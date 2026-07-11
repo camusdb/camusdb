@@ -110,9 +110,8 @@ internal sealed class TableOpener
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 
         // Build a column-ID→type lookup used by IsIndexRangeable to gate index registration.
-        // Only non-String column types (Integer64/Float64/Bool/Id/Null) encode to pure ASCII, making
-        // their key spaces safe to range under ordinal string comparison end-to-end. String columns
-        // stay hash-routed until the persistence-comparator alignment work (C3b) lands.
+        // Every indexable type uses an ASCII order-preserving key encoding, so only missing or
+        // unresolvable column IDs keep an index hash-routed.
         Dictionary<string, ColumnType>? columnTypeById =
             CamusDBConfig.KeyRangeShardingEnabled && tableSchema.Columns is { Count: > 0 }
                 ? tableSchema.Columns.ToDictionary(c => c.Id, c => c.Type)
@@ -181,8 +180,8 @@ internal sealed class TableOpener
     /// <summary>
     /// Returns true when this index's key columns are safe to place in a Kahuna key-range space.
     /// All column types now encode to pure ASCII end-to-end — numeric/bool/id are inherently ASCII,
-    /// and <see cref="KeyEncoder"/> encodes String as fixed-width hex (C3b) so its UTF-8 byte order
-    /// matches the UTF-16-ordinal order the in-memory path uses. The only disqualifier left is
+    /// and <see cref="KeyEncoder"/> encodes String with an ordered ASCII alphabet so its UTF-8 byte
+    /// order matches the UTF-16-ordinal order the in-memory path uses. The only disqualifier left is
     /// missing/unresolvable column IDs (conservative fallback: keep hash-routed).
     /// </summary>
     internal static bool IsIndexRangeable(TableIndexSchema entry, Dictionary<string, ColumnType> typeById)

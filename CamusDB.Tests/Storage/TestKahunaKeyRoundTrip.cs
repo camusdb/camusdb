@@ -33,9 +33,8 @@ namespace CamusDB.Tests.Storage;
 /// Verifies two properties:
 ///   1. Prefix scans via LocateAndGetByBucket return keys in ascending ordinal order
 ///      when those keys were inserted out-of-order using KeyEncoder.Encode.
-///   2. The codec's separator bytes (U+0000, U+0001, U+FFFF) that appear in
-///      string-valued encoded keys survive a round-trip through Kahuna's in-memory
-///      storage intact (point-read returns the exact key that was inserted).
+///   2. The codec's field terminator (U+0000, U+0001) and encoded control characters survive a
+///      round-trip through Kahuna's in-memory storage intact (point-read returns the exact key).
 /// </summary>
 [TestFixture]
 public sealed class TestKahunaKeyRoundTrip
@@ -174,14 +173,14 @@ public sealed class TestKahunaKeyRoundTrip
         const string bucketPrefix = "t0/s";
         const string keyPrefix = "t0/s/";
 
-        // These strings produce encoded keys whose bodies are pure ASCII hex ending in the
-        // terminator (U+0000 U+0001). An embedded NUL becomes the hex body "0000" — it is content,
-        // not the terminator, so it round-trips without escaping.
+        // These strings produce ordered ASCII bodies ending in the U+0000 U+0001 terminator.
+        // An embedded NUL uses a two-character code word above the terminator characters, so it
+        // remains content and round-trips without escaping.
         string[] strings =
         {
             "",
             "hello",
-            "a" + (char)0x0000,    // embedded NUL — encodes as hex "0061""0000", no escaping
+            "a" + (char)0x0000,
             "z"
         };
 
@@ -244,12 +243,12 @@ public sealed class TestKahunaKeyRoundTrip
             );
         }
 
-        // The encoded String body is pure ASCII hex (C3b): the key for "a\0" must contain no
-        // non-ASCII code unit — the embedded NUL is encoded as the hex digits "0000", not as a raw
-        // U+0000 in content, so its UTF-8 byte order matches its UTF-16-ordinal order everywhere.
+        // The encoded String body is pure ASCII: the key for "a\0" contains no raw U+0000 in its
+        // body, so its UTF-8 byte order matches its UTF-16-ordinal order everywhere.
         string nulKey = KeyEncoder.Encode(
             new CompositeColumnValue(new[] { new ColumnValue(ColumnType.String, "a" + (char)0x0000) })
         );
+        Assert.That(nulKey, Does.Not.Contain('/'));
         foreach (char c in nulKey)
             Assert.IsTrue(c == (char)0x0000 || c == (char)0x0001 || c < (char)0x0080,
                 $"Encoded String key must be ASCII (plus the U+0000/U+0001 terminator): U+{(int)c:X4} in {Readable(nulKey)}");

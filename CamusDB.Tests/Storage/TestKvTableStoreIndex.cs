@@ -908,9 +908,9 @@ public sealed class TestKvTableStoreIndex
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }
 
-    // String bounds exercise the AppendStringHex encoding path.  A String-indexed
-    // column's lock bounds are encoded via 4-hex-chars-per-code-unit + \x00\x01 terminator.  A bug
-    // in that path (e.g., wrong char width or missing terminator) would silently misplace the lock
+    // String bounds exercise the ordered ASCII encoding path. A String-indexed column's lock bounds
+    // use a variable-width prefix-free body plus the \x00\x01 terminator. A bug in that path
+    // (e.g., a non-prefix-free code or missing terminator) would silently misplace the lock
     // boundary while two lock-vs-lock tests with self-consistent encodings would still agree.
     [Test]
     [NonParallelizable]

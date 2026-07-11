@@ -94,8 +94,8 @@ public sealed class KvTableStore
     // hex chars (code points 0x0030–0x0066). The sentinel U+FFFF is the highest BMP code point
     // and exceeds every character KeyEncoder can emit:
     //   • Integer64 / Float64 / Bool: uppercase hex digits 0x0030–0x0046
-    //   • String / Id (AppendStringHex): 4-hex-per-code-unit 0x0030–0x0046, plus the
-    //     field terminator pair U+0000 U+0001 (both far below U+FFFF)
+    //   • String / Id: ordered ASCII U+0002–U+007F excluding '/', plus the field
+    //     terminator pair U+0000 U+0001 (all far below U+FFFF)
     //   • NULL marker: 0x0030 ('0'); Present marker: 0x0031 ('1')
     // If KeyEncoder ever emits a character ≥ U+FFFF (surrogates are illegal in C# strings;
     // a future supplementary-plane encoding would need two code units) this sentinel would
@@ -160,7 +160,7 @@ public sealed class KvTableStore
     /// <summary>
     /// The Kahuna key space for a secondary index (<c>{dbId}:{tableId}:i:{indexId}</c>). Pass to
     /// <see cref="IKahuna.RegisterKeyRange"/> when opting an index into key-range routing. All
-    /// column types are order-safe for range routing (String included, via its hex encoding).
+    /// column types are order-safe for range routing (String included, via its ordered ASCII encoding).
     /// </summary>
     public string IndexKeySpace(string indexId) => BuildIndexBucketPrefix(indexId);
 

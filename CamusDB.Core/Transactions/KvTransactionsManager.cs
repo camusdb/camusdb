@@ -470,7 +470,8 @@ public sealed class KvTransactionsManager : IDisposable
                 if (logger.IsEnabled(LogLevel.Debug))
                 {
                     int lockCount = tx.GetAcquiredLocks().Count;
-                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount, commitTimer.GetElapsedMilliseconds());
+                    long elapsedMs = commitTimer.GetElapsedMilliseconds();
+                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount, elapsedMs);
                 }
 
                 // Gate: bump generation, evict stale entries, clear in-flight mark — all inside
@@ -583,7 +584,8 @@ public sealed class KvTransactionsManager : IDisposable
         if (logger.IsEnabled(LogLevel.Debug))
         {
             int lockCount = tx.GetAcquiredLocks().Count;
-            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, lockCount, rollbackTimer.GetElapsedMilliseconds());
+            long elapsedMs = rollbackTimer.GetElapsedMilliseconds();
+            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, lockCount, elapsedMs);
         }
 
         await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);

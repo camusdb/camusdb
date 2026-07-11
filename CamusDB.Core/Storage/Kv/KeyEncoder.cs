@@ -37,14 +37,14 @@ namespace CamusDB.Core.Storage.Kv;
 ///   Bytes      : each byte as 2 uppercase hex chars, terminated by the field terminator
 ///                (pure ASCII, prefix-correct, bytewise-order-preserving).
 ///   Bool       : "0" / "1".
-///   String/Id  : each UTF-16 code unit as 4 uppercase hex chars (fixed width), terminated by the
-///                field terminator. The output is pure ASCII, so the key's UTF-8 byte order (how the
-///                RocksDB/SQLite persistence backends order keys) equals its UTF-16-ordinal order (how
-///                the in-memory B-tree, range routing, and scan merge order keys). Without this the
-///                two diverge for supplementary-plane characters, which would misroute/misorder a
-///                key-range-routed String secondary index. Order within the field is the code-unit
-///                order (matches <see cref="ColumnValue.CompareTo"/>). String and Id share this
-///                encoding so a String literal in a query matches an Id-typed stored key.
+///   String/Id  : prefix-free ordered ASCII code over UTF-16 code units, terminated by the field
+///                terminator. Printable ASCII uses one character, controls use two, and all other
+///                code units use three. The alphabet excludes '/' so encoded content cannot change
+///                Kahuna's last-slash key-space boundary. Pure ASCII makes the key's UTF-8 byte order
+///                (RocksDB/SQLite) equal its UTF-16-ordinal order (in-memory B-tree, range routing,
+///                and scan merge). Order within the field matches <see cref="ColumnValue.CompareTo"/>.
+///                String and Id share this encoding so a String literal in a query matches an
+///                Id-typed stored key.
 ///
 /// Fixed-width fields (Integer64/Float64/Float32/Bool/Date/DateTime) need no terminator; the decoder
 /// knows their width from the column type. Variable-length fields (String/Id/Bytes) are terminated
@@ -61,13 +61,24 @@ public static class KeyEncoder
 {
     // Field terminator = U+0000 U+0001. It uses the lowest code units so a terminated (shorter)
     // field sorts before a field that continues with more content ("ab" before "abc"). String/Id
-    // bodies are pure hex (see AppendStringHex), so U+0000 never appears in content and no escaping
-    // is needed — the terminator lead is unambiguous.
+    // bodies use only the ordered alphabet U+0002..U+007F (excluding '/'), so U+0000 never appears
+    // in content and the terminator lead is unambiguous.
     private const char FieldTerminatorLead = (char)0x0000;
     private const char FieldTerminatorTail = (char)0x0001;
 
     private const char NullMarker = '0';
     private const char PresentMarker = '1';
+
+    // Ordered String/Id alphabet: ASCII U+0002..U+007F excluding '/' (125 symbols). Excluding '/'
+    // is required because Kahuna derives a key space from everything before the last slash.
+    private const int StringAlphabetSize = 125;
+    private const int StringSlashRank = '/' - 2;
+    private const int StringDirectFirstRank = 1;
+    private const int StringDirectLastRank = 95;
+    private const int StringHighFirstRank = 96;
+    private const int StringHighLastRank = 100;
+    private const int StringHighFirstCodeUnit = 127;
+    private const int StringHighBlockSize = StringAlphabetSize * StringAlphabetSize;
 
     public static string Encode(CompositeColumnValue composite)
     {
@@ -119,10 +130,19 @@ public static class KeyEncoder
             ColumnType.Float32 => 1 + 8,
             ColumnType.Bool => 1 + 1,
             ColumnType.Bytes => 1 + 2 * (value.BytesValue?.Length ?? 0) + 2,            // 2 hex/byte + terminator
-            ColumnType.String or ColumnType.Id => 1 + 4 * (value.StrValue?.Length ?? 0) + 2, // 4 hex/code unit + terminator
+            ColumnType.String or ColumnType.Id => 1 + MeasureString(value.StrValue ?? "") + 2,
             ColumnType.Array => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable"),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot encode column type: " + value.Type),
         };
+    }
+
+    /// <summary>Measures the variable-width String/Id body and must mirror <see cref="WriteStringOrderedAscii"/>.</summary>
+    private static int MeasureString(string value)
+    {
+        int length = 0;
+        foreach (char c in value)
+            length += c < 32 ? 2 : c <= 126 ? 1 : 3;
+        return length;
     }
 
     // -- span writers -----------------------------------------------------------------------------
@@ -166,10 +186,10 @@ public static class KeyEncoder
 
             // String and Id share one encoding so a String literal in a query (e.g. WHERE id IN ('…'))
             // produces the same key as the Id-typed value stored in the index — the two must stay
-            // interchangeable. Both use the order-preserving ASCII-hex form.
+            // interchangeable. Both use the same order-preserving ASCII form.
             case ColumnType.String:
             case ColumnType.Id:
-                WriteStringHex(dest, ref pos, value.StrValue ?? "");
+                WriteStringOrderedAscii(dest, ref pos, value.StrValue ?? "");
                 break;
 
             default:
@@ -229,28 +249,49 @@ public static class KeyEncoder
     private const string HexChars = "0123456789ABCDEF";
 
     /// <summary>
-    /// Order-preserving <b>pure-ASCII</b> encoding for String keys: each UTF-16 code unit becomes 4
-    /// uppercase hex chars (fixed width). Because every output char is ASCII ('0'-'9','A'-'F'), the
-    /// key's UTF-8 byte order equals its UTF-16-ordinal order, so a String key sorts identically in
-    /// the persistence backends (RocksDB bytewise / SQLite BINARY, which order by UTF-8) and the
-    /// in-memory path (B-tree / range routing / scan merge, which order by UTF-16 ordinal). Fixed
-    /// width per code unit preserves the code-unit order (matching <see cref="ColumnValue.CompareTo"/>),
-    /// and the U+0000 U+0001 terminator — which sorts before any hex digit — preserves prefix ordering
-    /// across composite fields. A literal U+0000 inside the value is content (encoded as "0000") and is
-    /// never confused with the U+0000 terminator char, so no escaping is needed.
+    /// Writes a prefix-free, order-preserving ASCII encoding of UTF-16 code units. C0 controls use
+    /// alphabet rank 0 plus one digit, printable ASCII maps directly to ranks 1..95, and U+007F+
+    /// uses three base-125 digits beginning at ranks 96..100. Those disjoint leading-rank ranges
+    /// make concatenated code words preserve ordinal string order without a per-character delimiter.
+    /// The alphabet excludes '/' because Kahuna treats the last slash as the key-space boundary.
     /// </summary>
-    private static void WriteStringHex(Span<char> dest, ref int pos, string value)
+    private static void WriteStringOrderedAscii(Span<char> dest, ref int pos, string value)
     {
         foreach (char c in value)
         {
-            dest[pos++] = HexChars[(c >> 12) & 0xF];
-            dest[pos++] = HexChars[(c >> 8) & 0xF];
-            dest[pos++] = HexChars[(c >> 4) & 0xF];
-            dest[pos++] = HexChars[c & 0xF];
+            if (c < 32)
+            {
+                dest[pos++] = StringAlphabetChar(0);
+                dest[pos++] = StringAlphabetChar(c);
+            }
+            else if (c <= 126)
+            {
+                dest[pos++] = StringAlphabetChar(c - 31);
+            }
+            else
+            {
+                int ordered = c - StringHighFirstCodeUnit;
+                dest[pos++] = StringAlphabetChar(StringHighFirstRank + ordered / StringHighBlockSize);
+                dest[pos++] = StringAlphabetChar(ordered / StringAlphabetSize % StringAlphabetSize);
+                dest[pos++] = StringAlphabetChar(ordered % StringAlphabetSize);
+            }
         }
 
         dest[pos++] = FieldTerminatorLead;
         dest[pos++] = FieldTerminatorTail;
+    }
+
+    /// <summary>Maps an ordered base-125 digit onto ASCII while skipping Kahuna's '/' separator.</summary>
+    private static char StringAlphabetChar(int rank) =>
+        (char)(rank < StringSlashRank ? rank + 2 : rank + 3);
+
+    /// <summary>Reverses <see cref="StringAlphabetChar"/> and rejects terminators, separators, and non-ASCII.</summary>
+    private static int StringAlphabetRank(char value)
+    {
+        if (value is < (char)2 or > (char)127 || value == '/')
+            return -1;
+
+        return value < '/' ? value - 2 : value - 3;
     }
 
     /// <summary>
@@ -385,10 +426,6 @@ public static class KeyEncoder
                 case ColumnType.String:
                 case ColumnType.Id:
                 {
-                    // Body is groups of 4 hex chars (one UTF-16 code unit each), ended by the
-                    // U+0000 U+0001 terminator. A literal U+0000 (0x00) only appears as the
-                    // terminator lead — never inside the hex body — so it is unambiguous.
-
                     // Pre-scan: count code units and validate structure before allocating.
                     int bodyStart = pos;
                     int charCount = 0;
@@ -406,25 +443,19 @@ public static class KeyEncoder
                             break;
                         }
 
-                        if (pos + 4 > key.Length)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated hex code unit at field {i}");
-
+                        ReadStringCodeUnit(key, ref pos, i);
                         charCount++;
-                        pos += 4;
                     }
 
                     // Build the decoded string in one allocation, writing directly into its
                     // backing buffer — no StringBuilder intermediate.
                     string decoded = charCount == 0
                         ? ""
-                        : string.Create(charCount, (key, bodyStart), static (span, state) =>
+                        : string.Create(charCount, (key, bodyStart, field: i), static (span, state) =>
                         {
                             int p = state.bodyStart;
                             for (int ci = 0; ci < span.Length; ci++)
-                            {
-                                span[ci] = (char)ushort.Parse(state.key.AsSpan(p, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture);
-                                p += 4;
-                            }
+                                span[ci] = ReadStringCodeUnit(state.key, ref p, state.field);
                         });
 
                     values[i] = new ColumnValue(types[i], decoded);
@@ -437,5 +468,57 @@ public static class KeyEncoder
         }
 
         return new CompositeColumnValue(values);
+    }
+
+    /// <summary>
+    /// Reads one prefix-free String/Id code word and rejects ranks that are not assigned by the
+    /// encoder. Strict validation keeps malformed keys from consuming a following field as payload.
+    /// </summary>
+    private static char ReadStringCodeUnit(string key, ref int pos, int field)
+    {
+        if (pos >= key.Length)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated string code unit at field {field}");
+
+        int first = StringAlphabetRank(key[pos++]);
+        if (first < 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid string code unit at field {field}");
+
+        if (first == 0)
+        {
+            int control = ReadStringAlphabetRank(key, ref pos, field);
+            if (control >= 32)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid control code unit at field {field}");
+            return (char)control;
+        }
+
+        if (first is >= StringDirectFirstRank and <= StringDirectLastRank)
+            return (char)(first + 31);
+
+        if (first is >= StringHighFirstRank and <= StringHighLastRank)
+        {
+            int middle = ReadStringAlphabetRank(key, ref pos, field);
+            int last = ReadStringAlphabetRank(key, ref pos, field);
+            int codeUnit = StringHighFirstCodeUnit
+                + (first - StringHighFirstRank) * StringHighBlockSize
+                + middle * StringAlphabetSize
+                + last;
+
+            if (codeUnit <= char.MaxValue)
+                return (char)codeUnit;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid string code unit at field {field}");
+    }
+
+    /// <summary>Reads one validated base-125 digit without crossing the end of a malformed key.</summary>
+    private static int ReadStringAlphabetRank(string key, ref int pos, int field)
+    {
+        if (pos >= key.Length)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated string code unit at field {field}");
+
+        int rank = StringAlphabetRank(key[pos++]);
+        if (rank < 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid string code unit at field {field}");
+        return rank;
     }
 }

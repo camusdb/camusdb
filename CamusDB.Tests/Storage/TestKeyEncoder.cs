@@ -180,7 +180,7 @@ public class TestKeyEncoder
     // The load-bearing invariant for ranged String indexes: an encoded String key is PURE
     // ASCII, so its UTF-8 byte order (how the RocksDB/SQLite persistence backends compare keys)
     // equals its UTF-16-ordinal order (how the in-memory B-tree / range routing / scan merge compare
-    // keys) AND equals ColumnValue.CompareTo. Without the hex encoding these diverge for
+    // keys) AND equals ColumnValue.CompareTo. Without the ASCII encoding these diverge for
     // supplementary-plane chars, which would misroute/misorder a key-range-routed String index.
     [Test]
     public void StringKeysAreAsciiAndUtf8OrderMatchesOrdinalAndCompareTo()
@@ -222,6 +222,45 @@ public class TestKeyEncoder
                 Assert.AreEqual(semantic, ordinal,
                     $"Encoded ordinal order must match CompareTo ('{Escape(samples[i])}' vs '{Escape(samples[j])}')");
             }
+        }
+    }
+
+    [Test]
+    public void StringEncodingIsCompactForPrintableAscii()
+    {
+        const string value = "customer/email:alice@example.com";
+
+        string encoded = KeyEncoder.Encode(Single(new ColumnValue(ColumnType.String, value)));
+
+        // Present marker + one encoded character per printable ASCII input + two-char terminator.
+        Assert.That(encoded.Length, Is.EqualTo(value.Length + 3));
+        Assert.That(encoded.Length, Is.LessThan(4 * value.Length + 3));
+    }
+
+    [Test]
+    public void StringEncodingRoundTripsEveryCodeUnitWithoutKeySpaceSeparator()
+    {
+        char[] codeUnits = new char[char.MaxValue + 1];
+        for (int i = 0; i < codeUnits.Length; i++)
+            codeUnits[i] = (char)i;
+
+        string value = new(codeUnits);
+        string encoded = KeyEncoder.Encode(Single(new ColumnValue(ColumnType.String, value)));
+        CompositeColumnValue decoded = KeyEncoder.Decode(encoded, [ColumnType.String]);
+
+        Assert.That(encoded, Does.Not.Contain('/'),
+            "Encoded index content must not alter Kahuna's last-slash key-space boundary");
+        foreach (char c in encoded)
+            Assert.That(c, Is.LessThan((char)128));
+        Assert.That(decoded.Values[0].StrValue, Is.EqualTo(value));
+
+        string previous = KeyEncoder.Encode(Single(new ColumnValue(ColumnType.String, "\u0000")));
+        for (int i = 1; i < codeUnits.Length; i++)
+        {
+            string current = KeyEncoder.Encode(Single(new ColumnValue(ColumnType.String, new string((char)i, 1))));
+            if (string.CompareOrdinal(previous, current) >= 0)
+                Assert.Fail($"Encoded order diverged between U+{i - 1:X4} and U+{i:X4}");
+            previous = current;
         }
     }
 
@@ -324,8 +363,8 @@ public class TestKeyEncoder
         string[] samples =
         {
             "", "a", "ab", "abc", "b", "hello world", "a" + (char)0x0000 + "b",
-            // Non-ASCII BMP and a surrogate pair (emoji) exercise the per-code-unit decode
-            // (string.Create writing each 4-hex UTF-16 code unit directly into the buffer).
+            // Non-ASCII BMP and a surrogate pair (emoji) exercise the variable-width,
+            // per-code-unit decode path.
             "\u4E2D", "\u4E2D\u6587", "\uD83D\uDE00", "a\uD83D\uDE00b", "\uE000", "\uFFFF",
         };
         foreach (string v in samples)
@@ -768,7 +807,7 @@ public class TestKeyEncoder
 
     // Tokens deliberately span the full UTF-16 range an index key can contain, not just ASCII —
     // this is what proves ranged TEXT index keys stay order-preserving. Includes: the encoder's
-    // own sentinels as CONTENT (U+0000 terminator-lead, U+0001 terminator-tail, U+FFFF escape-tail),
+    // own sentinels as CONTENT (U+0000 terminator-lead and U+0001 terminator-tail),
     // the ASCII/Latin boundary, a Latin-1 char, a BMP CJK char (3-byte UTF-8, single UTF-16 unit), and
     // a SUPPLEMENTARY-plane code point as a well-formed surrogate pair (😀 U+1F600 → U+D83D U+DE00).
     // KeyEncoder, ColumnValue.CompareTo, and Kahuna's range layer all compare by UTF-16 code unit
@@ -826,7 +865,7 @@ public class TestKeyEncoder
             Single(new ColumnValue(ColumnType.Bool, true)),
             Single(new ColumnValue(ColumnType.String, "")),
             Single(new ColumnValue(ColumnType.String, "hello")),
-            // High-plane content: KeyEncoder encodes these as 4-hex-per-code-unit → pure ASCII output.
+            // High-plane content is encoded as ordered, pure ASCII output.
             Single(new ColumnValue(ColumnType.String, "�")),   // replacement char as value
             Single(new ColumnValue(ColumnType.String, "￿")),   // the sentinel itself as *value*
             Single(new ColumnValue(ColumnType.String, "😀")), // supplementary plane emoji
