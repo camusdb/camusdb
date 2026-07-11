@@ -5,6 +5,8 @@
 
 %option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
 
+%x BLOCKCOMMENT
+
 TDatabases      (D|d)(A|a)(T|t)(A|a)(B|b)(A|a)(S|s)(E|e)(S|s)
 TDatabase       (D|d)(A|a)(T|t)(A|a)(B|b)(A|a)(S|s)(E|e)
 TSelect         (S|s)(E|e)(L|l)(E|e)(C|c)(T|t)
@@ -106,6 +108,7 @@ Decimal         ("-"?)([0-9]+)(\.)([0-9]+)
 StrChs          [^\\\"\a\b\f\n\r\t\v\0]
 StrChs2          [^\\\'\a\b\f\n\r\t\v\0]
 DotChr          [^\r\n]
+LineComment     --{DotChr}*
 EscChr          \\{DotChr}
 OctDig          [0-7]
 HexDig          [0-9a-fA-F]
@@ -322,9 +325,17 @@ TDot            \.
 
 {TAdd} { return (int)Token.TADD; }
 
+"/*"                        { yy_push_state(BLOCKCOMMENT); }
+<BLOCKCOMMENT>"*/"          { yy_pop_state(); }
+<BLOCKCOMMENT>[^*\n]+       { /* skip block comment body */ }
+<BLOCKCOMMENT>"*"           { /* lone star, not followed by slash */ }
+<BLOCKCOMMENT>\n            { /* skip newline in block comment */ }
+
 {TMult} { return (int)Token.TMULT; }
 
 {TDiv} { return (int)Token.TDIV; }
+
+{LineComment}               /* skip */
 
 {TMinus} { return (int)Token.TMINUS; }
 

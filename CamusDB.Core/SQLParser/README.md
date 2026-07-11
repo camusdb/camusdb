@@ -6,6 +6,19 @@ Converts SQL text into an abstract syntax tree (AST).
 
 The grammar and lexer live in `SQLParser.Language.grammar.y` and `SQLParser.Language.analyzer.lex`; GPPG/GPLEX compile them into `SQLParser.Parser.Generated.cs` and `SQLParser.Scanner.Generated.cs` (regenerated on build — do not edit). `sql.Parser.cs` and `sql.Scanner.cs` are hand-written partial-class companions of the generated `sqlParser` / `sqlScanner` (the `Parse(string)` entry point, the `yyerror` override); they are scaffolded once and are **not** overwritten when the grammar/lexer change, so they are the place for hand-authored parser/scanner code.
 
+## Comments
+
+The lexer recognizes and silently discards both standard SQL comment forms before any token is emitted, so commented SQL parses identically to the same SQL without comments:
+
+- **Line comments** (`-- … end of line`): everything from `--` to the end of the line is ignored. The newline itself is not consumed by the comment rule, so line counting is unaffected.
+- **Block comments** (`/* … */`): everything between `/*` and the first matching `*/` is ignored, including embedded newlines (the line counter advances normally through them). Block comments do **not** nest — the first `*/` always closes the comment. An unclosed `/*` with no matching `*/` before end-of-input raises a clear parse error ("unterminated block comment") rather than falling back to lexing `/` as a division token.
+
+Neither comment form is recognized inside single-quoted (`'…'`) or double-quoted (`"…"`) string literals — the string literal's longest-match rule wins.
+
+**`--` vs. negative numbers:** `--5` is a line comment (standard behavior), not subtraction of a negative. To subtract a negative, write `10 - -5` or `10 - (-5)` — a space or parenthesis breaks the `--` prefix.
+
+**Parser cache:** `SqlParserCache` keys on the raw SQL string, so commented and uncommented variants of the same statement are distinct cache entries that resolve to structurally identical ASTs. This is correct and intentional.
+
 Key types:
 
 | Type | Purpose |

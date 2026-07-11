@@ -46,6 +46,13 @@ public sealed class KvTransactionsManager : IDisposable
     private readonly IKahuna kahuna;
     private readonly ILogger logger;
 
+    // Bounded back-off for opening a Kahuna transaction while a partition leader is still being
+    // elected / catching up (transient MustRetry / WaitingForReplication). 32 attempts at 25 ms
+    // covers ~0.8s of node warmup, enough to absorb the startup race that background bootstrap work
+    // (e.g. the orphan-branch scrub) hits before failing with a retryable error.
+    private const int MaxStartRetries = 32;
+    private const int StartRetryDelayMs = 25;
+
     /// <summary>
     /// Mints a local HLC timestamp without opening a Kahuna transaction. Used by the cheap
     /// serializable read-only snapshot path (<see cref="BeginReadOnlyAsync"/> with Serializable
@@ -156,21 +163,8 @@ public sealed class KvTransactionsManager : IDisposable
 
         string uniqueId = Guid.NewGuid().ToString("N");
 
-        (KeyValueResponseType type, Kommander.Time.HLCTimestamp txId) =
-            await kahuna.LocateAndStartTransaction(
-                new KeyValueTransactionOptions
-                {
-                    UniqueId = uniqueId,
-                    Locking  = KeyValueTransactionLocking.Pessimistic
-                },
-                cancellationToken
-            ).ConfigureAwait(false);
-
-        if (type != KeyValueResponseType.Set)
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                $"Failed to start Kahuna transaction: {type}"
-            );
+        Kommander.Time.HLCTimestamp txId = await StartKahunaTransactionAsync(
+            uniqueId, "start Kahuna transaction", cancellationToken).ConfigureAwait(false);
 
         int mutationLimit = mutationLimitOverride ?? CamusDBConfig.MaxMutationsPerTransaction;
         KvTransaction tx = new(txId, uniqueId, isReadOnly: false, level, mode, mutationLimit: mutationLimit);
@@ -201,21 +195,8 @@ public sealed class KvTransactionsManager : IDisposable
     {
         string uniqueId = Guid.NewGuid().ToString("N");
 
-        (KeyValueResponseType type, Kommander.Time.HLCTimestamp t) =
-            await kahuna.LocateAndStartTransaction(
-                new KeyValueTransactionOptions
-                {
-                    UniqueId = uniqueId,
-                    Locking  = KeyValueTransactionLocking.Pessimistic
-                },
-                cancellationToken
-            ).ConfigureAwait(false);
-
-        if (type != KeyValueResponseType.Set)
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                $"Failed to mint read-timestamp for serializable RO transaction: {type}"
-            );
+        Kommander.Time.HLCTimestamp t = await StartKahunaTransactionAsync(
+            uniqueId, "mint read-timestamp for serializable RO transaction", cancellationToken).ConfigureAwait(false);
 
         // Keep the Kahuna transaction alive as the tracking handle — its HLC timestamp T doubles as
         // the snapshot read timestamp. Reads go out with readTimestamp=T (no Kahuna write intents);
@@ -230,6 +211,65 @@ public sealed class KvTransactionsManager : IDisposable
         );
         Track(tx);
         return tx;
+    }
+
+    /// <summary>
+    /// Opens a Kahuna transaction, tolerating the transient startup/leadership signals
+    /// <see cref="KeyValueResponseType.MustRetry"/> and <see cref="KeyValueResponseType.WaitingForReplication"/>
+    /// with a bounded back-off before giving up.
+    ///
+    /// <para>Kahuna returns these while a partition's leader is still being elected or its log is
+    /// catching up — most visibly right after process start, when background bootstrap work (e.g. the
+    /// orphan-branch scrub) begins a transaction before the embedded node has warmed up. They are
+    /// <b>not</b> failures, so a single-shot start is wrong: it turns a normal warmup race into an
+    /// error. Every other Kahuna call path in the engine already retries these signals; the
+    /// transaction-start path must do the same.</para>
+    ///
+    /// <para>If the signal persists past <see cref="MaxStartRetries"/> the transaction genuinely
+    /// cannot be routed yet, so this throws <see cref="CamusDBErrorCodes.TransactionMustRetry"/>
+    /// (CADB0504, transient — the caller should retry the whole operation) rather than the permanent
+    /// CADB0501. Any other non-<see cref="KeyValueResponseType.Set"/> response is a real failure and
+    /// is surfaced immediately.</para>
+    /// </summary>
+    private async Task<Kommander.Time.HLCTimestamp> StartKahunaTransactionAsync(
+        string uniqueId, string operation, CancellationToken cancellationToken)
+    {
+        KeyValueResponseType type = KeyValueResponseType.MustRetry;
+        Kommander.Time.HLCTimestamp txId = default;
+
+        for (int attempt = 0; attempt <= MaxStartRetries; attempt++)
+        {
+            (type, txId) = await kahuna.LocateAndStartTransaction(
+                new KeyValueTransactionOptions
+                {
+                    UniqueId = uniqueId,
+                    Locking  = KeyValueTransactionLocking.Pessimistic
+                },
+                cancellationToken
+            ).ConfigureAwait(false);
+
+            if (type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
+                break;
+
+            if (attempt < MaxStartRetries)
+                await Task.Delay(StartRetryDelayMs, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (type == KeyValueResponseType.Set)
+            return txId;
+
+        // A still-transient signal after exhausting retries is retryable (CADB0504); anything else is
+        // a real, non-retryable failure.
+        if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"Failed to {operation}: {type} after {MaxStartRetries} retries; the node may still be starting up — retry the operation"
+            );
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.TransactionAlreadyCompleted,
+            $"Failed to {operation}: {type}"
+        );
     }
 
     /// <summary>
