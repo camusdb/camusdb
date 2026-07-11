@@ -1872,6 +1872,12 @@ internal sealed class QueryJoinExecutor
                             foreach (byte b in v.BytesValue)
                                 h.Add(b);
                         break;
+
+                    case ColumnType.Uuid:
+                        // Hash both halves; the low half alone would collide all UUIDs sharing it.
+                        h.Add(v.UuidHigh);
+                        h.Add(v.LongValue);
+                        break;
                 }
             }
 

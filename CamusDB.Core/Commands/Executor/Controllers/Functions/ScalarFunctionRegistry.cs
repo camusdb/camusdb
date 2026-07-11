@@ -47,6 +47,7 @@ internal sealed class ScalarFunctionRegistry
     {
         ScalarFunctionRegistry registry = new();
         IdScalarFunctions.Register(registry);
+        UuidScalarFunctions.Register(registry);
         DateTimeScalarFunctions.Register(registry);
         MathScalarFunctions.Register(registry);
         StringScalarFunctions.Register(registry);

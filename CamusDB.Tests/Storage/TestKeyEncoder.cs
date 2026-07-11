@@ -32,6 +32,7 @@ public class TestKeyEncoder
         ColumnType.Date,
         ColumnType.DateTime,
         ColumnType.Bytes,
+        ColumnType.Uuid,
     };
 
     /// <summary>
@@ -445,10 +446,156 @@ public class TestKeyEncoder
                     case ColumnType.Id:
                         Assert.AreEqual(orig.StrValue, dec.StrValue, $"String mismatch col {c} iter {iteration}");
                         break;
+                    case ColumnType.Uuid:
+                        Assert.AreEqual(orig.UuidHigh, dec.UuidHigh, $"Uuid high mismatch col {c} iter {iteration}");
+                        Assert.AreEqual(orig.LongValue, dec.LongValue, $"Uuid low mismatch col {c} iter {iteration}");
+                        break;
                     case ColumnType.Null:
                         break; // both are null, type check above is sufficient
                 }
             }
+        }
+    }
+
+    // ---- Uuid: order + round-trip + fixed-width + ASCII ---------------------
+
+    [Test]
+    public void Uuid_OrderingMatchesCompareTo()
+    {
+        Random random = new(20260711);
+        for (int iter = 0; iter < 4000; iter++)
+        {
+            ColumnValue a = ColumnValue.FromUuid(RandomGuid(random));
+            ColumnValue b = ColumnValue.FromUuid(RandomGuid(random));
+
+            int semantic = Math.Sign(a.CompareTo(b));
+            int encoded  = Math.Sign(string.CompareOrdinal(
+                KeyEncoder.Encode(Single(a)), KeyEncoder.Encode(Single(b))));
+
+            Assert.AreEqual(semantic, encoded, $"Uuid order mismatch: {a} vs {b}");
+        }
+    }
+
+    // The encoded key order must equal the canonical-string order (both are big-endian). This also
+    // guards against accidentally adopting System.Guid's mixed-endian comparison.
+    [Test]
+    public void Uuid_EncodedOrderMatchesCanonicalStringOrder()
+    {
+        Guid[] samples =
+        {
+            Guid.Parse("00000000-0000-0000-0000-000000000000"),
+            Guid.Parse("00000000-0000-0000-0000-000000000001"),
+            Guid.Parse("00000000-0000-0000-8000-000000000000"),
+            Guid.Parse("7fffffff-ffff-ffff-ffff-ffffffffffff"),
+            Guid.Parse("80000000-0000-0000-0000-000000000000"),
+            Guid.Parse("550e8400-e29b-41d4-a716-446655440000"),
+            Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        };
+
+        for (int i = 0; i < samples.Length; i++)
+        {
+            for (int j = 0; j < samples.Length; j++)
+            {
+                int byString = Math.Sign(string.CompareOrdinal(samples[i].ToString("D"), samples[j].ToString("D")));
+                int byKey = Math.Sign(string.CompareOrdinal(
+                    KeyEncoder.Encode(Single(ColumnValue.FromUuid(samples[i]))),
+                    KeyEncoder.Encode(Single(ColumnValue.FromUuid(samples[j])))));
+                Assert.AreEqual(byString, byKey, $"Order mismatch {samples[i]} vs {samples[j]}");
+            }
+        }
+    }
+
+    // Values differing only in the high half, only in the low half, and by a single bit, must all
+    // order correctly — this catches a codec that hashes/encodes only one 64-bit half.
+    [Test]
+    public void Uuid_HalfAndSingleBitDifferencesOrderCorrectly()
+    {
+        ColumnValue lowOnlyA = new(ColumnType.Uuid, 0L, 1L);
+        ColumnValue lowOnlyB = new(ColumnType.Uuid, 0L, 2L);
+        ColumnValue highOnlyA = new(ColumnType.Uuid, 1L, 0L);
+        ColumnValue highOnlyB = new(ColumnType.Uuid, 2L, 0L);
+        // High half dominates: (1, 0) > (0, maxLow).
+        ColumnValue highBeatsLow = new(ColumnType.Uuid, 1L, 0L);
+        ColumnValue maxLow = new(ColumnType.Uuid, 0L, -1L); // low = 0xFFFF...FFFF (unsigned)
+
+        AssertKeyOrder(lowOnlyA, lowOnlyB);
+        AssertKeyOrder(highOnlyA, highOnlyB);
+        AssertKeyOrder(maxLow, highBeatsLow);
+    }
+
+    [Test]
+    public void Uuid_RoundTrip()
+    {
+        Guid[] samples =
+        {
+            Guid.Empty,
+            Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            Guid.Parse("550e8400-e29b-41d4-a716-446655440000"),
+            Guid.NewGuid(),
+            Guid.CreateVersion7(),
+        };
+
+        foreach (Guid g in samples)
+        {
+            ColumnValue original = ColumnValue.FromUuid(g);
+            CompositeColumnValue dec = KeyEncoder.Decode(KeyEncoder.Encode(Single(original)), [ColumnType.Uuid]);
+            Assert.That(dec.Values[0].Type, Is.EqualTo(ColumnType.Uuid));
+            Assert.That(dec.Values[0].ToGuid(), Is.EqualTo(g), $"Uuid round-trip failed for {g}");
+        }
+    }
+
+    // The Uuid body is a fixed 19 base-125 digits with no terminator: present marker + 19 chars.
+    [Test]
+    public void Uuid_EncodedIsFixedWidthAsciiWithoutTerminatorOrSeparator()
+    {
+        foreach (Guid g in new[] { Guid.Empty, Guid.NewGuid(), Guid.CreateVersion7(),
+                                   Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff") })
+        {
+            string enc = KeyEncoder.Encode(Single(ColumnValue.FromUuid(g)));
+            Assert.That(enc.Length, Is.EqualTo(1 + 19), $"Uuid key must be present-marker + 19 digits for {g}");
+            Assert.That(enc, Does.Not.Contain('/'), "Uuid key must not contain the key-space separator");
+            foreach (char c in enc)
+                Assert.That(c, Is.LessThan((char)128), $"Non-ASCII char U+{(int)c:X4} for uuid {g}");
+        }
+    }
+
+    // Uuid is fixed-width, so a following field must decode correctly with no terminator ambiguity.
+    [Test]
+    public void Uuid_CompositePrefixOrderingHolds()
+    {
+        ColumnType[] schema = { ColumnType.Uuid, ColumnType.Integer64 };
+        Guid g = Guid.Parse("550e8400-e29b-41d4-a716-446655440000");
+
+        CompositeColumnValue a = new(new[] { ColumnValue.FromUuid(g), new ColumnValue(ColumnType.Integer64, 1L) });
+        CompositeColumnValue b = new(new[] { ColumnValue.FromUuid(g), new ColumnValue(ColumnType.Integer64, 2L) });
+
+        Assert.That(string.CompareOrdinal(KeyEncoder.Encode(a), KeyEncoder.Encode(b)), Is.LessThan(0));
+
+        CompositeColumnValue dec = KeyEncoder.Decode(KeyEncoder.Encode(a), schema);
+        Assert.That(dec.Values[0].ToGuid(), Is.EqualTo(g));
+        Assert.That(dec.Values[1].LongValue, Is.EqualTo(1L));
+    }
+
+    private static void AssertKeyOrder(ColumnValue smaller, ColumnValue larger)
+    {
+        Assert.That(smaller.CompareTo(larger), Is.LessThan(0), $"CompareTo precondition: {smaller} < {larger}");
+        Assert.That(string.CompareOrdinal(
+            KeyEncoder.Encode(Single(smaller)), KeyEncoder.Encode(Single(larger))), Is.LessThan(0),
+            $"Encoded order must match: {smaller} < {larger}");
+    }
+
+    private static Guid RandomGuid(Random random)
+    {
+        // Include the corner values so ordering across the signed-bit boundary is exercised.
+        switch (random.Next(6))
+        {
+            case 0: return Guid.Empty;
+            case 1: return Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
+            case 2: return Guid.CreateVersion7();
+            default:
+                Span<byte> bytes = stackalloc byte[16];
+                random.NextBytes(bytes);
+                return new Guid(bytes, bigEndian: true);
         }
     }
 
@@ -737,6 +884,9 @@ public class TestKeyEncoder
 
             case ColumnType.Bytes:
                 return new ColumnValue(RandomBytes(random));
+
+            case ColumnType.Uuid:
+                return ColumnValue.FromUuid(RandomGuid(random));
 
             default:
                 throw new InvalidOperationException("Unsupported type: " + type);

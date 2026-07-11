@@ -219,6 +219,12 @@ public static class ResultFingerprintBuilder
                 if (v.BytesValue is { Length: > 0 })
                     sb.Append(Convert.ToHexStringLower(v.BytesValue));
                 break;
+            case ColumnType.Uuid:
+                // Both halves must be hashed — the low half alone would collide two UUIDs that
+                // share their low 64 bits (e.g. adjacent v7 values), fingerprinting them equal.
+                sb.Append("uu:").Append(((ulong)v.UuidHigh).ToString("x16", CultureInfo.InvariantCulture))
+                  .Append(((ulong)v.LongValue).ToString("x16", CultureInfo.InvariantCulture));
+                break;
             case ColumnType.Array:
                 // Each element is recursively injection-safe; the element count removes the
                 // ambiguity that would otherwise arise from comma-separated variable-length elements.

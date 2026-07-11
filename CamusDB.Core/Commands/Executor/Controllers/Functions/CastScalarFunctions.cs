@@ -96,6 +96,7 @@ internal static class CastScalarFunctions
             ColumnType.Date      => CastToDate(castName, value),
             ColumnType.DateTime  => CastToDateTime(castName, value),
             ColumnType.Bytes     => CastToBytes(castName, value),
+            ColumnType.Uuid      => CastToUuid(castName, value),
             _ => throw UnknownTargetType(castName, targetType.ToString()),
         };
     }
@@ -107,11 +108,20 @@ internal static class CastScalarFunctions
     /// caught by the row encoder or constraint layer).
     /// </summary>
     internal static ColumnValue CoerceToColumnType(ColumnValue value, TableColumnSchema column)
+        => CoerceToColumnType(value, column.Type);
+
+    /// <summary>
+    /// Coerces a value to a target column type using the same narrow set of implicit conversions as
+    /// the <see cref="TableColumnSchema"/> overload. Used where only the type is known — e.g. coercing
+    /// a <c>DEFAULT('…')</c> string literal to the declared column type at DDL time, so a typed default
+    /// (date/datetime/bytes/uuid) is stored in the column's type rather than as a raw String.
+    /// </summary>
+    internal static ColumnValue CoerceToColumnType(ColumnValue value, ColumnType columnType)
     {
-        if (value.Type == ColumnType.Null || value.Type == column.Type)
+        if (value.Type == ColumnType.Null || value.Type == columnType)
             return value;
 
-        return (value.Type, column.Type) switch
+        return (value.Type, columnType) switch
         {
             (ColumnType.String,    ColumnType.Id)       => CastToId("coerce", value),
             (ColumnType.Float64,   ColumnType.Float32)  => CastToFloat32("coerce", value),
@@ -119,6 +129,7 @@ internal static class CastScalarFunctions
             (ColumnType.String,    ColumnType.Date)     => CastToDate("coerce", value),
             (ColumnType.String,    ColumnType.DateTime) => CastToDateTime("coerce", value),
             (ColumnType.String,    ColumnType.Bytes)    => CastToBytes("coerce", value),
+            (ColumnType.String,    ColumnType.Uuid)     => CastToUuid("coerce", value),
             _ => value,
         };
     }
@@ -136,6 +147,7 @@ internal static class CastScalarFunctions
             NodeType.TypeDate      => ColumnType.Date,
             NodeType.TypeDateTime  => ColumnType.DateTime,
             NodeType.TypeBytes     => ColumnType.Bytes,
+            NodeType.TypeUuid      => ColumnType.Uuid,
             NodeType.TypeStringSized => ColumnType.String,
             NodeType.Identifier    => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
             _ => throw UnknownTargetType(castName, targetTypeAst.nodeType.ToString()),
@@ -150,6 +162,7 @@ internal static class CastScalarFunctions
             "integer" => ColumnType.Integer64,
             "char" or "varchar" or "text" => ColumnType.String,
             "double" => ColumnType.Float64,
+            "uuid" or "guid" => ColumnType.Uuid,
             _ => throw UnknownTargetType(castName, identifier),
         };
     }
@@ -163,6 +176,7 @@ internal static class CastScalarFunctions
             ColumnType.Integer64 => new ColumnValue(ColumnType.String, value.LongValue.ToString(CultureInfo.InvariantCulture)),
             ColumnType.Float64 => new ColumnValue(ColumnType.String, FormatFloat(value.FloatValue)),
             ColumnType.Bool => new ColumnValue(ColumnType.String, value.BoolValue ? "true" : "false"),
+            ColumnType.Uuid => new ColumnValue(ColumnType.String, value.ToGuid().ToString("D")),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.String),
         };
     }
@@ -209,6 +223,24 @@ internal static class CastScalarFunctions
             ColumnType.String => FromStringToId(castName, value.StrValue!),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Id),
         };
+    }
+
+    private static ColumnValue CastToUuid(string castName, ColumnValue value)
+    {
+        return value.Type switch
+        {
+            ColumnType.Uuid => value,
+            ColumnType.String => FromStringToUuid(castName, value.StrValue!),
+            _ => throw InvalidConversion(castName, value.Type, ColumnType.Uuid),
+        };
+    }
+
+    private static ColumnValue FromStringToUuid(string castName, string value)
+    {
+        if (!Guid.TryParse(value, out Guid parsed))
+            throw InvalidConversion(castName, ColumnType.String, ColumnType.Uuid);
+
+        return ColumnValue.FromUuid(parsed);
     }
 
     private static ColumnValue CastToFloat32(string castName, ColumnValue value)

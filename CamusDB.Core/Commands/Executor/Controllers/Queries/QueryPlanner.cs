@@ -56,6 +56,9 @@ public sealed class QueryPlanner
         PredicateAnalysis analysis = ticket.AnalyzedWhere is not null
             ? PredicateAnalyzer.Merge(ticket.AnalyzedWhere, PredicateAnalyzer.AnalyzeFilters(ticket.Filters))
             : PredicateAnalyzer.AnalyzeTicket(ticket);
+        // Reconcile bare string literals against Uuid columns before access-path selection so the
+        // index selector and the bound-absorption check both see a Uuid constant, not a String.
+        analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, table);
         plan.PredicateAnalysis = analysis;
 
         // Compute the shape ID and schema deps up-front so the cache can be checked

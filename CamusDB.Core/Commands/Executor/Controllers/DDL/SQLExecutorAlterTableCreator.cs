@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -37,6 +38,9 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             }
 
             (ColumnType colType, int? maxLen, ColumnType? elemType) = GetColumnMeta(ast.extendedOne!);
+
+            if (defaultValue is not null)
+                defaultValue = CastScalarFunctions.CoerceToColumnType(defaultValue, colType);
 
             return new(
                 ticket.DatabaseName,
@@ -81,6 +85,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             case NodeType.TypeDate:      return (ColumnType.Date,      null, null);
             case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null);
             case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
+            case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null);
             case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
             case NodeType.TypeStringSized:

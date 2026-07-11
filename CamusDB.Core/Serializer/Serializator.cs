@@ -203,6 +203,25 @@ public sealed class Serializator
         pointer += 12;
     }
 
+    /// <summary>Writes a Uuid as its 16 raw big-endian bytes (high half then low half).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteUuid(byte[] buffer, long high, long low, ref int pointer)
+    {
+        BinaryPrimitives.WriteUInt64BigEndian(buffer.AsSpan(pointer), (ulong)high);
+        BinaryPrimitives.WriteUInt64BigEndian(buffer.AsSpan(pointer + 8), (ulong)low);
+        pointer += 16;
+    }
+
+    /// <summary>Reads the 16 raw big-endian bytes written by <see cref="WriteUuid"/> as two halves.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static (long High, long Low) ReadUuid(ReadOnlySpan<byte> buffer, ref int pointer)
+    {
+        long high = (long)BinaryPrimitives.ReadUInt64BigEndian(buffer.Slice(pointer, 8));
+        long low = (long)BinaryPrimitives.ReadUInt64BigEndian(buffer.Slice(pointer + 8, 8));
+        pointer += 16;
+        return (high, low);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteString(byte[] buffer, string str, ref int pointer)
     {

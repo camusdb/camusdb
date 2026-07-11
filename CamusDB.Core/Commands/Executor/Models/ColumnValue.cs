@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using System.Buffers.Binary;
 using System.Text.Json.Serialization;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
@@ -24,6 +25,12 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///   Array     — stored in ArrayValues (IReadOnlyList<ColumnValue>) + ArrayElementType (ColumnType).
 ///               An empty array still carries its element type. Elements must all be ArrayElementType
 ///               or Null.
+///   Uuid      — the 128-bit value split into two big-endian halves: the high 64 bits (RFC 4122
+///               bytes 0..7) in UuidHigh and the low 64 bits (bytes 8..15) reusing LongValue. This
+///               keeps a Uuid allocation-free (no byte[]/string) and makes ordering a plain unsigned
+///               compare of (UuidHigh, LongValue), which equals big-endian byte order — the same
+///               order as the canonical string. Never order Uuids with System.Guid.CompareTo /
+///               SqlGuid; those use a mixed-endian field comparison that does not match this.
 /// </summary>
 public sealed class ColumnValue : IComparable<ColumnValue>
 {
@@ -36,6 +43,12 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     public ColumnType Type { get; }
 
     public long LongValue { get; }
+
+    /// <summary>
+    /// High 64 bits (big-endian RFC 4122 bytes 0..7) of a <see cref="ColumnType.Uuid"/> value; the
+    /// low 64 bits live in <see cref="LongValue"/>. Zero for all other types.
+    /// </summary>
+    public long UuidHigh { get; }
 
     public double FloatValue { get; }
 
@@ -61,6 +74,14 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         _ => null,
     };
 
+    /// <summary>
+    /// Canonical lowercase hyphenated string form of a <see cref="ColumnType.Uuid"/> value
+    /// (e.g. <c>"550e8400-e29b-41d4-a716-446655440000"</c>); null for all other types. Written into
+    /// JSON responses for readability; ignored during deserialization (the raw halves round-trip).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? UuidValue => Type == ColumnType.Uuid ? ToGuid().ToString("D") : null;
+
     // -------------------------------------------------------------------------
     // JsonConstructor — must round-trip all backing fields for schema DefaultValue
     // -------------------------------------------------------------------------
@@ -74,7 +95,8 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         bool boolValue,
         byte[]? bytesValue,
         IReadOnlyList<ColumnValue>? arrayValues,
-        ColumnType arrayElementType)
+        ColumnType arrayElementType,
+        long uuidHigh = 0)
     {
         Type = type;
 
@@ -83,6 +105,21 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             if (strValue is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value (null)");
             StrValue = strValue;
+        }
+
+        if (type == ColumnType.Uuid)
+        {
+            // Prefer a supplied string form (ergonomic HTTP parameters); otherwise the raw big-endian
+            // halves round-trip a persisted schema default value.
+            if (!string.IsNullOrEmpty(strValue))
+            {
+                (UuidHigh, LongValue) = ParseUuid(strValue);
+            }
+            else
+            {
+                UuidHigh = uuidHigh;
+                LongValue = longValue;
+            }
         }
 
         if (type == ColumnType.Integer64)
@@ -158,6 +195,60 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         BytesValue = value;
     }
 
+    /// <summary>Constructor for Uuid values from the two big-endian 64-bit halves.</summary>
+    public ColumnValue(ColumnType type, long uuidHigh, long uuidLow)
+    {
+        if (type != ColumnType.Uuid && type != ColumnType.Null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.Uuid to uuid halves");
+
+        Type = type;
+        UuidHigh = uuidHigh;
+        LongValue = uuidLow;
+    }
+
+    /// <summary>Builds a <see cref="ColumnType.Uuid"/> value from a <see cref="System.Guid"/>.</summary>
+    public static ColumnValue FromUuid(Guid value)
+    {
+        (long high, long low) = GuidToHalves(value);
+        return new ColumnValue(ColumnType.Uuid, high, low);
+    }
+
+    /// <summary>
+    /// Builds a <see cref="ColumnType.Uuid"/> value from its canonical hyphenated or 32-hex string
+    /// form (case-insensitive). Throws <c>InvalidInput</c> for anything else.
+    /// </summary>
+    public static ColumnValue FromUuidString(string value)
+    {
+        (long high, long low) = ParseUuid(value);
+        return new ColumnValue(ColumnType.Uuid, high, low);
+    }
+
+    /// <summary>Reconstructs the <see cref="System.Guid"/> from the stored big-endian halves.</summary>
+    public Guid ToGuid()
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt64BigEndian(bytes[..8], (ulong)UuidHigh);
+        BinaryPrimitives.WriteUInt64BigEndian(bytes[8..], (ulong)LongValue);
+        return new Guid(bytes, bigEndian: true);
+    }
+
+    private static (long High, long Low) ParseUuid(string value)
+    {
+        if (!Guid.TryParse(value, out Guid parsed))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid UUID value: {value}");
+
+        return GuidToHalves(parsed);
+    }
+
+    private static (long High, long Low) GuidToHalves(Guid value)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        value.TryWriteBytes(bytes, bigEndian: true, out _);
+        long high = (long)BinaryPrimitives.ReadUInt64BigEndian(bytes[..8]);
+        long low = (long)BinaryPrimitives.ReadUInt64BigEndian(bytes[8..]);
+        return (high, low);
+    }
+
     /// <summary>Factory for Array values. All elements must match elementType or be Null.</summary>
     public static ColumnValue FromArray(ColumnType elementType, IReadOnlyList<ColumnValue> elements)
     {
@@ -225,6 +316,14 @@ public sealed class ColumnValue : IComparable<ColumnValue>
                 return a.SequenceCompareTo(b);
             }
 
+            case ColumnType.Uuid:
+            {
+                // Unsigned compare of the big-endian halves == big-endian byte order == canonical
+                // string order. Signed comparison would mis-order values with the high bit set.
+                int high = ((ulong)UuidHigh).CompareTo((ulong)other.UuidHigh);
+                return high != 0 ? high : ((ulong)LongValue).CompareTo((ulong)other.LongValue);
+            }
+
             case ColumnType.Array:
             {
                 IReadOnlyList<ColumnValue> a = ArrayValues ?? [];
@@ -264,6 +363,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             ColumnType.Date      => $"ColumnValue({Type}:{new DateTime(LongValue, DateTimeKind.Utc):yyyy-MM-dd})",
             ColumnType.DateTime  => $"ColumnValue({Type}:{new DateTime(LongValue, DateTimeKind.Utc):o})",
             ColumnType.Bytes     => $"ColumnValue({Type}:len={BytesValue?.Length ?? 0})",
+            ColumnType.Uuid      => $"ColumnValue({Type}:{ToGuid():D})",
             ColumnType.Array     => $"ColumnValue({Type}<{ArrayElementType}>:count={ArrayValues?.Count ?? 0})",
             _                    => $"ColumnValue({Type}:{StrValue})",
         };

@@ -113,6 +113,7 @@ public enum NodeType
     TypeBytes,
     TypeDate,
     TypeDateTime,
+    TypeUuid,
     TypeArray,
     ShowColumns,
     ShowTables,

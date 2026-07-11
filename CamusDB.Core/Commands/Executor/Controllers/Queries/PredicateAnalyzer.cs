@@ -106,6 +106,55 @@ public static class PredicateAnalyzer
         return new PredicateAnalysis(indexable, columnComparisons, residual, inList);
     }
 
+    /// <summary>
+    /// Parses bare string literals compared to a <see cref="ColumnType.Uuid"/> column into Uuid
+    /// constants, using the table schema. Applied once before access-path selection so the index
+    /// selector, the bound-absorption check, and the execution filter all compare like-typed values
+    /// (a raw String vs a Uuid throws, and would also build a non-matching index key). Only Uuid is
+    /// coerced — <see cref="ColumnType.Id"/> and other types keep their existing behavior.
+    /// </summary>
+    public static PredicateAnalysis CoerceConstantsForColumns(PredicateAnalysis analysis, TableDescriptor table)
+    {
+        List<AnalyzedComparison>? coerced = null;
+
+        for (int i = 0; i < analysis.IndexableComparisons.Count; i++)
+        {
+            AnalyzedComparison original = analysis.IndexableComparisons[i];
+            AnalyzedComparison mapped = CoerceUuidConstant(original, table);
+            if (ReferenceEquals(mapped, original))
+                continue;
+
+            coerced ??= [.. analysis.IndexableComparisons];
+            coerced[i] = mapped;
+        }
+
+        if (coerced is null)
+            return analysis;
+
+        return new PredicateAnalysis(coerced, analysis.ColumnComparisons, analysis.ResidualConjuncts, analysis.InListComparisons);
+    }
+
+    private static AnalyzedComparison CoerceUuidConstant(AnalyzedComparison comparison, TableDescriptor table)
+    {
+        if (comparison.Constant is not { Type: ColumnType.String } constant)
+            return comparison;
+
+        string columnName = comparison.ColumnName;
+        int dot = columnName.LastIndexOf('.');
+        if (dot >= 0 && dot < columnName.Length - 1)
+            columnName = columnName[(dot + 1)..];
+
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == columnName);
+        if (column?.Type != ColumnType.Uuid)
+            return comparison;
+
+        return new AnalyzedComparison(
+            comparison.ColumnName,
+            comparison.Operator,
+            ColumnValue.FromUuidString(constant.StrValue!),
+            comparison.Conjunct);
+    }
+
     public static NodeAst? BuildExecutionFilter(
         PredicateAnalysis analysis,
         QueryPlanStep? scanStep,

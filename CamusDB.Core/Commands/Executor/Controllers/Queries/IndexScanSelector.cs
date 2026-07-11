@@ -669,8 +669,28 @@ internal static class IndexScanSelector
                 => nextFloat,
             ColumnType.Bool when !value.BoolValue
                 => ColumnValue.True,
+            ColumnType.Uuid when TryNextUuid(value, out ColumnValue? nextUuid)
+                => nextUuid,
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// Computes the next-larger Uuid (unsigned 128-bit +1) so an exact-equality scan on a non-unique
+    /// Uuid index can use the fixed-width upper bound <c>[v, v+1)</c>. Returns false at the maximum
+    /// value (no successor), which makes the caller fall back to a full scan.
+    /// </summary>
+    private static bool TryNextUuid(ColumnValue value, out ColumnValue? next)
+    {
+        next = null;
+
+        UInt128 v = ((UInt128)(ulong)value.UuidHigh << 64) | (ulong)value.LongValue;
+        if (v == UInt128.MaxValue)
+            return false;
+
+        v += 1;
+        next = new ColumnValue(ColumnType.Uuid, (long)(ulong)(v >> 64), (long)(ulong)v);
+        return true;
     }
 
     private static bool TryNextFloat64(double value, out ColumnValue? next)

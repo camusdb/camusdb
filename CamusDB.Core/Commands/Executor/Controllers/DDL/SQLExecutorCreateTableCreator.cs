@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -181,12 +182,16 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
                 GetColumnConstraintList(fieldList.extendedOne, constraintTypes);
 
+                ColumnValue? defaultValue = GetDefaultFromConstraints(constraintTypes);
+                if (defaultValue is not null)
+                    defaultValue = CastScalarFunctions.CoerceToColumnType(defaultValue, colType);
+
                 allFieldLists.Add(
                     new ColumnInfo(
                         name: fieldList.leftAst.yytext! ?? "",
                         type: colType,
                         notNull: constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
-                        defaultValue: GetDefaultFromConstraints(constraintTypes),
+                        defaultValue: defaultValue,
                         maxLength: maxLen,
                         arrayElementType: elemType
                     )
@@ -234,6 +239,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             case NodeType.TypeDate:      return (ColumnType.Date,      null, null);
             case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null);
             case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
+            case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null);
             case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
             case NodeType.TypeStringSized:

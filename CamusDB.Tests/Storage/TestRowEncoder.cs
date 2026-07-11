@@ -476,6 +476,52 @@ public sealed class TestRowEncoder
     }
 
     [Test]
+    public void RoundTrip_Uuid()
+    {
+        TableSchema schema = MakeSchema(0, Col("u", ColumnType.Uuid));
+        ObjectIdValue rowId = RowId();
+
+        Guid[] samples =
+        {
+            Guid.Empty,
+            Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            Guid.Parse("550e8400-e29b-41d4-a716-446655440000"),
+            Guid.NewGuid(),
+            Guid.CreateVersion7(),
+        };
+
+        foreach (Guid g in samples)
+        {
+            Dictionary<string, ColumnValue> row = new() { ["u"] = ColumnValue.FromUuid(g) };
+            byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+            Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+            Assert.That(decoded["u"].Type, Is.EqualTo(ColumnType.Uuid));
+            Assert.That(decoded["u"].ToGuid(), Is.EqualTo(g), $"Uuid row round-trip failed for {g}");
+        }
+    }
+
+    [Test]
+    public void RoundTrip_Uuid_Array()
+    {
+        TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));
+        ObjectIdValue rowId = RowId();
+
+        Guid g1 = Guid.NewGuid();
+        Guid g2 = Guid.CreateVersion7();
+        Dictionary<string, ColumnValue> row = new()
+        {
+            ["a"] = ColumnValue.FromArray(ColumnType.Uuid, [ColumnValue.FromUuid(g1), ColumnValue.FromUuid(g2)])
+        };
+        byte[] bytes = RowEncoder.Encode(schema, row, rowId);
+        Dictionary<string, ColumnValue> decoded = RowEncoder.Decode(schema, rowId, bytes);
+
+        Assert.That(decoded["a"].ArrayElementType, Is.EqualTo(ColumnType.Uuid));
+        Assert.That(decoded["a"].ArrayValues![0].ToGuid(), Is.EqualTo(g1));
+        Assert.That(decoded["a"].ArrayValues![1].ToGuid(), Is.EqualTo(g2));
+    }
+
+    [Test]
     public void RoundTrip_Array_Empty()
     {
         TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));

@@ -36,6 +36,12 @@ namespace CamusDB.Core.Storage.Kv;
 ///   DateTime   : 16-char uppercase hex of the backing long (UTC ticks) via the integer transform.
 ///   Bytes      : each byte as 2 uppercase hex chars, terminated by the field terminator
 ///                (pure ASCII, prefix-correct, bytewise-order-preserving).
+///   Uuid       : the 128-bit value as a fixed 19-char, most-significant-first base-125 number over
+///                the same '/'-skipping ordered alphabet as String/Id. Fixed width (no terminator);
+///                125^19 > 2^128 so 19 digits cover every value, and MSB-first fixed-width base-N of
+///                an unsigned integer is order-preserving, matching <see cref="ColumnValue.CompareTo"/>
+///                (unsigned big-endian). At 19 code units it is ~half the size of a UUID stored as a
+///                String key.
 ///   Bool       : "0" / "1".
 ///   String/Id  : prefix-free ordered ASCII code over UTF-16 code units, terminated by the field
 ///                terminator. Printable ASCII uses one character, controls use two, and all other
@@ -46,9 +52,9 @@ namespace CamusDB.Core.Storage.Kv;
 ///                String and Id share this encoding so a String literal in a query matches an
 ///                Id-typed stored key.
 ///
-/// Fixed-width fields (Integer64/Float64/Float32/Bool/Date/DateTime) need no terminator; the decoder
-/// knows their width from the column type. Variable-length fields (String/Id/Bytes) are terminated
-/// so composite keys keep correct prefix ordering.
+/// Fixed-width fields (Integer64/Float64/Float32/Bool/Date/DateTime/Uuid) need no terminator; the
+/// decoder knows their width from the column type. Variable-length fields (String/Id/Bytes) are
+/// terminated so composite keys keep correct prefix ordering.
 ///
 /// Array is not indexable — encoding throws <see cref="CamusDBException"/> <c>InvalidInput</c>
 /// if an Array value is passed.
@@ -79,6 +85,10 @@ public static class KeyEncoder
     private const int StringHighLastRank = 100;
     private const int StringHighFirstCodeUnit = 127;
     private const int StringHighBlockSize = StringAlphabetSize * StringAlphabetSize;
+
+    // A 128-bit Uuid encodes to a fixed-width base-125 number: ceil(128 / log2(125)) = 19 digits.
+    // 125^19 > 2^128, so every value fits and the width is constant (no terminator needed).
+    private const int UuidKeyDigits = 19;
 
     public static string Encode(CompositeColumnValue composite)
     {
@@ -129,6 +139,7 @@ public static class KeyEncoder
             ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Date or ColumnType.DateTime => 1 + 16,
             ColumnType.Float32 => 1 + 8,
             ColumnType.Bool => 1 + 1,
+            ColumnType.Uuid => 1 + UuidKeyDigits,
             ColumnType.Bytes => 1 + 2 * (value.BytesValue?.Length ?? 0) + 2,            // 2 hex/byte + terminator
             ColumnType.String or ColumnType.Id => 1 + MeasureString(value.StrValue ?? "") + 2,
             ColumnType.Array => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable"),
@@ -179,6 +190,10 @@ public static class KeyEncoder
 
             case ColumnType.Bytes:
                 WriteBytesHex(dest, ref pos, value.BytesValue ?? []);
+                break;
+
+            case ColumnType.Uuid:
+                WriteUuidBase125(dest, ref pos, value.UuidHigh, value.LongValue);
                 break;
 
             case ColumnType.Array:
@@ -279,6 +294,25 @@ public static class KeyEncoder
 
         dest[pos++] = FieldTerminatorLead;
         dest[pos++] = FieldTerminatorTail;
+    }
+
+    /// <summary>
+    /// Writes a Uuid's 128 bits as 19 fixed-width, most-significant-first base-125 digits over the
+    /// '/'-skipping ordered alphabet. Because the digit count is constant and the rank→char mapping is
+    /// monotonic, ordinal string order equals unsigned big-endian order of the value, matching
+    /// <see cref="ColumnValue.CompareTo"/> — no field terminator is required.
+    /// </summary>
+    private static void WriteUuidBase125(Span<char> dest, ref int pos, long high, long low)
+    {
+        UInt128 value = ((UInt128)(ulong)high << 64) | (ulong)low;
+
+        for (int i = UuidKeyDigits - 1; i >= 0; i--)
+        {
+            dest[pos + i] = StringAlphabetChar((int)(value % 125));
+            value /= 125;
+        }
+
+        pos += UuidKeyDigits;
     }
 
     /// <summary>Maps an ordered base-125 digit onto ASCII while skipping Kahuna's '/' separator.</summary>
@@ -422,6 +456,26 @@ public static class KeyEncoder
                 case ColumnType.Bool:
                     values[i] = new ColumnValue(ColumnType.Bool, key[pos++] == '1');
                     break;
+
+                case ColumnType.Uuid:
+                {
+                    if (pos + UuidKeyDigits > key.Length)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated uuid field at field {i}");
+
+                    UInt128 value = UInt128.Zero;
+                    for (int d = 0; d < UuidKeyDigits; d++)
+                    {
+                        int rank = StringAlphabetRank(key[pos++]);
+                        if (rank is < 0 or >= StringAlphabetSize)
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid uuid digit at field {i}");
+                        value = value * 125 + (UInt128)(uint)rank;
+                    }
+
+                    long high = (long)(ulong)(value >> 64);
+                    long low = (long)(ulong)value;
+                    values[i] = new ColumnValue(ColumnType.Uuid, high, low);
+                    break;
+                }
 
                 case ColumnType.String:
                 case ColumnType.Id:

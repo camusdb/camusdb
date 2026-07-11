@@ -50,6 +50,22 @@ internal abstract class SQLExecutorBaseCreator
     /// All other expression types are unaffected — only the column-reference lookup differs
     /// between the two paths, keeping a single shared implementation body.
     /// </summary>
+    /// <summary>
+    /// Orders two values for a filter/predicate comparison, reconciling a bare string literal against
+    /// a <see cref="ColumnType.Uuid"/> operand by parsing the string as a UUID. This lets
+    /// <c>WHERE uuid_col = '…'</c> (and range comparisons) work without an explicit CAST. Only Uuid is
+    /// coerced here; a string-vs-<see cref="ColumnType.Id"/> comparison keeps its existing behavior.
+    /// </summary>
+    private static int CompareValues(ColumnValue left, ColumnValue right)
+    {
+        if (left.Type == ColumnType.Uuid && right.Type == ColumnType.String)
+            right = ColumnValue.FromUuidString(right.StrValue!);
+        else if (right.Type == ColumnType.Uuid && left.Type == ColumnType.String)
+            left = ColumnValue.FromUuidString(left.StrValue!);
+
+        return left.CompareTo(right);
+    }
+
     public static ColumnValue EvalExpr(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
@@ -133,7 +149,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) == 0);
+                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) == 0);
                 }
 
             case NodeType.ExprNotEquals:
@@ -141,7 +157,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) != 0);
+                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) != 0);
                 }
 
             case NodeType.ExprLessThan:
@@ -149,7 +165,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) < 0);
+                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) < 0);
                 }
 
             case NodeType.ExprGreaterThan:
@@ -157,7 +173,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) > 0);
+                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) > 0);
                 }
 
             case NodeType.ExprLessEqualsThan:
@@ -165,7 +181,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) <= 0);
+                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) <= 0);
                 }
 
             case NodeType.ExprGreaterEqualsThan:
@@ -173,7 +189,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(leftValue.CompareTo(rightValue) >= 0);
+                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) >= 0);
                 }
 
             case NodeType.ExprBetween:
@@ -186,7 +202,7 @@ internal abstract class SQLExecutorBaseCreator
                         return ColumnValue.False;
 
                     return ColumnValue.FromBool(
-                        subject.CompareTo(low) >= 0 && subject.CompareTo(high) <= 0);
+                        CompareValues(subject, low) >= 0 && CompareValues(subject, high) <= 0);
                 }
 
             case NodeType.ExprOr:

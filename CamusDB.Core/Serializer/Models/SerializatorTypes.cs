@@ -52,5 +52,6 @@ public static class SerializatorTypes
     public const int TypeDate = 23;
     public const int TypeDateTime = 24;
     public const int TypeBytes = 25;
+    public const int TypeUuid = 26;
 }
 

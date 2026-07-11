@@ -122,6 +122,11 @@ public static class RowEncoder
                     Serializator.WriteBytesPayload(buffer, columnValue.BytesValue ?? [], ref pointer);
                     break;
 
+                case ColumnType.Uuid:
+                    Serializator.WriteType(buffer, SerializatorTypes.TypeUuid, ref pointer);
+                    Serializator.WriteUuid(buffer, columnValue.UuidHigh, columnValue.LongValue, ref pointer);
+                    break;
+
                 case ColumnType.Array:
                 {
                     IReadOnlyList<ColumnValue> elements = columnValue.ArrayValues ?? [];
@@ -669,6 +674,19 @@ public static class RowEncoder
                 };
             }
 
+            case ColumnType.Uuid:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeUuid)
+                {
+                    (long high, long low) = Serializator.ReadUuid(data, ref pointer);
+                    return new ColumnValue(ColumnType.Uuid, high, low);
+                }
+                if (t == SerializatorTypes.TypeNull)
+                    return new(ColumnType.Null, 0L);
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+            }
+
             case ColumnType.Array:
             {
                 int t = Serializator.ReadType(data, ref pointer);
@@ -782,6 +800,16 @@ public static class RowEncoder
                 break;
             }
 
+            case ColumnType.Uuid:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeUuid)
+                    pointer += SerializatorTypeSizes.TypeUuid;
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
             case ColumnType.Array:
             {
                 int t = Serializator.ReadType(data, ref pointer);
@@ -820,6 +848,7 @@ public static class RowEncoder
                 ColumnType.Date or ColumnType.DateTime => 1 + SerializatorTypeSizes.TypeInteger64,
                 ColumnType.String    => 1 + SerializatorTypeSizes.TypeInteger32 + Encoding.Unicode.GetByteCount(el.StrValue!),
                 ColumnType.Bytes     => 1 + SerializatorTypeSizes.TypeInteger32 + (el.BytesValue?.Length ?? 0),
+                ColumnType.Uuid      => 1 + SerializatorTypeSizes.TypeUuid,
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array element type not supported in size: " + el.Type)
             };
         }
@@ -856,6 +885,10 @@ public static class RowEncoder
                 Serializator.WriteType(buffer, SerializatorTypes.TypeBytes, ref pointer);
                 Serializator.WriteBytesPayload(buffer, el.BytesValue ?? [], ref pointer);
                 break;
+            case ColumnType.Uuid:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeUuid, ref pointer);
+                Serializator.WriteUuid(buffer, el.UuidHigh, el.LongValue, ref pointer);
+                break;
             case ColumnType.Date:
                 Serializator.WriteType(buffer, SerializatorTypes.TypeDate, ref pointer);
                 Serializator.WriteInt64(buffer, el.LongValue, ref pointer);
@@ -883,10 +916,17 @@ public static class RowEncoder
             ColumnType.Bool      => new(ColumnType.Bool,      Serializator.ReadBool(data, ref pointer)),
             ColumnType.String    => new(ColumnType.String,    Serializator.ReadString(data, ref pointer)),
             ColumnType.Bytes     => new(Serializator.ReadBytesPayload(data, ref pointer)),
+            ColumnType.Uuid      => ReadUuidElement(data, ref pointer),
             ColumnType.Date      => new(ColumnType.Date,      Serializator.ReadInt64(data, ref pointer)),
             ColumnType.DateTime  => new(ColumnType.DateTime,  Serializator.ReadInt64(data, ref pointer)),
             _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Unknown array element type: " + elementType)
         };
+    }
+
+    private static ColumnValue ReadUuidElement(byte[] data, ref int pointer)
+    {
+        (long high, long low) = Serializator.ReadUuid(data, ref pointer);
+        return new ColumnValue(ColumnType.Uuid, high, low);
     }
 
     private static void SkipArrayElement(byte[] data, ref int pointer)
@@ -918,6 +958,9 @@ public static class RowEncoder
                 break;
             case SerializatorTypes.TypeBytes:
                 Serializator.ReadBytesPayload(data, ref pointer);
+                break;
+            case SerializatorTypes.TypeUuid:
+                pointer += SerializatorTypeSizes.TypeUuid;
                 break;
             default:
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Unknown array element disk type: " + t);
@@ -972,6 +1015,8 @@ public static class RowEncoder
                 ColumnType.Bytes =>
                     SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
                     + (columnValue.BytesValue?.Length ?? 0),
+                ColumnType.Uuid =>
+                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeUuid,
                 ColumnType.Array =>
                     SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + 1  // type + count + element-type byte
                     + ArrayElementsSize(columnValue.ArrayValues ?? []),

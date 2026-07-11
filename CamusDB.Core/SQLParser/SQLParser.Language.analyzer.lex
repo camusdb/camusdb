@@ -78,6 +78,8 @@ TTypeBlob       (B|b)(L|l)(O|o)(B|b)
 TTypeDatetime   (D|d)(A|a)(T|t)(E|e)(T|t)(I|i)(M|m)(E|e)
 TTypeTimestamp  (T|t)(I|i)(M|m)(E|e)(S|s)(T|t)(A|a)(M|m)(P|p)
 TTypeDate       (D|d)(A|a)(T|t)(E|e)
+TTypeUuid       (U|u)(U|u)(I|i)(D|d)
+TTypeGuid       (G|g)(U|u)(I|i)(D|d)
 TTypeArray      (A|a)(R|r)(R|r)(A|a)(Y|y)
 TCast           (C|c)(A|a)(S|s)(T|t)
 TInteger        (I|i)(N|n)(T|t)(E|e)(G|g)(E|e)(R|r)
@@ -310,6 +312,10 @@ TDot            \.
 {TTypeTimestamp} { return (int)Token.TTYPE_DATETIME; }
 
 {TTypeDate} { return (int)Token.TTYPE_DATE; }
+
+{TTypeUuid} { return (int)Token.TTYPE_UUID; }
+
+{TTypeGuid} { return (int)Token.TTYPE_UUID; }
 
 {TTypeArray} { return (int)Token.TTYPE_ARRAY; }
 

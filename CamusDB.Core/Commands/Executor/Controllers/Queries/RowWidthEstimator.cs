@@ -37,6 +37,7 @@ internal static class RowWidthEstimator
     private const int BoolBytes     = 1;
     private const int DateBytes     = 8;    // stored as int64 (days / ms)
     private const int DateTimeBytes = 8;
+    private const int UuidBytes     = 16;   // fixed 128-bit value
     private const int StringAvgBytes = 64;  // average short-to-medium string (UTF-8)
     private const int BytesAvgBytes  = 128; // average bytes payload
     private const int ArrayAvgBytes  = 64;  // rough estimate for scalar arrays
@@ -67,6 +68,7 @@ internal static class RowWidthEstimator
                 ColumnType.DateTime => DateTimeBytes,
                 ColumnType.String   => EstimateStringWidth(col.MaxLength),
                 ColumnType.Bytes    => EstimateBytesWidth(col.MaxLength),
+                ColumnType.Uuid     => UuidBytes,
                 ColumnType.Array    => ArrayAvgBytes,
                 _                   => 0,
             };

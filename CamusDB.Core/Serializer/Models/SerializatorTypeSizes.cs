@@ -27,5 +27,6 @@ public static class SerializatorTypeSizes
     public const int TypeObjectId = 12;
     public const int TypeHLCTimestamp = 12;
     public const int TypeTuple = 24;
+    public const int TypeUuid = 16;
 }
 

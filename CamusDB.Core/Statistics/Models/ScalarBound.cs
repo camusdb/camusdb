@@ -36,12 +36,17 @@ public sealed class ScalarBound
     [JsonPropertyName("s")]
     public string? StrValue { get; set; }
 
+    /// <summary>High 64 bits of a <see cref="ColumnType.Uuid"/> bound; the low 64 live in <see cref="LongValue"/>.</summary>
+    [JsonPropertyName("u")]
+    public long UuidHigh { get; set; }
+
     public static ScalarBound FromColumnValue(ColumnValue v) => new()
     {
         Type = v.Type,
         LongValue = v.LongValue,
         FloatValue = v.FloatValue,
         StrValue = v.StrValue,
+        UuidHigh = v.UuidHigh,
     };
 
     // Signed comparison: negative = this < other, 0 = equal, positive = this > other.
@@ -60,6 +65,9 @@ public sealed class ScalarBound
             ColumnType.DateTime  => LongValue.CompareTo(other.LongValue),
             ColumnType.String    => string.Compare(StrValue, other.StrValue, StringComparison.Ordinal),
             ColumnType.Id        => string.Compare(StrValue, other.StrValue, StringComparison.Ordinal),
+            ColumnType.Uuid      => ((ulong)UuidHigh).CompareTo((ulong)other.UuidHigh) is int h and not 0
+                                        ? h
+                                        : ((ulong)LongValue).CompareTo((ulong)other.LongValue),
             _                    => 0,
         };
     }

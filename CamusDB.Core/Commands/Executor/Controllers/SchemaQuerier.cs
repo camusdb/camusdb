@@ -94,6 +94,7 @@ internal sealed class SchemaQuerier
             ColumnType.Date or ColumnType.DateTime => new ColumnValue(ColumnType.String, column.DefaultValue.IsoValue!),
             // Bytes render as a 0x-hex literal, matching the SQL bytes-literal syntax.
             ColumnType.Bytes => new ColumnValue(ColumnType.String, "0x" + Convert.ToHexString(column.DefaultValue.BytesValue ?? [])),
+            ColumnType.Uuid => new ColumnValue(ColumnType.String, column.DefaultValue.UuidValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
         };
     }
@@ -359,6 +360,7 @@ internal sealed class SchemaQuerier
             ColumnType.Bytes => "BYTES",
             ColumnType.Date => "DATE",
             ColumnType.DateTime => "DATETIME",
+            ColumnType.Uuid => "UUID",
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render SQL type for: " + type),
         };
     }

@@ -59,6 +59,28 @@ internal static class ColumnValueAstBuilder
                 extendedFour: null,
                 extendedFive: null,
                 yytext: value.StrValue),
+            // No dedicated Uuid literal token exists; re-express the value as CAST('<canonical>' AS
+            // uuid). ExprCast is already handled everywhere in the expression pipeline, so this
+            // substituted subtree evaluates back to the same Uuid without new node-type plumbing.
+            ColumnType.Uuid => new NodeAst(
+                NodeType.ExprCast,
+                leftAst: new NodeAst(
+                    NodeType.String,
+                    leftAst: null,
+                    rightAst: null,
+                    extendedOne: null,
+                    extendedTwo: null,
+                    extendedThree: null,
+                    extendedFour: null,
+                    extendedFive: null,
+                    yytext: $"\"{value.ToGuid():D}\""),
+                rightAst: NodeAst.TypeUuid,
+                extendedOne: null,
+                extendedTwo: null,
+                extendedThree: null,
+                extendedFour: null,
+                extendedFive: null,
+                yytext: null),
             ColumnType.Null => NodeAst.Null,
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
