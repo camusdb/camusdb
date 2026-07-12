@@ -44,6 +44,13 @@ public sealed class TableColumnSchema
     public ColumnValue? DefaultValue { get; }
 
     /// <summary>
+    /// Name of a nullary volatile scalar function (e.g. <c>gen_uuid_v7</c>) evaluated per inserted
+    /// row to produce this column's default. Non-null only for function-call defaults; mutually
+    /// exclusive with <see cref="DefaultValue"/>. Persisted in schema JSON as a plain string.
+    /// </summary>
+    public string? DefaultFunction { get; }
+
+    /// <summary>
     /// Online schema-change state of the column.
     /// </summary>
     public SchemaElementState State { get; }
@@ -69,7 +76,8 @@ public sealed class TableColumnSchema
         ColumnValue? defaultValue,
         SchemaElementState state = SchemaElementState.Public,
         int? maxLength = null,
-        ColumnType? arrayElementType = null
+        ColumnType? arrayElementType = null,
+        string? defaultFunction = null
     )
     {
         Id = id;
@@ -80,5 +88,6 @@ public sealed class TableColumnSchema
         State = state;
         MaxLength = maxLength;
         ArrayElementType = arrayElementType;
+        DefaultFunction = defaultFunction;
     }
 }

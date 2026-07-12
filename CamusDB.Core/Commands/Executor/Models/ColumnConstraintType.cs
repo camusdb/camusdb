@@ -15,6 +15,7 @@ public enum ColumnConstraintType
     NotNull,
     Unique,
     Default,
+    DefaultFunction,
     Check,
     ForeignKey
 }

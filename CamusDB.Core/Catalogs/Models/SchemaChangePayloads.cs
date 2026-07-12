@@ -54,6 +54,12 @@ public sealed class SchemaColumnPayload
 
     public ColumnValue? DefaultValue { get; set; }
 
+    /// <summary>
+    /// Name of a nullary volatile scalar function evaluated per inserted row for this column's
+    /// default (e.g. <c>gen_uuid_v7</c>). Null for constant or absent defaults.
+    /// </summary>
+    public string? DefaultFunction { get; set; }
+
     public SchemaElementState State { get; set; } = SchemaElementState.Public;
 
     /// <summary>
@@ -74,6 +80,7 @@ public sealed class SchemaColumnPayload
             Type = column.Type,
             NotNull = column.NotNull,
             DefaultValue = column.Default,
+            DefaultFunction = column.DefaultFunction,
             MaxLength = column.MaxLength,
             ArrayElementType = column.ArrayElementType,
         };

@@ -77,12 +77,13 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             fieldMeta[i] = (colDef, defaultVal);
         }
 
-        // Columns that carry defaults but were not listed in the INSERT field list.
-        List<(string Name, ColumnValue Default)> extraDefaults = new();
+        // Columns that carry a default (constant or per-row function) but were not listed in the
+        // INSERT field list. A function default has a null DefaultValue, so both are checked.
+        List<TableColumnSchema> extraDefaults = new();
         foreach (TableColumnSchema col in schemaColumns)
         {
-            if (col.DefaultValue is not null && !fields.Contains(col.Name))
-                extraDefaults.Add((col.Name, col.DefaultValue));
+            if ((col.DefaultValue is not null || col.DefaultFunction is not null) && !fields.Contains(col.Name))
+                extraDefaults.Add(col);
         }
 
         // Single-pass: build each row dictionary directly from the AST, applying coercion
@@ -109,7 +110,7 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         Dictionary<string, ColumnValue>? parameters,
         List<string> fields,
         (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta,
-        List<(string Name, ColumnValue Default)> extraDefaults,
+        List<TableColumnSchema> extraDefaults,
         List<Dictionary<string, ColumnValue>> batchValues)
     {
         if (batchListAst.nodeType == NodeType.InsertBatchList)
@@ -142,11 +143,17 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             row[fields[i]] = val;
         }
 
-        // Add columns that have defaults but were not part of the INSERT field list.
-        foreach ((string name, ColumnValue def) in extraDefaults)
+        // Add columns that have defaults but were not part of the INSERT field list. A function
+        // default is evaluated here, once per row, so each row gets a fresh value (e.g. a distinct
+        // gen_uuid_v7()); a constant default is copied as-is.
+        foreach (TableColumnSchema col in extraDefaults)
         {
-            if (!row.ContainsKey(name))
-                row[name] = def;
+            if (row.ContainsKey(col.Name))
+                continue;
+
+            row[col.Name] = col.DefaultFunction is not null
+                ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction)
+                : col.DefaultValue!;
         }
 
         batchValues.Add(row);

@@ -438,7 +438,34 @@ internal abstract class SQLExecutorBaseCreator
 
         if (constraintsList.nodeType == NodeType.ConstraintDefault)
         {
-            constraintTypes.Add((ColumnConstraintType.Default, EvalExpr(constraintsList.leftAst!, new Dictionary<string, ColumnValue>(), null)));
+            NodeAst defaultExpr = constraintsList.leftAst!;
+
+            // A volatile default (e.g. gen_uuid_v7()) must be evaluated per inserted row, not once
+            // at DDL time — otherwise every defaulted row would share one value. Store the function
+            // name so the insert path can call it per row. Only a bare zero-argument volatile call is
+            // supported; any richer volatile expression is rejected rather than silently frozen to a
+            // constant. Non-volatile defaults (literals, deterministic calls) stay pre-evaluated.
+            if (ScalarFunctionEvaluator.ContainsVolatileFunction(defaultExpr))
+            {
+                if (defaultExpr.nodeType == NodeType.ExprFuncCall
+                    && defaultExpr.rightAst is null
+                    && defaultExpr.leftAst?.yytext is string functionName
+                    && ScalarFunctionEvaluator.TryResolveVolatileNullary(functionName.ToLowerInvariant(), out _))
+                {
+                    constraintTypes.Add((ColumnConstraintType.DefaultFunction,
+                        new ColumnValue(ColumnType.String, functionName.ToLowerInvariant())));
+                }
+                else
+                {
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        "A volatile function default must be a zero-argument function call, e.g. DEFAULT(gen_uuid_v7())");
+                }
+            }
+            else
+            {
+                constraintTypes.Add((ColumnConstraintType.Default,
+                    EvalExpr(defaultExpr, new Dictionary<string, ColumnValue>(), null)));
+            }
             return;
         }
 
@@ -465,6 +492,39 @@ internal abstract class SQLExecutorBaseCreator
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Returns the name of the volatile nullary function to evaluate per inserted row for a
+    /// <c>DEFAULT(fn())</c> column default, or null when the default is a constant or absent.
+    /// The name is carried in a String <see cref="ColumnValue"/> by <see cref="GetColumnConstraintList"/>.
+    /// </summary>
+    protected static string? GetDefaultFunctionFromConstraints(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.DefaultFunction)
+                return value?.StrValue;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Validates that a <c>DEFAULT(fn())</c> function is a supported zero-argument volatile function
+    /// whose return type matches the column's declared type (e.g. <c>gen_uuid_v7</c> → <c>uuid</c>).
+    /// Throws <c>InvalidInput</c> otherwise. Called at DDL time so a bad default fails at CREATE/ALTER,
+    /// not at insert.
+    /// </summary>
+    protected static void ValidateDefaultFunctionType(string functionName, ColumnType columnType, string columnName)
+    {
+        if (!ScalarFunctionEvaluator.TryResolveVolatileNullary(functionName, out ColumnType returnType))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                $"DEFAULT function '{functionName}()' on column '{columnName}' is not a supported zero-argument volatile function");
+
+        if (returnType != columnType)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                $"DEFAULT function '{functionName}()' returns {returnType} but column '{columnName}' is {columnType}");
     }
 
     private static bool Like(string text, string pattern)

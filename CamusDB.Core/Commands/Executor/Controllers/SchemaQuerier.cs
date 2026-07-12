@@ -78,6 +78,9 @@ internal sealed class SchemaQuerier
 
     private static ColumnValue GetDefaultValue(TableColumnSchema column)
     {
+        if (column.DefaultFunction is not null)
+            return new ColumnValue(ColumnType.String, column.DefaultFunction + "()");
+
         if (column.DefaultValue is null)
             return new ColumnValue(ColumnType.String, "NULL");
 

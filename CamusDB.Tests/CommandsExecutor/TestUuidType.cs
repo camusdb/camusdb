@@ -336,6 +336,117 @@ internal sealed class TestUuidType : SharedNodeBaseTest
         Assert.AreEqual(SampleUuid, uRow.Row["Default"].StrValue);
     }
 
+    // The requested feature: a volatile function default on a uuid PK, evaluated per inserted row.
+    [Test]
+    [NonParallelizable]
+    public async Task Uuid_FunctionDefault_GeneratesDistinctValuePerRow()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE x1 (id uuid primary key default(gen_uuid_v7()), name string(20) not null)");
+
+        await ExecInsert(executor, db, "INSERT INTO x1 (name) VALUES (\"a\")");
+        await ExecInsert(executor, db, "INSERT INTO x1 (name) VALUES (\"b\")");
+        await ExecInsert(executor, db, "INSERT INTO x1 (name) VALUES (\"c\")");
+
+        List<QueryResultRow> rows = await ExecSelect(executor, db, "SELECT id, name FROM x1");
+        Assert.AreEqual(3, rows.Count);
+
+        List<string> ids = rows.Select(r => r.Row["id"].UuidValue!).ToList();
+        Assert.AreEqual(3, ids.Distinct().Count(), "each defaulted row must get a distinct generated UUID");
+        foreach (string id in ids)
+        {
+            Assert.IsNotNull(id);
+            Assert.AreEqual('7', VersionNibble(id), $"default must produce a version-7 UUID: {id}");
+        }
+    }
+
+    // A multi-row INSERT must also get distinct per-row values from the function default.
+    [Test]
+    [NonParallelizable]
+    public async Task Uuid_FunctionDefault_DistinctAcrossMultiRowInsert()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE x1 (id uuid primary key default(gen_uuid_v7()), name string(20) not null)");
+
+        await ExecInsert(executor, db, "INSERT INTO x1 (name) VALUES (\"a\"), (\"b\"), (\"c\"), (\"d\")");
+
+        List<QueryResultRow> rows = await ExecSelect(executor, db, "SELECT id FROM x1");
+        Assert.AreEqual(4, rows.Count);
+        Assert.AreEqual(4, rows.Select(r => r.Row["id"].UuidValue).Distinct().Count());
+    }
+
+    // An explicitly supplied value must override the function default.
+    [Test]
+    [NonParallelizable]
+    public async Task Uuid_FunctionDefault_ExplicitValueOverrides()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE x1 (id uuid primary key default(gen_uuid_v7()), name string(20) not null)");
+
+        await ExecInsert(executor, db, $"INSERT INTO x1 (id, name) VALUES ('{SampleUuid}', \"a\")");
+
+        List<QueryResultRow> rows = await ExecSelect(executor, db, "SELECT id FROM x1");
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(SampleUuid, rows[0].Row["id"].UuidValue);
+    }
+
+    // A function whose return type does not match the column type is rejected at CREATE.
+    [Test]
+    [NonParallelizable]
+    public async Task Uuid_FunctionDefault_TypeMismatch_Rejected()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction tx = await db.Transactions.BeginAsync();
+
+        // gen_id() returns Id, not Uuid.
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+                "CREATE TABLE bad (id uuid primary key default(gen_id()), name string(20) not null)", null)))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+    }
+
+    // A volatile default that is not a bare zero-argument call is rejected (scope guard).
+    [Test]
+    [NonParallelizable]
+    public async Task Uuid_FunctionDefault_UnknownFunction_Rejected()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction tx = await db.Transactions.BeginAsync();
+
+        // An unregistered function name in a DEFAULT must be rejected rather than silently accepted.
+        Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+                "CREATE TABLE bad (id uuid primary key default(no_such_fn()), name string(20) not null)", null)));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Uuid_FunctionDefault_ShowColumns_RendersCall()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE x1 (id uuid primary key default(gen_uuid_v7()), name string(20) not null)");
+
+        List<QueryResultRow> cols = await ExecSelect(executor, db, "SHOW COLUMNS FROM x1");
+        QueryResultRow idRow = cols.Single(r => r.Row["Field"].StrValue == "id");
+        Assert.AreEqual("gen_uuid_v7()", idRow.Row["Default"].StrValue);
+    }
+
+    // gen_id() as a per-row default on an oid column (proves the mechanism is not uuid-specific).
+    [Test]
+    [NonParallelizable]
+    public async Task GenId_FunctionDefault_OnOidColumn_DistinctPerRow()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE x2 (id oid primary key default(gen_id()), name string(20) not null)");
+
+        await ExecInsert(executor, db, "INSERT INTO x2 (name) VALUES (\"a\")");
+        await ExecInsert(executor, db, "INSERT INTO x2 (name) VALUES (\"b\")");
+
+        List<QueryResultRow> rows = await ExecSelect(executor, db, "SELECT id FROM x2");
+        Assert.AreEqual(2, rows.Count);
+        Assert.AreEqual(2, rows.Select(r => r.Row["id"].StrValue).Distinct().Count());
+    }
+
     [Test]
     [NonParallelizable]
     public async Task ShowColumns_ReportsUuidType()

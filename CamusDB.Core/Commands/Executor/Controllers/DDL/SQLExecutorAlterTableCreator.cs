@@ -27,6 +27,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
         if (ast.nodeType == NodeType.AlterTableAddColumn)
         {
             ColumnValue? defaultValue = null;
+            string? defaultFunction = null;
             bool notNull = false;
 
             if (ast.extendedTwo is not null)
@@ -34,6 +35,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
                 GetColumnConstraintList(ast.extendedTwo, constraintTypes);
                 defaultValue = GetDefaultFromConstraints(constraintTypes);
+                defaultFunction = GetDefaultFunctionFromConstraints(constraintTypes);
                 notNull = constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull);
             }
 
@@ -42,11 +44,14 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             if (defaultValue is not null)
                 defaultValue = CastScalarFunctions.CoerceToColumnType(defaultValue, colType);
 
+            if (defaultFunction is not null)
+                ValidateDefaultFunctionType(defaultFunction, colType, ast.rightAst!.yytext!);
+
             return new(
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
-                new ColumnInfo(ast.rightAst!.yytext!, colType, notNull, defaultValue, maxLen, elemType)
+                new ColumnInfo(ast.rightAst!.yytext!, colType, notNull, defaultValue, maxLen, elemType, defaultFunction: defaultFunction)
             );
         }
 

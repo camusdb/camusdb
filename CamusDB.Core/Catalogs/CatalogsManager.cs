@@ -443,6 +443,7 @@ public sealed class CatalogsManager
                         Type = column.Type,
                         NotNull = column.NotNull,
                         DefaultValue = column.Default,
+                        DefaultFunction = column.DefaultFunction,
                         State = initialState,
                     }
                 })
@@ -992,7 +993,8 @@ public sealed class CatalogsManager
                     defaultValue: column.DefaultValue,
                     state: column.State,
                     maxLength: column.MaxLength,
-                    arrayElementType: column.ArrayElementType
+                    arrayElementType: column.ArrayElementType,
+                    defaultFunction: column.DefaultFunction
                 )
             );
         }
@@ -1138,7 +1140,8 @@ public sealed class CatalogsManager
             defaultValue: current.DefaultValue,
             state: current.State,
             maxLength: current.MaxLength,
-            arrayElementType: current.ArrayElementType
+            arrayElementType: current.ArrayElementType,
+            defaultFunction: current.DefaultFunction
         );
 
         tableSchema.Version++;
@@ -1156,7 +1159,8 @@ public sealed class CatalogsManager
             history.Columns[hIdx] = new TableColumnSchema(
                 id: hCol.Id, name: payload.NewName, type: hCol.Type,
                 notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State,
-                maxLength: hCol.MaxLength, arrayElementType: hCol.ArrayElementType);
+                maxLength: hCol.MaxLength, arrayElementType: hCol.ArrayElementType,
+                defaultFunction: hCol.DefaultFunction);
         }
 
         tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
@@ -1265,7 +1269,8 @@ public sealed class CatalogsManager
                 defaultValue: newColumn.DefaultValue,
                 state: newColumn.State,
                 maxLength: newColumn.MaxLength,
-                arrayElementType: newColumn.ArrayElementType
+                arrayElementType: newColumn.ArrayElementType,
+                defaultFunction: newColumn.DefaultFunction
             )
         );
 
@@ -1307,7 +1312,10 @@ public sealed class CatalogsManager
                 current.Type,
                 current.NotNull,
                 current.DefaultValue,
-                payload.State
+                payload.State,
+                maxLength: current.MaxLength,
+                arrayElementType: current.ArrayElementType,
+                defaultFunction: current.DefaultFunction
             );
         }
 

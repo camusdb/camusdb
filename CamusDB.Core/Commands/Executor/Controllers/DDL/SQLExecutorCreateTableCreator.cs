@@ -186,14 +186,20 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 if (defaultValue is not null)
                     defaultValue = CastScalarFunctions.CoerceToColumnType(defaultValue, colType);
 
+                string columnName = fieldList.leftAst.yytext! ?? "";
+                string? defaultFunction = GetDefaultFunctionFromConstraints(constraintTypes);
+                if (defaultFunction is not null)
+                    ValidateDefaultFunctionType(defaultFunction, colType, columnName);
+
                 allFieldLists.Add(
                     new ColumnInfo(
-                        name: fieldList.leftAst.yytext! ?? "",
+                        name: columnName,
                         type: colType,
                         notNull: constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
                         defaultValue: defaultValue,
                         maxLength: maxLen,
-                        arrayElementType: elemType
+                        arrayElementType: elemType,
+                        defaultFunction: defaultFunction
                     )
                 );
                 return;

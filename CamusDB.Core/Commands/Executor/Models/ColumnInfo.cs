@@ -21,6 +21,13 @@ public sealed class ColumnInfo
     public ColumnValue? Default { get; }
 
     /// <summary>
+    /// Name of a nullary volatile scalar function (e.g. <c>gen_uuid_v7</c>) to evaluate per inserted
+    /// row for this column's default, when the default is a function call rather than a constant.
+    /// Mutually exclusive with <see cref="Default"/>. Null when there is no function default.
+    /// </summary>
+    public string? DefaultFunction { get; }
+
+    /// <summary>
     /// Maximum length in characters (String) or bytes (Bytes). Null means unbounded-but-capped
     /// at the default (see <see cref="CamusDB.Core.CamusDBConfig.DefaultStringMaxLength"/> /
     /// <see cref="CamusDB.Core.CamusDBConfig.DefaultBytesMaxLength"/>). Ignored for other types.
@@ -38,7 +45,8 @@ public sealed class ColumnInfo
         bool notNull = false,
         ColumnValue? defaultValue = null,
         int? maxLength = null,
-        ColumnType? arrayElementType = null
+        ColumnType? arrayElementType = null,
+        string? defaultFunction = null
     )
     {
         Name = name;
@@ -47,5 +55,6 @@ public sealed class ColumnInfo
         Default = defaultValue;
         MaxLength = maxLength;
         ArrayElementType = arrayElementType;
+        DefaultFunction = defaultFunction;
     }
 }

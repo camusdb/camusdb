@@ -525,7 +525,8 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | float { $$.n = $1.n; $$.s = $1.s; }
              | string { $$.n = $1.n; $$.s = $1.s; }
              | bool { $$.n = $1.n; $$.s = $1.s; }
-             | null { $$.n = $1.n; $$.s = $1.s; }             
+             | null { $$.n = $1.n; $$.s = $1.s; }
+             | fcall_expr { $$.n = $1.n; $$.s = $1.s; }
 			 ;
 
 field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }

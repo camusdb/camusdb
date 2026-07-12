@@ -93,4 +93,37 @@ internal static class ScalarFunctionEvaluator
             || ContainsVolatileFunction(ast.extendedFour)
             || ContainsVolatileFunction(ast.extendedFive);
     }
+
+    /// <summary>
+    /// Resolves a zero-argument volatile scalar function usable as a per-row column default (e.g.
+    /// <c>gen_uuid_v7</c>). Returns true only when <paramref name="functionName"/> is registered,
+    /// <see cref="ScalarFunctionDescriptor.IsVolatile"/>, and takes no arguments; <paramref name="returnType"/>
+    /// receives its inferred return type so the DDL layer can validate it against the column type.
+    /// </summary>
+    internal static bool TryResolveVolatileNullary(string functionName, out ColumnType returnType)
+    {
+        returnType = ColumnType.Null;
+
+        if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
+            return false;
+
+        if (!descriptor.IsVolatile || descriptor.MinArity != 0 || descriptor.MaxArity != 0)
+            return false;
+
+        returnType = descriptor.InferReturnType([]);
+        return true;
+    }
+
+    /// <summary>
+    /// Evaluates a zero-argument scalar function by name, producing a fresh value. Used to apply a
+    /// function-call column default per inserted row. Assumes the name was validated via
+    /// <see cref="TryResolveVolatileNullary"/> at DDL time.
+    /// </summary>
+    internal static ColumnValue EvaluateNullary(string functionName)
+    {
+        if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Default function not found: " + functionName);
+
+        return descriptor.Evaluator(functionName, []);
+    }
 }
