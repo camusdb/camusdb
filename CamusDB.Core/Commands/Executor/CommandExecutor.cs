@@ -1143,7 +1143,10 @@ public sealed class CommandExecutor : IAsyncDisposable
             ? IndexType.Unique
             : IndexType.Multi;
 
-        IndexColumnOrder.RejectUnsupportedDescending(ticket.Columns, ticket.IndexName);
+        IndexColumnOrder.RejectDescendingOnUnsupportedType(
+            ticket.Columns,
+            ticket.IndexName,
+            name => table.Schema.Columns!.Find(c => c.Name == name)?.Type);
 
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIdsForIndex(table, ticket.Columns);

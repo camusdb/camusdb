@@ -12,6 +12,7 @@ using System.Text;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -844,6 +845,214 @@ public class TestKeyEncoder
 
     private static CompositeColumnValue Single(ColumnValue value) => new(new[] { value });
 
+    // ── Descending / mixed-direction index encoding ────────────────────────────────────────────
+
+    // Fixed-width types support descending encoding (String/Bytes are still rejected).
+    private static readonly ColumnType[] DescendableTypes =
+    {
+        ColumnType.Integer64,
+        ColumnType.Float64,
+        ColumnType.Float32,
+        ColumnType.Bool,
+        ColumnType.Date,
+        ColumnType.DateTime,
+        ColumnType.Uuid,
+        ColumnType.Id,
+    };
+
+    /// <summary>Id now encodes as a fixed 14-digit base-125 body (no terminator), not the String form.</summary>
+    [Test]
+    public void Id_EncodedIsFixedWidthWithoutTerminatorOrSeparator()
+    {
+        for (int n = 0; n < 200; n++)
+        {
+            CompositeColumnValue composite = new(new[] { RandomValue(new Random(1000 + n), ColumnType.Id) });
+            string encoded = KeyEncoder.Encode(composite);
+
+            Assert.AreEqual(1 + 14, encoded.Length, "Id key = 1 present-marker + 14 base-125 digits");
+            Assert.IsFalse(encoded.Contains('/'), "Id key must not contain the '/' key-space separator");
+            Assert.IsFalse(encoded.Contains((char)0x0000), "Id key must be terminator-free");
+        }
+    }
+
+    /// <summary>The RandomValue Id generator must exercise low/high/boundary 96-bit magnitudes.</summary>
+    [Test]
+    public void Id_BoundaryValuesOrderAndRoundTrip()
+    {
+        string[] ids =
+        {
+            "000000000000000000000000",
+            "000000000000000000000001",
+            "7fffffffffffffffffffffff",
+            "800000000000000000000000",
+            "fffffffffffffffffffffffe",
+            "ffffffffffffffffffffffff",
+        };
+        ColumnType[] schema = { ColumnType.Id };
+        OrderType[] asc = { OrderType.Ascending };
+        OrderType[] desc = { OrderType.Descending };
+
+        for (int i = 0; i < ids.Length; i++)
+        {
+            CompositeColumnValue a = new(new[] { new ColumnValue(ColumnType.Id, ids[i]) });
+
+            // Round-trip both directions.
+            Assert.AreEqual(0, a.CompareTo(KeyEncoder.Decode(KeyEncoder.Encode(a, asc), schema, asc)));
+            Assert.AreEqual(0, a.CompareTo(KeyEncoder.Decode(KeyEncoder.Encode(a, desc), schema, desc)));
+
+            for (int j = 0; j < ids.Length; j++)
+            {
+                CompositeColumnValue b = new(new[] { new ColumnValue(ColumnType.Id, ids[j]) });
+                int semantic = Math.Sign(a.CompareTo(b));
+                Assert.AreEqual(semantic,
+                    Math.Sign(string.CompareOrdinal(KeyEncoder.Encode(a, asc), KeyEncoder.Encode(b, asc))),
+                    $"ascending Id order {ids[i]} vs {ids[j]}");
+                Assert.AreEqual(-semantic,
+                    Math.Sign(string.CompareOrdinal(KeyEncoder.Encode(a, desc), KeyEncoder.Encode(b, desc))),
+                    $"descending Id order {ids[i]} vs {ids[j]}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A single descending column inverts the encoded ordinal order relative to CompareTo — that is
+    /// the whole point of a DESC index: forward scan yields values largest-first.
+    /// </summary>
+    [Test]
+    public void DescendingSingleColumn_InvertsOrdinalOrder()
+    {
+        Random random = new(20260712);
+        OrderType[] desc = { OrderType.Descending };
+
+        foreach (ColumnType type in DescendableTypes)
+        {
+            for (int n = 0; n < 400; n++)
+            {
+                ColumnValue va = RandomValue(random, type);
+                ColumnValue vb = RandomValue(random, type);
+                CompositeColumnValue a = new(new[] { va });
+                CompositeColumnValue b = new(new[] { vb });
+
+                int semantic = Math.Sign(a.CompareTo(b));
+                int encoded = Math.Sign(string.CompareOrdinal(KeyEncoder.Encode(a, desc), KeyEncoder.Encode(b, desc)));
+
+                Assert.AreEqual(-semantic, encoded,
+                    $"type={type} a={va} b={vb}: descending encoded order must be the reverse of CompareTo");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Mixed ASC/DESC composite keys must sort by each column's own direction, first difference wins.
+    /// </summary>
+    [Test]
+    public void MixedDirectionComposite_PreservesDirectionalOrder()
+    {
+        Random random = new(20260713);
+
+        for (int iteration = 0; iteration < 2000; iteration++)
+        {
+            int columns = random.Next(1, 5);
+            ColumnType[] schema = new ColumnType[columns];
+            OrderType[] directions = new OrderType[columns];
+            for (int c = 0; c < columns; c++)
+            {
+                schema[c] = DescendableTypes[random.Next(DescendableTypes.Length)];
+                directions[c] = random.Next(2) == 0 ? OrderType.Ascending : OrderType.Descending;
+            }
+
+            CompositeColumnValue a = RandomComposite(random, schema);
+            CompositeColumnValue b = RandomComposite(random, schema);
+
+            int semantic = DirectionalCompare(a, b, directions);
+            int encoded = Math.Sign(string.CompareOrdinal(KeyEncoder.Encode(a, directions), KeyEncoder.Encode(b, directions)));
+
+            Assert.AreEqual(semantic, encoded,
+                $"mixed-direction composite ordering mismatch (dirs=[{string.Join(",", directions)}])");
+        }
+    }
+
+    /// <summary>Encode → Decode round-trips a mixed-direction composite back to the original values.</summary>
+    [Test]
+    public void MixedDirectionComposite_RoundTrips()
+    {
+        Random random = new(20260714);
+
+        for (int iteration = 0; iteration < 2000; iteration++)
+        {
+            int columns = random.Next(1, 5);
+            ColumnType[] schema = new ColumnType[columns];
+            OrderType[] directions = new OrderType[columns];
+            for (int c = 0; c < columns; c++)
+            {
+                schema[c] = DescendableTypes[random.Next(DescendableTypes.Length)];
+                directions[c] = random.Next(2) == 0 ? OrderType.Ascending : OrderType.Descending;
+            }
+
+            CompositeColumnValue original = RandomComposite(random, schema);
+            string encoded = KeyEncoder.Encode(original, directions);
+            CompositeColumnValue decoded = KeyEncoder.Decode(encoded, schema, directions);
+
+            Assert.AreEqual(0, original.CompareTo(decoded),
+                $"round-trip mismatch (dirs=[{string.Join(",", directions)}]): {original} != {decoded}");
+        }
+    }
+
+    /// <summary>A descending column sorts NULLs last: a present value precedes a NULL.</summary>
+    [Test]
+    public void DescendingColumn_NullsSortLast()
+    {
+        OrderType[] desc = { OrderType.Descending };
+        OrderType[] asc = { OrderType.Ascending };
+
+        CompositeColumnValue present = new(new[] { new ColumnValue(ColumnType.Integer64, 42) });
+        CompositeColumnValue nullVal = new(new[] { new ColumnValue(ColumnType.Null, false) });
+
+        // Descending: present ('...') sorts before NULL → NULLS LAST.
+        Assert.Less(string.CompareOrdinal(KeyEncoder.Encode(present, desc), KeyEncoder.Encode(nullVal, desc)), 0);
+        // Ascending (baseline): NULL sorts before present → NULLS FIRST.
+        Assert.Less(string.CompareOrdinal(KeyEncoder.Encode(nullVal, asc), KeyEncoder.Encode(present, asc)), 0);
+
+        // A NULL round-trips under a descending direction.
+        CompositeColumnValue decoded = KeyEncoder.Decode(KeyEncoder.Encode(nullVal, desc), new[] { ColumnType.Integer64 }, desc);
+        Assert.AreEqual(ColumnType.Null, decoded.Values[0].Type);
+    }
+
+    [Test]
+    public void DescendingTerminatedColumn_IsRejected()
+    {
+        OrderType[] desc = { OrderType.Descending };
+
+        // String and Bytes still have no descending encoding (Id now does — it is fixed-width).
+        foreach (ColumnType type in new[] { ColumnType.String, ColumnType.Bytes })
+        {
+            ColumnValue value = type == ColumnType.Bytes
+                ? new ColumnValue(new byte[] { 1, 2, 3 })
+                : new ColumnValue(type, "abc");
+            CompositeColumnValue composite = new(new[] { value });
+
+            Assert.Throws<CamusDBException>(() => KeyEncoder.Encode(composite, desc),
+                $"descending {type} must be rejected by the encoder");
+        }
+    }
+
+    /// <summary>
+    /// Compares two composites applying each column's direction (descending negates that column's
+    /// comparison), first non-equal column wins. Mirrors what a direction-aware index must produce.
+    /// </summary>
+    private static int DirectionalCompare(CompositeColumnValue a, CompositeColumnValue b, OrderType[] directions)
+    {
+        for (int i = 0; i < a.Values.Length; i++)
+        {
+            int c = a.Values[i].CompareTo(b.Values[i]);
+            if (directions[i] == OrderType.Descending)
+                c = -c;
+            if (c != 0)
+                return Math.Sign(c);
+        }
+        return 0;
+    }
+
     private static CompositeColumnValue RandomComposite(Random random, ColumnType[] schema)
     {
         ColumnValue[] values = new ColumnValue[schema.Length];
@@ -874,7 +1083,7 @@ public class TestKeyEncoder
                 return new ColumnValue(ColumnType.String, RandomString(random));
 
             case ColumnType.Id:
-                return new ColumnValue(ColumnType.Id, RandomString(random));
+                return new ColumnValue(ColumnType.Id, RandomObjectIdHex(random));
 
             case ColumnType.Date:
                 return new ColumnValue(ColumnType.Date, RandomDateTicks(random));
@@ -945,6 +1154,20 @@ public class TestKeyEncoder
             1 => DateTime.MaxValue.Ticks,
             _ => DateTicksMin + (long)(random.NextDouble() * (DateTicksMax - DateTicksMin))
         };
+    }
+
+    // A valid 24-char lowercase-hex ObjectId with boundary and uniform-random 96-bit magnitudes.
+    private static readonly string HexDigits = "0123456789abcdef";
+    private static string RandomObjectIdHex(Random random)
+    {
+        int bucket = random.Next(5);
+        if (bucket == 0) return "000000000000000000000000";
+        if (bucket == 1) return "ffffffffffffffffffffffff";
+
+        char[] chars = new char[24];
+        for (int i = 0; i < 24; i++)
+            chars[i] = HexDigits[random.Next(16)];
+        return new string(chars);
     }
 
     private static byte[] RandomBytes(Random random)

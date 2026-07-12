@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -107,11 +108,12 @@ public static class PredicateAnalyzer
     }
 
     /// <summary>
-    /// Parses bare string literals compared to a <see cref="ColumnType.Uuid"/> column into Uuid
-    /// constants, using the table schema. Applied once before access-path selection so the index
-    /// selector, the bound-absorption check, and the execution filter all compare like-typed values
-    /// (a raw String vs a Uuid throws, and would also build a non-matching index key). Only Uuid is
-    /// coerced — <see cref="ColumnType.Id"/> and other types keep their existing behavior.
+    /// Parses bare string literals compared to a <see cref="ColumnType.Uuid"/> or
+    /// <see cref="ColumnType.Id"/> column into like-typed constants, using the table schema. Applied
+    /// once before access-path selection so the index selector, the bound-absorption check, and the
+    /// execution filter all compare like-typed values — a raw String constant on a Uuid/Id column
+    /// would otherwise build a non-matching index key (both types now encode natively, not via the
+    /// String path). Other column types keep their existing behavior.
     /// </summary>
     public static PredicateAnalysis CoerceConstantsForColumns(PredicateAnalysis analysis, TableDescriptor table)
     {
@@ -120,7 +122,7 @@ public static class PredicateAnalyzer
         for (int i = 0; i < analysis.IndexableComparisons.Count; i++)
         {
             AnalyzedComparison original = analysis.IndexableComparisons[i];
-            AnalyzedComparison mapped = CoerceUuidConstant(original, table);
+            AnalyzedComparison mapped = CoerceStringConstant(original, table);
             if (ReferenceEquals(mapped, original))
                 continue;
 
@@ -128,32 +130,86 @@ public static class PredicateAnalyzer
             coerced[i] = mapped;
         }
 
-        if (coerced is null)
+        // IN-list constants feed index lookup keys the same way, so they need the same coercion —
+        // an uncoerced String constant on a Uuid/Id column would build a non-matching key and the
+        // index-in-list scan would silently return the wrong rows.
+        List<AnalyzedInList>? coercedInList = null;
+        for (int i = 0; i < analysis.InListComparisons.Count; i++)
+        {
+            AnalyzedInList original = analysis.InListComparisons[i];
+            AnalyzedInList mapped = CoerceInListConstants(original, table);
+            if (ReferenceEquals(mapped, original))
+                continue;
+
+            coercedInList ??= [.. analysis.InListComparisons];
+            coercedInList[i] = mapped;
+        }
+
+        if (coerced is null && coercedInList is null)
             return analysis;
 
-        return new PredicateAnalysis(coerced, analysis.ColumnComparisons, analysis.ResidualConjuncts, analysis.InListComparisons);
+        return new PredicateAnalysis(
+            coerced ?? analysis.IndexableComparisons,
+            analysis.ColumnComparisons,
+            analysis.ResidualConjuncts,
+            coercedInList ?? analysis.InListComparisons);
     }
 
-    private static AnalyzedComparison CoerceUuidConstant(AnalyzedComparison comparison, TableDescriptor table)
+    private static AnalyzedInList CoerceInListConstants(AnalyzedInList inList, TableDescriptor table)
+    {
+        ColumnType? target = TargetCoercionType(inList.ColumnName, table);
+        if (target is null)
+            return inList;
+
+        ColumnValue[]? values = null;
+        for (int i = 0; i < inList.Values.Count; i++)
+        {
+            ColumnValue original = inList.Values[i];
+            if (original.Type != ColumnType.String)
+                continue;
+
+            values ??= [.. inList.Values];
+            values[i] = CoerceStringTo(original, target.Value);
+        }
+
+        return values is null ? inList : new AnalyzedInList(inList.ColumnName, values, inList.Conjunct);
+    }
+
+    private static AnalyzedComparison CoerceStringConstant(AnalyzedComparison comparison, TableDescriptor table)
     {
         if (comparison.Constant is not { Type: ColumnType.String } constant)
             return comparison;
 
-        string columnName = comparison.ColumnName;
-        int dot = columnName.LastIndexOf('.');
-        if (dot >= 0 && dot < columnName.Length - 1)
-            columnName = columnName[(dot + 1)..];
-
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == columnName);
-        if (column?.Type != ColumnType.Uuid)
+        ColumnType? target = TargetCoercionType(comparison.ColumnName, table);
+        if (target is null)
             return comparison;
 
         return new AnalyzedComparison(
             comparison.ColumnName,
             comparison.Operator,
-            ColumnValue.FromUuidString(constant.StrValue!),
+            CoerceStringTo(constant, target.Value),
             comparison.Conjunct);
     }
+
+    /// <summary>
+    /// The type a bare String constant compared to <paramref name="columnName"/> must be coerced to
+    /// so it builds a matching native index key — Uuid and Id, which no longer share String's
+    /// encoding. Returns null for every other column type (no coercion). Handles alias-qualified names.
+    /// </summary>
+    private static ColumnType? TargetCoercionType(string columnName, TableDescriptor table)
+    {
+        int dot = columnName.LastIndexOf('.');
+        if (dot >= 0 && dot < columnName.Length - 1)
+            columnName = columnName[(dot + 1)..];
+
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == columnName);
+        return column?.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
+    }
+
+    private static ColumnValue CoerceStringTo(ColumnValue constant, ColumnType target)
+        => target == ColumnType.Uuid
+            ? ColumnValue.FromUuidString(constant.StrValue!)
+            : CastScalarFunctions.CoerceToColumnType(constant, ColumnType.Id);
 
     public static NodeAst? BuildExecutionFilter(
         PredicateAnalysis analysis,

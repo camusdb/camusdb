@@ -163,18 +163,19 @@ internal static class IndexScanSelector
 
             CompositeColumnValue? upperBound;
             bool equalityToInclusive;
-            if (SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+            if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
             {
                 upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
                 if (upperBound is null)
                     return false;
                 equalityToInclusive = false;
             }
-            else if (IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+            else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
             {
-                // String/Id has no computable successor value. Use an inclusive [v, v] equality
-                // range instead — the same approach the IN-list path uses. ScanIndex appends a
-                // high sentinel for non-unique indexes so all {encode(v)+rowIdHex} entries are
+                // No usable ascending successor: String/Id has none, and a descending column's
+                // successor would move the wrong way in encoded order. Use an inclusive [v, v]
+                // equality range instead — the same approach the IN-list path uses. ScanIndex appends
+                // a high sentinel for non-unique indexes so all {encode(v)+rowIdHex} entries are
                 // captured by the raw scan; the decoded-key bounds filter trims to key == v.
                 upperBound = lookupKey;
                 equalityToInclusive = true;
@@ -193,7 +194,12 @@ internal static class IndexScanSelector
             return true;
         }
 
+        // A trailing range bound is only absorbed when its column is ascending: the tightest-bound
+        // selection and the [v, next) prefix caps below assume ascending encoded order. A descending
+        // range column is left to the executor's residual filter (the index may still be chosen for
+        // its equality prefix or to satisfy ORDER BY).
         if (equalityPrefixLength < columns.Length
+            && IsAscending(index, equalityPrefixLength)
             && byColumn.TryGetValue(columns[equalityPrefixLength], out List<AnalyzedComparison>? rangeComparisons)
             && TryBuildRangeBounds(
                 equalityValues,
@@ -206,7 +212,7 @@ internal static class IndexScanSelector
         {
             if (equalityPrefixLength > 0)
             {
-                if (SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+                if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
                 {
                     CompositeColumnValue? prefixUpperBound = BuildPrefixScanUpperBound(
                         table,
@@ -219,9 +225,10 @@ internal static class IndexScanSelector
 
                     (toBound, toInclusive) = TightenUpperBound(toBound, toInclusive, prefixUpperBound);
                 }
-                else if (IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+                else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
                 {
-                    // String/Id equality prefix: no computable successor, so cap any open side
+                    // No computable ascending successor for the prefix column (String/Id, or a
+                    // descending column whose successor moves the wrong way), so cap any open side
                     // with an inclusive prefix sentinel. ScanIndex appends U+FFFF for non-unique
                     // indexes, so [prefix] inclusive bounds the scan to the prefix's rows exactly.
                     ColumnValue[] prefixVals = new ColumnValue[equalityPrefixLength];
@@ -256,16 +263,17 @@ internal static class IndexScanSelector
 
             CompositeColumnValue? upperBound;
             bool prefixToInclusive;
-            if (SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
+            if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
             {
                 upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
                 if (upperBound is null)
                     return false;
                 prefixToInclusive = false;
             }
-            else if (IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+            else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
             {
-                // String/Id prefix: use inclusive [v, v] equality range.
+                // String/Id or descending prefix column: no usable ascending successor, so use an
+                // inclusive [v, v] equality range (ScanIndex's non-unique sentinel captures all rows).
                 upperBound = prefixBound;
                 prefixToInclusive = true;
             }
@@ -291,9 +299,6 @@ internal static class IndexScanSelector
         IReadOnlyList<QueryOrderBy>? orderBy)
     {
         if (orderBy is null || orderBy.Count == 0)
-            return null;
-
-        if (!IsAscendingOrderBy(orderBy))
             return null;
 
         TableIndexSchema? bestIndex = null;
@@ -420,9 +425,6 @@ internal static class IndexScanSelector
         if (orderBy is null || orderBy.Count == 0)
             return true;
 
-        if (!IsAscendingOrderBy(orderBy))
-            return false;
-
         return scanStep.Type switch
         {
             QueryPlanStepType.QueryFromIndex => true,
@@ -432,17 +434,6 @@ internal static class IndexScanSelector
                 && MatchOrderByPrefixLength(scanStep.Index, orderBy) >= orderBy.Count,
             _ => false
         };
-    }
-
-    private static bool IsAscendingOrderBy(IReadOnlyList<QueryOrderBy> orderBy)
-    {
-        for (int i = 0; i < orderBy.Count; i++)
-        {
-            if (orderBy[i].Type != OrderType.Ascending)
-                return false;
-        }
-
-        return true;
     }
 
     private static int MatchOrderByPrefixLength(TableIndexSchema index, IReadOnlyList<QueryOrderBy> orderBy)
@@ -457,11 +448,21 @@ internal static class IndexScanSelector
             if (!string.Equals(index.Columns[i], BareColumnName(orderBy[i].ColumnName), StringComparison.Ordinal))
                 break;
 
+            // Direction must match exactly. A forward-only scan yields the index's own per-column
+            // order, so an ascending index column satisfies ORDER BY ... ASC and a descending one
+            // satisfies ... DESC — never the reverse (there is no backward scan to flip it).
+            if (index.DirectionAt(i) != orderBy[i].Type)
+                break;
+
             matched++;
         }
 
         return matched;
     }
+
+    /// <summary>Direction of the index's column at <paramref name="position"/> (Ascending when unset).</summary>
+    private static bool IsAscending(TableIndexSchema index, int position)
+        => index.DirectionAt(position) == OrderType.Ascending;
 
     private static string BareColumnName(string columnName)
     {

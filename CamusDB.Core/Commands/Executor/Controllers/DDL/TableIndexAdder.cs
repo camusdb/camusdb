@@ -76,7 +76,10 @@ internal sealed class TableIndexAdder
             }
         }
 
-        IndexColumnOrder.RejectUnsupportedDescending(ticket.Columns, ticket.IndexName);
+        IndexColumnOrder.RejectDescendingOnUnsupportedType(
+            ticket.Columns,
+            ticket.IndexName,
+            name => table.Schema.Columns!.Find(c => c.Name == name)?.Type);
 
         foreach (ColumnIndexInfo indexColumn in ticket.Columns)
         {
@@ -173,6 +176,7 @@ internal sealed class TableIndexAdder
             new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections)
         );
         table.Store.RegisterIndexName(indexId, ticket.IndexName);
+        table.Store.RegisterIndexDirections(indexId, columnDirections);
 
         state.IndexId = indexId;
 

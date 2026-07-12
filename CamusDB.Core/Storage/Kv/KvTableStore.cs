@@ -71,6 +71,10 @@ public sealed class KvTableStore
     // Populated by TableOpener at open time; the KvId is the stable immutable id used in KV keys.
     private readonly Dictionary<string, string> indexIdToDisplayName = [];
 
+    // Per-index KvId → column sort directions. Only indexes with at least one descending column
+    // are present; an absent entry means all-ascending (the encoder's fast path).
+    private readonly Dictionary<string, OrderType[]> indexDirections = [];
+
     private const int RowIdHexLength = 24;
     private const int DefaultPageSize = 512;
     private const int MaxKahunaRetries = 32;
@@ -202,6 +206,35 @@ public sealed class KvTableStore
     /// </summary>
     public void RegisterIndexName(string indexId, string displayName) => indexIdToDisplayName[indexId] = displayName;
 
+    /// <summary>
+    /// Registers the per-column sort directions for an index KvId so that key encoding and index
+    /// scans invert the ordinal order of descending columns. A null or all-ascending vector is not
+    /// stored — <see cref="DirectionsOf"/> then returns null and the encoder takes its ascending
+    /// fast path, keeping every existing index byte-identical. Called by <c>TableOpener</c> for each
+    /// loaded index and by the index-add path, before any DML can reference the index.
+    /// </summary>
+    public void RegisterIndexDirections(string indexId, OrderType[]? directions)
+    {
+        bool anyDescending = false;
+        if (directions is not null)
+            foreach (OrderType direction in directions)
+                if (direction == OrderType.Descending) { anyDescending = true; break; }
+
+        if (anyDescending)
+            indexDirections[indexId] = directions!;
+        else
+            indexDirections.Remove(indexId);
+
+        // Branch lineage: an ancestor namespace stores this index with the same descending encoding,
+        // so a lineage lookup (BuildUniqueIndexKey on an ancestor store) must encode identically.
+        foreach ((KvTableStore ancestorStore, HLCTimestamp _) in ancestorStores)
+            ancestorStore.RegisterIndexDirections(indexId, directions);
+    }
+
+    /// <summary>Per-index sort directions, or null when the index is entirely ascending.</summary>
+    private OrderType[]? DirectionsOf(string indexId)
+        => indexDirections.TryGetValue(indexId, out OrderType[]? directions) ? directions : null;
+
     // -----------------------------------------------------------------------
     // Range (prefix) locking — opt-in serializable scans
     // -----------------------------------------------------------------------
@@ -280,8 +313,9 @@ public sealed class KvTableStore
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix    = bucketPrefix + "/";
 
-        string? fromEncoded = fromBound is not null ? KeyEncoder.Encode(fromBound) : null;
-        string? toEncoded   = toBound   is not null ? KeyEncoder.Encode(toBound)   : null;
+        OrderType[]? directions = DirectionsOf(indexId);
+        string? fromEncoded = fromBound is not null ? KeyEncoder.Encode(fromBound, directions) : null;
+        string? toEncoded   = toBound   is not null ? KeyEncoder.Encode(toBound, directions)   : null;
 
         // Non-unique stored key = {encodedValue}{rowId24}. The IndexKeySentinel (U+FFFF) sorts after
         // every rowId suffix, so it is appended to push a bound past all of a value's row entries.
@@ -961,8 +995,10 @@ public sealed class KvTableStore
         string keyPrefix    = bucketPrefix + "/";
         int prefixLen = keyPrefix.Length;
 
-        string? fromEncoded = from is not null ? KeyEncoder.Encode(from) : null;
-        string? toEncoded   = to   is not null ? KeyEncoder.Encode(to)   : null;
+        OrderType[]? directions = DirectionsOf(indexId);
+
+        string? fromEncoded = from is not null ? KeyEncoder.Encode(from, directions) : null;
+        string? toEncoded   = to   is not null ? KeyEncoder.Encode(to, directions)   : null;
 
         // Push bounds into the scan. For non-unique indexes the stored key is
         // {encodedKey}{rowIdHex24}, so the end key needs IndexKeySentinel to include all
@@ -1021,7 +1057,7 @@ public sealed class KvTableStore
                     rowId = ObjectId.ToValue(suffix[^RowIdHexLength..]);
                 }
 
-                CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes);
+                CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes, directions);
 
                 // Bounds filter on the DECODED value, compared as a PREFIX (trailing columns of
                 // decodedKey are ignored). This is correct for both shapes that carry extra trailing
@@ -1128,7 +1164,7 @@ public sealed class KvTableStore
 
                             if (encKey is not null)
                             {
-                                CompositeColumnValue decodedKey = KeyEncoder.Decode(encKey, keyTypes);
+                                CompositeColumnValue decodedKey = KeyEncoder.Decode(encKey, keyTypes, directions);
 
                                 bool inRange = true;
                                 if (from is not null)
@@ -2423,13 +2459,13 @@ public sealed class KvTableStore
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)
-        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key)}";
+        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key, DirectionsOf(indexId))}";
 
     // Non-unique: rowIdHex appended directly (no separator) so the last slash in the full
     // key is always the one after {indexId}, keeping the routing hash stable.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildNonUniqueIndexKey(string indexId, CompositeColumnValue key, ObjectIdValue rowId)
-        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key)}{rowId}";
+        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key, DirectionsOf(indexId))}{rowId}";
 
     // Formats a human-readable "table.index" key name for duplicate-key errors.
     // Resolves the immutable KvId to the mutable display name via the table-open-time registry.

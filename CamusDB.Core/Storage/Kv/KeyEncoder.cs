@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Storage.Kv;
 
@@ -43,17 +44,21 @@ namespace CamusDB.Core.Storage.Kv;
 ///                (unsigned big-endian). At 19 code units it is ~half the size of a UUID stored as a
 ///                String key.
 ///   Bool       : "0" / "1".
-///   String/Id  : prefix-free ordered ASCII code over UTF-16 code units, terminated by the field
+///   Id         : the 96-bit ObjectId as a fixed 14-char, most-significant-first base-125 number over
+///                the same '/'-skipping ordered alphabet as Uuid. 125^14 > 2^96; fixed width (no
+///                terminator). The magnitude is (a,b,c) as unsigned big-endian limbs, so ordinal order
+///                matches the 24-hex ordinal order <see cref="ColumnValue.CompareTo"/> uses for Id. A
+///                String literal compared to an Id column is coerced to Id at the query layer so it
+///                produces the same key (Id no longer shares String's encoding).
+///   String     : prefix-free ordered ASCII code over UTF-16 code units, terminated by the field
 ///                terminator. Printable ASCII uses one character, controls use two, and all other
 ///                code units use three. The alphabet excludes '/' so encoded content cannot change
 ///                Kahuna's last-slash key-space boundary. Pure ASCII makes the key's UTF-8 byte order
 ///                (RocksDB/SQLite) equal its UTF-16-ordinal order (in-memory B-tree, range routing,
 ///                and scan merge). Order within the field matches <see cref="ColumnValue.CompareTo"/>.
-///                String and Id share this encoding so a String literal in a query matches an
-///                Id-typed stored key.
 ///
-/// Fixed-width fields (Integer64/Float64/Float32/Bool/Date/DateTime/Uuid) need no terminator; the
-/// decoder knows their width from the column type. Variable-length fields (String/Id/Bytes) are
+/// Fixed-width fields (Integer64/Float64/Float32/Bool/Date/DateTime/Uuid/Id) need no terminator; the
+/// decoder knows their width from the column type. Variable-length fields (String/Bytes) are
 /// terminated so composite keys keep correct prefix ordering.
 ///
 /// Array is not indexable — encoding throws <see cref="CamusDBException"/> <c>InvalidInput</c>
@@ -90,7 +95,23 @@ public static class KeyEncoder
     // 125^19 > 2^128, so every value fits and the width is constant (no terminator needed).
     private const int UuidKeyDigits = 19;
 
-    public static string Encode(CompositeColumnValue composite)
+    // A 96-bit Id (ObjectId) encodes to a fixed-width base-125 number: ceil(96 / log2(125)) = 14
+    // digits. 125^14 > 2^96, so every value fits, fixed width, no terminator — ~half the 26 code
+    // units the shared String encoding used. The 96-bit magnitude is (a,b,c) as unsigned big-endian
+    // limbs, matching the 24-hex ordinal (unsigned) order that ColumnValue.CompareTo uses for Id.
+    private const int IdKeyDigits = 14;
+
+    // Low 96 bits set — used to complement an Id magnitude for descending order within its width.
+    private static readonly UInt128 Id96BitMask = (UInt128.One << 96) - 1;
+
+    /// <summary>
+    /// Encodes a composite index key. <paramref name="directions"/> is positionally aligned with
+    /// <paramref name="composite"/>'s values; a null array (or an out-of-range/absent position) means
+    /// that column is ascending — so an all-ascending index passes null and encodes exactly as before.
+    /// A descending column inverts its field's ordinal order (and its NULL marker, so NULLs sort last
+    /// under DESC) while keeping the same fixed width, so composite prefix ordering is unaffected.
+    /// </summary>
+    public static string Encode(CompositeColumnValue composite, OrderType[]? directions = null)
     {
         ArgumentNullException.ThrowIfNull(composite);
 
@@ -100,23 +121,33 @@ public static class KeyEncoder
         // no per-field ToString("X…") temporaries. The destination span IS the final string, so the
         // large-value case (String/Id/Bytes can expand to millions of chars) is heap-sized exactly —
         // no stackalloc size ceiling applies.
-        return string.Create(length, composite, static (span, state) =>
+        return string.Create(length, (composite, directions), static (span, state) =>
         {
             int pos = 0;
-            foreach (ColumnValue value in state.Values)
-                WriteValue(span, ref pos, value);
+            ColumnValue[] values = state.composite.Values;
+            for (int i = 0; i < values.Length; i++)
+                WriteValue(span, ref pos, values[i], DirectionAt(state.directions, i));
         });
     }
 
-    public static string EncodeValue(ColumnValue value)
+    public static string EncodeValue(ColumnValue value, OrderType direction = OrderType.Ascending)
     {
         int length = MeasureValue(value);
-        return string.Create(length, value, static (span, v) =>
+        return string.Create(length, (value, direction), static (span, state) =>
         {
             int pos = 0;
-            WriteValue(span, ref pos, v);
+            WriteValue(span, ref pos, state.value, state.direction);
         });
     }
+
+    /// <summary>
+    /// Direction of the column at <paramref name="index"/>, defaulting to
+    /// <see cref="OrderType.Ascending"/> when the vector is null or the index is out of range.
+    /// </summary>
+    private static OrderType DirectionAt(OrderType[]? directions, int index)
+        => directions is not null && index >= 0 && index < directions.Length
+            ? directions[index]
+            : OrderType.Ascending;
 
     // -- length measurement (must mirror WriteValue's layout exactly) -----------------------------
 
@@ -140,8 +171,9 @@ public static class KeyEncoder
             ColumnType.Float32 => 1 + 8,
             ColumnType.Bool => 1 + 1,
             ColumnType.Uuid => 1 + UuidKeyDigits,
+            ColumnType.Id => 1 + IdKeyDigits,
             ColumnType.Bytes => 1 + 2 * (value.BytesValue?.Length ?? 0) + 2,            // 2 hex/byte + terminator
-            ColumnType.String or ColumnType.Id => 1 + MeasureString(value.StrValue ?? "") + 2,
+            ColumnType.String => 1 + MeasureString(value.StrValue ?? "") + 2,
             ColumnType.Array => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable"),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot encode column type: " + value.Type),
         };
@@ -158,58 +190,107 @@ public static class KeyEncoder
 
     // -- span writers -----------------------------------------------------------------------------
 
-    private static void WriteValue(Span<char> dest, ref int pos, ColumnValue value)
+    private static void WriteValue(Span<char> dest, ref int pos, ColumnValue value, OrderType direction)
     {
+        bool descending = direction == OrderType.Descending;
+
         if (value.Type == ColumnType.Null)
         {
-            dest[pos++] = NullMarker;
+            // Ascending: NULL sorts before any present value (NullMarker '0' < PresentMarker '1').
+            // Descending: NULL sorts last, so the markers swap — a present value's '0' precedes a
+            // NULL's '1'.
+            dest[pos++] = descending ? PresentMarker : NullMarker;
             return;
         }
 
-        dest[pos++] = PresentMarker;
+        dest[pos++] = descending ? NullMarker : PresentMarker;
 
         switch (value.Type)
         {
             case ColumnType.Integer64:
             case ColumnType.Date:
             case ColumnType.DateTime:
-                WriteHex16(dest, ref pos, (ulong)value.LongValue ^ 0x8000_0000_0000_0000UL);
+                WriteHex16(dest, ref pos, Invert(((ulong)value.LongValue) ^ 0x8000_0000_0000_0000UL, descending));
                 break;
 
             case ColumnType.Float64:
-                WriteHex16(dest, ref pos, Float64Ordered(value.FloatValue));
+                WriteHex16(dest, ref pos, Invert(Float64Ordered(value.FloatValue), descending));
                 break;
 
             case ColumnType.Bool:
-                dest[pos++] = value.BoolValue ? '1' : '0';
+                // Ascending false('0') < true('1'); descending inverts so true sorts first.
+                dest[pos++] = value.BoolValue ^ descending ? '1' : '0';
                 break;
 
             case ColumnType.Float32:
-                WriteHex8(dest, ref pos, Float32Ordered((float)value.FloatValue));
+                WriteHex8(dest, ref pos, Invert(Float32Ordered((float)value.FloatValue), descending));
                 break;
 
             case ColumnType.Bytes:
+                RejectDescendingTerminatedType(descending, value.Type);
                 WriteBytesHex(dest, ref pos, value.BytesValue ?? []);
                 break;
 
             case ColumnType.Uuid:
-                WriteUuidBase125(dest, ref pos, value.UuidHigh, value.LongValue);
+            {
+                UInt128 uuid = ((UInt128)(ulong)value.UuidHigh << 64) | (ulong)value.LongValue;
+                WriteBase125(dest, ref pos, descending ? ~uuid : uuid, UuidKeyDigits);
                 break;
+            }
+
+            case ColumnType.Id:
+            {
+                // Id (96-bit ObjectId) encodes to a fixed-width base-125 number, like Uuid but 14
+                // digits. A String literal compared to an Id column is coerced to Id first (see
+                // PredicateAnalyzer / CompareValues / CoerceToColumnType), so it reaches this arm and
+                // produces the same key — the two are no longer encoding-identical.
+                UInt128 id = IdMagnitude(value.StrValue);
+                WriteBase125(dest, ref pos, descending ? Id96BitMask - id : id, IdKeyDigits);
+                break;
+            }
 
             case ColumnType.Array:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable");
 
-            // String and Id share one encoding so a String literal in a query (e.g. WHERE id IN ('…'))
-            // produces the same key as the Id-typed value stored in the index — the two must stay
-            // interchangeable. Both use the same order-preserving ASCII form.
             case ColumnType.String:
-            case ColumnType.Id:
+                RejectDescendingTerminatedType(descending, value.Type);
                 WriteStringOrderedAscii(dest, ref pos, value.StrValue ?? "");
                 break;
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot encode column type: " + value.Type);
         }
+    }
+
+    /// <summary>Bitwise-complements the order-preserving word when the column is descending.</summary>
+    private static ulong Invert(ulong ordered, bool descending) => descending ? ~ordered : ordered;
+
+    private static uint Invert(uint ordered, bool descending) => descending ? ~ordered : ordered;
+
+    /// <summary>
+    /// Builds the 96-bit Id magnitude from its 24-hex string as unsigned big-endian limbs (a,b,c),
+    /// so base-125 ordinal order equals the 24-hex ordinal order used by <see cref="ColumnValue.CompareTo"/>
+    /// for Id. Stored Id values are always canonical 24-hex, so parsing is total here.
+    /// </summary>
+    private static UInt128 IdMagnitude(string? hex)
+    {
+        ObjectIdValue oid = ObjectId.ToValue((hex ?? "").AsSpan());
+        return ((UInt128)(uint)oid.a << 64) | ((UInt128)(uint)oid.b << 32) | (uint)oid.c;
+    }
+
+    /// <summary>
+    /// String and Bytes have no descending encoding yet — they use a prefix-free, terminator-delimited
+    /// body (String uses the ordered-ASCII form; Bytes uses terminated hex) whose terminator sorts
+    /// before content, which a naive rank inversion would break. DDL rejects descending on these
+    /// types, so reaching here means a caller bypassed that gate. (Id, though it once shared String's
+    /// encoding, is now fixed-width base-125 and supports descending — it is not handled here.)
+    /// </summary>
+    private static void RejectDescendingTerminatedType(bool descending, ColumnType type)
+    {
+        if (descending)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Descending index encoding is not supported for column type {type}");
     }
 
     /// <summary>
@@ -297,22 +378,42 @@ public static class KeyEncoder
     }
 
     /// <summary>
-    /// Writes a Uuid's 128 bits as 19 fixed-width, most-significant-first base-125 digits over the
-    /// '/'-skipping ordered alphabet. Because the digit count is constant and the rank→char mapping is
-    /// monotonic, ordinal string order equals unsigned big-endian order of the value, matching
-    /// <see cref="ColumnValue.CompareTo"/> — no field terminator is required.
+    /// Writes an unsigned value as <paramref name="digits"/> fixed-width, most-significant-first
+    /// base-125 digits over the '/'-skipping ordered alphabet. Because the digit count is constant and
+    /// the rank→char mapping is monotonic, ordinal string order equals unsigned order of the value,
+    /// matching <see cref="ColumnValue.CompareTo"/> — no field terminator is required. Used by both
+    /// Uuid (128 bits → 19 digits) and Id (96 bits → 14 digits).
     /// </summary>
-    private static void WriteUuidBase125(Span<char> dest, ref int pos, long high, long low)
+    private static void WriteBase125(Span<char> dest, ref int pos, UInt128 value, int digits)
     {
-        UInt128 value = ((UInt128)(ulong)high << 64) | (ulong)low;
-
-        for (int i = UuidKeyDigits - 1; i >= 0; i--)
+        for (int i = digits - 1; i >= 0; i--)
         {
             dest[pos + i] = StringAlphabetChar((int)(value % 125));
             value /= 125;
         }
 
-        pos += UuidKeyDigits;
+        pos += digits;
+    }
+
+    /// <summary>
+    /// Reads <paramref name="digits"/> fixed-width base-125 digits back into an unsigned value —
+    /// the inverse of <see cref="WriteBase125"/>. Rejects malformed keys (short, or a code unit that
+    /// is not a valid ordered-alphabet rank).
+    /// </summary>
+    private static UInt128 ReadBase125(string key, ref int pos, int digits, int field)
+    {
+        if (pos + digits > key.Length)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated base-125 field at field {field}");
+
+        UInt128 value = UInt128.Zero;
+        for (int d = 0; d < digits; d++)
+        {
+            int rank = StringAlphabetRank(key[pos++]);
+            if (rank is < 0 or >= StringAlphabetSize)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid base-125 digit at field {field}");
+            value = value * 125 + (UInt128)(uint)rank;
+        }
+        return value;
     }
 
     /// <summary>Maps an ordered base-125 digit onto ASCII while skipping Kahuna's '/' separator.</summary>
@@ -345,7 +446,7 @@ public static class KeyEncoder
         dest[pos++] = FieldTerminatorTail;
     }
 
-    public static CompositeColumnValue Decode(string key, ColumnType[] types)
+    public static CompositeColumnValue Decode(string key, ColumnType[] types, OrderType[]? directions = null)
     {
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(types);
@@ -358,23 +459,29 @@ public static class KeyEncoder
             if (pos >= key.Length)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Key too short for {types.Length} fields at field {i}");
 
+            bool descending = DirectionAt(directions, i) == OrderType.Descending;
+
             char marker = key[pos++];
 
-            if (marker == NullMarker)
+            if (marker != NullMarker && marker != PresentMarker)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unexpected marker '{marker}' at position {pos - 1}");
+
+            // Descending fields swap the markers (NULLs sort last), so a NULL is written as the
+            // PresentMarker char and vice-versa. Interpret the raw char through the direction.
+            bool isNull = descending ? marker == PresentMarker : marker == NullMarker;
+            if (isNull)
             {
                 values[i] = new ColumnValue(ColumnType.Null, false);
                 continue;
             }
-
-            if (marker != PresentMarker)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unexpected marker '{marker}' at position {pos - 1}");
 
             switch (types[i])
             {
                 case ColumnType.Integer64:
                 {
                     ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
-                    long longValue = (long)(stored ^ 0x8000_0000_0000_0000UL);
+                    ulong ordered = descending ? ~stored : stored;
+                    long longValue = (long)(ordered ^ 0x8000_0000_0000_0000UL);
                     values[i] = new ColumnValue(ColumnType.Integer64, longValue);
                     pos += 16;
                     break;
@@ -383,6 +490,7 @@ public static class KeyEncoder
                 case ColumnType.Float64:
                 {
                     ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    if (descending) stored = ~stored;
                     long storedBits = (long)stored;
                     // Reverse the order-preserving transform:
                     //   non-negatives were encoded as bits ^ long.MinValue  (high bit 1)
@@ -398,6 +506,7 @@ public static class KeyEncoder
                 case ColumnType.Float32:
                 {
                     uint stored = uint.Parse(key.AsSpan(pos, 8), System.Globalization.NumberStyles.HexNumber);
+                    if (descending) stored = ~stored;
                     int storedBits = (int)stored;
                     int originalBits = storedBits < 0
                         ? storedBits ^ int.MinValue  // was non-negative: undo sign-bit flip
@@ -411,7 +520,8 @@ public static class KeyEncoder
                 case ColumnType.Date:
                 {
                     ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
-                    long ticks = (long)(stored ^ 0x8000_0000_0000_0000UL);
+                    ulong ordered = descending ? ~stored : stored;
+                    long ticks = (long)(ordered ^ 0x8000_0000_0000_0000UL);
                     values[i] = new ColumnValue(ColumnType.Date, ticks);
                     pos += 16;
                     break;
@@ -420,7 +530,8 @@ public static class KeyEncoder
                 case ColumnType.DateTime:
                 {
                     ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
-                    long ticks = (long)(stored ^ 0x8000_0000_0000_0000UL);
+                    ulong ordered = descending ? ~stored : stored;
+                    long ticks = (long)(ordered ^ 0x8000_0000_0000_0000UL);
                     values[i] = new ColumnValue(ColumnType.DateTime, ticks);
                     pos += 16;
                     break;
@@ -428,6 +539,7 @@ public static class KeyEncoder
 
                 case ColumnType.Bytes:
                 {
+                    RejectDescendingTerminatedType(descending, types[i]);
                     List<byte> bytes = new();
                     while (true)
                     {
@@ -454,22 +566,14 @@ public static class KeyEncoder
                 }
 
                 case ColumnType.Bool:
-                    values[i] = new ColumnValue(ColumnType.Bool, key[pos++] == '1');
+                    // Ascending: '1'==true. Descending inverts so '0'==true.
+                    values[i] = new ColumnValue(ColumnType.Bool, descending ? key[pos++] == '0' : key[pos++] == '1');
                     break;
 
                 case ColumnType.Uuid:
                 {
-                    if (pos + UuidKeyDigits > key.Length)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated uuid field at field {i}");
-
-                    UInt128 value = UInt128.Zero;
-                    for (int d = 0; d < UuidKeyDigits; d++)
-                    {
-                        int rank = StringAlphabetRank(key[pos++]);
-                        if (rank is < 0 or >= StringAlphabetSize)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid uuid digit at field {i}");
-                        value = value * 125 + (UInt128)(uint)rank;
-                    }
+                    UInt128 value = ReadBase125(key, ref pos, UuidKeyDigits, i);
+                    if (descending) value = ~value;
 
                     long high = (long)(ulong)(value >> 64);
                     long low = (long)(ulong)value;
@@ -477,9 +581,22 @@ public static class KeyEncoder
                     break;
                 }
 
-                case ColumnType.String:
                 case ColumnType.Id:
                 {
+                    UInt128 value = ReadBase125(key, ref pos, IdKeyDigits, i);
+                    if (descending) value = Id96BitMask - value;
+
+                    int a = (int)(uint)(value >> 64);
+                    int b = (int)(uint)(value >> 32);
+                    int c = (int)(uint)value;
+                    values[i] = new ColumnValue(ColumnType.Id, ObjectId.ToString(a, b, c));
+                    break;
+                }
+
+                case ColumnType.String:
+                {
+                    RejectDescendingTerminatedType(descending, types[i]);
+
                     // Pre-scan: count code units and validate structure before allocating.
                     int bodyStart = pos;
                     int charCount = 0;

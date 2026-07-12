@@ -135,13 +135,15 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
 
         if (ast.nodeType == NodeType.IndexIdentifierAsc)
         {
-            indexColumns.Add(new ColumnIndexInfo(ast.yytext!, OrderType.Ascending));
+            // The column identifier is the child node (`any_identifier TASC`); this node itself
+            // carries no text.
+            indexColumns.Add(new ColumnIndexInfo(ast.leftAst!.yytext!, OrderType.Ascending));
             return;
         }
 
         if (ast.nodeType == NodeType.IndexIdentifierDesc)
         {
-            indexColumns.Add(new ColumnIndexInfo(ast.yytext!, OrderType.Descending));
+            indexColumns.Add(new ColumnIndexInfo(ast.leftAst!.yytext!, OrderType.Descending));
             return;
         }
 

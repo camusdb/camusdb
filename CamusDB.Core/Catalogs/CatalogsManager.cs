@@ -215,7 +215,16 @@ public sealed class CatalogsManager
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown constraint: " + constraint.Type)
             };
 
-            IndexColumnOrder.RejectUnsupportedDescending(constraint.Columns, constraint.Name);
+            IndexColumnOrder.RejectDescendingOnUnsupportedType(
+                constraint.Columns,
+                constraint.Name,
+                name =>
+                {
+                    foreach (SchemaColumnPayload column in columns)
+                        if (column.Name == name)
+                            return column.Type;
+                    return null;
+                });
 
             string[] columnIds = new string[constraint.Columns.Length];
             for (int i = 0; i < constraint.Columns.Length; i++)

@@ -456,7 +456,7 @@ internal sealed class TestTableRename : SharedNodeBaseTest
             databaseName: dbname,
             tableName: "ixt5",
             indexName: "idx_other",
-            columns: new ColumnIndexInfo[] { new("name", OrderType.Descending) },
+            columns: new ColumnIndexInfo[] { new("name", OrderType.Ascending) },
             operation: AlterIndexOperation.AddIndex
         );
         await executor.AlterIndex(addIdx2);

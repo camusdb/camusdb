@@ -52,9 +52,10 @@ internal abstract class SQLExecutorBaseCreator
     /// </summary>
     /// <summary>
     /// Orders two values for a filter/predicate comparison, reconciling a bare string literal against
-    /// a <see cref="ColumnType.Uuid"/> operand by parsing the string as a UUID. This lets
-    /// <c>WHERE uuid_col = '…'</c> (and range comparisons) work without an explicit CAST. Only Uuid is
-    /// coerced here; a string-vs-<see cref="ColumnType.Id"/> comparison keeps its existing behavior.
+    /// a <see cref="ColumnType.Uuid"/> or <see cref="ColumnType.Id"/> operand by parsing/normalizing
+    /// the string to that type. This lets <c>WHERE uuid_col = '…'</c> / <c>WHERE id = '…'</c> (and
+    /// range comparisons) work without an explicit CAST, and — for Id — normalizes the literal to the
+    /// canonical lowercase 24-hex form so it matches the stored value regardless of input casing.
     /// </summary>
     private static int CompareValues(ColumnValue left, ColumnValue right)
     {
@@ -62,6 +63,10 @@ internal abstract class SQLExecutorBaseCreator
             right = ColumnValue.FromUuidString(right.StrValue!);
         else if (right.Type == ColumnType.Uuid && left.Type == ColumnType.String)
             left = ColumnValue.FromUuidString(left.StrValue!);
+        else if (left.Type == ColumnType.Id && right.Type == ColumnType.String)
+            right = CastScalarFunctions.CoerceToColumnType(right, ColumnType.Id);
+        else if (right.Type == ColumnType.Id && left.Type == ColumnType.String)
+            left = CastScalarFunctions.CoerceToColumnType(left, ColumnType.Id);
 
         return left.CompareTo(right);
     }

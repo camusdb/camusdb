@@ -15,11 +15,14 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// per-column ASC/DESC <see cref="OrderType"/>) into the direction vector persisted on
 /// <see cref="TableIndexSchema.ColumnDirections"/>.
 ///
-/// Descending index columns are not yet honored by the key encoder or the query planner, so any
-/// column declared <see cref="OrderType.Descending"/> is rejected up front: an index physically
-/// stored ascending but tagged descending would be mis-decoded once descending encoding lands.
-/// Once the encoder and planner understand direction, drop <see cref="RejectUnsupportedDescending"/>
-/// and the extracted vector starts driving real behavior with no persistence change.
+/// Descending is honored by the key encoder for types with a fixed-width, self-delimiting body
+/// (Integer64, Float64, Float32, Bool, Date, DateTime, Uuid, Id) — a descending column simply inverts
+/// its field's encoded ordinal order.
+///
+/// String and Bytes do not yet have a descending encoding: they encode through a prefix-free,
+/// terminator-delimited form whose terminator must sort before content for ascending
+/// prefix-correctness, which a naive descending inversion would break — so a descending column of one
+/// of these types is rejected at DDL time by <see cref="RejectDescendingOnUnsupportedType"/>.
 /// </summary>
 internal static class IndexColumnOrder
 {
@@ -44,19 +47,34 @@ internal static class IndexColumnOrder
     }
 
     /// <summary>
-    /// Throws <see cref="CamusDBException"/> if any column requests descending order, naming the
-    /// offending column. Called at every DDL entry point that creates an index (standalone and
-    /// cluster CREATE INDEX / ALTER ADD INDEX, and inline CREATE TABLE constraints) so a
-    /// descending index can never be persisted before the encoder supports it.
+    /// Returns true when descending index encoding is supported for <paramref name="type"/>. Types
+    /// with a fixed-width, self-delimiting key body qualify; the terminator-delimited types
+    /// String/Bytes do not (see the class summary).
     /// </summary>
-    internal static void RejectUnsupportedDescending(ReadOnlySpan<ColumnIndexInfo> columns, string indexName)
+    internal static bool SupportsDescending(ColumnType type)
+        => type is not (ColumnType.String or ColumnType.Bytes or ColumnType.Array);
+
+    /// <summary>
+    /// Throws <see cref="CamusDBException"/> if any column requests descending order on a type whose
+    /// descending encoding is not yet supported (String/Bytes). Called at every DDL entry point
+    /// that creates an index. <paramref name="resolveType"/> returns the column's declared type, or
+    /// null when the column is unknown (its non-existence is reported by the caller's own validation).
+    /// </summary>
+    internal static void RejectDescendingOnUnsupportedType(
+        ReadOnlySpan<ColumnIndexInfo> columns,
+        string indexName,
+        Func<string, ColumnType?> resolveType)
     {
         foreach (ColumnIndexInfo column in columns)
         {
-            if (column.Order == OrderType.Descending)
+            if (column.Order != OrderType.Descending)
+                continue;
+
+            ColumnType? type = resolveType(column.Name);
+            if (type is not null && !SupportsDescending(type.Value))
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    $"Descending index columns are not yet supported (column '{column.Name}' in index '{indexName}')"
+                    $"Descending index columns are not supported for type {type} (column '{column.Name}' in index '{indexName}')"
                 );
         }
     }

@@ -158,6 +158,10 @@ internal sealed class TableOpener
                     // name instead of the opaque immutable KvId stored in KV keys.
                     store.RegisterIndexName(entry.KvId, entry.Name);
 
+                    // Register per-column sort directions so descending columns encode/scan inverted.
+                    // Keyed by KvId to match the key segment; ascending-only indexes register null.
+                    store.RegisterIndexDirections(entry.KvId, entry.ColumnDirections);
+
                     // Register this index's key space for key-range routing using the stable KvId
                     // so that range-routing registration survives a RENAME INDEX without a restart.
                     if (columnTypeById is not null && IsIndexRangeable(entry, columnTypeById))
