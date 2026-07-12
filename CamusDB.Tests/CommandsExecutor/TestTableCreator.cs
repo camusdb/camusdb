@@ -9,6 +9,7 @@
 using NUnit.Framework;
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 
 using CamusDB.Core;
@@ -338,5 +339,85 @@ internal sealed class TestTableCreator : SharedNodeBaseTest
 
         result = await executor.CreateTable(ticket);
         Assert.False(result.Success);
+    }
+
+    // -----------------------------------------------------------------------
+    // Short base-62 table id allocation
+    // -----------------------------------------------------------------------
+
+    [Test]
+    [NonParallelizable]
+    public async Task CreateTable_AssignsShortBase62TableId()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        CreateTableTicket ticket = new(
+            databaseName: dbname,
+            tableName: "short_id_table",
+            new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("val", ColumnType.String)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false
+        );
+
+        CreateTableResult result = await executor.CreateTable(ticket);
+        Assert.True(result.Success);
+
+        TableSchema tableSchema = catalogs.GetTableSchema(database, "short_id_table");
+        string tableId = tableSchema.Id!;
+
+        // Must be non-empty and contain only base-62 characters
+        Assert.IsNotEmpty(tableId);
+        const string Base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        Assert.IsTrue(tableId.All(c => Base62Chars.Contains(c)),
+            $"Table id '{tableId}' contains non-base62 characters");
+
+        // Must not contain KV key separators
+        Assert.IsFalse(tableId.Contains('/'), $"Table id '{tableId}' must not contain '/'");
+        Assert.IsFalse(tableId.Contains(':'), $"Table id '{tableId}' must not contain ':'");
+        Assert.IsFalse(tableId.Contains('~'), $"Table id '{tableId}' must not contain '~'");
+
+        // Must be shorter than a 24-hex ObjectId (the old scheme was always exactly 24 chars)
+        Assert.Less(tableId.Length, 24,
+            $"Table id '{tableId}' should be shorter than the 24-char ObjectId it replaces");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task CreateTable_TableIdsAreMonotonicAcrossCreates()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs) = await SetupDatabase();
+
+        async Task<string> CreateAndGetId(string name)
+        {
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname,
+                tableName: name,
+                new ColumnInfo[] { new("id", ColumnType.Id) },
+                constraints: new ConstraintInfo[]
+                {
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+                },
+                ifNotExists: false
+            ));
+            return catalogs.GetTableSchema(database, name).Id!;
+        }
+
+        string id1 = await CreateAndGetId("t1");
+        string id2 = await CreateAndGetId("t2");
+        string id3 = await CreateAndGetId("t3");
+
+        // Each successive table gets a strictly larger encoded counter value
+        static bool IsLess(string a, string b) =>
+            a.Length < b.Length || (a.Length == b.Length && string.CompareOrdinal(a, b) < 0);
+
+        Assert.IsTrue(IsLess(id1, id2), $"id1='{id1}' must be < id2='{id2}'");
+        Assert.IsTrue(IsLess(id2, id3), $"id2='{id2}' must be < id3='{id3}'");
     }
 }

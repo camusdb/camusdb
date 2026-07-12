@@ -35,6 +35,14 @@ namespace CamusDB.Core.Storage.Kv;
 ///   Non-unique index:  {dbId}:{tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   → rowIdHex24 (UTF-8)
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
 ///
+/// <b>Table id format:</b> newly created tables get a <em>short base-62</em> table id allocated from
+/// a per-store persistent monotonic sequence (<c>_system/tableseq</c>) via
+/// <see cref="CamusDB.Core.CommandsExecutor.Controllers.DatabaseRegistry.AllocateTableIdAsync"/>.
+/// The id is typically 1–4 characters (e.g. <c>"1"</c>, <c>"A0"</c>) and contains none of the key
+/// separators (<c>/</c>, <c>:</c>, <c>~</c>). Tables created before this change keep their original
+/// 24-character lowercase-hex ObjectId (e.g. <c>"6849f3a1c2e7d50b4f8a91d3"</c>); the two forms
+/// coexist safely because their lengths and character sets never overlap.
+///
 /// Routing constraint:
 ///   LocateAndScanRange routes via SimpleHash(prefix) while individual TrySet/Delete
 ///   route via InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash]).

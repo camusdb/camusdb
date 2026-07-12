@@ -34,7 +34,8 @@ internal sealed class TableCreator
         TableIndexAlterer tableIndexAlterer,
         DatabaseDescriptor database,
         CreateTableTicket ticket,
-        KvTransaction tx
+        KvTransaction tx,
+        string tableId
     )
     {
         if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
@@ -49,7 +50,7 @@ internal sealed class TableCreator
         // Inline constraints (PRIMARY KEY / UNIQUE / INDEX) are folded into the single CreateTable
         // delta (see CatalogsManager.BuildInlineIndexes), so creating a table is exactly one schema
         // version and the table is born with its indexes at Public — no separate AddIndex round-trips.
-        TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx).ConfigureAwait(false);
+        TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx, tableId).ConfigureAwait(false);
 
         RegisterTableObject(database, tableSchema);
         await catalogs.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);

@@ -86,6 +86,28 @@ public enum NodeType
     ConstraintPrimaryKey,
     ConstraintUnique,
     ConstraintDefault,
+    /// <summary>
+    /// Column-level <c>CHECK (condition)</c> constraint written inline on a column definition.
+    /// <c>leftAst</c> = the condition expression. Desugared into a table-level
+    /// <see cref="CreateTableConstraintCheck"/> at schema-build time.
+    /// </summary>
+    ConstraintCheck,
+    /// <summary>
+    /// Table-level <c>CHECK (condition)</c> constraint, optionally named via
+    /// <c>CONSTRAINT name CHECK (condition)</c>. <c>leftAst</c> = condition; <c>yytext</c> = name
+    /// (null when auto-naming is required).
+    /// </summary>
+    CreateTableConstraintCheck,
+    /// <summary>
+    /// <c>ALTER TABLE t ADD CONSTRAINT name CHECK (condition)</c>.
+    /// <c>leftAst</c> = table name node; <c>rightAst</c> = condition; <c>yytext</c> = constraint name.
+    /// </summary>
+    AlterTableAddConstraintCheck,
+    /// <summary>
+    /// <c>ALTER TABLE t DROP CONSTRAINT name</c>.
+    /// <c>leftAst</c> = table name node; <c>yytext</c> = constraint name.
+    /// </summary>
+    AlterTableDropConstraint,
     DropTable,
     DropTableIfExists,
     AlterTableAddColumn,

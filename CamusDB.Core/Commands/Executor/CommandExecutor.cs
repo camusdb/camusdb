@@ -883,9 +883,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (forwarded is not null)
             return new CreateTableResult(database, forwarded.Value);
 
+        // Allocate the table id before the DDL transaction — only the proposer/leader allocates;
+        // the id is carried in the replicated payload so every follower applies the same id.
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        string tableId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
+
         return await ExecuteDdlInTransaction(database, async tx =>
         {
-            bool result = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx).ConfigureAwait(false);
+            bool result = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx, tableId).ConfigureAwait(false);
             return new CreateTableResult(database, result);
         }).ConfigureAwait(false);
     }
@@ -1704,9 +1709,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (forwarded is not null)
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
+                    // Allocate before the DDL transaction — only the proposer/leader allocates;
+                    // the id is carried in the replicated payload so every follower applies the same id.
+                    DatabaseRegistry sqlRegistry = await registryTask.ConfigureAwait(false);
+                    string sqlTableId = await sqlRegistry.AllocateTableIdAsync().ConfigureAwait(false);
+
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {
-                        bool ok = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket, tx).ConfigureAwait(false);
+                        bool ok = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket, tx, sqlTableId).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     }).ConfigureAwait(false);
                 }
