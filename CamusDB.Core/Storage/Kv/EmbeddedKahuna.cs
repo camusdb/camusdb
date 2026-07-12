@@ -79,6 +79,15 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     private Func<int, RaftLog, Task<bool>>? _walRestoreLogHandler;
     private Action<int>? _walRestoreFinishedHandler;
 
+    // Completes when StartAsync has finished electing leaders for every partition (system + all data
+    // partitions). Background startup work fired from constructors — the database-registry load, the
+    // snapshot-hold renewer, and the orphan-branch scrub — awaits this before issuing any KV
+    // operation: a hosted service can eagerly construct CommandExecutor during host startup, before
+    // Program.cs calls StartAsync, and a request routed to a not-yet-created partition throws
+    // Kommander's "Invalid partition". RunContinuationsAsynchronously so a resumed waiter never runs
+    // inline on the thread that completes StartAsync.
+    private readonly TaskCompletionSource startedSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     /// <summary>
     /// The Kahuna KV API. Used by KvTableStore and the transaction layer.
     /// </summary>
@@ -233,11 +242,36 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         => new(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, CamusDBConfig.Kahuna), loggerFactory);
 
     /// <summary>
-    /// Starts the Raft cluster and waits for the initial partition to elect a leader.
-    /// Must be called once before any KV operations.
+    /// Starts the Raft cluster and waits for every partition (system + all data partitions) to elect
+    /// a leader. Must be called once before any KV operations. On completion it signals
+    /// <see cref="WaitUntilStartedAsync"/> so background startup work kicked off eagerly during
+    /// construction can proceed; if start fails, that failure is propagated to those waiters too.
     /// </summary>
-    public Task StartAsync(CancellationToken cancellationToken = default)
-        => node.StartAsync(cancellationToken);
+    public async Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await node.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            startedSignal.TrySetException(ex);
+            throw;
+        }
+
+        startedSignal.TrySetResult();
+    }
+
+    /// <summary>
+    /// Completes once <see cref="StartAsync"/> has elected leaders for all partitions — or faults
+    /// with the same exception StartAsync threw. Background startup tasks that issue KV operations
+    /// (the database-registry load, the snapshot-hold renewer, the orphan-branch scrub) must await
+    /// this first: they can begin before StartAsync is called, and issuing a request against a
+    /// partition that does not exist yet throws Kommander's "Invalid partition". Returns immediately
+    /// once the node has started.
+    /// </summary>
+    public Task WaitUntilStartedAsync(CancellationToken cancellationToken = default)
+        => startedSignal.Task.WaitAsync(cancellationToken);
 
     /// <summary>
     /// Blocks until the partition that owns <paramref name="key"/> has an elected leader.

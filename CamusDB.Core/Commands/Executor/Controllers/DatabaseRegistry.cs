@@ -180,6 +180,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         KvTransactionsManager txManager = new(sharedNode.Kahuna, mintLocalT);
         DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/", sharedNode.Raft.GetLocalNodeId());
+
+        // OpenAsync is kicked off eagerly during CommandExecutor construction, which a hosted service
+        // can trigger before Program.cs calls StartAsync. Wait until the shared node has elected
+        // leaders for every partition before scanning; otherwise the scan routes to a not-yet-created
+        // partition and throws "Invalid partition".
+        await sharedNode.WaitUntilStartedAsync().ConfigureAwait(false);
+
         await registry.LoadAsync().ConfigureAwait(false);
         return registry;
     }
@@ -195,14 +202,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     ///
     /// <para>The registry is opened exactly once per process into a cached task, so a single failure
     /// here would stick for the node's lifetime and fail every later <c>SHOW DATABASES</c> /
-    /// <c>OpenDatabase</c>. Startup is inherently racy: the shared node brings its Raft partitions
-    /// online asynchronously (leader election takes a second or two after <c>StartAsync</c>), and the
-    /// registry open is kicked off eagerly during construction. The scan can therefore reach the
-    /// node before the partition owning the registry bucket is registered and fail with
-    /// <see cref="Kommander.RaftException"/> ("Invalid partition"). That is transient — the partition
-    /// appears shortly after — so the scan is retried over a bounded window rather than cached as a
-    /// permanent fault. Once the window elapses the last error propagates, since a persistent failure
-    /// is a real one.</para>
+    /// <c>OpenDatabase</c>. <see cref="OpenAsync"/> now waits for the shared node to elect leaders for
+    /// every partition (<see cref="EmbeddedKahuna.WaitUntilStartedAsync"/>) before calling this, which
+    /// closes the main boot race where the eagerly-started scan reached the node before the registry
+    /// bucket's partition existed and failed with <see cref="Kommander.RaftException"/> ("Invalid
+    /// partition"). The bounded retry below remains as a secondary guard against a momentary
+    /// leadership blip during the scan (e.g. a re-election); it surfaces the error only if it persists
+    /// past the window, since a persistent failure is a real one.</para>
     /// </summary>
     private async Task LoadAsync()
     {

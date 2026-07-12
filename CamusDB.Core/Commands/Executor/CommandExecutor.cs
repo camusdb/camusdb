@@ -196,6 +196,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     private async Task StartSnapshotHoldRenewerAsync(EmbeddedKahuna node)
     {
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        // The renewer and the orphan scrub both issue read-write KV transactions. This method is
+        // kicked off from the constructor, which a hosted service can trigger before Program.cs calls
+        // StartAsync, so a transaction routed to a not-yet-created partition would throw "Invalid
+        // partition". Wait until the node has elected leaders for every partition first. (The owned
+        // registry path is already gated inside DatabaseRegistry.OpenAsync; this also covers the
+        // pre-created-registry path, where registryTask completes without that gate.)
+        await node.WaitUntilStartedAsync().ConfigureAwait(false);
+
         SnapshotHoldRenewer renewer = new(node, registry, logger, CamusDBConfig.BranchSnapshotHoldLeaseMs);
         renewer.Start();
         snapshotHoldRenewer = renewer;
