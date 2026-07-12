@@ -55,6 +55,16 @@ public sealed class TableIndexSchema
     public string[]? ColumnIds { get; }
 
     /// <summary>
+    /// Per-column sort direction, positionally aligned with <see cref="ColumnIds"/> in the
+    /// persisted form and with <see cref="Columns"/> in the in-memory form. A <c>null</c> array
+    /// means every column is <see cref="OrderType.Ascending"/> — which is how every index
+    /// persisted before mixed-direction indexes existed loads, so the on-disk/replicated format
+    /// stays backward-compatible. Use <see cref="DirectionAt"/> rather than indexing this
+    /// directly so the null (all-ascending) case is handled uniformly.
+    /// </summary>
+    public OrderType[]? ColumnDirections { get; }
+
+    /// <summary>
     /// The type of index
     /// </summary>
     public IndexType Type { get; }
@@ -80,18 +90,35 @@ public sealed class TableIndexSchema
     public string KvId => Id ?? Name;
 
     /// <summary>
+    /// Sort direction of the index column at position <paramref name="position"/>, defaulting to
+    /// <see cref="OrderType.Ascending"/> when <see cref="ColumnDirections"/> is null (the
+    /// backward-compatible all-ascending form) or when the position is out of range.
+    /// </summary>
+    public OrderType DirectionAt(int position)
+    {
+        OrderType[]? directions = ColumnDirections;
+        if (directions is null || position < 0 || position >= directions.Length)
+            return OrderType.Ascending;
+
+        return directions[position];
+    }
+
+    /// <summary>
     /// Constructs an in-memory (query/DML) entry with resolved column names.
     /// Used by <c>TableOpener</c> when building <c>TableDescriptor.Indexes</c>.
     /// The optional <paramref name="id"/> propagates the schema-assigned immutable identifier
     /// so that <see cref="KvId"/> resolves to the stable ID rather than the mutable name.
+    /// <paramref name="columnDirections"/> is positionally aligned with <paramref name="columns"/>;
+    /// null means all-ascending.
     /// </summary>
-    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null)
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null)
     {
         Id = id;
         Name = name;
         Columns = columns;
         Type = type;
         State = state;
+        ColumnDirections = columnDirections;
     }
 
     /// <summary>
@@ -99,9 +126,12 @@ public sealed class TableIndexSchema
     /// Column names are absent (<see cref="Columns"/> is empty); they are resolved from
     /// <paramref name="columnIds"/> at open time. This constructor is also the JSON
     /// deserialization target so the persisted form round-trips correctly.
+    /// <paramref name="columnDirections"/> is positionally aligned with <paramref name="columnIds"/>;
+    /// null (the default, and the value in log entries written before mixed-direction indexes
+    /// existed) means every column is ascending.
     /// </summary>
     [JsonConstructor]
-    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null)
+    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null)
     {
         Id = id;
         Name = name;
@@ -110,5 +140,6 @@ public sealed class TableIndexSchema
         Type = type;
         State = state;
         StartOffset = startOffset;
+        ColumnDirections = columnDirections;
     }
 }

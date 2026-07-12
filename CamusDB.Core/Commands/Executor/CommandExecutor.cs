@@ -1143,11 +1143,13 @@ public sealed class CommandExecutor : IAsyncDisposable
             ? IndexType.Unique
             : IndexType.Multi;
 
+        IndexColumnOrder.RejectUnsupportedDescending(ticket.Columns, ticket.IndexName);
+
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIdsForIndex(table, ticket.Columns);
         string[] columnNames = ticket.Columns.Select(c => c.Name).ToArray();
 
-        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType);
+        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns));
 
         await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try

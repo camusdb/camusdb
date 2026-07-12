@@ -445,10 +445,16 @@ public sealed record SchemaChangeJob(
 /// <param name="ColumnIds">Immutable column IDs covered by the index.</param>
 /// <param name="ColumnNames">Resolved column names, populated from the table schema.</param>
 /// <param name="IndexType">Whether the index enforces uniqueness.</param>
+/// <param name="ColumnDirections">
+/// Per-column sort direction, positionally aligned with <paramref name="ColumnIds"/>; null means
+/// all-ascending. Carried through the staged cluster add so the replicated index definition
+/// records the same directions the proposer parsed.
+/// </param>
 public sealed record IndexBuildInfo(
     string IndexId,
     string IndexName,
     string[] ColumnIds,
     string[] ColumnNames,
-    IndexType IndexType
+    IndexType IndexType,
+    OrderType[]? ColumnDirections = null
 );

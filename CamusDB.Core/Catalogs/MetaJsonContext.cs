@@ -56,4 +56,6 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(Dictionary<string, ColumnHistogram>))]
 [JsonSerializable(typeof(Dictionary<string, long>))]
 [JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(OrderType))]
+[JsonSerializable(typeof(OrderType[]))]
 internal sealed partial class MetaJsonContext : JsonSerializerContext;

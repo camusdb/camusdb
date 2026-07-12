@@ -110,9 +110,9 @@ public sealed class TestHttpCommitIdempotencyGuard : SharedNodeBaseTest
 
         // A second commit issued after the first fully returned must fail deterministically rather
         // than re-drive 2PC on an already-committed transaction.
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await coord.CommitAsync(db, tx, CancellationToken.None));
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionAlreadyCompleted));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionAlreadyCompleted));
         Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.Committed));
     }
 

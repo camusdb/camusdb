@@ -771,7 +771,7 @@ public sealed class TestRowEncoder
             new ColumnValue(ColumnType.Integer64, 99L), SchemaElementState.Public);
 
         schema.Version = 1;
-        schema.Columns = [schema.SchemaHistory![0].Columns![0], schema.SchemaHistory[0].Columns[1], scoreCol];
+        schema.Columns = [schema.SchemaHistory![0].Columns![0], schema.SchemaHistory[0].Columns![1], scoreCol];
         schema.SchemaHistory!.Add(new TableSchemaHistory
         {
             Version  = 1,

@@ -76,6 +76,8 @@ internal sealed class TableIndexAdder
             }
         }
 
+        IndexColumnOrder.RejectUnsupportedDescending(ticket.Columns, ticket.IndexName);
+
         foreach (ColumnIndexInfo indexColumn in ticket.Columns)
         {
             TableColumnSchema? tableColumn = null;
@@ -144,6 +146,7 @@ internal sealed class TableIndexAdder
 
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIds(table, ticket.Columns);
+        OrderType[]? columnDirections = IndexColumnOrder.Extract(ticket.Columns);
 
         try
         {
@@ -156,7 +159,8 @@ internal sealed class TableIndexAdder
                 columnIds,
                 indexType,
                 SchemaElementState.WriteOnly,
-                startOffset: null
+                startOffset: null,
+                columnDirections: columnDirections
             ));
         }
         finally
@@ -166,7 +170,7 @@ internal sealed class TableIndexAdder
 
         table.Indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId)
+            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections)
         );
         table.Store.RegisterIndexName(indexId, ticket.IndexName);
 
@@ -276,7 +280,8 @@ internal sealed class TableIndexAdder
                         old.ColumnIds,
                         old.Type,
                         SchemaElementState.Public,
-                        finalOffset
+                        finalOffset,
+                        columnDirections: old.ColumnDirections
                     );
                     break;
                 }
@@ -289,7 +294,7 @@ internal sealed class TableIndexAdder
         }
 
         TableIndexSchema current = table.Indexes[ticket.IndexName];
-        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id);
+        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections);
 
         return FluxAction.Continue;
     }

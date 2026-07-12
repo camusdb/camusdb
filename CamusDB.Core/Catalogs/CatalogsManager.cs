@@ -215,6 +215,8 @@ public sealed class CatalogsManager
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown constraint: " + constraint.Type)
             };
 
+            IndexColumnOrder.RejectUnsupportedDescending(constraint.Columns, constraint.Name);
+
             string[] columnIds = new string[constraint.Columns.Length];
             for (int i = 0; i < constraint.Columns.Length; i++)
             {
@@ -232,7 +234,8 @@ public sealed class CatalogsManager
                 columnIds,
                 indexType,
                 SchemaElementState.Public,
-                startOffset: null
+                startOffset: null,
+                columnDirections: IndexColumnOrder.Extract(constraint.Columns)
             ));
         }
 
@@ -535,7 +538,8 @@ public sealed class CatalogsManager
                         columnIds: indexBuildInfo.ColumnIds,
                         type: indexBuildInfo.IndexType,
                         state: initialState,
-                        startOffset: null
+                        startOffset: null,
+                        columnDirections: indexBuildInfo.ColumnDirections
                     )
                 })
             };
@@ -1203,7 +1207,8 @@ public sealed class CatalogsManager
             columnIds: current.ColumnIds,
             type: current.Type,
             state: current.State,
-            startOffset: current.StartOffset
+            startOffset: current.StartOffset,
+            columnDirections: current.ColumnDirections
         );
 
         // TableSchema.Version is intentionally NOT bumped: indexes are not part of row encoding.
@@ -1370,7 +1375,8 @@ public sealed class CatalogsManager
                 current.ColumnIds,
                 current.Type,
                 payload.State,
-                current.StartOffset
+                current.StartOffset,
+                columnDirections: current.ColumnDirections
             );
         }
 
