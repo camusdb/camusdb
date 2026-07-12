@@ -59,14 +59,25 @@ internal abstract class SQLExecutorBaseCreator
     /// </summary>
     private static int CompareValues(ColumnValue left, ColumnValue right)
     {
-        if (left.Type == ColumnType.Uuid && right.Type == ColumnType.String)
-            right = ColumnValue.FromUuidString(right.StrValue!);
-        else if (right.Type == ColumnType.Uuid && left.Type == ColumnType.String)
-            left = ColumnValue.FromUuidString(left.StrValue!);
-        else if (left.Type == ColumnType.Id && right.Type == ColumnType.String)
-            right = CastScalarFunctions.CoerceToColumnType(right, ColumnType.Id);
-        else if (right.Type == ColumnType.Id && left.Type == ColumnType.String)
-            left = CastScalarFunctions.CoerceToColumnType(left, ColumnType.Id);
+        // Coercion is best-effort. If a String operand is not a valid Uuid/Id it can equal no such
+        // value, so return a deterministic non-zero ordering rather than throwing — and never call
+        // ColumnValue.CompareTo with mismatched types (it throws on Uuid/Id vs String).
+        try
+        {
+            if (left.Type == ColumnType.Uuid && right.Type == ColumnType.String)
+                right = ColumnValue.FromUuidString(right.StrValue!);
+            else if (right.Type == ColumnType.Uuid && left.Type == ColumnType.String)
+                left = ColumnValue.FromUuidString(left.StrValue!);
+            else if (left.Type == ColumnType.Id && right.Type == ColumnType.String)
+                right = CastScalarFunctions.CoerceToColumnType(right, ColumnType.Id);
+            else if (right.Type == ColumnType.Id && left.Type == ColumnType.String)
+                left = CastScalarFunctions.CoerceToColumnType(left, ColumnType.Id);
+        }
+        catch (CamusDBException)
+        {
+            // Malformed Uuid/Id literal: unequal to any real value. Order the String operand first.
+            return left.Type == ColumnType.String ? -1 : 1;
+        }
 
         return left.CompareTo(right);
     }

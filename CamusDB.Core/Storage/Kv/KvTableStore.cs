@@ -941,7 +941,10 @@ public sealed class KvTableStore
         CompositeColumnValue key,
         CancellationToken cancellationToken = default)
     {
-        string kvKey = BuildUniqueIndexKey(indexId, key);
+        // A lookup key that cannot be encoded (e.g. an Id equality against a non-ObjectId literal)
+        // can match no stored row — return a miss rather than throwing on the invalid value.
+        if (!TryBuildUniqueIndexKey(indexId, key, out string kvKey))
+            return null;
 
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
@@ -2460,6 +2463,20 @@ public sealed class KvTableStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)
         => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key, DirectionsOf(indexId))}";
+
+    // Read-path variant: returns false when the key cannot be encoded (an invalid Id value that no
+    // stored row can equal), so a point lookup treats it as a miss instead of throwing.
+    private bool TryBuildUniqueIndexKey(string indexId, CompositeColumnValue key, out string kvKey)
+    {
+        if (!KeyEncoder.TryEncode(key, DirectionsOf(indexId), out string encoded))
+        {
+            kvKey = string.Empty;
+            return false;
+        }
+
+        kvKey = $"{tableKeyPrefix}:i:{indexId}/{encoded}";
+        return true;
+    }
 
     // Non-unique: rowIdHex appended directly (no separator) so the last slash in the full
     // key is always the one after {indexId}, keeping the routing hash stable.

@@ -52,6 +52,22 @@ internal sealed class TestNativeIdEncoding : BaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task WhereIdEquality_InvalidLiteral_ReturnsNoRowsWithoutThrowing()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateRefTable();
+        await InsertRefs(executor, dbname, new[] { Id1, Id2 });
+
+        // A non-ObjectId literal can equal no stored id — must return zero rows, not throw during
+        // planning or lookup.
+        List<QueryResultRow> byId = await ExecSelect(executor, dbname, "SELECT id FROM docs WHERE id = 'not-a-valid-id'");
+        Assert.AreEqual(0, byId.Count);
+
+        List<QueryResultRow> byRef = await ExecSelect(executor, dbname, "SELECT ref FROM docs WHERE ref = 'xyz'");
+        Assert.AreEqual(0, byRef.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task IdRangePredicate_StringLiteral_ReturnsCorrectRows()
     {
         (string dbname, _, CommandExecutor executor) = await CreateRefTable();

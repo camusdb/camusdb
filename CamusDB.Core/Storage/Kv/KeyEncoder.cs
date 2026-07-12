@@ -130,6 +130,46 @@ public static class KeyEncoder
         });
     }
 
+    /// <summary>
+    /// Encodes a composite key for a <b>read/lookup</b>, returning false instead of throwing when a
+    /// value cannot be encoded — specifically an <see cref="ColumnType.Id"/> whose string is not a
+    /// valid 24-hex ObjectId (e.g. a lookup literal that no stored row can possibly equal, such as
+    /// <c>WHERE id = '---'</c>). Such a key cannot exist in the store, so callers treat a false result
+    /// as "no match" rather than an error. Write paths must keep using <see cref="Encode"/> so an
+    /// invalid id is rejected rather than silently ignored.
+    /// </summary>
+    public static bool TryEncode(CompositeColumnValue composite, OrderType[]? directions, out string encoded)
+    {
+        ArgumentNullException.ThrowIfNull(composite);
+
+        foreach (ColumnValue value in composite.Values)
+        {
+            if (value.Type == ColumnType.Id && !IsEncodableObjectId(value.StrValue))
+            {
+                encoded = string.Empty;
+                return false;
+            }
+        }
+
+        encoded = Encode(composite, directions);
+        return true;
+    }
+
+    /// <summary>True when <paramref name="s"/> is 24 hex characters — the only Id form the fixed-width
+    /// codec can encode. Accepts upper- or lower-case (ObjectId parsing does).</summary>
+    private static bool IsEncodableObjectId(string? s)
+    {
+        if (s is null || s.Length != 24)
+            return false;
+
+        foreach (char c in s)
+        {
+            if (c is not ((>= '0' and <= '9') or (>= 'a' and <= 'f') or (>= 'A' and <= 'F')))
+                return false;
+        }
+        return true;
+    }
+
     public static string EncodeValue(ColumnValue value, OrderType direction = OrderType.Ascending)
     {
         int length = MeasureValue(value);

@@ -168,8 +168,12 @@ public static class PredicateAnalyzer
             if (original.Type != ColumnType.String)
                 continue;
 
+            ColumnValue? coerced = TryCoerceStringTo(original, target.Value);
+            if (coerced is null)
+                continue; // invalid list item stays as-is; it simply matches nothing
+
             values ??= [.. inList.Values];
-            values[i] = CoerceStringTo(original, target.Value);
+            values[i] = coerced;
         }
 
         return values is null ? inList : new AnalyzedInList(inList.ColumnName, values, inList.Conjunct);
@@ -184,11 +188,11 @@ public static class PredicateAnalyzer
         if (target is null)
             return comparison;
 
-        return new AnalyzedComparison(
-            comparison.ColumnName,
-            comparison.Operator,
-            CoerceStringTo(constant, target.Value),
-            comparison.Conjunct);
+        ColumnValue? coerced = TryCoerceStringTo(constant, target.Value);
+        if (coerced is null)
+            return comparison; // invalid literal: leave it — it can match nothing, and it must not throw here
+
+        return new AnalyzedComparison(comparison.ColumnName, comparison.Operator, coerced, comparison.Conjunct);
     }
 
     /// <summary>
@@ -206,10 +210,25 @@ public static class PredicateAnalyzer
         return column?.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
     }
 
-    private static ColumnValue CoerceStringTo(ColumnValue constant, ColumnType target)
-        => target == ColumnType.Uuid
-            ? ColumnValue.FromUuidString(constant.StrValue!)
-            : CastScalarFunctions.CoerceToColumnType(constant, ColumnType.Id);
+    /// <summary>
+    /// Coerces a String constant to <paramref name="target"/> (Uuid/Id), or returns null when the
+    /// literal is not a valid value of that type. A null result means "unsatisfiable, leave it alone":
+    /// the constant stays a String that can equal no stored Uuid/Id, so the query returns no rows —
+    /// coercion must never throw during planning just because a literal is malformed.
+    /// </summary>
+    private static ColumnValue? TryCoerceStringTo(ColumnValue constant, ColumnType target)
+    {
+        try
+        {
+            return target == ColumnType.Uuid
+                ? ColumnValue.FromUuidString(constant.StrValue!)
+                : CastScalarFunctions.CoerceToColumnType(constant, ColumnType.Id);
+        }
+        catch (CamusDBException)
+        {
+            return null;
+        }
+    }
 
     public static NodeAst? BuildExecutionFilter(
         PredicateAnalysis analysis,
