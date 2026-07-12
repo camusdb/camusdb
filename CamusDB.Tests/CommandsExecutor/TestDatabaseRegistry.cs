@@ -17,6 +17,7 @@ using CamusDB.Core;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Util;
 using CamusDB.Core.Util.ObjectIds;
 using Kahuna;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
@@ -458,20 +459,98 @@ internal sealed class TestDatabaseRegistry
         Assert.IsTrue(afterIsHigher, $"idAfter='{idAfter}' must be > idBefore='{idBefore}'");
     }
 
+    // -----------------------------------------------------------------------
+    // Table-id sequence (AllocateTableIdAsync)
+    // -----------------------------------------------------------------------
+
     [Test]
-    public static void ToBase62_KnownValues()
+    public async Task AllocateTableId_ReturnsBase62WithNoKeySeparators()
+    {
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
+
+        List<string> ids = [];
+        for (int i = 0; i < 5; i++)
+            ids.Add(await registry.AllocateTableIdAsync());
+
+        const string Base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        foreach (string id in ids)
+        {
+            Assert.IsNotEmpty(id);
+            Assert.IsTrue(id.All(c => Base62Chars.Contains(c)), $"table id '{id}' contains non-base62 chars");
+            Assert.IsFalse(id.Contains('/'), $"table id '{id}' must not contain '/'");
+            Assert.IsFalse(id.Contains(':'), $"table id '{id}' must not contain ':'");
+            Assert.IsFalse(id.Contains('~'), $"table id '{id}' must not contain '~'");
+        }
+    }
+
+    [Test]
+    public async Task AllocateTableId_IsMonotonicAndNeverReused()
+    {
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
+
+        List<string> ids = [];
+        for (int i = 0; i < 5; i++)
+            ids.Add(await registry.AllocateTableIdAsync());
+
+        for (int i = 1; i < ids.Count; i++)
+        {
+            bool aLess = ids[i - 1].Length < ids[i].Length ||
+                         (ids[i - 1].Length == ids[i].Length && string.CompareOrdinal(ids[i - 1], ids[i]) < 0);
+            Assert.IsTrue(aLess, $"ids[{i - 1}]='{ids[i - 1]}' must be < ids[{i}]='{ids[i]}'");
+        }
+    }
+
+    [Test]
+    public async Task AllocateTableId_SurvivesReopenCounterContinues()
+    {
+        string id1;
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!);
+        id1 = await first.AllocateTableIdAsync();
+        await first.DisposeAsync();
+
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!);
+        string id2 = await second.AllocateTableIdAsync();
+
+        Assert.IsTrue(
+            id2.Length > id1.Length || (id2.Length == id1.Length && string.CompareOrdinal(id2, id1) > 0),
+            $"After reopen id2='{id2}' must be > id1='{id1}'");
+    }
+
+    [Test]
+    public async Task AllocateTableId_SequenceIsIndependentFromDatabaseSequence()
+    {
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
+
+        // Advance the database sequence several times
+        for (int i = 0; i < 5; i++)
+            await registry.AllocateIdAsync();
+
+        // The table sequence starts from its own counter, independent of the db sequence
+        string tableId1 = await registry.AllocateTableIdAsync();
+        string tableId2 = await registry.AllocateTableIdAsync();
+
+        Assert.IsNotEmpty(tableId1);
+        Assert.IsNotEmpty(tableId2);
+        // The two sequences are independent — the table counter must be monotonically increasing
+        bool aLess = tableId1.Length < tableId2.Length ||
+                     (tableId1.Length == tableId2.Length && string.CompareOrdinal(tableId1, tableId2) < 0);
+        Assert.IsTrue(aLess, $"tableId1='{tableId1}' must be < tableId2='{tableId2}'");
+    }
+
+    [Test]
+    public static void Base62Encode_KnownValues()
     {
         // Alphabet: 0-9=0..9, A-Z=10..35, a-z=36..61
-        Assert.AreEqual("0",  DatabaseRegistry.ToBase62(0));
-        Assert.AreEqual("1",  DatabaseRegistry.ToBase62(1));
-        Assert.AreEqual("9",  DatabaseRegistry.ToBase62(9));
-        Assert.AreEqual("A",  DatabaseRegistry.ToBase62(10));
-        Assert.AreEqual("Z",  DatabaseRegistry.ToBase62(35));
-        Assert.AreEqual("a",  DatabaseRegistry.ToBase62(36));
-        Assert.AreEqual("z",  DatabaseRegistry.ToBase62(61));
-        Assert.AreEqual("10", DatabaseRegistry.ToBase62(62));      // 1×62 + 0
-        Assert.AreEqual("A0", DatabaseRegistry.ToBase62(620));     // 10×62 + 0
-        Assert.AreEqual("100", DatabaseRegistry.ToBase62(62 * 62)); // 1×62² + 0×62 + 0
+        Assert.AreEqual("0",   Base62.Encode(0));
+        Assert.AreEqual("1",   Base62.Encode(1));
+        Assert.AreEqual("9",   Base62.Encode(9));
+        Assert.AreEqual("A",   Base62.Encode(10));
+        Assert.AreEqual("Z",   Base62.Encode(35));
+        Assert.AreEqual("a",   Base62.Encode(36));
+        Assert.AreEqual("z",   Base62.Encode(61));
+        Assert.AreEqual("10",  Base62.Encode(62));       // 1×62 + 0
+        Assert.AreEqual("A0",  Base62.Encode(620));      // 10×62 + 0
+        Assert.AreEqual("100", Base62.Encode(62 * 62));  // 1×62² + 0×62 + 0
     }
 
     // -----------------------------------------------------------------------

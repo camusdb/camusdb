@@ -9,6 +9,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Util;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -93,6 +94,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // Id allocation — compact base62 from a persistent monotonic sequence
     // -----------------------------------------------------------------------
 
+    private string TableSequenceKey => $"{keyPrefix}tableseq";
+
     /// <summary>
     /// Allocates the next database id from the persistent monotonic counter stored in the
     /// shared node's sequence (<c>dbregistry/seq</c> or <c>_system/dbregistry/seq</c> in
@@ -100,10 +103,26 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// a DROP, so a recycled name gets a strictly higher id than the dropped database.
     /// The id is returned as a short base-62 string.
     /// </summary>
-    public async Task<string> AllocateIdAsync()
-    {
-        string seqName = SequenceKey;
+    public Task<string> AllocateIdAsync() => AllocateFromSequenceAsync(SequenceKey, "database");
 
+    /// <summary>
+    /// Allocates the next table id from the persistent per-store monotonic sequence
+    /// (<c>_system/tableseq</c>). The counter is global to the store (not per-database) so
+    /// table ids are globally unique: a table created in a branch cannot collide with any
+    /// inherited ancestor table id even after DROP + recreate. The id is returned as a short
+    /// base-62 string, which is never reused and contains none of the KV key separators
+    /// (<c>/</c>, <c>:</c>, <c>~</c>).
+    /// </summary>
+    public Task<string> AllocateTableIdAsync() => AllocateFromSequenceAsync(TableSequenceKey, "table");
+
+    /// <summary>
+    /// Core sequence-allocation helper. Creates the sequence on first use (idempotent) and
+    /// advances it once, returning the allocated counter value encoded as a base-62 string.
+    /// Only the proposer/leader calls this; followers apply the pre-allocated id from the
+    /// replicated payload and never invoke the allocator.
+    /// </summary>
+    private async Task<string> AllocateFromSequenceAsync(string seqName, string label)
+    {
         // Ensure the sequence exists (idempotent — AlreadyExists is fine)
         (SequenceResponseType createType, _) = await kahuna.LocateAndCreateSequence(
             seqName, initialValue: 0, increment: 1, maxValue: null,
@@ -113,7 +132,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         if (createType is not (SequenceResponseType.Success or SequenceResponseType.AlreadyExists))
             throw new CamusDBException(
                 CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to ensure database id sequence: {createType}");
+                $"Failed to ensure {label} id sequence: {createType}");
 
         // Advance the counter atomically — cluster-safe across all nodes
         SequenceResponseType nextType;
@@ -133,30 +152,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         if (nextType != SequenceResponseType.Success)
             throw new CamusDBException(
                 CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to allocate database id: {nextType}");
+                $"Failed to allocate {label} id: {nextType}");
 
-        return ToBase62(allocation.Start);
-    }
-
-    /// <summary>
-    /// Encodes <paramref name="value"/> as a base-62 string using the alphabet
-    /// <c>0–9 A–Z a–z</c>. The output is the shortest representation with no leading zeros
-    /// (value 1 → "1", value 62 → "A0"). Always at least one character.
-    /// </summary>
-    internal static string ToBase62(long value)
-    {
-        const string Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-        if (value <= 0)
-            return "0";
-
-        Span<char> buf = stackalloc char[11]; // ceil(log₆₂(long.MaxValue)) ≤ 11
-        int pos = 11;
-        while (value > 0)
-        {
-            buf[--pos] = Alphabet[(int)(value % 62)];
-            value /= 62;
-        }
-        return new string(buf[pos..]);
+        return Base62.Encode(allocation.Start);
     }
 
     // -----------------------------------------------------------------------
