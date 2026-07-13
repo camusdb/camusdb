@@ -144,10 +144,12 @@ public class TestSQLComments
     {
         // A syntax error *after* a multi-line block comment must report a line
         // number that accounts for the newlines inside the comment.
-        const string sql = "SELECT\n/*\nspan\n*/\nBADSQL";
+        // The tail '1 +' is an incomplete expression that errors at end-of-input; a bare
+        // identifier would now parse as a FROM-less SELECT, so it would not be a syntax error.
+        const string sql = "SELECT\n/*\nspan\n*/\n1 +";
         CamusDBException ex = Assert.Throws<CamusDBException>(
             () => SQLParserProcessor.Parse(sql))!;
-        // The error should reference line 6 (the 'BADSQL' line per GPLEX line counter), not line 1.
+        // The error should reference line 6 (past the tail line per GPLEX line counter), not line 1.
         Assert.That(ex.Message, Does.Contain("line 6"), ex.Message);
     }
 

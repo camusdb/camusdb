@@ -2231,6 +2231,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             case NodeType.Select:
                 {
+                    // FROM-less SELECT (no table node): project scalar expressions against a single
+                    // synthetic row. The grammar only admits a projection list plus optional
+                    // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
+                    if (ast.rightAst is null)
+                        return (database, ExecuteFromlessSelect(ast, ticket));
+
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
 
                     // Detect an inner subquery that carries a {cache=name} hint when the outer
@@ -2386,6 +2392,107 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         await Task.CompletedTask;
         yield return row;
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> EmptyResultset()
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+
+    /// <summary>
+    /// Executes a FROM-less <c>SELECT &lt;expr, …&gt; [LIMIT n] [OFFSET n]</c>: evaluates each
+    /// projection as a scalar expression against a single synthetic (empty) row and returns exactly
+    /// one row, subject to LIMIT/OFFSET. There is no table, so projections may not reference columns,
+    /// use <c>*</c>, aggregate, or contain subqueries — those are rejected with a clear
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/>. Subqueries in a FROM-less projection (the
+    /// existence-check idiom) are a deliberate later phase.
+    /// </summary>
+    private static IAsyncEnumerable<QueryResultRow> ExecuteFromlessSelect(NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        List<NodeAst> projections = new();
+        FlattenProjectionList(ast.leftAst!, projections);
+
+        Dictionary<string, ColumnValue> emptyRow = new();
+        Dictionary<string, ColumnValue> projected = new(projections.Count);
+
+        for (int i = 0; i < projections.Count; i++)
+        {
+            NodeAst projection = projections[i];
+            NodeAst valueExpr = projection.nodeType == NodeType.ExprAlias ? projection.leftAst! : projection;
+
+            if (valueExpr.nodeType == NodeType.ExprAllFields)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "SELECT * requires a FROM clause");
+
+            if (ContainsSubquery(valueExpr))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Subqueries in a FROM-less SELECT projection are not yet supported");
+
+            if (QueryExpressionClassifier.IsAggregateProjection(valueExpr)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(valueExpr))
+            {
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregate functions require a FROM clause");
+            }
+
+            string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
+            projected[name] = SQLExecutorBaseCreator.EvalExpr(valueExpr, emptyRow, ticket.Parameters);
+        }
+
+        // A single constant row: apply OFFSET (any offset >= 1 skips it) then LIMIT (0 drops it).
+        long offset = EvalRowCount(ast.extendedFour, ticket.Parameters, "OFFSET");
+        long limit = ast.extendedThree is null ? long.MaxValue : EvalRowCount(ast.extendedThree, ticket.Parameters, "LIMIT");
+
+        if (offset >= 1 || limit <= 0)
+            return EmptyResultset();
+
+        return ToAsyncEnumerable(new QueryResultRow(new ObjectIdValue(), projected));
+    }
+
+    /// <summary>Flattens the left-recursive <see cref="NodeType.IdentifierList"/> projection chain into order.</summary>
+    private static void FlattenProjectionList(NodeAst ast, List<NodeAst> projections)
+    {
+        if (ast.nodeType == NodeType.IdentifierList)
+        {
+            if (ast.leftAst is not null)
+                FlattenProjectionList(ast.leftAst, projections);
+            if (ast.rightAst is not null)
+                FlattenProjectionList(ast.rightAst, projections);
+            return;
+        }
+
+        projections.Add(ast);
+    }
+
+    /// <summary>Evaluates a LIMIT/OFFSET count node to a non-negative long; a null node means "none".</summary>
+    private static long EvalRowCount(NodeAst? node, Dictionary<string, ColumnValue>? parameters, string clause)
+    {
+        if (node is null)
+            return 0;
+
+        ColumnValue value = SQLExecutorBaseCreator.EvalExpr(node, new Dictionary<string, ColumnValue>(), parameters);
+        if (value.Type != ColumnType.Integer64)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"{clause} must be an integer");
+
+        return value.LongValue;
+    }
+
+    /// <summary>Returns true if <paramref name="ast"/> contains a subquery node anywhere in its tree.</summary>
+    private static bool ContainsSubquery(NodeAst? ast)
+    {
+        if (ast is null)
+            return false;
+
+        if (ast.nodeType is NodeType.ExprScalarSubquery or NodeType.ExprInSubquery
+            or NodeType.ExprNotInSubquery or NodeType.ExprExistsSubquery or NodeType.ExprExistsCorrelated)
+        {
+            return true;
+        }
+
+        return ContainsSubquery(ast.leftAst) || ContainsSubquery(ast.rightAst)
+            || ContainsSubquery(ast.extendedOne) || ContainsSubquery(ast.extendedTwo)
+            || ContainsSubquery(ast.extendedThree) || ContainsSubquery(ast.extendedFour)
+            || ContainsSubquery(ast.extendedFive) || ContainsSubquery(ast.extendedSix);
     }
 
     private static string? UnquoteLikePattern(string? raw)

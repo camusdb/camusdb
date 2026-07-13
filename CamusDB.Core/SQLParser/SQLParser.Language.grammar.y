@@ -64,6 +64,8 @@ opt_distinct : TDISTINCT { $$.s = "1"; }
 
 select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_where opt_group opt_having opt_order opt_limit opt_offset
             { $$.n = new(NodeType.Select, $3.n, $5.n, $6.n, $9.n, $10.n, $11.n, $7.n, $2.s, $8.n); }
+            | TSELECT opt_distinct select_field_list opt_limit opt_offset
+            { $$.n = new(NodeType.Select, $3.n, null, null, null, $4.n, $5.n, null, $2.s, null); }
             ;
 
 /* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt

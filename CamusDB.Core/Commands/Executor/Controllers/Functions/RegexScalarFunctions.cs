@@ -223,8 +223,7 @@ internal static class RegexScalarFunctions
         {
             if (args[2].Type != ColumnType.Null)
             {
-                RequireInteger(calledName, 2, args[2]);
-                start = (int)args[2].LongValue;
+                start = ReadInt32Arg(calledName, 2, args[2], "start");
                 if (start < 1)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                         $"Function '{calledName}' argument 'start' must be >= 1, got {start}");
@@ -240,8 +239,11 @@ internal static class RegexScalarFunctions
         (RegexOptions opts, _) = RegexMatcher.ParseFlags(flagsStr);
         Regex re = RegexMatcher.GetRegex(args[1].StrValue!, opts);
         string subject = args[0].StrValue!;
-        string slice = start <= 1 ? subject : (start <= subject.Length ? subject[(start - 1)..] : "");
-        int count = RegexMatcher.GuardTimeout(() => re.Matches(slice).Count);
+        // Match from the start offset without slicing, so an anchored '^' still refers to the true
+        // start of the string (or line, with 'm') rather than the offset — matching PostgreSQL and
+        // the regexp_instr/regexp_substr functions.
+        int offset = start <= 1 ? 0 : Math.Min(start - 1, subject.Length);
+        int count = RegexMatcher.GuardTimeout(() => re.Matches(subject, offset).Count);
         return new ColumnValue(ColumnType.Integer64, (long)count);
     }
 
@@ -260,24 +262,21 @@ internal static class RegexScalarFunctions
 
         if (args.Count >= 3 && args[2].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 2, args[2]);
-            start = (int)args[2].LongValue;
+            start = ReadInt32Arg(calledName, 2, args[2], "start");
             if (start < 1)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'start' must be >= 1, got {start}");
         }
         if (args.Count >= 4 && args[3].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 3, args[3]);
-            nth = (int)args[3].LongValue;
+            nth = ReadInt32Arg(calledName, 3, args[3], "N");
             if (nth < 1)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'N' must be >= 1, got {nth}");
         }
         if (args.Count >= 5 && args[4].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 4, args[4]);
-            endOption = (int)args[4].LongValue;
+            endOption = ReadInt32Arg(calledName, 4, args[4], "endoption");
             if (endOption is not 0 and not 1)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'endoption' must be 0 or 1, got {endOption}");
@@ -289,8 +288,7 @@ internal static class RegexScalarFunctions
         }
         if (args.Count >= 7 && args[6].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 6, args[6]);
-            subexpr = (int)args[6].LongValue;
+            subexpr = ReadInt32Arg(calledName, 6, args[6], "subexpr");
             if (subexpr < 0)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'subexpr' must be >= 0, got {subexpr}");
@@ -339,16 +337,14 @@ internal static class RegexScalarFunctions
 
         if (args.Count >= 3 && args[2].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 2, args[2]);
-            start = (int)args[2].LongValue;
+            start = ReadInt32Arg(calledName, 2, args[2], "start");
             if (start < 1)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'start' must be >= 1, got {start}");
         }
         if (args.Count >= 4 && args[3].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 3, args[3]);
-            nth = (int)args[3].LongValue;
+            nth = ReadInt32Arg(calledName, 3, args[3], "N");
             if (nth < 1)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'N' must be >= 1, got {nth}");
@@ -360,8 +356,7 @@ internal static class RegexScalarFunctions
         }
         if (args.Count >= 6 && args[5].Type != ColumnType.Null)
         {
-            RequireInteger(calledName, 5, args[5]);
-            subexpr = (int)args[5].LongValue;
+            subexpr = ReadInt32Arg(calledName, 5, args[5], "subexpr");
             if (subexpr < 0)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     $"Function '{calledName}' argument 'subexpr' must be >= 0, got {subexpr}");
@@ -442,6 +437,9 @@ internal static class RegexScalarFunctions
     /// Translates a PostgreSQL-style back-reference replacement string to .NET syntax:
     /// <c>\1</c>…<c>\9</c> → <c>$1</c>…<c>$9</c>, <c>\&amp;</c> → <c>$0</c>,
     /// <c>\\</c> → literal backslash.
+    /// <para>A literal <c>$</c> in the PostgreSQL replacement (PostgreSQL never treats <c>$</c> as a
+    /// group reference — only backslash does) is escaped to <c>$$</c> so .NET does not
+    /// misinterpret <c>$1</c> etc. as a group substitution.</para>
     /// </summary>
     private static string TranslateReplacement(string pgReplacement)
     {
@@ -467,16 +465,19 @@ internal static class RegexScalarFunctions
                 }
                 if (next == '\\')
                 {
-                    // Literal backslash in .NET replacement: use \\
+                    // Literal backslash: backslash is not special in a .NET replacement, so emit one.
                     sb.Append('\\');
                     i++;
                     continue;
                 }
             }
-            // Dollar signs in .NET replacement are significant ($1, $0, ${name}, $$).
-            // Pass through non-backslash chars unchanged; a lone '$' in the PG replacement
-            // means a literal '$', which .NET also treats as literal when not followed by
-            // a group reference — so no translation needed.
+            if (c == '$')
+            {
+                // '$' is literal in a PostgreSQL replacement but significant in .NET ($1, $0, $$,
+                // ${name}, $`, $', $_, $+). Escape it so it is emitted literally.
+                sb.Append("$$");
+                continue;
+            }
             sb.Append(c);
         }
         return sb.ToString();
@@ -487,4 +488,19 @@ internal static class RegexScalarFunctions
 
     private static void RequireInteger(string calledName, int argumentIndex, ColumnValue argument)
         => ScalarFunctionArguments.RequireType(calledName, argumentIndex, argument, ColumnType.Integer64);
+
+    /// <summary>
+    /// Validates that argument <paramref name="argumentIndex"/> is an integer and fits in a 32-bit
+    /// <see cref="int"/>, returning it. Guards against a large bigint silently truncating (which could
+    /// even wrap past a lower-bound check) when used as a position/count argument.
+    /// </summary>
+    private static int ReadInt32Arg(string calledName, int argumentIndex, ColumnValue argument, string argName)
+    {
+        RequireInteger(calledName, argumentIndex, argument);
+        long value = argument.LongValue;
+        if (value is < int.MinValue or > int.MaxValue)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' argument '{argName}' is out of range: {value}");
+        return (int)value;
+    }
 }

@@ -252,6 +252,27 @@ public sealed class TestRegexpFunctions : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task RegexpReplace_LiteralDollar_NotTreatedAsGroup()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+        // '$1' is a literal in a PostgreSQL replacement (only backslash is a back-reference), so it
+        // must NOT be substituted as .NET group 1. First match of '(o)' in 'foo' → 'x$1'.
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT regexp_replace('foo', '(o)', 'x$1') FROM strings LIMIT 1");
+        Assert.AreEqual("fx$1o", rows[0].Row["0"].StrValue);
+    }
+
+    [Test]
+    public async Task RegexpReplace_MixedBackrefAndLiteralDollar()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+        // Backslash back-references are honored; a literal '$' is preserved.
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT regexp_replace('ab', '(a)(b)', '\\1-$2') FROM strings LIMIT 1");
+        Assert.AreEqual("a-$2", rows[0].Row["0"].StrValue);
+    }
+
+    [Test]
     public async Task RegexpReplace_NullArg_ReturnsNull()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
@@ -297,6 +318,18 @@ public sealed class TestRegexpFunctions : SharedNodeBaseTest
         CamusDBException ex = await AssertQueryThrows(executor, database, dbname,
             "SELECT regexp_count('hello', 'h', 0) FROM strings LIMIT 1");
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+    }
+
+    [Test]
+    public async Task RegexpCount_CaretAnchorsToStringStart_NotToOffset()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+        // '^a' on 'xax' matches only at the true string start (position 0), where the char is 'x'.
+        // With start=2 the search begins past position 0, so '^' can never match → 0.
+        // (A slice-based implementation would wrongly re-anchor '^' to the slice and return 1.)
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT regexp_count('xax', '^a', 2) FROM strings LIMIT 1");
+        Assert.AreEqual(0L, rows[0].Row["0"].LongValue);
     }
 
     [Test]
@@ -514,6 +547,19 @@ public sealed class TestRegexpFunctions : SharedNodeBaseTest
             "SELECT regexp_like('hello', '[invalid') FROM strings LIMIT 1");
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
         Assert.That(ex.Message, Does.Contain("Invalid regular expression"));
+    }
+
+    [Test]
+    public async Task PathologicalPattern_HitsTimeout()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+        // Catastrophic backtracking against a non-matching subject must hit the shared match
+        // timeout and surface as a bounded domain error, not hang unbounded.
+        string subject = new string('a', 40) + "!";
+        CamusDBException ex = await AssertQueryThrows(executor, database, dbname,
+            $"SELECT regexp_like('{subject}', '^(a+)+$') FROM strings LIMIT 1");
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        Assert.That(ex.Message, Does.Contain("time limit"));
     }
 
     // ── Integration: array through projection ─────────────────────────────────
