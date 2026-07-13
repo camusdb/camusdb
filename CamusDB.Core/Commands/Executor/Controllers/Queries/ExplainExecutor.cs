@@ -83,6 +83,17 @@ internal sealed class ExplainExecutor
         ExecuteSQLTicket ticket,
         string stage)
     {
+        // A FROM-less SELECT (null table node) never reaches the planner: it projects a single
+        // synthetic row directly, so there is no scan/join/plan tree to walk. Render a fixed
+        // constant-source → project shape instead. Projection subqueries are left symbolic here
+        // (their names only) — unlike a real query, EXPLAIN does not pre-materialize them.
+        if (selectAst.rightAst is null)
+        {
+            foreach (QueryResultRow row in RenderFromlessPlan(selectAst, stage))
+                yield return row;
+            yield break;
+        }
+
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
 
         // Zip rendered (name, detail) pairs with plan nodes so we can emit cost estimates.
@@ -194,6 +205,15 @@ internal sealed class ExplainExecutor
         NodeAst selectAst,
         ExecuteSQLTicket ticket)
     {
+        // A FROM-less SELECT has no plan tree to instrument (see ExplainQuery). There are no
+        // storage reads to measure, so ANALYZE would add nothing over plain EXPLAIN; reject it
+        // clearly rather than fabricate zeroed runtime stats.
+        if (selectAst.rightAst is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "EXPLAIN (ANALYZE) is not supported for a FROM-less SELECT (there is no table access to measure). " +
+                "Use plain EXPLAIN to inspect the plan.");
+
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
 
         if (plan.BoundQuery is not null)
@@ -344,5 +364,63 @@ internal sealed class ExplainExecutor
         result.Add(node);
         if (node.Input is not null)
             WalkNodesOrderedInner(node.Input, result);
+    }
+
+    /// <summary>
+    /// Renders the fixed plan shape for a FROM-less SELECT: a single-row <c>constant-source</c>
+    /// feeding a <c>project</c> that lists the output column names, plus a <c>limit</c> row
+    /// when <c>LIMIT</c>/<c>OFFSET</c> is present. There is no cost model here — the source always
+    /// produces exactly one row — so <c>estimated_rows</c> is a static 1/0 and cost is null.
+    /// </summary>
+    private static IEnumerable<QueryResultRow> RenderFromlessPlan(NodeAst selectAst, string stage)
+    {
+        List<NodeAst> projections = new();
+        FlattenProjectionList(selectAst.leftAst!, projections);
+
+        List<string> names = new(projections.Count);
+        for (int i = 0; i < projections.Count; i++)
+            names.Add(QueryProjectionResolver.GetOutputNameFromProjectionExpression(projections[i], i));
+
+        yield return FromlessRow(stage, "constant-source", "1 row", 1);
+        yield return FromlessRow(stage, "project", "columns: " + string.Join(", ", names), 1);
+
+        if (selectAst.extendedThree is not null || selectAst.extendedFour is not null)
+            yield return FromlessRow(stage, "limit", DescribeLimitOffset(selectAst), null);
+    }
+
+    private static QueryResultRow FromlessRow(string stage, string node, string detail, long? estimatedRows)
+    {
+        return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+        {
+            { "stage",          new ColumnValue(ColumnType.String, stage) },
+            { "node",           new ColumnValue(ColumnType.String, node) },
+            { "detail",         new ColumnValue(ColumnType.String, detail) },
+            { "estimated_rows", estimatedRows is not null
+                ? new ColumnValue(ColumnType.Integer64, estimatedRows.Value)
+                : ColumnValue.Null },
+            { "estimated_cost", ColumnValue.Null },
+        });
+    }
+
+    private static string DescribeLimitOffset(NodeAst selectAst)
+    {
+        string limit = selectAst.extendedThree is not null ? (selectAst.extendedThree.yytext ?? "?") : "none";
+        string offset = selectAst.extendedFour is not null ? (selectAst.extendedFour.yytext ?? "?") : "0";
+        return $"limit={limit}, offset={offset}";
+    }
+
+    /// <summary>Flattens the left-recursive <see cref="NodeType.IdentifierList"/> projection chain in order.</summary>
+    private static void FlattenProjectionList(NodeAst ast, List<NodeAst> projections)
+    {
+        if (ast.nodeType == NodeType.IdentifierList)
+        {
+            if (ast.leftAst is not null)
+                FlattenProjectionList(ast.leftAst, projections);
+            if (ast.rightAst is not null)
+                FlattenProjectionList(ast.rightAst, projections);
+            return;
+        }
+
+        projections.Add(ast);
     }
 }

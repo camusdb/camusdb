@@ -163,14 +163,182 @@ public sealed class TestFromlessSelect : SharedNodeBaseTest
         Assert.That(ex.Message, Does.Contain("FROM"));
     }
 
+    // ── WHERE/GROUP/HAVING/ORDER are not admitted by the FROM-less grammar rule ─────
+    // (they only exist on the FROM-carrying alternative), so each is rejected at parse time.
+
     [Test]
-    public async Task ProjectionSubquery_RejectedAsUnsupported()
+    public async Task WhereClause_Rejected()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-        // A scalar subquery in a FROM-less projection is the existence-check idiom — a deliberate
-        // later phase, rejected clearly rather than mis-evaluated.
-        CamusDBException ex = await AssertThrows(executor, database, dbname, "SELECT (SELECT 1)");
+        // Parser-level rejection: the FROM-less select_stmt admits only a field list + LIMIT/OFFSET.
+        Assert.ThrowsAsync<CamusDBException>(() => ExecQuery(executor, database, dbname, "SELECT 1 WHERE 1 = 1"));
+    }
+
+    [Test]
+    public async Task GroupBy_Rejected()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        Assert.ThrowsAsync<CamusDBException>(() => ExecQuery(executor, database, dbname, "SELECT 1 GROUP BY 1"));
+    }
+
+    [Test]
+    public async Task OrderBy_Rejected()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        Assert.ThrowsAsync<CamusDBException>(() => ExecQuery(executor, database, dbname, "SELECT 1 ORDER BY 1"));
+    }
+
+    // ── EXPLAIN of a FROM-less SELECT renders a fixed ConstantSource → Projection shape ──
+
+    [Test]
+    public async Task Explain_RendersConstantSourceAndProjection()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, "EXPLAIN SELECT 41 + 1 AS answer");
+
+        List<string> nodes = rows.Select(r => r.Row["node"].StrValue!).ToList();
+        Assert.That(nodes, Does.Contain("constant-source"));
+        Assert.That(nodes, Does.Contain("project"));
+
+        QueryResultRow projection = rows.Single(r => r.Row["node"].StrValue == "project");
+        Assert.That(projection.Row["detail"].StrValue, Does.Contain("answer"));
+
+        QueryResultRow source = rows.Single(r => r.Row["node"].StrValue == "constant-source");
+        Assert.AreEqual(1L, source.Row["estimated_rows"].LongValue);
+    }
+
+    [Test]
+    public async Task Explain_WithLimit_RendersLimitNode()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, "EXPLAIN SELECT 1 LIMIT 5 OFFSET 2");
+
+        Assert.That(rows.Select(r => r.Row["node"].StrValue), Does.Contain("limit"));
+        QueryResultRow limit = rows.Single(r => r.Row["node"].StrValue == "limit");
+        Assert.That(limit.Row["detail"].StrValue, Does.Contain("limit=5"));
+        Assert.That(limit.Row["detail"].StrValue, Does.Contain("offset=2"));
+    }
+
+    [Test]
+    public async Task ExplainAnalyze_Rejected()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        CamusDBException ex = await AssertThrows(executor, database, dbname, "EXPLAIN (ANALYZE) SELECT 1");
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
-        Assert.That(ex.Message, Does.Contain("not yet supported"));
+        Assert.That(ex.Message, Does.Contain("FROM-less"));
+    }
+
+    // ── FS3: uncorrelated projection subqueries (existence-check idiom) ────────────
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupAccounts()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "accounts",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("email", ColumnType.String),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false));
+
+        foreach (string email in new[] { "alice@example.com", "bob@example.com" })
+        {
+            await executor.Insert(new InsertTicket(
+                txnState: tx,
+                databaseName: dbname,
+                tableName: "accounts",
+                values: new() {
+                    new() {
+                        { "id", new(ColumnType.Id, CamusDB.Core.Util.ObjectIds.ObjectIdGenerator.Generate().ToString()) },
+                        { "email", new(ColumnType.String, email) },
+                    }
+                }));
+        }
+
+        await database.Transactions.CommitAsync(tx);
+        return (dbname, database, executor);
+    }
+
+    [Test]
+    public async Task Exists_Match_ReturnsTrue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT EXISTS (SELECT 1 FROM accounts WHERE email = 'alice@example.com')");
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(ColumnType.Bool, rows[0].Row["0"].Type);
+        Assert.IsTrue(rows[0].Row["0"].BoolValue);
+    }
+
+    [Test]
+    public async Task Exists_NoMatch_ReturnsFalse()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT EXISTS (SELECT 1 FROM accounts WHERE email = 'nobody@example.com')");
+        Assert.IsFalse(rows[0].Row["0"].BoolValue);
+    }
+
+    [Test]
+    public async Task NotExists_NoMatch_ReturnsTrue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT NOT EXISTS (SELECT 1 FROM accounts WHERE email = 'nobody@example.com')");
+        Assert.IsTrue(rows[0].Row["0"].BoolValue);
+    }
+
+    [Test]
+    public async Task Exists_Parameterized()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        Dictionary<string, ColumnValue> parameters = new()
+        {
+            { "@e", new ColumnValue(ColumnType.String, "bob@example.com") }
+        };
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT EXISTS (SELECT 1 FROM accounts WHERE email = @e)", parameters);
+        Assert.IsTrue(rows[0].Row["0"].BoolValue);
+    }
+
+    [Test]
+    public async Task ScalarCount_GreaterThanZero_ReturnsTrue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT (SELECT COUNT(*) FROM accounts WHERE email = 'alice@example.com') > 0");
+        Assert.AreEqual(ColumnType.Bool, rows[0].Row["0"].Type);
+        Assert.IsTrue(rows[0].Row["0"].BoolValue);
+    }
+
+    [Test]
+    public async Task ScalarCount_ReturnsCount()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT (SELECT COUNT(*) FROM accounts)");
+        Assert.AreEqual(2L, rows[0].Row["0"].LongValue);
+    }
+
+    [Test]
+    public async Task ScalarCountOverDerivedTable_GreaterThanZero()
+    {
+        // Q2 shape: COUNT(*) over a derived table, parameterized, compared to > 0.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        Dictionary<string, ColumnValue> parameters = new()
+        {
+            { "@e", new ColumnValue(ColumnType.String, "alice@example.com") }
+        };
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT (SELECT COUNT(*) FROM (SELECT 1 FROM accounts WHERE email = @e) AS _e) > 0", parameters);
+        Assert.IsTrue(rows[0].Row["0"].BoolValue);
     }
 }

@@ -312,6 +312,58 @@ public class TestCastScalarFunctions : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task CastToUuid_InvalidString_QuotesValueAndHint()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        CamusDBException ex = await AssertSelectThrows(
+            executor,
+            database,
+            dbname,
+            "SELECT CAST(\"not-a-uuid\" AS uuid) FROM robots");
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        StringAssert.Contains("the value 'not-a-uuid'", ex.Message);
+        StringAssert.Contains("to Uuid", ex.Message);
+        StringAssert.Contains("expected a valid UUID string", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task ToInt64_InvalidString_QuotesValueAndHint()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        CamusDBException ex = await AssertSelectThrows(
+            executor,
+            database,
+            dbname,
+            "SELECT to_int64(\"not-a-number\") FROM robots");
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        StringAssert.Contains("the value 'not-a-number'", ex.Message);
+        StringAssert.Contains("expected a 64-bit integer", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task ToFloat64_InvalidString_QuotesValueAndHint()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
+
+        CamusDBException ex = await AssertSelectThrows(
+            executor,
+            database,
+            dbname,
+            "SELECT to_float64(\"not-a-number\") FROM robots");
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        StringAssert.Contains("the value 'not-a-number'", ex.Message);
+        StringAssert.Contains("expected a number", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task CastUnknownTargetType_Throws()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();

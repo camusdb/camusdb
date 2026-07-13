@@ -158,6 +158,11 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 #   end_election_timeout_increment_ms: 200
 #   heartbeat_interval_ms: 500
 #   voting_timeout_ms: 1500
-#   max_entries_per_actor: 50000
-#   max_bytes_per_actor: 268435456
-#   compact_every_operations: 1000
+#   max_entries_per_actor: 50000        # size-based eviction: cap on in-memory entries per actor
+#   max_bytes_per_actor: 268435456      # size-based eviction: cap on in-memory bytes per actor (256 MiB)
+#   cache_entry_ttl_ms: 300000          # idle TTL before an aged cache entry may be evicted (5 min)
+#   cache_entries_to_remove: 1000       # max aged entries evicted per collection sweep
+#   collection_interval_ms: 60000       # background eviction-sweep cadence (60 s)
+#   compact_every_operations: 1000      # take a Raft-log compaction point every N operations
+#   compact_number_entries: 50          # trailing log entries retained at each compaction point
+#   max_entries_per_compaction: 5000    # cap on entries removed by a single compaction pass

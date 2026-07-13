@@ -178,7 +178,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
         subqueryRewriter = new SubqueryRewriter(
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
-            new InSubqueryExecutor(subqueryQueryExecutor, statisticsManager));
+            new InSubqueryExecutor(subqueryQueryExecutor, statisticsManager),
+            existsSubqueryExecutor);
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager, semiJoinAnalyzer);
@@ -2235,7 +2236,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // synthetic row. The grammar only admits a projection list plus optional
                     // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
                     if (ast.rightAst is null)
-                        return (database, ExecuteFromlessSelect(ast, ticket));
+                        return (database, await ExecuteFromlessSelectAsync(database, ast, ticket).ConfigureAwait(false));
 
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
 
@@ -2403,12 +2404,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Executes a FROM-less <c>SELECT &lt;expr, …&gt; [LIMIT n] [OFFSET n]</c>: evaluates each
     /// projection as a scalar expression against a single synthetic (empty) row and returns exactly
-    /// one row, subject to LIMIT/OFFSET. There is no table, so projections may not reference columns,
-    /// use <c>*</c>, aggregate, or contain subqueries — those are rejected with a clear
-    /// <see cref="CamusDBErrorCodes.InvalidInput"/>. Subqueries in a FROM-less projection (the
-    /// existence-check idiom) are a deliberate later phase.
+    /// one row, subject to LIMIT/OFFSET. Uncorrelated subqueries in a projection (the existence-check
+    /// idiom, e.g. <c>SELECT EXISTS(…)</c> / <c>SELECT (SELECT COUNT(*) …) &gt; 0</c>) are
+    /// pre-materialized into literals via <see cref="SubqueryRewriter"/> before evaluation. There is
+    /// no table, so a projection may not reference columns (a bare identifier surfaces
+    /// <see cref="CamusDBErrorCodes.UnknownColumn"/> at evaluation), use <c>*</c>, or aggregate —
+    /// those are rejected with a clear <see cref="CamusDBErrorCodes.InvalidInput"/>.
     /// </summary>
-    private static IAsyncEnumerable<QueryResultRow> ExecuteFromlessSelect(NodeAst ast, ExecuteSQLTicket ticket)
+    private async Task<IAsyncEnumerable<QueryResultRow>> ExecuteFromlessSelectAsync(
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
     {
         List<NodeAst> projections = new();
         FlattenProjectionList(ast.leftAst!, projections);
@@ -2424,19 +2428,20 @@ public sealed class CommandExecutor : IAsyncDisposable
             if (valueExpr.nodeType == NodeType.ExprAllFields)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "SELECT * requires a FROM clause");
 
-            if (ContainsSubquery(valueExpr))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Subqueries in a FROM-less SELECT projection are not yet supported");
-
             if (QueryExpressionClassifier.IsAggregateProjection(valueExpr)
                 || QueryExpressionClassifier.IsCompoundAggregateProjection(valueExpr))
             {
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregate functions require a FROM clause");
             }
 
+            // Pre-materialize any uncorrelated projection subquery (EXISTS / scalar / IN) into a
+            // literal so the synchronous evaluator only ever sees literals.
+            NodeAst resolved = await subqueryRewriter
+                .RewriteProjectionExpressionAsync(database, valueExpr, ticket)
+                .ConfigureAwait(false);
+
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
-            projected[name] = SQLExecutorBaseCreator.EvalExpr(valueExpr, emptyRow, ticket.Parameters);
+            projected[name] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }
 
         // A single constant row: apply OFFSET (any offset >= 1 skips it) then LIMIT (0 drops it).
@@ -2475,24 +2480,6 @@ public sealed class CommandExecutor : IAsyncDisposable
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"{clause} must be an integer");
 
         return value.LongValue;
-    }
-
-    /// <summary>Returns true if <paramref name="ast"/> contains a subquery node anywhere in its tree.</summary>
-    private static bool ContainsSubquery(NodeAst? ast)
-    {
-        if (ast is null)
-            return false;
-
-        if (ast.nodeType is NodeType.ExprScalarSubquery or NodeType.ExprInSubquery
-            or NodeType.ExprNotInSubquery or NodeType.ExprExistsSubquery or NodeType.ExprExistsCorrelated)
-        {
-            return true;
-        }
-
-        return ContainsSubquery(ast.leftAst) || ContainsSubquery(ast.rightAst)
-            || ContainsSubquery(ast.extendedOne) || ContainsSubquery(ast.extendedTwo)
-            || ContainsSubquery(ast.extendedThree) || ContainsSubquery(ast.extendedFour)
-            || ContainsSubquery(ast.extendedFive) || ContainsSubquery(ast.extendedSix);
     }
 
     private static string? UnquoteLikePattern(string? raw)

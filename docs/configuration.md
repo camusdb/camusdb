@@ -78,7 +78,16 @@ Allowed keys: `storage`, `storage_revision`, `wal_storage`, `wal_revision`, `wal
 `background_writer_workers`, `read_io_threads`, `write_io_threads`, `start_election_timeout_ms`,
 `end_election_timeout_ms`, `start_election_timeout_increment_ms`,
 `end_election_timeout_increment_ms`, `heartbeat_interval_ms`, `voting_timeout_ms`,
-`max_entries_per_actor`, `max_bytes_per_actor`, `compact_every_operations`.
+`max_entries_per_actor`, `max_bytes_per_actor`, `cache_entry_ttl_ms`, `cache_entries_to_remove`,
+`collection_interval_ms`, `compact_every_operations`, `compact_number_entries`,
+`max_entries_per_compaction`.
+
+Entry eviction is governed by two mechanisms: **size-based** caps (`max_entries_per_actor`,
+`max_bytes_per_actor`) that bound how much an actor holds in memory, and a **time-based**
+collection sweep (`collection_interval_ms`) that evicts up to `cache_entries_to_remove` entries
+older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed together by
+`compact_every_operations` (how often), `compact_number_entries` (trailing entries kept), and
+`max_entries_per_compaction` (per-pass removal cap). Every unset key keeps Kahuna's default.
 
 Storage backends: `memory`, `sqlite`, `rocksdb`.
 

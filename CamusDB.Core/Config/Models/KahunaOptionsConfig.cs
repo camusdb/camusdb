@@ -37,7 +37,12 @@ public sealed class KahunaOptionsConfig
         "voting_timeout_ms",
         "max_entries_per_actor",
         "max_bytes_per_actor",
+        "cache_entry_ttl_ms",
+        "cache_entries_to_remove",
+        "collection_interval_ms",
         "compact_every_operations",
+        "compact_number_entries",
+        "max_entries_per_compaction",
     };
 
     /// <summary>Persistence backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
@@ -80,7 +85,40 @@ public sealed class KahunaOptionsConfig
 
     public long? MaxBytesPerActor { get; set; }
 
+    /// <summary>
+    /// Idle time-to-live for an in-memory cache entry before the background collection sweep is
+    /// allowed to evict it. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.CacheEntryTtl"/>
+    /// (expressed here in milliseconds).
+    /// </summary>
+    public int? CacheEntryTtlMs { get; set; }
+
+    /// <summary>
+    /// Maximum number of aged-out entries the collection sweep evicts per pass. Bounds the work
+    /// (and lock hold time) of a single sweep. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.CacheEntriesToRemove"/>.
+    /// </summary>
+    public int? CacheEntriesToRemove { get; set; }
+
+    /// <summary>
+    /// Cadence of the background collection sweep that evicts entries past <see cref="CacheEntryTtlMs"/>.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.CollectionInterval"/> (in milliseconds).
+    /// </summary>
+    public int? CollectionIntervalMs { get; set; }
+
     public int? CompactEveryOperations { get; set; }
+
+    /// <summary>
+    /// Number of trailing Raft-log entries retained (not compacted away) at each compaction point.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.CompactNumberEntries"/>. Governs the same
+    /// compaction pass as <see cref="CompactEveryOperations"/>; tune them together.
+    /// </summary>
+    public int? CompactNumberEntries { get; set; }
+
+    /// <summary>
+    /// Upper bound on how many log entries a single compaction pass may remove, capping its cost.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.MaxEntriesPerCompaction"/>.
+    /// </summary>
+    public int? MaxEntriesPerCompaction { get; set; }
 
     /// <summary>
     /// Validates allow-listed Kahuna fields. Called from <see cref="ConfigDefinition.Validate"/>.
@@ -138,8 +176,23 @@ public sealed class KahunaOptionsConfig
         if (MaxBytesPerActor is <= 0)
             throw InvalidConfig($"'kahuna.max_bytes_per_actor' must be > 0, got {MaxBytesPerActor}");
 
+        if (CacheEntryTtlMs is <= 0)
+            throw InvalidConfig($"'kahuna.cache_entry_ttl_ms' must be > 0, got {CacheEntryTtlMs}");
+
+        if (CacheEntriesToRemove is <= 0)
+            throw InvalidConfig($"'kahuna.cache_entries_to_remove' must be > 0, got {CacheEntriesToRemove}");
+
+        if (CollectionIntervalMs is <= 0)
+            throw InvalidConfig($"'kahuna.collection_interval_ms' must be > 0, got {CollectionIntervalMs}");
+
         if (CompactEveryOperations is <= 0)
             throw InvalidConfig($"'kahuna.compact_every_operations' must be > 0, got {CompactEveryOperations}");
+
+        if (CompactNumberEntries is <= 0)
+            throw InvalidConfig($"'kahuna.compact_number_entries' must be > 0, got {CompactNumberEntries}");
+
+        if (MaxEntriesPerCompaction is <= 0)
+            throw InvalidConfig($"'kahuna.max_entries_per_compaction' must be > 0, got {MaxEntriesPerCompaction}");
     }
 
     private static void ValidateStorage(string? value, string field)

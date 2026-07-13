@@ -241,7 +241,8 @@ internal static class CastScalarFunctions
     private static ColumnValue FromStringToUuid(string castName, string value)
     {
         if (!Guid.TryParse(value, out Guid parsed))
-            throw InvalidConversion(castName, ColumnType.String, ColumnType.Uuid);
+            throw InvalidStringConversion(castName, value, ColumnType.Uuid,
+                "a valid UUID string (e.g. 550e8400-e29b-41d4-a716-446655440000)");
 
         return ColumnValue.FromUuid(parsed);
     }
@@ -385,7 +386,7 @@ internal static class CastScalarFunctions
     private static ColumnValue FromStringToInt64(string castName, string text)
     {
         if (!long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed))
-            throw InvalidConversion(castName, ColumnType.String, ColumnType.Integer64);
+            throw InvalidStringConversion(castName, text, ColumnType.Integer64, "a 64-bit integer");
 
         return new ColumnValue(ColumnType.Integer64, parsed);
     }
@@ -393,7 +394,7 @@ internal static class CastScalarFunctions
     private static ColumnValue FromStringToFloat64(string castName, string text)
     {
         if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed))
-            throw InvalidConversion(castName, ColumnType.String, ColumnType.Float64);
+            throw InvalidStringConversion(castName, text, ColumnType.Float64, "a number");
 
         return new ColumnValue(ColumnType.Float64, RejectNonFinite(castName, parsed).FloatValue);
     }
@@ -495,4 +496,19 @@ internal static class CastScalarFunctions
             CamusDBErrorCodes.InvalidInput,
             $"Function '{castName}' cannot convert {sourceType} to {targetType}");
     }
+
+    /// <summary>
+    /// Builds a conversion error that quotes the offending source value and states the expected
+    /// format. Used for string-parse failures where the generic <see cref="InvalidConversion"/>
+    /// (which names only the types) would leave the caller guessing which value was rejected.
+    /// The value is truncated so a pathologically long input can't bloat the message.
+    /// </summary>
+    private static CamusDBException InvalidStringConversion(string castName, string value, ColumnType targetType, string expected)
+    {
+        return new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Function '{castName}' cannot convert the value '{Truncate(value)}' to {targetType}: expected {expected}");
+    }
+
+    private static string Truncate(string value) => value.Length <= 64 ? value : value[..64] + "…";
 }

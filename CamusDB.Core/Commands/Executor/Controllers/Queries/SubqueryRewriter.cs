@@ -23,12 +23,79 @@ internal sealed class SubqueryRewriter
 {
     private readonly ScalarSubqueryExecutor scalarExecutor;
     private readonly InSubqueryExecutor inExecutor;
+    private readonly ExistsSubqueryExecutor existsExecutor;
     private readonly SelectQueryCreator selectQueryCreator = new();
 
-    public SubqueryRewriter(ScalarSubqueryExecutor scalarExecutor, InSubqueryExecutor inExecutor)
+    public SubqueryRewriter(
+        ScalarSubqueryExecutor scalarExecutor,
+        InSubqueryExecutor inExecutor,
+        ExistsSubqueryExecutor existsExecutor)
     {
         this.scalarExecutor = scalarExecutor;
         this.inExecutor = inExecutor;
+        this.existsExecutor = existsExecutor;
+    }
+
+    /// <summary>
+    /// Rewrites an expression that appears in a projection position by pre-materializing any
+    /// uncorrelated subquery it contains (scalar, <c>IN</c>/<c>NOT IN</c>, and <c>EXISTS</c>) into a
+    /// literal, so the synchronous <c>SqlExecutor.EvalExpr</c> can finish the projection. Used by
+    /// FROM-less <c>SELECT</c> (there is no outer row, so every projection subquery is uncorrelated).
+    /// Unlike the WHERE rewriter (<see cref="RewriteSelectQueryAsync"/>), this also resolves EXISTS,
+    /// because a FROM-less projection has no per-row EXISTS-preparer stage to fall back on.
+    /// </summary>
+    public async Task<NodeAst> RewriteProjectionExpressionAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        ExecuteSQLTicket ticket)
+    {
+        switch (expr.nodeType)
+        {
+            case NodeType.ExprExistsSubquery:
+            case NodeType.ExprExistsCorrelated:
+            {
+                if (expr.leftAst is null)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid EXISTS subquery expression");
+
+                bool exists = await existsExecutor.ExecuteUncorrelatedAsync(
+                    database, expr.leftAst, ticket.TxnState, ticket.Parameters).ConfigureAwait(false);
+
+                return exists ? NodeAst.True : NodeAst.False;
+            }
+
+            case NodeType.ExprScalarSubquery:
+            {
+                if (expr.leftAst is null)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid scalar subquery expression");
+
+                ColumnValue value = await scalarExecutor.ExecuteAsync(
+                    database, expr.leftAst, ticket.TxnState, ticket.Parameters).ConfigureAwait(false);
+
+                return ColumnValueAstBuilder.FromColumnValue(value);
+            }
+
+            case NodeType.ExprInSubquery:
+                return await RewriteInSubqueryAsync(database, expr, ticket, negated: false).ConfigureAwait(false);
+
+            case NodeType.ExprNotInSubquery:
+                return await RewriteInSubqueryAsync(database, expr, ticket, negated: true).ConfigureAwait(false);
+        }
+
+        NodeAst? left = expr.leftAst is not null
+            ? await RewriteProjectionExpressionAsync(database, expr.leftAst, ticket).ConfigureAwait(false)
+            : null;
+
+        NodeAst? right = expr.rightAst is not null
+            ? await RewriteProjectionExpressionAsync(database, expr.rightAst, ticket).ConfigureAwait(false)
+            : null;
+
+        if (ReferenceEquals(left, expr.leftAst) && ReferenceEquals(right, expr.rightAst))
+            return expr;
+
+        return new NodeAst(
+            expr.nodeType, left, right,
+            expr.extendedOne, expr.extendedTwo, expr.extendedThree,
+            expr.extendedFour, expr.extendedFive, expr.yytext, expr.extendedSix);
     }
 
     public async Task<SelectQuery> RewriteSelectQueryAsync(

@@ -6,9 +6,11 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.IO;
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Config.Models;
 using CamusDB.Core.Storage.Kv;
 using Kahuna;
@@ -91,5 +93,56 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
 
         Assert.That(built.StartElectionTimeout, Is.EqualTo(1500));
         Assert.That(built.EndElectionTimeout, Is.EqualTo(3500));
+    }
+
+    [Test]
+    public void EvictionAndCompactionKnobs_OverrideStandaloneBaseline()
+    {
+        KahunaOptionsConfig kahuna = new()
+        {
+            MaxEntriesPerActor = 20_000,
+            MaxBytesPerActor = 128L * 1024 * 1024,
+            CacheEntryTtlMs = 90_000,
+            CacheEntriesToRemove = 250,
+            CollectionIntervalMs = 15_000,
+            CompactEveryOperations = 500,
+            CompactNumberEntries = 32,
+            MaxEntriesPerCompaction = 2_000,
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/evict-db", kahuna);
+
+        Assert.That(built.MaxEntriesPerActor, Is.EqualTo(20_000));
+        Assert.That(built.MaxBytesPerActor, Is.EqualTo(128L * 1024 * 1024));
+        Assert.That(built.CacheEntryTtl, Is.EqualTo(TimeSpan.FromMilliseconds(90_000)));
+        Assert.That(built.CacheEntriesToRemove, Is.EqualTo(250));
+        Assert.That(built.CollectionInterval, Is.EqualTo(TimeSpan.FromMilliseconds(15_000)));
+        Assert.That(built.CompactEveryOperations, Is.EqualTo(500));
+        Assert.That(built.CompactNumberEntries, Is.EqualTo(32));
+        Assert.That(built.MaxEntriesPerCompaction, Is.EqualTo(2_000));
+    }
+
+    [Test]
+    public void UnsetEvictionKnobs_KeepKahunaDefaults()
+    {
+        // An empty kahuna section must not touch the eviction/compaction knobs; they inherit
+        // Kahuna's own EmbeddedKahunaOptions defaults untouched.
+        EmbeddedKahunaOptions defaults = new();
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/defaults-db", new KahunaOptionsConfig());
+
+        Assert.That(built.CacheEntryTtl, Is.EqualTo(defaults.CacheEntryTtl));
+        Assert.That(built.CacheEntriesToRemove, Is.EqualTo(defaults.CacheEntriesToRemove));
+        Assert.That(built.CollectionInterval, Is.EqualTo(defaults.CollectionInterval));
+        Assert.That(built.CompactNumberEntries, Is.EqualTo(defaults.CompactNumberEntries));
+        Assert.That(built.MaxEntriesPerCompaction, Is.EqualTo(defaults.MaxEntriesPerCompaction));
+    }
+
+    [Test]
+    public void NonPositiveEvictionKnob_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { CacheEntryTtlMs = 0 }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("cache_entry_ttl_ms"));
     }
 }

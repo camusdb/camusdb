@@ -150,8 +150,23 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.MaxBytesPerActor is long maxBytes)
             baseline.MaxBytesPerActor = maxBytes;
 
+        if (kahuna.CacheEntryTtlMs is int cacheTtl)
+            baseline.CacheEntryTtl = TimeSpan.FromMilliseconds(cacheTtl);
+
+        if (kahuna.CacheEntriesToRemove is int cacheEvict)
+            baseline.CacheEntriesToRemove = cacheEvict;
+
+        if (kahuna.CollectionIntervalMs is int collectInterval)
+            baseline.CollectionInterval = TimeSpan.FromMilliseconds(collectInterval);
+
         if (kahuna.CompactEveryOperations is int compactEvery)
             baseline.CompactEveryOperations = compactEvery;
+
+        if (kahuna.CompactNumberEntries is int compactEntries)
+            baseline.CompactNumberEntries = compactEntries;
+
+        if (kahuna.MaxEntriesPerCompaction is int maxPerCompaction)
+            baseline.MaxEntriesPerCompaction = maxPerCompaction;
 
         return baseline;
     }

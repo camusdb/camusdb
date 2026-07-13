@@ -31,6 +31,12 @@ than silently treated as a plain `EXPLAIN`.
 > inner subquery once (it is materialized during planning), so `EXPLAIN` of such a statement
 > does read storage for the inner query. The outer query is never executed by plain `EXPLAIN`.
 
+> **FROM-less limitation:** a [FROM-less `SELECT`](./fromless-select.md) has no plan tree, so
+> plain `EXPLAIN` renders a fixed `constant-source` → `project` (→ `limit`) shape rather than a
+> costed plan, and `EXPLAIN (ANALYZE)` is rejected (there is no table access to measure — use
+> plain `EXPLAIN`). Unlike a real query, `EXPLAIN` of a FROM-less `SELECT` does **not**
+> pre-materialize its projection subqueries; they appear only as their output column names.
+
 ---
 
 ## Result-row schema
@@ -99,6 +105,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `hash-join`              | Inner equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
 | `merge-join`             | Inner equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>` (right-filter appended when present) |
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
+| `constant-source`        | The single synthetic row of a **FROM-less** `SELECT` (no table access) | `1 row` |
 
 Notes:
 - Uncorrelated `IN`/`NOT IN` over an **indexed** inner column become a `semi-join` /
