@@ -39,6 +39,9 @@ public static class EmbeddedKahunaOptionsBuilder
             WalRevision = "v1",
             StartElectionTimeout = 2000,
             EndElectionTimeout = 4000,
+            RocksDbSharedMemoryEnabled = true,
+            RocksDbSharedMemoryBudgetMb = 320,
+            RocksDbSharedMemtableBudgetMb = 128,
         };
     }
 
@@ -55,6 +58,9 @@ public static class EmbeddedKahunaOptionsBuilder
             WalPath = Path.Combine(dataPath, "wal"),
             WalRevision = "v1",
             InitialPartitions = 1,
+            RocksDbSharedMemoryEnabled = true,
+            RocksDbSharedMemoryBudgetMb = 320,
+            RocksDbSharedMemtableBudgetMb = 128,
         };
     }
 
@@ -71,6 +77,9 @@ public static class EmbeddedKahunaOptionsBuilder
             WalPath = Path.Combine(dataPath, "wal"),
             WalRevision = "v1",
             InitialPartitions = 1,
+            RocksDbSharedMemoryEnabled = true,
+            RocksDbSharedMemoryBudgetMb = 320,
+            RocksDbSharedMemtableBudgetMb = 128,
         };
     }
 
@@ -167,6 +176,33 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.MaxEntriesPerCompaction is int maxPerCompaction)
             baseline.MaxEntriesPerCompaction = maxPerCompaction;
+
+        if (kahuna.RocksdbSharedMemory is bool sharedMem)
+            baseline.RocksDbSharedMemoryEnabled = sharedMem;
+
+        if (kahuna.RocksdbSharedMemoryBudgetMb is int sharedBudget)
+            baseline.RocksDbSharedMemoryBudgetMb = sharedBudget;
+
+        if (kahuna.RocksdbSharedMemtableBudgetMb is int memtableBudget)
+            baseline.RocksDbSharedMemtableBudgetMb = memtableBudget;
+
+        // Kahuna only builds the shared bundle when sharing is enabled and both databases are RocksDB;
+        // otherwise the budgets are ignored. In that build case the memtable sub-budget must fit inside
+        // the total cache budget, or Kahuna's RocksDbSharedResources.CreateWithUnifiedBudget throws an
+        // ArgumentOutOfRangeException while the node is starting. KahunaOptionsConfig.Validate only sees
+        // the raw config, so a single-knob override (e.g. lowering only the total budget below the
+        // baseline memtable default) slips past it and would surface as a raw crash at boot. Re-check the
+        // effective, post-merge pair here so it fails fast with a clear config error instead.
+        if (baseline.RocksDbSharedMemoryEnabled
+            && baseline.Storage == "rocksdb"
+            && baseline.WalStorage == "rocksdb"
+            && baseline.RocksDbSharedMemtableBudgetMb > baseline.RocksDbSharedMemoryBudgetMb)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidConfig,
+                $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.RocksDbSharedMemtableBudgetMb}) must be <= " +
+                $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.RocksDbSharedMemoryBudgetMb})");
+        }
 
         return baseline;
     }

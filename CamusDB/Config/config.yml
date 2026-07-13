@@ -166,3 +166,10 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 #   compact_every_operations: 1000      # take a Raft-log compaction point every N operations
 #   compact_number_entries: 50          # trailing log entries retained at each compaction point
 #   max_entries_per_compaction: 5000    # cap on entries removed by a single compaction pass
+#
+#   # RocksDB memory sharing (default: on whenever storage AND wal_storage are rocksdb;
+#   # a no-op otherwise). One block cache + one write-buffer manager serve both databases,
+#   # bounding total RocksDB memory with a single budget instead of two.
+#   rocksdb_shared_memory: true                 # set false to give each database its own budget
+#   rocksdb_shared_memory_budget_mb: 320        # total shared block-cache budget (MiB)
+#   rocksdb_shared_memtable_budget_mb: 128      # memtable sub-budget (MiB); must be <= the total

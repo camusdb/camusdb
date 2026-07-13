@@ -43,6 +43,9 @@ public sealed class KahunaOptionsConfig
         "compact_every_operations",
         "compact_number_entries",
         "max_entries_per_compaction",
+        "rocksdb_shared_memory",
+        "rocksdb_shared_memory_budget_mb",
+        "rocksdb_shared_memtable_budget_mb",
     };
 
     /// <summary>Persistence backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
@@ -121,6 +124,31 @@ public sealed class KahunaOptionsConfig
     public int? MaxEntriesPerCompaction { get; set; }
 
     /// <summary>
+    /// Enables the shared RocksDB block-cache and WriteBufferManager across the KV backend and the
+    /// Raft WAL. This is a no-op unless both <c>storage</c> and <c>wal_storage</c> are set to
+    /// <c>rocksdb</c> — Kahuna silently skips the shared bundle otherwise.
+    /// When both databases are RocksDB, enabling this bounds total cache+memtable memory to one
+    /// shared budget (<see cref="RocksdbSharedMemoryBudgetMb"/>) instead of two independent ones.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbSharedMemoryEnabled"/>.
+    /// </summary>
+    public bool? RocksdbSharedMemory { get; set; }
+
+    /// <summary>
+    /// Total shared block-cache budget in MiB when <see cref="RocksdbSharedMemory"/> is enabled.
+    /// The memtable sub-budget (<see cref="RocksdbSharedMemtableBudgetMb"/>) lives inside this budget
+    /// and must be &lt;= this value. Must be &gt; 0 when set.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbSharedMemoryBudgetMb"/>.
+    /// </summary>
+    public int? RocksdbSharedMemoryBudgetMb { get; set; }
+
+    /// <summary>
+    /// Memtable sub-budget in MiB, cost-charged into the shared block-cache budget. Must be &gt; 0
+    /// when set, and must be &lt;= <see cref="RocksdbSharedMemoryBudgetMb"/> when both are provided.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbSharedMemtableBudgetMb"/>.
+    /// </summary>
+    public int? RocksdbSharedMemtableBudgetMb { get; set; }
+
+    /// <summary>
     /// Validates allow-listed Kahuna fields. Called from <see cref="ConfigDefinition.Validate"/>.
     /// </summary>
     public void Validate()
@@ -193,6 +221,16 @@ public sealed class KahunaOptionsConfig
 
         if (MaxEntriesPerCompaction is <= 0)
             throw InvalidConfig($"'kahuna.max_entries_per_compaction' must be > 0, got {MaxEntriesPerCompaction}");
+
+        if (RocksdbSharedMemoryBudgetMb is <= 0)
+            throw InvalidConfig($"'kahuna.rocksdb_shared_memory_budget_mb' must be > 0, got {RocksdbSharedMemoryBudgetMb}");
+
+        if (RocksdbSharedMemtableBudgetMb is <= 0)
+            throw InvalidConfig($"'kahuna.rocksdb_shared_memtable_budget_mb' must be > 0, got {RocksdbSharedMemtableBudgetMb}");
+
+        if (RocksdbSharedMemtableBudgetMb is int memtable && RocksdbSharedMemoryBudgetMb is int total && memtable > total)
+            throw InvalidConfig(
+                $"'kahuna.rocksdb_shared_memtable_budget_mb' ({memtable}) must be <= 'kahuna.rocksdb_shared_memory_budget_mb' ({total})");
     }
 
     private static void ValidateStorage(string? value, string field)

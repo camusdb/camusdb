@@ -109,4 +109,21 @@ public sealed class TestConfigReaderCharacterization
         Assert.That(config.Kahuna.StartElectionTimeoutMs, Is.EqualTo(1000));
         Assert.That(config.Kahuna.EndElectionTimeoutMs, Is.EqualTo(3000));
     }
+
+    [Test]
+    public void ReadsRocksDbSharedMemoryOverrides()
+    {
+        // Exercises the real YamlDotNet UnderscoredNamingConvention binding: the underscored YAML keys
+        // must map onto the C# properties (RocksdbSharedMemory, etc.). A mis-cased property name would
+        // silently fail to bind here while the direct-construction builder tests still pass, so this is
+        // the test that locks the yaml-key <-> property contract.
+        ConfigDefinition config = new ConfigReader().Read(
+            "kahuna:\n  rocksdb_shared_memory: false\n" +
+            "  rocksdb_shared_memory_budget_mb: 512\n" +
+            "  rocksdb_shared_memtable_budget_mb: 200");
+
+        Assert.That(config.Kahuna.RocksdbSharedMemory, Is.False);
+        Assert.That(config.Kahuna.RocksdbSharedMemoryBudgetMb, Is.EqualTo(512));
+        Assert.That(config.Kahuna.RocksdbSharedMemtableBudgetMb, Is.EqualTo(200));
+    }
 }
