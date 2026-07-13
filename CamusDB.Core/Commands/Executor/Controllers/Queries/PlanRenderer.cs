@@ -342,6 +342,10 @@ public static class PlanRenderer
 
             NodeType.ExprLike => $"{RenderExpr(expr.leftAst!)} LIKE {RenderExpr(expr.rightAst!)}",
             NodeType.ExprILike => $"{RenderExpr(expr.leftAst!)} ILIKE {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprRegexMatch => $"{RenderExpr(expr.leftAst!)} ~ {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprRegexMatchCi => $"{RenderExpr(expr.leftAst!)} ~* {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprRegexNotMatch => $"{RenderExpr(expr.leftAst!)} !~ {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprRegexNotMatchCi => $"{RenderExpr(expr.leftAst!)} !~* {RenderExpr(expr.rightAst!)}",
 
             NodeType.ExprNot => $"NOT {RenderExpr(expr.leftAst!)}",
             NodeType.ExprIsNull => $"{RenderExpr(expr.leftAst!)} IS NULL",

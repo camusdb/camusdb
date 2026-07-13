@@ -117,6 +117,10 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
                 return (expression.leftAst is not null
                         && ContainsHiddenExpression(expression.leftAst, ticket, outputNames, insideAggregate))
                     || (expression.rightAst is not null
@@ -257,6 +261,10 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
                 if (expression.leftAst is not null)
                     CollectHiddenExpressions(expression.leftAst, ticket, projections, outputNames, insideAggregate);
 

@@ -563,6 +563,25 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                     ValidateCheckConditionAst(condition.leftAst, columnNames);
                 return;
 
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
+            {
+                // When the pattern operand is a string literal, compile it now so a malformed
+                // regex fails at CREATE/ALTER instead of at the first INSERT. A non-literal
+                // pattern (a column or expression) can only be validated at row-evaluation time.
+                if (condition.rightAst?.nodeType == NodeType.String)
+                {
+                    bool ignoreCase = condition.nodeType is NodeType.ExprRegexMatchCi or NodeType.ExprRegexNotMatchCi;
+                    RegexMatcher.ValidatePattern(UnquoteStringLiteral(condition.rightAst.yytext!), ignoreCase);
+                }
+                // Validate the subject operand (column reference, etc.).
+                if (condition.leftAst != null)
+                    ValidateCheckConditionAst(condition.leftAst, columnNames);
+                return;
+            }
+
             // Literals and NULL — always valid.
             case NodeType.Integer:
             case NodeType.Float:
@@ -592,6 +611,15 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 return;
         }
     }
+
+    /// <summary>
+    /// Strips the outer single/double quote from a string-literal token, matching the unquoting
+    /// applied when a <see cref="NodeType.String"/> node is evaluated at runtime.
+    /// </summary>
+    private static string UnquoteStringLiteral(string raw) =>
+        raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\'')
+            ? raw[1..^1]
+            : raw.Trim('"');
 
     private static bool IsAggregateFunction(string name) => name switch
     {

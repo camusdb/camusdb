@@ -490,6 +490,25 @@ public static class CamusDBConfig
     public static bool QueryTracingEnabled = false;
 
     /// <summary>
+    /// Maximum time, in milliseconds, allowed for a single POSIX-style regex match evaluation
+    /// (<c>~</c>, <c>~*</c>, <c>!~</c>, <c>!~*</c>). A match that exceeds this limit throws
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> (in WHERE/HAVING) or
+    /// <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> (inside a CHECK constraint) to
+    /// guard against ReDoS on pathological patterns.
+    /// Default: <c>250</c> ms.
+    /// </summary>
+    public static int RegexMatchTimeoutMs = 250;
+
+    /// <summary>
+    /// Maximum number of compiled <c>Regex</c> instances the engine caches, keyed by
+    /// <c>(pattern, ignoreCase)</c>. When the cache is full, new patterns are still compiled
+    /// and evaluated but the result is not stored. This bounds memory growth from many distinct
+    /// one-off patterns while never failing a query because the cache is full.
+    /// Default: <c>1024</c>.
+    /// </summary>
+    public static int RegexCacheMaxEntries = 1024;
+
+    /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
     /// nodes in cluster and standalone modes.
     /// </summary>

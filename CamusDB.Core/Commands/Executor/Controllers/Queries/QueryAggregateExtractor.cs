@@ -136,6 +136,8 @@ internal static class QueryAggregateExtractor
             or NodeType.ExprLessEqualsThan or NodeType.ExprGreaterEqualsThan
             or NodeType.ExprOr or NodeType.ExprAnd
             or NodeType.ExprLike or NodeType.ExprILike
+            or NodeType.ExprRegexMatch or NodeType.ExprRegexMatchCi
+            or NodeType.ExprRegexNotMatch or NodeType.ExprRegexNotMatchCi
             or NodeType.ExprList => new NodeAst(
                 node.nodeType,
                 node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),

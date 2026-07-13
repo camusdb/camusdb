@@ -23,6 +23,10 @@ TIs             (I|i)(S|s)
 TAsc            (A|a)(S|s)(C|c)
 TLike           (L|l)(I|i)(K|k)(E|e)
 TILike          (I|i)(L|l)(I|i)(K|k)(E|e)
+TRegexIMatch    ~\*
+TRegexMatch     ~
+TRegexNotIMatch !~\*
+TRegexNotMatch  !~
 TTrue           (T|t)(R|r)(U|u)(E|e)
 TFalse          (F|f)(A|a)(L|l)(S|s)(E|e)
 TUpdate         (U|u)(P|p)(D|d)(A|a)(T|t)(E|e)
@@ -168,6 +172,11 @@ TDot            \.
 {TLike} { return (int)Token.TLIKE; }
 
 {TILike} { return (int)Token.TILIKE; }
+
+{TRegexIMatch}    { return (int)Token.TREGEXIMATCH; }
+{TRegexMatch}     { return (int)Token.TREGEXMATCH; }
+{TRegexNotIMatch} { return (int)Token.TREGEXNOTIMATCH; }
+{TRegexNotMatch}  { return (int)Token.TREGEXNOTMATCH; }
 
 {TBegin} { return (int)Token.TBEGIN; }
 

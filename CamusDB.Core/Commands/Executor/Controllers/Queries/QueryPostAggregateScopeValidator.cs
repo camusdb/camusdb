@@ -112,6 +112,10 @@ internal static class QueryPostAggregateScopeValidator
             case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
                 if (expression.leftAst is not null)
                     ValidatePostAggregateExpression(expression.leftAst, query, rowNames, insideAggregate);
 

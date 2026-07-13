@@ -77,8 +77,8 @@ A check must be a **deterministic, single-row** predicate. Rejected at DDL-valid
 - references to **columns that don't exist** on the table.
 
 Everything the WHERE grammar supports otherwise is allowed: comparisons, `AND`/`OR`/`NOT`,
-arithmetic, `BETWEEN`, `LIKE`/`ILIKE`, `IS [NOT] NULL`, `IN (literal list)`, deterministic function
-calls, and `CAST`.
+arithmetic, `BETWEEN`, `LIKE`/`ILIKE`, the regex operators `~` / `~*` / `!~` / `!~*` (see below),
+`IS [NOT] NULL`, `IN (literal list)`, deterministic function calls, and `CAST`.
 
 ### The NULL rule (three-valued logic) — read this
 
@@ -103,6 +103,43 @@ The combinators follow standard three-valued truth tables:
 
 If you want to *forbid* NULL, add `NOT NULL` (or `… IS NOT NULL AND …` inside the check) — that is a
 deliberate, separate decision.
+
+### Regex match operators (`~`, `~*`, `!~`, `!~*`)
+
+PostgreSQL-style regular-expression operators are available anywhere a boolean expression is (a
+CHECK, a `WHERE`, a `HAVING`). Both operands must be text.
+
+| Operator | Meaning                       | Case         |
+|----------|-------------------------------|--------------|
+| `~`      | matches regex                 | sensitive    |
+| `~*`     | matches regex                 | insensitive  |
+| `!~`     | does **not** match regex      | sensitive    |
+| `!~*`    | does **not** match regex      | insensitive  |
+
+```sql
+CREATE TABLE users (
+    username text NOT NULL,
+    CONSTRAINT username_format
+        CHECK (username ~ '^[a-zA-Z][a-zA-Z0-9_]{2,29}$')
+);
+```
+
+Key points:
+
+- **Unanchored.** The pattern matches if it occurs *anywhere* in the value — anchor explicitly with
+  `^` / `$` (as above) to require a full-string match.
+- **.NET regex flavor, not POSIX ERE.** It is a superset for common constructs (character classes,
+  quantifiers, anchors, alternation, groups). POSIX named classes like `[[:alpha:]]` are **not**
+  supported — use `\p{L}` or `[a-zA-Z]`. Case-insensitivity (`~*` / `!~*`) is locale-invariant.
+- **Three-valued NULL** applies just like any other comparison: if the subject (or pattern) is
+  `NULL` the result is `UNKNOWN`, so a nullable column with a regex CHECK still accepts `NULL`. This
+  holds for the negated forms too (`!~` on a `NULL` is `UNKNOWN`, not "true").
+- **Malformed patterns fail early.** A literal pattern that isn't a valid regex is rejected at
+  `CREATE` / `ALTER` time, not deferred to the first `INSERT`. A malformed or timed-out pattern
+  encountered *during* a CHECK evaluation surfaces as a check-constraint violation (HTTP 400).
+- **ReDoS guard.** Every match runs under a bounded timeout
+  (`CamusDBConfig.RegexMatchTimeoutMs`, default 250 ms); a pathological pattern fails rather than
+  hanging. Compiled patterns are cached (`CamusDBConfig.RegexCacheMaxEntries`).
 
 ### Type coercion in a check
 

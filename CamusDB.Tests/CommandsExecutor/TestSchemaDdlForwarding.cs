@@ -342,6 +342,68 @@ public sealed class TestSchemaDdlForwarding
         }
     }
 
+    /// <summary>
+    /// A CHECK constraint containing a regex operator (<c>~</c>) created on the schema leader must
+    /// replicate to a follower and enforce there. The constraint is persisted/replicated as SQL
+    /// text and re-parsed on the follower, so this proves the operator survives
+    /// propose → persist → reparse across nodes: a violating INSERT from the follower is rejected
+    /// with <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> while a valid one succeeds.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task ClusterFollower_RegexCheckConstraint_ReplicatesAndEnforces()
+    {
+        await using ClusterHarness cluster = await ClusterHarness.StartAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        CommandExecutor creatorExecutor = cluster.CreateExecutor(cluster.Nodes[0]);
+        DatabaseDescriptor createdDesc = await creatorExecutor
+            .CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false))
+            .WaitAsync(TimeSpan.FromSeconds(15));
+
+        EmbeddedKahuna leader = await cluster.WaitForSchemaLeaderNode(createdDesc.Id);
+        EmbeddedKahuna follower = cluster.Nodes.First(node => node != leader);
+        CommandExecutor leaderExecutor = cluster.CreateExecutor(leader);
+        CommandExecutor followerExecutor = cluster.CreateExecutor(follower);
+
+        try
+        {
+            // DDL on the schema leader: a table whose CHECK uses the regex match operator.
+            DatabaseDescriptor leaderDb = await leaderExecutor.OpenDatabase(db).WaitAsync(TimeSpan.FromSeconds(10));
+            KvTransaction ddlTx = await leaderDb.Transactions.BeginAsync();
+            await leaderExecutor.ExecuteDDLSQL(new ExecuteSQLTicket(ddlTx, db, @"
+                CREATE TABLE codes (
+                    id object_id DEFAULT(gen_id()) PRIMARY KEY,
+                    code text NOT NULL,
+                    CONSTRAINT code_format CHECK (code ~ '^[A-Z]{3}-[0-9]{3}$')
+                )", null)).WaitAsync(TimeSpan.FromSeconds(20));
+            await leaderDb.Transactions.CommitAsync(ddlTx);
+
+            // From the follower: a valid code inserts, an invalid code is rejected by the
+            // replicated + re-parsed CHECK.
+            DatabaseDescriptor followerDb = await followerExecutor.OpenDatabase(db).WaitAsync(TimeSpan.FromSeconds(10));
+
+            KvTransaction okTx = await followerDb.Transactions.BeginAsync();
+            await followerExecutor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                okTx, db, "INSERT INTO codes (code) VALUES ('ABC-123')", null))
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            await followerDb.Transactions.CommitAsync(okTx);
+
+            KvTransaction badTx = await followerDb.Transactions.BeginAsync();
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() =>
+                followerExecutor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    badTx, db, "INSERT INTO codes (code) VALUES ('invalid')", null)));
+            Assert.NotNull(ex);
+            Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, ex!.Code,
+                "the regex CHECK must replicate to the follower and reject the violating row there");
+            await followerDb.Transactions.RollbackAsync(badTx);
+        }
+        finally
+        {
+            await CleanupDatabaseAsync(db, [leaderExecutor, followerExecutor, creatorExecutor]);
+        }
+    }
+
     private static CreateTableTicket CreateRobotsTableTicket(string db, bool ifNotExists = false)
     {
         return new(

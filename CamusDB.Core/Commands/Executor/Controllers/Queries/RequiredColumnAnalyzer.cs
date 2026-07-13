@@ -583,6 +583,10 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
                 if (expression.leftAst is not null)
                 {
                     CollectFromPostAggregateExpression(
@@ -798,6 +802,10 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
                 if (expression.leftAst is not null)
                 {
                     CollectFromPostAggregateExpressionForAlias(

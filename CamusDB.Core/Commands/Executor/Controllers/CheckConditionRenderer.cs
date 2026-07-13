@@ -111,6 +111,12 @@ internal static class CheckConditionRenderer
             case NodeType.ExprLike:  RenderBinary(sb, expr, "LIKE"); return;
             case NodeType.ExprILike: RenderBinary(sb, expr, "ILIKE"); return;
 
+            // ── regex matching ──────────────────────────────────────────────────
+            case NodeType.ExprRegexMatch:      RenderBinary(sb, expr, "~");   return;
+            case NodeType.ExprRegexMatchCi:    RenderBinary(sb, expr, "~*");  return;
+            case NodeType.ExprRegexNotMatch:   RenderBinary(sb, expr, "!~");  return;
+            case NodeType.ExprRegexNotMatchCi: RenderBinary(sb, expr, "!~*"); return;
+
             // ── null tests ──────────────────────────────────────────────────────
             case NodeType.ExprIsNull:
                 RenderOperand(sb, expr.leftAst!);

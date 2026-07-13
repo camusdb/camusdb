@@ -15,7 +15,7 @@
 %left TOR
 %left TAND
 %right TNOT
-%left TLIKE TILIKE
+%left TLIKE TILIKE TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
@@ -28,6 +28,7 @@
 %token TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_UUID TTYPE_ARRAY
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT TCHECK
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
+%token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT
 
@@ -620,6 +621,10 @@ expr       : equals_expr { $$.n = $1.n; }
            | div_expr { $$.n = $1.n; }
            | like_expr { $$.n = $1.n; }
            | ilike_expr { $$.n = $1.n; }
+           | regex_match_expr { $$.n = $1.n; }
+           | regex_imatch_expr { $$.n = $1.n; }
+           | regex_not_match_expr { $$.n = $1.n; }
+           | regex_not_imatch_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
@@ -681,6 +686,11 @@ like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n
 
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null, null); }
            ;
+
+regex_match_expr      : condition TREGEXMATCH    condition { $$.n = new(NodeType.ExprRegexMatch,      $1.n, $3.n, null, null, null, null, null, null); } ;
+regex_imatch_expr     : condition TREGEXIMATCH   condition { $$.n = new(NodeType.ExprRegexMatchCi,    $1.n, $3.n, null, null, null, null, null, null); } ;
+regex_not_match_expr  : condition TREGEXNOTMATCH  condition { $$.n = new(NodeType.ExprRegexNotMatch,   $1.n, $3.n, null, null, null, null, null, null); } ;
+regex_not_imatch_expr : condition TREGEXNOTIMATCH condition { $$.n = new(NodeType.ExprRegexNotMatchCi, $1.n, $3.n, null, null, null, null, null, null); } ;
 
 is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, NodeAst.Null, null, null, null, null, null, null); }
              ;

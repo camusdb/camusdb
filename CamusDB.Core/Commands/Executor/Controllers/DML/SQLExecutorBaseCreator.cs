@@ -392,6 +392,24 @@ internal abstract class SQLExecutorBaseCreator
                     return ColumnValue.FromBool(ILike(leftValue.StrValue!, rightValue.StrValue!));
                 }
 
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
+                {
+                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+                    if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt,
+                            $"No matching signature for operator ~ for argument types: {leftValue.Type}, {rightValue.Type}");
+
+                    bool ci = expr.nodeType is NodeType.ExprRegexMatchCi or NodeType.ExprRegexNotMatchCi;
+                    bool negate = expr.nodeType is NodeType.ExprRegexNotMatch or NodeType.ExprRegexNotMatchCi;
+                    bool matched = Functions.RegexMatcher.IsMatch(leftValue.StrValue!, rightValue.StrValue!, ci);
+                    return ColumnValue.FromBool(negate ? !matched : matched);
+                }
+
             case NodeType.ExprScalarSubquery:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
@@ -614,10 +632,12 @@ internal abstract class SQLExecutorBaseCreator
                 return text.Contains(inner, StringComparison.Ordinal);
         }
 
-        // Fallback: regex for multi-wildcard patterns (e.g. 'a%b%c').
-        string escapedPattern = Regex.Escape(pattern);
-        string regexPattern = string.Concat("^", escapedPattern.Replace("%", ".*"), "$");
-        return Regex.IsMatch(text, regexPattern);
+        // Fallback: regex for multi-wildcard patterns (e.g. 'a%b%c'). Route through RegexMatcher
+        // so this path inherits the bounded compiled-pattern cache and the ReDoS match-timeout.
+        // The glob is escaped first and only '%' becomes '.*', so LIKE semantics are unchanged
+        // (still ordinal, case-sensitive).
+        string regexPattern = string.Concat("^", Regex.Escape(pattern).Replace("%", ".*"), "$");
+        return Functions.RegexMatcher.IsMatch(text, regexPattern, ignoreCase: false);
     }
 
     private static bool ILike(string text, string pattern)

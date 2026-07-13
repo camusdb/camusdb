@@ -137,6 +137,33 @@ internal static class CheckEvaluator
                 return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
             }
 
+            // ── regex match / not-match: unknown if either operand is NULL ───────────
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
+            {
+                ColumnValue leftVal = EvalLeaf(condition.leftAst!, row);
+                ColumnValue rightVal = EvalLeaf(condition.rightAst!, row);
+
+                if (leftVal.Type == ColumnType.Null || rightVal.Type == ColumnType.Null)
+                    return null;
+
+                try
+                {
+                    ColumnValue result = SQLExecutorBaseCreator.EvalExpr(condition, row, null);
+                    return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
+                }
+                catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.InvalidInput)
+                {
+                    // A malformed pattern or a match timeout inside a CHECK is a client mistake
+                    // surfaced at write time. Report it as a check-constraint rejection (HTTP 400,
+                    // the row is rejected) rather than letting the regex helper's InvalidInput
+                    // (HTTP 500) escape — mirroring how CompareValues translates incompatible types.
+                    throw new CamusDBException(CamusDBErrorCodes.CheckConstraintViolation, ex.Message);
+                }
+            }
+
             // ── IN membership: unknown if subject is NULL ────────────────────────────
             case NodeType.ExprInMembership:
             {

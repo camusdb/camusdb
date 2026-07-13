@@ -43,6 +43,10 @@ internal static class QueryExpressionWalker
             case NodeType.ExprDiv:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
+            case NodeType.ExprRegexMatch:
+            case NodeType.ExprRegexMatchCi:
+            case NodeType.ExprRegexNotMatch:
+            case NodeType.ExprRegexNotMatchCi:
                 if (expr.leftAst is not null)
                     CollectColumnReferences(expr.leftAst, identifiers);
 
