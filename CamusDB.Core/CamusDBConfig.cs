@@ -495,7 +495,7 @@ public static class CamusDBConfig
     /// <see cref="CamusDBErrorCodes.InvalidInput"/> (in WHERE/HAVING) or
     /// <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> (inside a CHECK constraint) to
     /// guard against ReDoS on pathological patterns.
-    /// Default: <c>250</c> ms.
+    /// Set via <c>regex_match_timeout_ms</c> in <c>config.yml</c>. Default: <c>250</c> ms.
     /// </summary>
     public static int RegexMatchTimeoutMs = 250;
 
@@ -504,7 +504,7 @@ public static class CamusDBConfig
     /// <c>(pattern, ignoreCase)</c>. When the cache is full, new patterns are still compiled
     /// and evaluated but the result is not stored. This bounds memory growth from many distinct
     /// one-off patterns while never failing a query because the cache is full.
-    /// Default: <c>1024</c>.
+    /// Set via <c>regex_cache_max_entries</c> in <c>config.yml</c>. Default: <c>1024</c>.
     /// </summary>
     public static int RegexCacheMaxEntries = 1024;
 

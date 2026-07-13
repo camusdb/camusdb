@@ -129,6 +129,39 @@ public sealed class TestConfigResolver
     }
 
     [Test]
+    public void ApplyToCamusDBConfig_RegexKnobsRoundTrip()
+    {
+        int prevTimeout = CamusDBConfig.RegexMatchTimeoutMs;
+        int prevCache = CamusDBConfig.RegexCacheMaxEntries;
+
+        try
+        {
+            string yml =
+                "regex_match_timeout_ms: 500\n" +
+                "regex_cache_max_entries: 64";
+
+            ConfigDefinition config = new ConfigReader().Read(yml);
+            ConfigResolver.ApplyToCamusDBConfig(config);
+
+            Assert.That(CamusDBConfig.RegexMatchTimeoutMs, Is.EqualTo(500));
+            Assert.That(CamusDBConfig.RegexCacheMaxEntries, Is.EqualTo(64));
+        }
+        finally
+        {
+            CamusDBConfig.RegexMatchTimeoutMs = prevTimeout;
+            CamusDBConfig.RegexCacheMaxEntries = prevCache;
+        }
+    }
+
+    [Test]
+    public void RegexMatchTimeout_NonPositive_Rejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(() =>
+            new ConfigReader().Read("regex_match_timeout_ms: 0"))!;
+        Assert.That(ex.Message, Does.Contain("regex_match_timeout_ms"));
+    }
+
+    [Test]
     public void ApplyToCamusDBConfig_LockKnobsRoundTrip()
     {
         int prevDeadline = CamusDBConfig.LockWaitDeadlineMs;

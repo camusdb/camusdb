@@ -116,6 +116,20 @@ public class ConfigDefinition
     /// </summary>
     public int PlanCacheMaxEntries { get; set; } = 512;
 
+    /// <summary>
+    /// Per-match timeout in milliseconds for the regex operators <c>~</c> / <c>~*</c> / <c>!~</c> /
+    /// <c>!~*</c>; a match that exceeds it is rejected rather than allowed to run unbounded (ReDoS
+    /// guard). Must be &gt; 0. Maps to <c>CamusDBConfig.RegexMatchTimeoutMs</c>.
+    /// </summary>
+    public int RegexMatchTimeoutMs { get; set; } = 250;
+
+    /// <summary>
+    /// Maximum number of compiled regex patterns cached (keyed by pattern + case-sensitivity).
+    /// 0 disables caching — patterns are still compiled and evaluated, just never retained.
+    /// Maps to <c>CamusDBConfig.RegexCacheMaxEntries</c>.
+    /// </summary>
+    public int RegexCacheMaxEntries { get; set; } = 1024;
+
     /// <summary>Numeric Raft node id for cluster mode. Maps to <c>EmbeddedKahunaOptions.NodeId</c>.</summary>
     public int RaftNodeId { get; set; } = 1;
 
@@ -303,6 +317,14 @@ public class ConfigDefinition
         if (SqlParserCacheSweepSeconds <= 0)
             throw Invalid(
                 $"'sql_parser_cache_sweep_seconds' must be > 0, got {SqlParserCacheSweepSeconds}");
+
+        if (RegexMatchTimeoutMs <= 0)
+            throw Invalid(
+                $"'regex_match_timeout_ms' must be > 0, got {RegexMatchTimeoutMs}");
+
+        if (RegexCacheMaxEntries < 0)
+            throw Invalid(
+                $"'regex_cache_max_entries' must be >= 0 (0 = no caching), got {RegexCacheMaxEntries}");
 
         if (HttpPort is <= 0 or > 65535)
             throw Invalid($"'http_port' must be in 1..65535, got {HttpPort}");

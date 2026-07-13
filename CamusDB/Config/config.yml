@@ -104,6 +104,14 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # plan_cache_enabled: false               # SQL plan cache (reuse parsed+planned queries)
 # plan_cache_max_entries: 512             # max LRU entries in the plan cache
 
+# ── Regex match operators (~, ~*, !~, !~*) ────────────────────────────────────
+# regex_match_timeout_ms: per-match timeout guarding against ReDoS on pathological patterns;
+#   a match that exceeds it is rejected rather than allowed to run unbounded. Must be > 0.
+# regex_cache_max_entries: max compiled patterns cached (keyed by pattern + case-sensitivity);
+#   0 disables caching (patterns still compile+evaluate, just aren't retained).
+# regex_match_timeout_ms: 250
+# regex_cache_max_entries: 1024
+
 # ── Query result cache ────────────────────────────────────────────────────────
 # On by default; opt-in per query via a {cache=name} hint. Nothing without a hint is cached.
 # See docs/query-result-cache.md for the full reference.

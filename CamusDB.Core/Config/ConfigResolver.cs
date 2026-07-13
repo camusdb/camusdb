@@ -109,6 +109,9 @@ public static class ConfigResolver
         CamusDBConfig.PlanCacheEnabled = config.PlanCacheEnabled;
         CamusDBConfig.PlanCacheMaxEntries = config.PlanCacheMaxEntries;
 
+        CamusDBConfig.RegexMatchTimeoutMs = config.RegexMatchTimeoutMs;
+        CamusDBConfig.RegexCacheMaxEntries = config.RegexCacheMaxEntries;
+
         CamusDBConfig.SpillEnabled = config.SpillEnabled;
         CamusDBConfig.SpillThresholdRows = config.SpillThresholdRows;
         CamusDBConfig.SpillMergeFanIn = config.SpillMergeFanIn;
