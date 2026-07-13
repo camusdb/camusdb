@@ -108,6 +108,21 @@ public enum NodeType
     /// <c>leftAst</c> = table name node; <c>yytext</c> = constraint name.
     /// </summary>
     AlterTableDropConstraint,
+    /// <summary>
+    /// <c>ALTER TABLE t ALTER [COLUMN] c SET NOT NULL</c>.
+    /// <c>leftAst</c> = table name node; <c>rightAst</c> = column name node.
+    /// </summary>
+    AlterTableSetNotNull,
+    /// <summary>
+    /// <c>ALTER TABLE t ALTER [COLUMN] c DROP NOT NULL</c>.
+    /// <c>leftAst</c> = table name node; <c>rightAst</c> = column name node.
+    /// </summary>
+    AlterTableDropNotNull,
+    /// <summary>
+    /// Column-level <c>CONSTRAINT name NOT NULL</c> written inline on a column definition.
+    /// <c>yytext</c> = the user-supplied constraint name.
+    /// </summary>
+    ConstraintNotNullNamed,
     DropTable,
     DropTableIfExists,
     AlterTableAddColumn,

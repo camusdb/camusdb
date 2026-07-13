@@ -52,6 +52,14 @@ public sealed class TableSchema
     public List<TableIndexSchema>? Indexes { get; set; }
 
     /// <summary>
+    /// CHECK constraints defined on this table (both column-level — desugared to table-level
+    /// at create time — and explicit table-level constraints). Null for tables that have no
+    /// check constraints. Does not bump <c>Version</c> when constraints change (checks do not
+    /// affect row encoding), matching the precedent set by <c>Indexes</c>.
+    /// </summary>
+    public List<CheckConstraintSchema>? CheckConstraints { get; set; }
+
+    /// <summary>
     /// A list of all the previous versions of the table schema.
     /// </summary>
     public List<TableSchemaHistory>? SchemaHistory { get; set; }

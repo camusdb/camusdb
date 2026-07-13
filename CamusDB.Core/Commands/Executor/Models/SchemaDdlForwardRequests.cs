@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -22,6 +23,23 @@ public sealed class ColumnInfoRequest
     public ColumnValue? Default { get; set; }
     public int? MaxLength { get; set; }
     public ColumnType? ArrayElementType { get; set; }
+
+    /// <summary>Name of a nullary volatile function default (e.g. <c>gen_uuid_v7</c>); null when absent.</summary>
+    public string? DefaultFunction { get; set; }
+
+    /// <summary>Name of a <c>CONSTRAINT name NOT NULL</c> declared on the column; null for bare NOT NULL.</summary>
+    public string? NotNullConstraintName { get; set; }
+}
+
+/// <summary>
+/// Wire form of a table-level (or desugared column-level) CHECK constraint carried on a
+/// forwarded CREATE TABLE. Without this the leader would rebuild the table with no checks.
+/// </summary>
+public sealed class CheckConstraintInfoRequest
+{
+    public string Name { get; set; } = "";
+    public string Expression { get; set; } = "";
+    public string[] ReferencedColumns { get; set; } = [];
 }
 
 public sealed class ColumnIndexInfoRequest
@@ -44,6 +62,7 @@ public sealed class ForwardCreateTableRequest
     public string TableName { get; set; } = "";
     public ColumnInfoRequest[] Columns { get; set; } = [];
     public ConstraintInfoRequest[] Constraints { get; set; } = [];
+    public CheckConstraintInfoRequest[] CheckConstraints { get; set; } = [];
     public bool IfNotExists { get; set; }
 }
 
@@ -75,6 +94,21 @@ public sealed class ForwardDropTableRequest
     public string DatabaseName { get; set; } = "";
     public string TableName { get; set; } = "";
     public bool IfExists { get; set; }
+}
+
+public sealed class ForwardAlterConstraintRequest
+{
+    public string OperationId { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public string TableName { get; set; } = "";
+    public string ConstraintName { get; set; } = "";
+    public string? Expression { get; set; }
+    public string[]? ReferencedColumns { get; set; }
+    public AlterConstraintOperation Operation { get; set; }
+
+    /// <summary>Target column for SET/DROP NOT NULL; null for CHECK add/drop. Without it the
+    /// leader cannot resolve the column and the NOT NULL alter fails.</summary>
+    public string? ColumnName { get; set; }
 }
 
 public sealed class ForwardRenameTableRequest

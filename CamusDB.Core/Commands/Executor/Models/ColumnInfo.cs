@@ -39,6 +39,12 @@ public sealed class ColumnInfo
     /// </summary>
     public ColumnType? ArrayElementType { get; }
 
+    /// <summary>
+    /// Name of the NOT NULL constraint when the column was declared with <c>CONSTRAINT name NOT NULL</c>.
+    /// Null for bare <c>NOT NULL</c> declarations.
+    /// </summary>
+    public string? NotNullConstraintName { get; }
+
     public ColumnInfo(
         string name,
         ColumnType type,
@@ -46,7 +52,8 @@ public sealed class ColumnInfo
         ColumnValue? defaultValue = null,
         int? maxLength = null,
         ColumnType? arrayElementType = null,
-        string? defaultFunction = null
+        string? defaultFunction = null,
+        string? notNullConstraintName = null
     )
     {
         Name = name;
@@ -56,5 +63,6 @@ public sealed class ColumnInfo
         MaxLength = maxLength;
         ArrayElementType = arrayElementType;
         DefaultFunction = defaultFunction;
+        NotNullConstraintName = notNullConstraintName;
     }
 }

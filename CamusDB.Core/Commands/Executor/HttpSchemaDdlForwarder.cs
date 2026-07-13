@@ -58,6 +58,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             TableName = ticket.TableName,
             Columns = MapColumns(ticket.Columns),
             Constraints = MapConstraints(ticket.Constraints),
+            CheckConstraints = MapCheckConstraints(ticket.CheckConstraints),
             IfNotExists = ticket.IfNotExists,
         };
 
@@ -107,6 +108,23 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         };
 
         return await PostAsync(leader, "drop-table", request, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken)
+    {
+        ForwardAlterConstraintRequest request = new()
+        {
+            OperationId = operationId,
+            DatabaseName = ticket.DatabaseName,
+            TableName = ticket.TableName,
+            ConstraintName = ticket.ConstraintName,
+            Expression = ticket.Expression,
+            ReferencedColumns = ticket.ReferencedColumns,
+            Operation = ticket.Operation,
+            ColumnName = ticket.ColumnName,
+        };
+
+        return await PostAsync(leader, "alter-constraint", request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken)
@@ -225,6 +243,8 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         Default = col.Default,
         MaxLength = col.MaxLength,
         ArrayElementType = col.ArrayElementType,
+        DefaultFunction = col.DefaultFunction,
+        NotNullConstraintName = col.NotNullConstraintName,
     };
 
     private static ColumnInfoRequest[] MapColumns(ColumnInfo[] cols)
@@ -246,6 +266,22 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
                 Type = c.Type,
                 Name = c.Name,
                 Columns = c.Columns.Select(col => new ColumnIndexInfoRequest { Name = col.Name, Order = col.Order }).ToArray(),
+            };
+        }
+        return result;
+    }
+
+    private static CheckConstraintInfoRequest[] MapCheckConstraints(CheckConstraintInfo[] checks)
+    {
+        CheckConstraintInfoRequest[] result = new CheckConstraintInfoRequest[checks.Length];
+        for (int i = 0; i < checks.Length; i++)
+        {
+            CheckConstraintInfo c = checks[i];
+            result[i] = new()
+            {
+                Name = c.Name,
+                Expression = c.Expression,
+                ReferencedColumns = c.ReferencedColumns,
             };
         }
         return result;

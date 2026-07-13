@@ -55,6 +55,12 @@ public static class CamusDBErrorCodes
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
+
+    /// <summary>
+    /// A row was rejected because it evaluates to <c>false</c> against a named CHECK constraint.
+    /// The exception message includes the constraint name. Maps to HTTP 400.
+    /// </summary>
+    public const string CheckConstraintViolation = "CADB0303";
     
     public const string TransactionAlreadyCompleted = "CADB0501";
     public const string TransactionConflict = "CADB0502";
@@ -120,6 +126,7 @@ public static class CamusDBErrorCodes
     public static int GetHttpStatus(string code) => code switch
     {
         TransactionMutationLimitExceeded => 400,
+        CheckConstraintViolation => 400,
         _ => 500
     };
 }

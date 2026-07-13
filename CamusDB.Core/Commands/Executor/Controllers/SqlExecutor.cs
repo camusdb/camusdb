@@ -38,6 +38,8 @@ internal sealed class SqlExecutor()
 
     private readonly SQLExecutorAlterIndexCreator sqlExecutorAlterIndexCreator = new();
 
+    private readonly SQLExecutorAlterConstraintCreator sqlExecutorAlterConstraintCreator = new();
+
     public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorQueryCreator.CreateQueryTicket(ticket, ast);
@@ -100,6 +102,16 @@ internal sealed class SqlExecutor()
     internal AlterIndexTicket CreateAlterIndexTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorAlterIndexCreator.CreateAlterIndexTicket(ticket, ast);
+    }
+
+    /// <summary>
+    /// Creates a ticket to add or drop a CHECK (or named NOT NULL) constraint from the AST
+    /// representation of a SQL statement. Requires the current table schema so column references
+    /// can be validated at parse time.
+    /// </summary>
+    internal AlterConstraintTicket CreateAlterConstraintTicket(ExecuteSQLTicket ticket, NodeAst ast, Catalogs.Models.TableSchema tableSchema)
+    {
+        return sqlExecutorAlterConstraintCreator.CreateAlterConstraintTicket(ticket, ast, tableSchema);
     }
 
     /// <summary>

@@ -68,6 +68,15 @@ public sealed class TableColumnSchema
     /// </summary>
     public ColumnType? ArrayElementType { get; }
 
+    /// <summary>
+    /// Optional name for the NOT NULL constraint on this column, set when the column was declared
+    /// with <c>CONSTRAINT name NOT NULL</c> or when NOT NULL was added via
+    /// <c>ALTER TABLE … ALTER COLUMN … SET NOT NULL</c>. When non-null, this name is recognised
+    /// by <c>DROP CONSTRAINT name</c> as an alias for dropping the NOT NULL. Null for columns
+    /// where the constraint is unnamed (bare <c>NOT NULL</c> in CREATE TABLE).
+    /// </summary>
+    public string? NotNullConstraintName { get; }
+
     public TableColumnSchema(
         string id,
         string name,
@@ -77,7 +86,8 @@ public sealed class TableColumnSchema
         SchemaElementState state = SchemaElementState.Public,
         int? maxLength = null,
         ColumnType? arrayElementType = null,
-        string? defaultFunction = null
+        string? defaultFunction = null,
+        string? notNullConstraintName = null
     )
     {
         Id = id;
@@ -89,5 +99,6 @@ public sealed class TableColumnSchema
         MaxLength = maxLength;
         ArrayElementType = arrayElementType;
         DefaultFunction = defaultFunction;
+        NotNullConstraintName = notNullConstraintName;
     }
 }

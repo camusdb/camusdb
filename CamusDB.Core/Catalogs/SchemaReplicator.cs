@@ -446,6 +446,10 @@ public sealed class SchemaReplicator
             Columns = table.Columns is null ? null : [.. table.Columns],
             // TableIndexSchema is immutable so a shallow list copy is sufficient.
             Indexes = table.Indexes is null ? null : [.. table.Indexes],
+            // Shallow list copy: the CheckConstraintSchema instances (and their cached parsed AST)
+            // are shared, matching the Indexes treatment. Omitting this dropped all checks from the
+            // clone, silently losing them for any consumer that promotes the clone to a live schema.
+            CheckConstraints = table.CheckConstraints is null ? null : [.. table.CheckConstraints],
             SchemaHistory = table.SchemaHistory is null
                 ? null
                 : table.SchemaHistory.Select(CloneHistory).ToList(),

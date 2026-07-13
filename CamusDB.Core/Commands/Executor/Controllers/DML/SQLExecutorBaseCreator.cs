@@ -433,6 +433,14 @@ internal abstract class SQLExecutorBaseCreator
             return;
         }
 
+        if (constraintsList.nodeType == NodeType.ConstraintNotNullNamed)
+        {
+            // Carry the user-supplied constraint name as the ColumnValue so callers can thread it
+            // into ColumnInfo.NotNullConstraintName.
+            constraintTypes.Add((ColumnConstraintType.NotNull, new ColumnValue(ColumnType.String, constraintsList.yytext!)));
+            return;
+        }
+
         if (constraintsList.nodeType == NodeType.ConstraintNull)
         {
             constraintTypes.Add((ColumnConstraintType.Null, null));
@@ -485,6 +493,16 @@ internal abstract class SQLExecutorBaseCreator
             return;
         }
 
+        if (constraintsList.nodeType == NodeType.ConstraintCheck)
+        {
+            // The column-level check is collected straight from the AST by
+            // SQLExecutorCreateTableCreator.CollectCheckConstraints (which desugars it to a named
+            // table-level check); this arm only needs to consume the node so it isn't treated as
+            // an unknown constraint. Nothing here reads the value back.
+            constraintTypes.Add((ColumnConstraintType.Check, null));
+            return;
+        }
+
         if (constraintsList.nodeType == NodeType.CreateTableFieldConstraintList)
         {
             if (constraintsList.leftAst != null)
@@ -521,6 +539,22 @@ internal abstract class SQLExecutorBaseCreator
         {
             if (type == ColumnConstraintType.DefaultFunction)
                 return value?.StrValue;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the user-supplied NOT NULL constraint name when the column was declared with
+    /// <c>CONSTRAINT name NOT NULL</c> (carried as a String <see cref="ColumnValue"/> by
+    /// <see cref="GetColumnConstraintList"/>), or null for bare <c>NOT NULL</c>.
+    /// </summary>
+    protected static string? GetNotNullConstraintNameFromConstraints(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.NotNull && value?.StrValue is { Length: > 0 } name)
+                return name;
         }
 
         return null;

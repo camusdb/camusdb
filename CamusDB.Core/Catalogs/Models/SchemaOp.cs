@@ -56,5 +56,27 @@ public enum SchemaOp
     RenameColumn = 8,
 
     /// <summary>Rename an index (payload: <c>SchemaRenamePayload</c>). Metadata-only; does not bump <c>TableSchema.Version</c>.</summary>
-    RenameIndex = 9
+    RenameIndex = 9,
+
+    /// <summary>
+    /// Add a CHECK constraint (payload: <c>SchemaCheckConstraintPayload</c>). Idempotent on apply
+    /// (an existing constraint with the same name is replaced). Does not bump <c>TableSchema.Version</c>
+    /// because check constraints do not affect row encoding.
+    /// </summary>
+    AddCheckConstraint = 10,
+
+    /// <summary>
+    /// Remove a CHECK constraint (payload: <c>SchemaCheckConstraintPayload</c>). Idempotent on apply —
+    /// if the constraint is already absent the operation is a no-op. Does not bump
+    /// <c>TableSchema.Version</c>.
+    /// </summary>
+    DropCheckConstraint = 11,
+
+    /// <summary>
+    /// Set or clear the NOT NULL flag and its optional constraint name on a single column
+    /// (payload: <c>SchemaSetColumnNotNullPayload</c>). Used for both SET NOT NULL and
+    /// DROP NOT NULL. Does not bump <c>TableSchema.Version</c> — the NOT NULL flag is
+    /// enforced at write time, not encoded in row bytes.
+    /// </summary>
+    SetColumnNotNull = 12
 }

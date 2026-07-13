@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -164,6 +165,10 @@ public sealed class CatalogsManager
         // in the payload so every node applies identical definitions.
         TableIndexSchema[]? indexes = BuildInlineIndexes(ticket, columns);
 
+        // Fold CHECK constraints declared in the CREATE TABLE into the same single delta so the
+        // table is created with its constraints already in place.
+        CheckConstraintSchema[]? checkConstraints = BuildInlineCheckConstraints(ticket);
+
         return new()
         {
             Ts = tx.TransactionId,
@@ -176,7 +181,8 @@ public sealed class CatalogsManager
                 TableId = tableId,
                 TableName = ticket.TableName,
                 Columns = columns,
-                Indexes = indexes
+                Indexes = indexes,
+                CheckConstraints = checkConstraints
             })
         };
     }
@@ -251,6 +257,26 @@ public sealed class CatalogsManager
         }
 
         return [.. indexes];
+    }
+
+    /// <summary>
+    /// Converts the <see cref="CheckConstraintInfo"/> array on the ticket into a
+    /// <see cref="CheckConstraintSchema"/> array suitable for inclusion in the
+    /// <see cref="SchemaCreateTablePayload"/>. Returns null when the ticket has no check constraints
+    /// (backward-compatible: absent in old payloads → treated as no checks).
+    /// The <c>ParsedCondition</c> field is not included; it is rebuilt at apply time.
+    /// </summary>
+    private static CheckConstraintSchema[]? BuildInlineCheckConstraints(CreateTableTicket ticket)
+    {
+        if (ticket.CheckConstraints.Length == 0)
+            return null;
+
+        return [.. ticket.CheckConstraints.Select(cc => new CheckConstraintSchema
+        {
+            Name = cc.Name,
+            Expression = cc.Expression,
+            ReferencedColumns = cc.ReferencedColumns
+        })];
     }
 
     private static SchemaChangeLogEntry AlterTableEntry(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
@@ -459,6 +485,7 @@ public sealed class CatalogsManager
                         DefaultValue = column.Default,
                         DefaultFunction = column.DefaultFunction,
                         State = initialState,
+                        NotNullConstraintName = column.NotNullConstraintName,
                     }
                 })
             };
@@ -741,6 +768,87 @@ public sealed class CatalogsManager
     private static string FormatLaggards(IReadOnlyList<string> laggards)
         => laggards.Count == 0 ? "(none)" : string.Join(", ", laggards);
 
+    /// <summary>
+    /// Proposes an <c>AddCheckConstraint</c> delta and replicates it to all cluster nodes.
+    /// The proposer must already have validated the expression and confirmed existing rows pass.
+    /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
+    /// </summary>
+    public async Task ReplicateAddCheckConstraintAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string constraintName,
+        string expression,
+        string[] referencedColumns)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.AddCheckConstraint,
+                Payload = Serializator.Serialize(new SchemaCheckConstraintPayload
+                {
+                    TableName = tableName,
+                    ConstraintName = constraintName,
+                    Expression = expression,
+                    ReferencedColumns = referencedColumns
+                })
+            };
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes a <c>DropCheckConstraint</c> delta and replicates it to all cluster nodes.
+    /// Idempotent: if the constraint is already absent, the delta is a no-op but still advances
+    /// the schema version.
+    /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
+    /// </summary>
+    public async Task ReplicateDropCheckConstraintAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string constraintName)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.DropCheckConstraint,
+                Payload = Serializator.Serialize(new SchemaCheckConstraintPayload
+                {
+                    TableName = tableName,
+                    ConstraintName = constraintName,
+                    Expression = "",
+                    ReferencedColumns = []
+                })
+            };
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
     private static string? ResolveTableId(DatabaseDescriptor database, string tableName)
         => database.Schema.Tables.TryGetValue(tableName, out TableSchema? table) ? table.Id : null;
 
@@ -845,6 +953,8 @@ public sealed class CatalogsManager
         // lives under the new name after apply, so use NewName so the persist path finds it.
         SchemaOp.RenameTable => DecodePayload<SchemaRenamePayload>(entry).NewName,
         SchemaOp.RenameColumn or SchemaOp.RenameIndex => DecodePayload<SchemaRenamePayload>(entry).TableName,
+        SchemaOp.AddCheckConstraint or SchemaOp.DropCheckConstraint => DecodePayload<SchemaCheckConstraintPayload>(entry).TableName,
+        SchemaOp.SetColumnNotNull => DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Cannot resolve table name for schema operation '{entry.Op}'"
@@ -965,6 +1075,9 @@ public sealed class CatalogsManager
             SchemaOp.RenameTable => ApplyRenameTable(schema, DecodePayload<SchemaRenamePayload>(entry)),
             SchemaOp.RenameColumn => ApplyRenameColumn(schema, DecodePayload<SchemaRenamePayload>(entry)),
             SchemaOp.RenameIndex => ApplyRenameIndex(schema, DecodePayload<SchemaRenamePayload>(entry)),
+            SchemaOp.AddCheckConstraint => ApplyAddCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
+            SchemaOp.DropCheckConstraint => ApplyDropCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
+            SchemaOp.SetColumnNotNull => ApplySetColumnNotNull(schema, DecodePayload<SchemaSetColumnNotNullPayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -1009,7 +1122,8 @@ public sealed class CatalogsManager
                     state: column.State,
                     maxLength: column.MaxLength,
                     arrayElementType: column.ArrayElementType,
-                    defaultFunction: column.DefaultFunction
+                    defaultFunction: column.DefaultFunction,
+                    notNullConstraintName: column.NotNullConstraintName
                 )
             );
         }
@@ -1028,6 +1142,14 @@ public sealed class CatalogsManager
         // is empty so the indexes are already Public — no backfill, no separate AddIndex delta.
         if (payload.Indexes is { Length: > 0 })
             tableSchema.Indexes = [.. payload.Indexes];
+
+        // CHECK constraints folded in by BuildInlineCheckConstraints. Rebuild AST cache so
+        // enforcement is immediately available on the node that created the table.
+        if (payload.CheckConstraints is { Length: > 0 })
+        {
+            tableSchema.CheckConstraints = [.. payload.CheckConstraints];
+            ParseCheckConstraintAsts(tableSchema);
+        }
 
         schema.Tables.Add(payload.TableName, tableSchema);
 
@@ -1074,6 +1196,142 @@ public sealed class CatalogsManager
 
         tableSchema.Indexes?.RemoveAll(ix => ix.Name == payload.IndexName);
         return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies an AddCheckConstraint delta. Idempotent: an existing constraint with the same name
+    /// is replaced. Rebuilds the <c>ParsedCondition</c> AST cache so enforcement is immediately
+    /// available on the applying node. Does not bump <c>TableSchema.Version</c> — check constraints
+    /// do not affect row encoding.
+    /// </summary>
+    private static TableSchema ApplyAddCheckConstraint(Schema schema, SchemaCheckConstraintPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        CheckConstraintSchema check = new()
+        {
+            Name = payload.ConstraintName,
+            Expression = payload.Expression,
+            ReferencedColumns = payload.ReferencedColumns
+        };
+
+        if (!string.IsNullOrEmpty(payload.Expression))
+            check.ParsedCondition = SQLParserProcessor.ParseCondition(payload.Expression);
+
+        tableSchema.CheckConstraints ??= [];
+        tableSchema.CheckConstraints.RemoveAll(c => c.Name == payload.ConstraintName);
+        tableSchema.CheckConstraints.Add(check);
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a DropCheckConstraint delta. Idempotent: if the constraint is already absent the
+    /// operation is a no-op. Returns the table even when absent so the schema version still advances.
+    /// </summary>
+    private static TableSchema? ApplyDropCheckConstraint(Schema schema, SchemaCheckConstraintPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            return null;
+
+        tableSchema.CheckConstraints?.RemoveAll(c => c.Name == payload.ConstraintName);
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a SetColumnNotNull delta. Replaces the target column with an updated copy that has
+    /// the new <c>NotNull</c> flag and <c>NotNullConstraintName</c>. Idempotent: setting the flag
+    /// to its current value is a no-op. Does not bump <c>TableSchema.Version</c> because the NOT
+    /// NULL flag is not encoded in row bytes.
+    /// </summary>
+    private static TableSchema ApplySetColumnNotNull(Schema schema, SchemaSetColumnNotNullPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (tableSchema.Columns is null)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
+
+        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ColumnName, StringComparison.Ordinal));
+        if (idx < 0)
+            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ColumnName}' does not exist on table '{payload.TableName}'");
+
+        TableColumnSchema old = tableSchema.Columns[idx];
+        tableSchema.Columns[idx] = new TableColumnSchema(
+            id: old.Id,
+            name: old.Name,
+            type: old.Type,
+            notNull: payload.NotNull,
+            defaultValue: old.DefaultValue,
+            state: old.State,
+            maxLength: old.MaxLength,
+            arrayElementType: old.ArrayElementType,
+            defaultFunction: old.DefaultFunction,
+            notNullConstraintName: payload.ConstraintName
+        );
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Proposes a <c>SetColumnNotNull</c> delta and replicates it to all cluster nodes.
+    /// Idempotent: if the column's NOT NULL state already matches, the delta is a no-op but still
+    /// advances the schema version.
+    /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
+    /// </summary>
+    public async Task ReplicateSetColumnNotNullAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string columnName,
+        bool notNull,
+        string? constraintName)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.SetColumnNotNull,
+                Payload = Serializator.Serialize(new SchemaSetColumnNotNullPayload
+                {
+                    TableName = tableName,
+                    ColumnName = columnName,
+                    NotNull = notNull,
+                    ConstraintName = constraintName
+                })
+            };
+            ValidateSchemaDelta(database.Schema, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Rebuilds the transient <see cref="CheckConstraintSchema.ParsedCondition"/> AST cache for
+    /// every check constraint on <paramref name="tableSchema"/> whose cache is null. Called after
+    /// the JSON checkpoint is deserialized (the field is <c>[JsonIgnore]</c> and therefore absent
+    /// in the persisted form) and after <c>ApplyCreateTable</c> copies constraints from the payload.
+    /// </summary>
+    internal static void ParseCheckConstraintAsts(TableSchema tableSchema)
+    {
+        if (tableSchema.CheckConstraints is null || tableSchema.CheckConstraints.Count == 0)
+            return;
+
+        foreach (CheckConstraintSchema check in tableSchema.CheckConstraints)
+        {
+            if (check.ParsedCondition is not null || string.IsNullOrEmpty(check.Expression))
+                continue;
+
+            check.ParsedCondition = SQLParserProcessor.ParseCondition(check.Expression);
+        }
     }
 
     /// <summary>
@@ -1156,7 +1414,8 @@ public sealed class CatalogsManager
             state: current.State,
             maxLength: current.MaxLength,
             arrayElementType: current.ArrayElementType,
-            defaultFunction: current.DefaultFunction
+            defaultFunction: current.DefaultFunction,
+            notNullConstraintName: current.NotNullConstraintName
         );
 
         tableSchema.Version++;
@@ -1175,7 +1434,8 @@ public sealed class CatalogsManager
                 id: hCol.Id, name: payload.NewName, type: hCol.Type,
                 notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State,
                 maxLength: hCol.MaxLength, arrayElementType: hCol.ArrayElementType,
-                defaultFunction: hCol.DefaultFunction);
+                defaultFunction: hCol.DefaultFunction,
+                notNullConstraintName: hCol.NotNullConstraintName);
         }
 
         tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
@@ -1286,7 +1546,8 @@ public sealed class CatalogsManager
                 state: newColumn.State,
                 maxLength: newColumn.MaxLength,
                 arrayElementType: newColumn.ArrayElementType,
-                defaultFunction: newColumn.DefaultFunction
+                defaultFunction: newColumn.DefaultFunction,
+                notNullConstraintName: newColumn.NotNullConstraintName
             )
         );
 
@@ -1331,7 +1592,8 @@ public sealed class CatalogsManager
                 payload.State,
                 maxLength: current.MaxLength,
                 arrayElementType: current.ArrayElementType,
-                defaultFunction: current.DefaultFunction
+                defaultFunction: current.DefaultFunction,
+                notNullConstraintName: current.NotNullConstraintName
             );
         }
 
@@ -1877,6 +2139,7 @@ public sealed class CatalogsManager
             ValidateLoadedTable(table, key);
             table.SchemaHistory = null;
             ConfigureSchemaHistoryLoader(database, table);
+            ParseCheckConstraintAsts(table);
             tables[table.Name!] = table;
         }
 
@@ -1974,6 +2237,7 @@ public sealed class CatalogsManager
             Name = tableSchema.Name,
             Columns = tableSchema.Columns,
             Indexes = tableSchema.Indexes,
+            CheckConstraints = tableSchema.CheckConstraints,
             SchemaHistory = null
         };
     }

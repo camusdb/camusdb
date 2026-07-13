@@ -92,7 +92,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 tableName: req.TableName,
                 columns: MapColumns(req.Columns),
                 constraints: MapConstraints(req.Constraints),
-                ifNotExists: req.IfNotExists
+                ifNotExists: req.IfNotExists,
+                checkConstraints: MapCheckConstraints(req.CheckConstraints)
             );
 
             CreateTableResult result = await executor.CreateTable(ticket).ConfigureAwait(false);
@@ -376,6 +377,66 @@ public sealed class SchemaDdlForwardController : CommandsController
         }
     }
 
+    [HttpPost]
+    [Route("/internal/schema-ddl/alter-constraint")]
+    public async Task<JsonResult> ForwardAlterConstraint()
+    {
+        ForwardAlterConstraintRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<ForwardAlterConstraintRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("ForwardAlterConstraint request is null");
+
+            if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
+
+        try
+        {
+            AlterConstraintTicket ticket = new(
+                databaseName: req.DatabaseName,
+                tableName: req.TableName,
+                constraintName: req.ConstraintName,
+                expression: req.Expression,
+                referencedColumns: req.ReferencedColumns,
+                operation: req.Operation,
+                columnName: req.ColumnName
+            );
+
+            ExecuteDDLSQLResult result = await executor.AlterConstraint(ticket).ConfigureAwait(false);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result.Success };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -425,7 +486,8 @@ public sealed class SchemaDdlForwardController : CommandsController
         { StatusCode = 500 };
 
     private static ColumnInfo MapColumn(ColumnInfoRequest r) =>
-        new(r.Name, r.Type, r.NotNull, r.Default, r.MaxLength, r.ArrayElementType);
+        new(r.Name, r.Type, r.NotNull, r.Default, r.MaxLength, r.ArrayElementType,
+            r.DefaultFunction, r.NotNullConstraintName);
 
     private static ColumnInfo[] MapColumns(ColumnInfoRequest[] cols) =>
         cols.Select(MapColumn).ToArray();
@@ -436,4 +498,7 @@ public sealed class SchemaDdlForwardController : CommandsController
             c.Name,
             c.Columns.Select(col => new ColumnIndexInfo(col.Name, col.Order)).ToArray()
         )).ToArray();
+
+    private static CheckConstraintInfo[] MapCheckConstraints(CheckConstraintInfoRequest[] checks) =>
+        checks.Select(c => new CheckConstraintInfo(c.Name, c.Expression, c.ReferencedColumns)).ToArray();
 }

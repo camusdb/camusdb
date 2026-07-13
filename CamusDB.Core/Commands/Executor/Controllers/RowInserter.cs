@@ -85,6 +85,9 @@ internal sealed class RowInserter
                     EnforceLengthBound(col, val);
                 }
             }
+
+            // Step 4: CHECK constraints — evaluated after all values (including defaults) are present.
+            CheckEnforcer.EnforceOnRow(table, values);
         }
     }
 

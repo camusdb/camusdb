@@ -26,6 +26,8 @@ public sealed class CommandValidator
 
     private readonly AlterIndexValidator alterIndexValidator = new();
 
+    private readonly AlterConstraintValidator alterConstraintValidator = new();
+
     private readonly CloseDatabaseValidator closeDatabaseValidator = new();
 
     public void Validate(CreateDatabaseTicket ticket)
@@ -51,6 +53,11 @@ public sealed class CommandValidator
     public void Validate(AlterIndexTicket ticket)
     {
         alterIndexValidator.Validate(ticket);
+    }
+
+    public void Validate(AlterConstraintTicket ticket)
+    {
+        alterConstraintValidator.Validate(ticket);
     }
 
     public void Validate(RenameTableTicket ticket)

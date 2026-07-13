@@ -400,6 +400,7 @@ public sealed class RowUpdater
 
             CoerceRowValues(table, newRow);
             CheckForNotNulls(table, newRow);
+            CheckEnforcer.EnforceOnRow(table, newRow);
 
             byte[] newData = RowEncoder.Encode(table.Schema, newRow, rowId);
 

@@ -165,6 +165,12 @@ internal sealed class SchemaQuerier
                 createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + "),");
         }
 
+        if (table.Schema.CheckConstraints is { Count: > 0 } checks)
+        {
+            foreach (CheckConstraintSchema cc in checks)
+                createTableSql.Append($" CONSTRAINT `{cc.Name}` CHECK ({cc.Expression}),");
+        }
+
         // Remove trailing comma and close
         if (createTableSql[^1] == ',')
             createTableSql.Length--;
@@ -370,11 +376,12 @@ internal sealed class SchemaQuerier
 
     private static string GetSQLConstraint(TableColumnSchema column)
     {
-        //if (column.Primary)
-        //    return "PRIMARY KEY";
-
         if (column.NotNull)
+        {
+            if (column.NotNullConstraintName is not null)
+                return $"CONSTRAINT `{column.NotNullConstraintName}` NOT NULL";
             return "NOT NULL";
+        }
 
         return "NULL";
     }

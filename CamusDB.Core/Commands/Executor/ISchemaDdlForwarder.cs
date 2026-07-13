@@ -7,6 +7,7 @@
 
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
+
 namespace CamusDB.Core.CommandsExecutor;
 
 /// <summary>
@@ -26,4 +27,6 @@ public interface ISchemaDdlForwarder
     Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken cancellationToken);
 
     Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken);
+
+    Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken);
 }

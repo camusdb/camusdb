@@ -220,6 +220,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         public async Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken ct)
             => await (await LeaderAsync(ticket.DatabaseName)).Executor.RenameTable(ticket).ConfigureAwait(false);
+
+        public async Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken ct)
+            => (await (await LeaderAsync(ticket.DatabaseName)).Executor.AlterConstraint(ticket).ConfigureAwait(false)).Success;
     }
 
     public string NextSchemaLogDatabaseName()

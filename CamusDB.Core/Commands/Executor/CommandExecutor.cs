@@ -16,6 +16,7 @@ using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -65,6 +66,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly TableColumnAlterer tableColumnAlterer;
 
     private readonly TableIndexAlterer tableIndexAlterer;
+
+    private readonly TableConstraintAlterer tableConstraintAlterer;
 
     private readonly TableDropper tableDropper;
 
@@ -161,6 +164,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableCreator = new(catalogs, logger);
         tableColumnAlterer = new(catalogs, logger);
         tableIndexAlterer = new(catalogs, logger);
+        tableConstraintAlterer = new(logger);
         tableDropper = new(catalogs, logger);
         rowInserter = new(logger);
         rowUpdater = new(logger);
@@ -1660,6 +1664,61 @@ public sealed class CommandExecutor : IAsyncDisposable
             && !database.Schema.Tables.ContainsKey(ticket.TableName);
     }
 
+    private static bool ForwardedAlterConstraintApplied(DatabaseDescriptor database, AlterConstraintTicket ticket)
+    {
+        if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? ts))
+            return false;
+
+        if (ticket.Operation == AlterConstraintOperation.SetNotNull)
+        {
+            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => c.Name == ticket.ColumnName);
+            return col?.NotNull == true;
+        }
+
+        if (ticket.Operation == AlterConstraintOperation.DropNotNull)
+        {
+            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => c.Name == ticket.ColumnName);
+            return col?.NotNull == false;
+        }
+
+        bool constraintExists = ts.CheckConstraints?.Any(c => c.Name == ticket.ConstraintName) == true;
+        return ticket.Operation == AlterConstraintOperation.AddCheck ? constraintExists : !constraintExists;
+    }
+
+    private async Task<bool?> TryForwardAlterConstraintAsync(DatabaseDescriptor database, AlterConstraintTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardAlterConstraintAsync(leader, ticket, opId, ct),
+            () => ForwardedAlterConstraintApplied(database, ticket)
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Adds or drops a CHECK (or named NOT NULL) constraint on an existing table.
+    /// For ADD CHECK, scans all existing rows and rejects if any row violates the expression.
+    /// Replicates in cluster mode; applies directly in standalone mode.
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> AlterConstraint(AlterConstraintTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+
+        bool? forwarded = await TryForwardAlterConstraintAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return new ExecuteDDLSQLResult(database, forwarded.Value);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+        bool ok = await tableConstraintAlterer.Alter(
+            catalogs, database, table, ticket, isClusterMode
+        ).ConfigureAwait(false);
+        database.Cache?.InvalidateByTableId(database.Id, table.Id);
+        return new ExecuteDDLSQLResult(database, ok);
+    }
+
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
     {
         validator.Validate(ticket);
@@ -1828,6 +1887,27 @@ public sealed class CommandExecutor : IAsyncDisposable
                     },
                     postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameIdx.Id)
                     ).ConfigureAwait(false);
+                }
+
+            case NodeType.AlterTableAddConstraintCheck:
+            case NodeType.AlterTableDropConstraint:
+            case NodeType.AlterTableSetNotNull:
+            case NodeType.AlterTableDropNotNull:
+                {
+                    TableDescriptor tableForConstraint = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+
+                    AlterConstraintTicket alterConstraintTicket = sqlExecutor.CreateAlterConstraintTicket(ticket, ast, tableForConstraint.Schema);
+                    validator.Validate(alterConstraintTicket);
+
+                    bool? constraintForwarded = await TryForwardAlterConstraintAsync(database, alterConstraintTicket).ConfigureAwait(false);
+                    if (constraintForwarded is not null)
+                        return new ExecuteDDLSQLResult(database, constraintForwarded.Value);
+
+                    bool constraintOk = await tableConstraintAlterer.Alter(
+                        catalogs, database, tableForConstraint, alterConstraintTicket, isClusterMode
+                    ).ConfigureAwait(false);
+                    database.Cache?.InvalidateByTableId(database.Id, tableForConstraint.Id);
+                    return new ExecuteDDLSQLResult(database, constraintOk);
                 }
 
             case NodeType.AlterTableRenameTo:

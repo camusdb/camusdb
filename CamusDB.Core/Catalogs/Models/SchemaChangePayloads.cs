@@ -33,6 +33,15 @@ public sealed class SchemaCreateTablePayload
     // is empty, so its indexes are born at Public with nothing to backfill. Null/empty on tables
     // declared without inline constraints, and on log entries written before this field existed.
     public TableIndexSchema[]? Indexes { get; set; }
+
+    /// <summary>
+    /// CHECK constraints declared in the CREATE TABLE statement (both column-level, desugared to
+    /// named constraints, and explicit table-level forms). Null/empty when no checks were declared;
+    /// absent in log entries written before this field existed (backward-compatible: null → no checks).
+    /// The <c>ParsedCondition</c> field on each entry is not persisted (<c>[JsonIgnore]</c>); it is
+    /// rebuilt from <c>Expression</c> at table-open time.
+    /// </summary>
+    public CheckConstraintSchema[]? CheckConstraints { get; set; }
 }
 
 public sealed class SchemaAlterColumnPayload
@@ -72,6 +81,11 @@ public sealed class SchemaColumnPayload
     /// </summary>
     public ColumnType? ArrayElementType { get; set; }
 
+    /// <summary>
+    /// Name of the NOT NULL constraint for this column, when named. Null for unnamed NOT NULL.
+    /// </summary>
+    public string? NotNullConstraintName { get; set; }
+
     public static SchemaColumnPayload FromColumnInfo(ColumnInfo column)
     {
         return new()
@@ -83,6 +97,7 @@ public sealed class SchemaColumnPayload
             DefaultFunction = column.DefaultFunction,
             MaxLength = column.MaxLength,
             ArrayElementType = column.ArrayElementType,
+            NotNullConstraintName = column.NotNullConstraintName,
         };
     }
 }
@@ -128,6 +143,54 @@ public sealed class SchemaRenamePayload
     public string? ElementName { get; set; }
 
     public string NewName { get; set; } = "";
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.AddCheckConstraint"/> and <see cref="SchemaOp.DropCheckConstraint"/>.
+/// Carries the table name, constraint name, and (for Add) the condition SQL text and referenced columns.
+/// For Drop, only <see cref="TableName"/> and <see cref="ConstraintName"/> are consulted.
+/// </summary>
+public sealed class SchemaCheckConstraintPayload
+{
+    /// <summary>Table that owns the constraint.</summary>
+    public string TableName { get; set; } = "";
+
+    /// <summary>Unique name of the constraint within the table.</summary>
+    public string ConstraintName { get; set; } = "";
+
+    /// <summary>
+    /// SQL text of the condition, rendered by <c>PlanRenderer.RenderExpr</c>. Empty string for
+    /// Drop operations (the constraint is identified by name alone).
+    /// </summary>
+    public string Expression { get; set; } = "";
+
+    /// <summary>
+    /// Column identifiers referenced by the condition. Empty for Drop operations.
+    /// </summary>
+    public string[] ReferencedColumns { get; set; } = [];
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetColumnNotNull"/>. Carries the target column name, the new
+/// <c>NotNull</c> value (true = SET NOT NULL, false = DROP NOT NULL), and the optional constraint
+/// name. Used both by <c>ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL</c> and by
+/// <c>DROP CONSTRAINT name</c> when the name resolves to a column's NOT NULL constraint.
+/// </summary>
+public sealed class SchemaSetColumnNotNullPayload
+{
+    public string TableName { get; set; } = "";
+
+    public string ColumnName { get; set; } = "";
+
+    /// <summary>True = SET NOT NULL; false = DROP NOT NULL.</summary>
+    public bool NotNull { get; set; }
+
+    /// <summary>
+    /// Name assigned to this NOT NULL constraint. Set by SET NOT NULL (auto-named
+    /// <c>{table}_{col}_not_null</c>), or preserved from the original column declaration.
+    /// Null for DROP NOT NULL (constraint is being removed).
+    /// </summary>
+    public string? ConstraintName { get; set; }
 }
 
 public sealed class SchemaElementStatePayload

@@ -267,6 +267,10 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TRENAME TINDEX any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameIndex, $3.n, $6.n, $8.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.AlterTableAddConstraintCheck, $3.n, $9.n, null, null, null, null, null, $6.s); }
                  | TALTER TTABLE any_identifier TDROP TCONSTRAINT any_identifier { $$.n = new(NodeType.AlterTableDropConstraint, $3.n, null, null, null, null, null, null, $6.s); }
+                 | TALTER TTABLE any_identifier TALTER any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $5.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TALTER any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $5.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $6.n, null, null, null, null, null, null); }
 				 ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, null, null, null, null, null); }
@@ -520,6 +524,7 @@ create_table_field_constraint_list : create_table_field_constraint_list create_t
 
 create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                         | TNOT TNULL { $$.n = NodeAst.ConstraintNotNull; }
+                        | TCONSTRAINT any_identifier TNOT TNULL { $$.n = new(NodeType.ConstraintNotNullNamed, null, null, null, null, null, null, null, $2.s); }
 						| TPRIMARY TKEY { $$.n = NodeAst.ConstraintPrimaryKey; }
                         | TUNIQUE { $$.n = NodeAst.ConstraintUnique; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }

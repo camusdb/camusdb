@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core;
+
 namespace CamusDB.Core.SQLParser;
 
 /// <summary>
@@ -43,6 +45,26 @@ public static class SQLParserProcessor
         NodeAst ast = sqlParser.Parse(sql);
         IdentifierNormalizer.Normalize(ast);
         return ast;
+    }
+
+    /// <summary>
+    /// Parses a bare SQL condition expression (e.g. <c>price &gt; 0</c>) and returns its
+    /// <see cref="NodeAst"/>. Used to rebuild the <c>ParsedCondition</c> cache on a
+    /// <see cref="CamusDB.Core.Catalogs.Models.CheckConstraintSchema"/> after the stored
+    /// SQL text is loaded from the KV checkpoint.
+    /// <para>
+    /// Internally wraps the expression as <c>SELECT 1 FROM t WHERE (&lt;expr&gt;)</c> and
+    /// extracts the WHERE subtree, so any condition the engine can evaluate in a WHERE clause
+    /// is also valid here.
+    /// </para>
+    /// </summary>
+    public static NodeAst ParseCondition(string expression)
+    {
+        NodeAst ast = Parse($"SELECT 1 FROM t WHERE ({expression})");
+        return ast.extendedOne
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Could not parse CHECK condition expression: {expression}");
     }
 
     /// <summary>

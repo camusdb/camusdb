@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -20,9 +21,9 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Verifies that the SQL emitted by SHOW CREATE TABLE is parseable and semantically correct
-/// (gap 1 fix): the grammar now accepts PRIMARY KEY, KEY, and UNIQUE KEY inline within the
-/// CREATE TABLE parentheses, which is the format the DDL generator produces.
+/// Verifies that the SQL emitted by SHOW CREATE TABLE is parseable and semantically correct:
+/// the grammar accepts PRIMARY KEY, KEY, and UNIQUE KEY inline within the CREATE TABLE
+/// parentheses, which is the format the DDL generator produces.
 /// </summary>
 [TestFixture]
 public sealed class TestShowCreateTableRoundTrip : BaseTest
@@ -312,5 +313,117 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
 
         Assert.AreEqual("1.5",        Default("ratio"));
         Assert.AreEqual("2026-06-26", Default("day"));
+    }
+
+    [Test]
+    public async Task ShowCreateTable_RendersCheckConstraint()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE products (id object_id PRIMARY KEY, price int64 CHECK (price > 0), name string)", null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE products");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.IsTrue(ddl.Contains("CHECK"), $"Expected CHECK in DDL: {ddl}");
+        Assert.IsTrue(ddl.Contains("price > 0"), $"Expected expression 'price > 0' in DDL: {ddl}");
+        Assert.IsTrue(ddl.Contains("CONSTRAINT"), $"Expected CONSTRAINT keyword in DDL: {ddl}");
+    }
+
+    [Test]
+    public async Task ShowCreateTable_CheckConstraintOutputIsReparseable()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE products (id object_id PRIMARY KEY, price int64, CONSTRAINT chk_price CHECK (price > 0))", null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE products");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        // Replace table name and re-execute — the rendered DDL must be valid SQL.
+        string ddl2 = ddl.Replace("`products`", "`products2`", System.StringComparison.Ordinal);
+        await DdlAsync(executor, db, dbname, ddl2);
+
+        // The recreated table must have the same check constraint enforced.
+        KvTransaction tx2 = await db.Transactions.BeginAsync();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx2, dbname,
+                "INSERT INTO products2 (id, price) VALUES (gen_id(), -5)", null)))!;
+        Assert.IsTrue(ex.Message.Contains("chk_price") || ex.Message.Contains("CHECK"));
+        await db.Transactions.RollbackAsync(tx2);
+    }
+
+    [Test]
+    public async Task ShowCreateTable_MultipleCheckConstraintsAllRendered()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE employees (" +
+            "  id object_id PRIMARY KEY, " +
+            "  salary int64, " +
+            "  age int64, " +
+            "  CONSTRAINT chk_salary CHECK (salary > 0), " +
+            "  CONSTRAINT chk_age CHECK (age >= 18))", null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE employees");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.IsTrue(ddl.Contains("chk_salary"), $"Expected chk_salary in DDL: {ddl}");
+        Assert.IsTrue(ddl.Contains("salary > 0"), $"Expected salary > 0 in DDL: {ddl}");
+        Assert.IsTrue(ddl.Contains("chk_age"), $"Expected chk_age in DDL: {ddl}");
+        Assert.IsTrue(ddl.Contains("age >= 18"), $"Expected age >= 18 in DDL: {ddl}");
+    }
+
+    [Test]
+    public async Task ShowCreateTable_AfterAlterAddConstraint_RendersCheck()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE items (id object_id PRIMARY KEY, qty int64)", null));
+        await db.Transactions.CommitAsync(tx);
+
+        KvTransaction tx2 = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx2, dbname,
+            "ALTER TABLE items ADD CONSTRAINT chk_qty CHECK (qty >= 0)", null));
+        await db.Transactions.CommitAsync(tx2);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE items");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.IsTrue(ddl.Contains("chk_qty"), $"Expected chk_qty in DDL: {ddl}");
+        Assert.IsTrue(ddl.Contains("qty >= 0"), $"Expected qty >= 0 in DDL: {ddl}");
+    }
+
+    [Test]
+    public async Task ShowCreateTable_AfterAlterDropConstraint_CheckNotRendered()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE items (id object_id PRIMARY KEY, qty int64, CONSTRAINT chk_qty CHECK (qty >= 0))", null));
+        await db.Transactions.CommitAsync(tx);
+
+        KvTransaction tx2 = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx2, dbname,
+            "ALTER TABLE items DROP CONSTRAINT chk_qty", null));
+        await db.Transactions.CommitAsync(tx2);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE items");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.IsFalse(ddl.Contains("chk_qty"), $"Dropped constraint should not appear in DDL: {ddl}");
+        Assert.IsFalse(ddl.Contains("CHECK"), $"No CHECK should appear after drop: {ddl}");
     }
 }

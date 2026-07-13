@@ -18,6 +18,13 @@ public readonly struct CreateTableTicket
 
     public ConstraintInfo[] Constraints { get; }
 
+    /// <summary>
+    /// CHECK constraints collected from both column-level inline declarations (desugared to
+    /// named constraints) and explicit table-level <c>CONSTRAINT name CHECK (cond)</c> clauses.
+    /// Empty when no CHECK constraints were declared.
+    /// </summary>
+    public CheckConstraintInfo[] CheckConstraints { get; }
+
     public bool IfNotExists { get; }
 
     public CreateTableTicket(
@@ -25,13 +32,15 @@ public readonly struct CreateTableTicket
         string tableName,
         ColumnInfo[] columns,
         ConstraintInfo[] constraints,
-        bool ifNotExists
+        bool ifNotExists,
+        CheckConstraintInfo[]? checkConstraints = null
     )
     {
         DatabaseName = databaseName;
         TableName = tableName;
         Columns = columns;
         Constraints = constraints;
+        CheckConstraints = checkConstraints ?? [];
         IfNotExists = ifNotExists;
     }
 }
