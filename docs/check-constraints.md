@@ -106,13 +106,18 @@ deliberate, separate decision.
 
 ### Type coercion in a check
 
-A bare string literal is coerced to the other operand's type where a string is a valid literal
-form — `Uuid`, `Id`, `Date`, `DateTime` — so these work without an explicit `CAST`, exactly as the
-WHERE path intends:
+Two coercions make the natural SQL work without explicit `CAST`, exactly as the WHERE path does:
 
-```sql
-CREATE TABLE people (id object_id PRIMARY KEY, birth_date date CHECK (birth_date > '1900-01-01'));
-```
+- **Numeric widening.** An integer literal compares against a floating-point column, so
+  `price float64 CHECK (price > 0)` works — the `0` (an `Integer64` literal) is compared numerically
+  to the `Float64` value. Integer literals are likewise accepted for float columns on `INSERT`
+  (`VALUES (100)` into a `float64` column stores `100.0`).
+- **String→typed literal.** A bare string literal is coerced to `Uuid` / `Id` / `Date` / `DateTime`
+  when the other operand is that type:
+
+  ```sql
+  CREATE TABLE people (id object_id PRIMARY KEY, birth_date date CHECK (birth_date > '1900-01-01'));
+  ```
 
 A comparison between genuinely incompatible types with no such coercion (e.g. a `string` column vs a
 numeric literal) rejects the row at write time as a check violation (`CADB0303`, "compares
@@ -271,9 +276,11 @@ collapses NULL → false):
 - **leaf evaluation delegates to `SQLExecutorBaseCreator.EvalExpr`** so coercion (String→Date/Uuid/Id,
   arithmetic, function calls, CAST) is identical to WHERE. A missing column (omitted from an INSERT)
   is treated as `NULL`.
-- `CompareValues` coerces a bare string operand to `Uuid`/`Id`/`Date`/`DateTime`, and turns a
-  genuinely incomparable pair into a `CamusDBException` instead of letting `ColumnValue.CompareTo`
-  escape as a raw `ArgumentException`.
+- `CompareValues` widens mixed integer/float operands to `double`, coerces a bare string operand to
+  `Uuid`/`Id`/`Date`/`DateTime`, and turns a genuinely incomparable pair into a `CamusDBException`
+  (a `CheckConstraintViolation`) instead of letting `ColumnValue.CompareTo` escape as a raw
+  `ArgumentException`. The WHERE evaluator (`SQLExecutorBaseCreator.CompareValues`) applies the same
+  numeric widening, so `WHERE price > 0` and `CHECK (price > 0)` behave consistently.
 
 `NOT NULL` is **not** evaluated here — it stays a fast boolean check in
 `RowInserter.Validate` / `RowUpdater.CheckForNotNulls`.

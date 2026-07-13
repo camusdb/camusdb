@@ -197,6 +197,11 @@ internal static class CheckEvaluator
     /// </summary>
     private static int CompareValues(ColumnValue left, ColumnValue right)
     {
+        // Mixed integer/float operands (e.g. a Float64 column vs an integer literal in `price > 0`)
+        // compare numerically by widening both to double.
+        if (TryCompareNumeric(left, right, out int numericCmp))
+            return numericCmp;
+
         try
         {
             if (left.Type == ColumnType.String && right.Type != ColumnType.String)
@@ -237,4 +242,28 @@ internal static class CheckEvaluator
         ColumnType.Id or ColumnType.Date or ColumnType.DateTime => CastScalarFunctions.CoerceToColumnType(str, target),
         _ => str,
     };
+
+    /// <summary>
+    /// Compares two operands numerically when they are a mix of integer and floating-point types
+    /// (which <see cref="ColumnValue.CompareTo"/> rejects as incompatible), widening both to double —
+    /// so an integer literal in a check like <c>price &gt; 0</c> compares against a Float64 column.
+    /// Returns false (leaving the caller's other coercion/compare logic in charge) unless both
+    /// operands are numeric and at least one is floating point.
+    /// </summary>
+    private static bool TryCompareNumeric(ColumnValue left, ColumnValue right, out int result)
+    {
+        result = 0;
+        if (!IsNumeric(left.Type) || !IsNumeric(right.Type))
+            return false;
+        if (left.Type == right.Type)
+            return false; // same type — let CompareTo handle it (exact integer/float semantics)
+
+        double l = left.Type == ColumnType.Integer64 ? left.LongValue : left.FloatValue;
+        double r = right.Type == ColumnType.Integer64 ? right.LongValue : right.FloatValue;
+        result = l.CompareTo(r);
+        return true;
+    }
+
+    private static bool IsNumeric(ColumnType type) =>
+        type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
 }

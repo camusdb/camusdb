@@ -98,6 +98,29 @@ public sealed class TestCheckConstraintsFixes : BaseTest
         Assert.That(ex.Message, Does.Contain("incompatible"));
     }
 
+    // ── Numeric literal vs float column (integer literal must widen, not error) ───────────────
+
+    [Test]
+    public async Task FloatColumnCheck_AgainstIntegerLiteral_Works()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname,
+            "CREATE TABLE products (id object_id PRIMARY KEY DEFAULT (gen_id()), price float64 CHECK (price > 0))");
+
+        // Integer literal for a float column is accepted (widened), and the check (price > 0, with
+        // 0 an integer literal) evaluates numerically instead of erroring on Float64 vs Integer64.
+        Assert.DoesNotThrowAsync(async () =>
+            await ExecInsert(executor, dbname, "INSERT INTO products (price) VALUES (100)"));
+        Assert.DoesNotThrowAsync(async () =>
+            await ExecInsert(executor, dbname, "INSERT INTO products (price) VALUES (100.0)"));
+
+        // A violating value is still rejected as a check violation (not an incompatible-type error).
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecInsert(executor, dbname, "INSERT INTO products (price) VALUES (-5)"))!;
+        Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, ex.Code);
+        Assert.That(ex.Message, Does.Not.Contain("incompatible"));
+    }
+
     // ── Round-trip fidelity: parenthesized precedence must survive persist + reopen ───────────
 
     [Test]

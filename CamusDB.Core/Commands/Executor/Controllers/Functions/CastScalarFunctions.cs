@@ -124,6 +124,9 @@ internal static class CastScalarFunctions
         return (value.Type, columnType) switch
         {
             (ColumnType.String,    ColumnType.Id)       => CastToId("coerce", value),
+            // Integer literals widen to the floating-point column type, so `price FLOAT64` accepts
+            // `VALUES (100)` and `price FLOAT32` accepts `VALUES (100)` without an explicit CAST.
+            (ColumnType.Integer64, ColumnType.Float64)  => CastToFloat64("coerce", value),
             (ColumnType.Float64,   ColumnType.Float32)  => CastToFloat32("coerce", value),
             (ColumnType.Integer64, ColumnType.Float32)  => CastToFloat32("coerce", value),
             (ColumnType.String,    ColumnType.Date)     => CastToDate("coerce", value),

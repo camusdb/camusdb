@@ -59,6 +59,16 @@ internal abstract class SQLExecutorBaseCreator
     /// </summary>
     private static int CompareValues(ColumnValue left, ColumnValue right)
     {
+        // Mixed integer/float operands (e.g. `price > 0` where price is Float64 and 0 is an integer
+        // literal) compare numerically by widening both to double; ColumnValue.CompareTo rejects the
+        // cross-type comparison.
+        if (left.Type != right.Type && IsNumeric(left.Type) && IsNumeric(right.Type))
+        {
+            double l = left.Type == ColumnType.Integer64 ? left.LongValue : left.FloatValue;
+            double r = right.Type == ColumnType.Integer64 ? right.LongValue : right.FloatValue;
+            return l.CompareTo(r);
+        }
+
         // Coercion is best-effort. If a String operand is not a valid Uuid/Id it can equal no such
         // value, so return a deterministic non-zero ordering rather than throwing — and never call
         // ColumnValue.CompareTo with mismatched types (it throws on Uuid/Id vs String).
@@ -81,6 +91,9 @@ internal abstract class SQLExecutorBaseCreator
 
         return left.CompareTo(right);
     }
+
+    private static bool IsNumeric(ColumnType type) =>
+        type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
 
     public static ColumnValue EvalExpr(
         NodeAst expr,

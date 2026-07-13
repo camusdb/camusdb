@@ -135,7 +135,8 @@ internal sealed class TableConstraintAlterer
             }
         }
 
-        logger.LogInformation("Check constraint '{Constraint}' added to table '{Table}'", ticket.ConstraintName, ticket.TableName);
+        if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+            logger.LogInformation("Check constraint '{Constraint}' added to table '{Table}'", ticket.ConstraintName, ticket.TableName);
         return true;
     }
 
@@ -222,7 +223,8 @@ internal sealed class TableConstraintAlterer
             }
         }
 
-        logger.LogInformation("Constraint '{Constraint}' dropped from table '{Table}'", ticket.ConstraintName, ticket.TableName);
+        if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+            logger.LogInformation("Constraint '{Constraint}' dropped from table '{Table}'", ticket.ConstraintName, ticket.TableName);
         return true;
     }
 
@@ -302,7 +304,8 @@ internal sealed class TableConstraintAlterer
             }
         }
 
-        logger.LogInformation("NOT NULL set on column '{Column}' of table '{Table}'", columnName, ticket.TableName);
+        if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+            logger.LogInformation("NOT NULL set on column '{Column}' of table '{Table}'", columnName, ticket.TableName);
         return true;
     }
 
@@ -375,7 +378,8 @@ internal sealed class TableConstraintAlterer
             }
         }
 
-        logger.LogInformation("NOT NULL dropped from column '{Column}' of table '{Table}'", columnName, ticket.TableName);
+        if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+            logger.LogInformation("NOT NULL dropped from column '{Column}' of table '{Table}'", columnName, ticket.TableName);
         return true;
     }
 
@@ -447,7 +451,7 @@ internal sealed class TableConstraintAlterer
                     visibilitySchemaVersion: table.Schema.Version
                 ).ConfigureAwait(false);
 
-                if (!row.TryGetValue(columnName, out ColumnValue cv) || cv.Type == ColumnType.Null)
+                if (!row.TryGetValue(columnName, out ColumnValue? cv) || cv is null || cv.Type == ColumnType.Null)
                     throw new CamusDBException(
                         CamusDBErrorCodes.NotNullViolation,
                         $"column \"{columnName}\" of table \"{table.Name}\" contains null values");
