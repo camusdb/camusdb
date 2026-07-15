@@ -43,10 +43,26 @@ public readonly record struct RangeLockBounds(
 public sealed class KvTransaction
 {
     /// <summary>
-    /// The Kahuna transaction timestamp. Passed as the <c>transactionId</c> argument
-    /// to every transactional KV operation.
+    /// Stable client-visible identity for this transaction. Set to a locally-minted HLC
+    /// timestamp at construction time and never changes, even before the Kahuna coordinator
+    /// session starts. <see cref="HttpTransactionCoordinator"/> keys its tracking dictionary
+    /// on this value so the client can locate an explicit transaction by the ID returned in
+    /// <c>/start-transaction</c>, regardless of whether the session has started yet.
+    ///
+    /// <para>For eagerly-started transactions (promoted read-only, Serializable+RO),
+    /// <c>ClientId</c> equals <see cref="TransactionId"/> (both set to the Kahuna handle at
+    /// construction). For zero-snapshot read-only transactions, both are
+    /// <see cref="HLCTimestamp.Zero"/> and the transaction is not tracked.</para>
     /// </summary>
-    public HLCTimestamp TransactionId { get; }
+    public HLCTimestamp ClientId { get; }
+
+    /// <summary>
+    /// The Kahuna transaction timestamp. Passed as the <c>transactionId</c> argument
+    /// to every transactional KV operation. Zero until <see cref="EnsureSessionStartedAsync"/>
+    /// fires for a deferred-start transaction; set to the Kahuna handle once the coordinator
+    /// session starts.
+    /// </summary>
+    public HLCTimestamp TransactionId { get; private set; }
 
     /// <summary>
     /// The unique identifier that routes commit/rollback to the correct Kahuna
@@ -115,13 +131,12 @@ public sealed class KvTransaction
     public HLCTimestamp ReadTimestamp { get; }
 
     /// <summary>
-    /// Concurrency strategy the Kahuna coordinator was started with for this transaction.
-    /// <see cref="KeyValueTransactionLocking.Pessimistic"/> (the default) acquires locks before each
-    /// write and relies on them alone; <see cref="KeyValueTransactionLocking.Optimistic"/> defers
-    /// conflict detection to a read-set validation at commit, which requires reads to be folded into
-    /// the coordinator working set (see <see cref="FoldReads"/>).
+    /// Concurrency strategy for this transaction. Pessimistic (the default) acquires explicit
+    /// locks before each write; optimistic defers conflict detection to commit-time read-set
+    /// validation via the coordinator. May be changed via <c>SET TRANSACTION LOCKING</c> before
+    /// the Kahuna coordinator session starts — see <see cref="ApplyLocking"/>.
     /// </summary>
-    public KeyValueTransactionLocking Locking { get; }
+    public KeyValueTransactionLocking Locking { get; private set; }
 
     /// <summary>
     /// Whether reads issued by this transaction are tracked by the coordinator for a commit-time
@@ -157,13 +172,32 @@ public sealed class KvTransaction
          ReadValidation == ReadValidation.TrackAndValidate);
 
     /// <summary>
-    /// Monotonic elapsed-time counter started when this transaction was created. Used to enforce
-    /// <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/> — immune to NTP wall-clock
-    /// jumps, consistent with the monotonic lock-wait deadline used elsewhere in the store.
+    /// Monotonic elapsed-time counter started when the Kahuna coordinator session begins. Used to
+    /// enforce <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/> — immune to NTP
+    /// wall-clock jumps, consistent with the monotonic lock-wait deadline used elsewhere in the
+    /// store.
     ///
-    /// <para><c>null</c> for zero-snapshot (read-only) transactions, which have no lifetime limit.</para>
+    /// <para><c>null</c> for zero-snapshot (read-only) transactions and for deferred-start
+    /// transactions whose session has not yet started. In the deferred case the watch is started
+    /// by <see cref="SetSessionId"/> when the session actually opens.</para>
     /// </summary>
-    private readonly Stopwatch? lifetimeWatch;
+    private Stopwatch? lifetimeWatch;
+
+    /// <summary>
+    /// Session-start delegate set by <see cref="KvTransactionsManager.BeginAsync"/> for
+    /// deferred-start transactions. When non-null, the Kahuna coordinator session has not been
+    /// opened yet; the first call to <see cref="EnsureSessionStartedAsync"/> invokes it exactly
+    /// once. Null for eager-start and zero-snapshot transactions — those have no pending start.
+    /// </summary>
+    internal Func<CancellationToken, Task>? SessionStarter;
+
+    /// <summary>Guards <see cref="sessionStartTask"/> so the deferred Kahuna session is opened exactly
+    /// once even when several of a transaction's operations race to be the first.</summary>
+    private readonly object sessionStartSync = new();
+
+    /// <summary>The single in-flight/completed session-start task, memoized under
+    /// <see cref="sessionStartSync"/>. Concurrent first-operations all await this same task.</summary>
+    private Task? sessionStartTask;
 
     // Mutation budget, guarded by trackSync.
     private int mutationCount;
@@ -210,9 +244,15 @@ public sealed class KvTransaction
         HLCTimestamp readTimestamp = default,
         int mutationLimit = 0,
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic,
-        ReadValidation readValidation = ReadValidation.None)
+        ReadValidation readValidation = ReadValidation.None,
+        HLCTimestamp clientId = default)
     {
         TransactionId = transactionId;
+        // ClientId is the stable tracking identity for HttpTransactionCoordinator. For eager-start
+        // transactions (transactionId != Zero) it equals the Kahuna session id so existing
+        // callers need no change. For deferred-start transactions it is separately minted by the
+        // caller (BeginAsync) so it is non-zero before the Kahuna session exists.
+        ClientId = clientId.IsNull() ? transactionId : clientId;
         UniqueId = uniqueId;
         IsReadOnly = isReadOnly;
         IsolationLevel = isolationLevel;
@@ -264,6 +304,75 @@ public sealed class KvTransaction
         // No lock needed: a bool write is atomic on all .NET-supported architectures, and the
         // flag only transitions false→true (never back), so a torn read is harmless.
         statementExecuted = true;
+    }
+
+    /// <summary>
+    /// Called by <see cref="KvTransactionsManager"/> when a deferred session actually starts.
+    /// Seats the Kahuna transaction handle so subsequent operations have a valid identity and
+    /// starts the lifetime watch. Never called for eager-start or zero-snapshot transactions.
+    /// </summary>
+    internal void SetSessionId(HLCTimestamp kahunaId)
+    {
+        TransactionId = kahunaId;
+        lifetimeWatch = Stopwatch.StartNew();
+    }
+
+    /// <summary>
+    /// Ensures the Kahuna coordinator session has been opened. No-op for zero-snapshot
+    /// transactions (<see cref="SessionStarter"/> is null) and for transactions whose session is
+    /// already started (<see cref="TransactionId"/> is non-zero). Called by write and lock paths
+    /// in <see cref="CamusDB.Core.Storage.Kv.KvTableStore"/> before any KV operation that
+    /// requires a valid transaction handle.
+    /// </summary>
+    public Task EnsureSessionStartedAsync(CancellationToken ct)
+    {
+        // Fast path: not a deferred transaction, or the session is already open.
+        if (SessionStarter is null || TransactionId != HLCTimestamp.Zero)
+            return Task.CompletedTask;
+
+        lock (sessionStartSync)
+        {
+            // Re-check under the lock: another operation may have already opened the session.
+            if (TransactionId != HLCTimestamp.Zero)
+                return Task.CompletedTask;
+
+            // Invoke SessionStarter exactly once; every concurrent first-operation awaits the same
+            // task, so only one Kahuna session is ever opened. The starter returns its Task
+            // synchronously up to the first await, so nothing blocks under the lock.
+            return sessionStartTask ??= SessionStarter(ct);
+        }
+    }
+
+    /// <summary>
+    /// Applies a new locking strategy to this transaction. Called by the
+    /// <c>SET TRANSACTION LOCKING</c> SQL handler. Throws <see cref="CamusDBErrorCodes.InvalidInput"/>
+    /// if any prior statement has executed (standard SQL requires <c>SET TRANSACTION</c> to precede
+    /// all data statements) or if the Kahuna coordinator session has already started (locking is
+    /// pinned at session start and cannot change after the session exists).
+    /// </summary>
+    public void ApplyLocking(KeyValueTransactionLocking locking)
+    {
+        lock (trackSync)
+        {
+            if (statementExecuted)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION LOCKING must be the first statement of a transaction — " +
+                    $"transaction {UniqueId} has already executed a statement");
+
+            if (IsReadOnly)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION LOCKING cannot be applied to a read-only transaction");
+
+            if (TransactionId != HLCTimestamp.Zero)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION LOCKING cannot be applied after the coordinator session has started — " +
+                    $"transaction {UniqueId} already has an active session");
+
+            Locking = locking;
+        }
     }
 
     /// <summary>

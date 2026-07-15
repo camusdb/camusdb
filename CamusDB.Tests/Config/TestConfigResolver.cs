@@ -18,6 +18,8 @@ using CamusDB.Core.Config.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 
+using Kahuna.Shared.KeyValue;
+
 namespace CamusDB.Tests.Config;
 
 [TestFixture]
@@ -82,6 +84,32 @@ public sealed class TestConfigResolver
             CamusDBConfig.LockWaitDeadlineMs = prevDeadline;
             CamusDBConfig.DefaultIsolationLevel = prevIso;
         }
+    }
+
+    [Test]
+    public void ApplyToCamusDBConfig_SetsDefaultTransactionLockingFromYaml()
+    {
+        KeyValueTransactionLocking prevLocking = CamusDBConfig.DefaultTransactionLocking;
+
+        try
+        {
+            ConfigDefinition config = new ConfigReader().Read("default_transaction_locking: optimistic");
+            ConfigResolver.ApplyToCamusDBConfig(config);
+
+            Assert.That(CamusDBConfig.DefaultTransactionLocking, Is.EqualTo(KeyValueTransactionLocking.Optimistic));
+        }
+        finally
+        {
+            CamusDBConfig.DefaultTransactionLocking = prevLocking;
+        }
+    }
+
+    [Test]
+    public void DefaultTransactionLocking_DefaultsToPessimisticWhenKeyAbsent()
+    {
+        // No default_transaction_locking key present → the ConfigDefinition default resolves to Pessimistic.
+        ConfigDefinition config = new ConfigReader().Read("default_isolation_level: serializable");
+        Assert.That(config.ParseDefaultTransactionLocking(), Is.EqualTo(KeyValueTransactionLocking.Pessimistic));
     }
 
     [Test]

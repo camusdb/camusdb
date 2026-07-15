@@ -251,7 +251,109 @@ public sealed class TestIsolationLevelPlumbing
     }
 
     // ------------------------------------------------------------------
-    // 6. Zero observable change: Serializable tx commits/rolls back OK
+    // 6. SET TRANSACTION LOCKING parser tests (no Kahuna node required)
+    // ------------------------------------------------------------------
+
+    [Test]
+    public void SetTransactionLocking_Parse_Pessimistic()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SET TRANSACTION LOCKING PESSIMISTIC");
+
+        Assert.AreEqual(NodeType.SetTransactionLocking, ast.nodeType);
+        Assert.AreEqual("Pessimistic", ast.yytext);
+    }
+
+    [Test]
+    public void SetTransactionLocking_Parse_Optimistic()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SET TRANSACTION LOCKING OPTIMISTIC");
+
+        Assert.AreEqual(NodeType.SetTransactionLocking, ast.nodeType);
+        Assert.AreEqual("Optimistic", ast.yytext);
+    }
+
+    [Test]
+    public void SetTransactionLocking_Parse_CaseInsensitive()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("set transaction locking optimistic");
+
+        Assert.AreEqual(NodeType.SetTransactionLocking, ast.nodeType);
+        Assert.AreEqual("Optimistic", ast.yytext);
+    }
+
+    [Test]
+    public void SetTransactionLocking_Parse_MixedCase()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("Set Transaction Locking Pessimistic");
+
+        Assert.AreEqual(NodeType.SetTransactionLocking, ast.nodeType);
+        Assert.AreEqual("Pessimistic", ast.yytext);
+    }
+
+    [Test]
+    public void SetTransactionLocking_Parse_UnknownMode_Throws()
+    {
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SET TRANSACTION LOCKING SNAPSHOT"));
+    }
+
+    [Test]
+    public void SetTransactionLocking_Parse_DoesNotConflictWithIsolationLevel()
+    {
+        // Isolation level parsing must still work alongside the new locking production.
+        NodeAst iso = SQLParserProcessor.Parse("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        Assert.AreEqual(NodeType.SetTransaction, iso.nodeType);
+        Assert.AreEqual("Serializable", iso.yytext);
+
+        NodeAst locking = SQLParserProcessor.Parse("SET TRANSACTION LOCKING PESSIMISTIC");
+        Assert.AreEqual(NodeType.SetTransactionLocking, locking.nodeType);
+    }
+
+    // ------------------------------------------------------------------
+    // 7. ApplyLocking on KvTransaction (unit-level, no Kahuna required)
+    // ------------------------------------------------------------------
+
+    [Test]
+    public async Task ApplyLocking_BeforeStatement_ChangesLockingMode()
+    {
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await node.WaitForLeaderAsync("locking-apply/warmup", CancellationToken.None);
+        await using EmbeddedKahuna __ = node;
+
+        // Wire mintLocalT and request deferStart so BeginAsync uses the deferred-start path, leaving
+        // TransactionId==Zero until the first write. This is the precondition under which ApplyLocking
+        // is valid (locking can only change before the Kahuna session opens).
+        Kommander.Time.HLCTimestamp mintLocalT(Kommander.Time.HLCTimestamp? _) =>
+            node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+
+        KvTransactionsManager mgr = new(node.Kahuna, mintLocalT);
+
+        KvTransaction tx = await mgr.BeginAsync(deferStart: true);
+        Assert.AreEqual(KeyValueTransactionLocking.Pessimistic, tx.Locking);
+
+        tx.ApplyLocking(KeyValueTransactionLocking.Optimistic);
+        Assert.AreEqual(KeyValueTransactionLocking.Optimistic, tx.Locking);
+
+        await mgr.RollbackAsync(tx);
+    }
+
+    [Test]
+    public async Task ApplyLocking_AfterStatement_Throws()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("locking-after-stmt");
+        await using EmbeddedKahuna __ = node;
+
+        KvTransaction tx = await mgr.BeginAsync();
+        tx.MarkStatementExecuted();
+
+        Assert.Throws<CamusDBException>(() => tx.ApplyLocking(KeyValueTransactionLocking.Optimistic));
+
+        await mgr.RollbackAsync(tx);
+    }
+
+    // ------------------------------------------------------------------
+    // 8. Zero observable change: Serializable tx commits/rolls back OK
     // ------------------------------------------------------------------
 
     [Test]

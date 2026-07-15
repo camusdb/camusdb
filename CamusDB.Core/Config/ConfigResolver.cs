@@ -85,6 +85,7 @@ public static class ConfigResolver
         CamusDBConfig.SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds;
 
         CamusDBConfig.DefaultIsolationLevel = config.ParseDefaultIsolationLevel();
+        CamusDBConfig.DefaultTransactionLocking = config.ParseDefaultTransactionLocking();
         CamusDBConfig.RangeLockExpiresMs = config.RangeLockExpiresMs;
         CamusDBConfig.MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs;
         CamusDBConfig.TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs;

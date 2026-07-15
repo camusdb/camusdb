@@ -54,7 +54,8 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # schema_ack_live_node_lease_ms: -1
 
 # ── Isolation and locking ─────────────────────────────────────────────────────
-# default_isolation_level: serializable   # serializable | read_committed
+# default_isolation_level: serializable       # serializable | read_committed
+# default_transaction_locking: pessimistic    # pessimistic | optimistic
 # range_lock_expires_ms: 150000           # initial range-lock TTL; must exceed the coordinator renewal tick (60s); <= 0 = no expiry
 # max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables absolute cap; also the Kahuna session timeout
 # lock_escalation_threshold: 50           # shared-point locks before bucket escalation (> 0)

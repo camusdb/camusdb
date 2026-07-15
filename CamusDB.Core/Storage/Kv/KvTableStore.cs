@@ -379,6 +379,10 @@ public sealed class KvTableStore
     {
         ArgumentNullException.ThrowIfNull(tx);
 
+        // Start the deferred Kahuna session (if not yet started) before any lock attempt.
+        // For zero-snapshot and eager-start transactions this is a no-op.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         // A range lock needs a real transaction identity to own and later release it. The
         // Zero-snapshot read-only fast path (point reads, and all reads in single-partition mode)
         // has no such identity, so it cannot take a range lock — skip. A promoted read-only scan
@@ -572,6 +576,10 @@ public sealed class KvTableStore
     /// </summary>
     public async Task<byte[]?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
+        // Serializable+RW acquires a shared point lock: the session must be open first.
+        // For all other transaction types this is a no-op (zero-snapshot reads proceed without a session).
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         string key = BuildRowKey(rowId);
 
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
@@ -748,6 +756,12 @@ public sealed class KvTableStore
     {
         if (maxRows is <= 0)
             yield break;
+
+        // Open the deferred Kahuna session before reading tx.FoldReads / tx.TransactionId below, so an
+        // optimistic transaction that scans before its first write folds these reads (FoldReads is
+        // false while TransactionId is Zero). No-op for eager, read-only, and already-started
+        // transactions.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
 
         if (ancestorStores.Length == 0)
         {
@@ -973,6 +987,9 @@ public sealed class KvTableStore
         CompositeColumnValue key,
         CancellationToken cancellationToken = default)
     {
+        // Serializable+RW acquires a shared point lock on the index entry before reading.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         // A lookup key that cannot be encoded (e.g. an Id equality against a non-ObjectId literal)
         // can match no stored row — return a miss rather than throwing on the invalid value.
         if (!TryBuildUniqueIndexKey(indexId, key, out string kvKey))
@@ -1024,6 +1041,11 @@ public sealed class KvTableStore
     {
         if (maxRows is <= 0)
             yield break;
+
+        // Open the deferred Kahuna session before the fold decision below, so an optimistic
+        // transaction that scans an index before its first write folds these reads. No-op for eager,
+        // read-only, and already-started transactions.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
 
         long emitted = 0;
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
@@ -1361,6 +1383,11 @@ public sealed class KvTableStore
         if (rows.Count == 0)
             return;
 
+        // Ensure the Kahuna session is open before building request items that embed
+        // tx.TransactionId — the items are built into batch lists before AcquireManyWithRetry
+        // runs, so a deferred-start session must start here rather than inside that call.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         bool isBranch = ancestorStores.Length > 0;
 
         // Collect lock keys and — for root databases — the batch write items in one pass.
@@ -1475,6 +1502,10 @@ public sealed class KvTableStore
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken ct)
     {
+        // Start the deferred session before the optimistic check so that the write calls that
+        // follow (SetManyWithRetry / DeleteManyWithRetry) have a valid TransactionId.
+        await tx.EnsureSessionStartedAsync(ct).ConfigureAwait(false);
+
         // Optimistic transactions take no explicit exclusive locks: each confirmed write folds an
         // implicit point lock into the coordinator working set, and conflicts are detected at commit
         // (write-intent conflict on the modified keys plus read-set validation). Skipping the acquire
@@ -1665,6 +1696,8 @@ public sealed class KvTableStore
         if (rows.Count == 0)
             return;
 
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         bool isBranch = ancestorStores.Length > 0;
 
         // Collect lock keys (deduplicated), delete items (old index entries for root),
@@ -1833,6 +1866,8 @@ public sealed class KvTableStore
         if (rows.Count == 0)
             return;
 
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         List<string> keys = [];
 
         foreach (RowDelete row in rows)
@@ -1948,6 +1983,8 @@ public sealed class KvTableStore
     /// </summary>
     public async Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)
     {
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         string bucketPrefix = BuildIndexBucketPrefix(indexName);
         string keyPrefix    = bucketPrefix + "/";
 
@@ -2011,6 +2048,9 @@ public sealed class KvTableStore
     {
         if (keys.Count == 0)
             return;
+
+        // Start the deferred session before building delete items that embed tx.TransactionId.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
 
         List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys =
             keys.Select(k => (k, 0, KeyValueDurability.Persistent)).ToList();
@@ -2158,6 +2198,10 @@ public sealed class KvTableStore
 
     private async Task AcquireLock(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
+        // Start the deferred Kahuna session before the optimistic/pessimistic branch so the
+        // session is open for the write that follows even when optimistic skips the lock.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
         // Optimistic transactions take no explicit exclusive locks — see AcquireManyWithRetry. The
         // write's implicit point lock and commit-time validation provide isolation instead.
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)

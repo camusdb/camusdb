@@ -24,6 +24,7 @@ using CamusDB.App.Models;
 using CamusDB.App.Services;
 
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -54,7 +55,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
 
         KvTransaction tx = await coord.StartAsync(
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            KeyValueTransactionLocking.Optimistic, CancellationToken.None);
+            KeyValueTransactionLocking.Optimistic, cancellationToken: CancellationToken.None);
 
         Assert.That(tx.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic));
 
@@ -68,7 +69,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
 
         KvTransaction tx = await coord.StartAsync(
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            KeyValueTransactionLocking.Pessimistic, CancellationToken.None);
+            KeyValueTransactionLocking.Pessimistic, cancellationToken: CancellationToken.None);
 
         Assert.That(tx.Locking, Is.EqualTo(KeyValueTransactionLocking.Pessimistic));
 
@@ -103,7 +104,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
 
         KvTransaction tx = await coord.StartAsync(
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            KeyValueTransactionLocking.Optimistic, CancellationToken.None);
+            KeyValueTransactionLocking.Optimistic, cancellationToken: CancellationToken.None);
         await executor.ExecuteNonSQLQuery(new(tx, dbname,
             "INSERT INTO cities_http (id, name) VALUES (\"lis\", \"Lisbon\")", null));
         await coord.CommitAsync(db, tx, CancellationToken.None);
@@ -134,7 +135,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
         {
             KvTransaction tx = await coord.StartAsync(
                 dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-                KeyValueTransactionLocking.Optimistic, CancellationToken.None);
+                KeyValueTransactionLocking.Optimistic, cancellationToken: CancellationToken.None);
             try
             {
                 await executor.ExecuteNonSQLQuery(new(tx, dbname, sql, null));
@@ -201,6 +202,104 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
         CamusDBException ex = Assert.Throws<CamusDBException>(() => LockingParseProbe.Parse(request))!;
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
     }
+
+    // ── Deferred coordinator start (the /start-transaction path) ───────────────────────────────
+
+    [Test]
+    public async Task DeferredStart_SessionOpensOnFirstWrite_CommitsAndReadable()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor) = await SetupAsync();
+
+        await executor.ExecuteDDLSQL(new(
+            await db.Transactions.BeginAsync(), dbname,
+            "CREATE TABLE deferred_rows (id STRING NOT NULL PRIMARY KEY, v STRING NOT NULL)", null));
+
+        KvTransaction tx = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            KeyValueTransactionLocking.Optimistic, deferStart: true);
+
+        // Deferred: no Kahuna session yet, but a stable client id is assigned for tracking.
+        Assert.That(tx.TransactionId, Is.EqualTo(HLCTimestamp.Zero), "session must not start at begin");
+        Assert.That(tx.ClientId, Is.Not.EqualTo(HLCTimestamp.Zero), "a stable client id must be assigned");
+
+        await executor.ExecuteNonSQLQuery(new(tx, dbname,
+            "INSERT INTO deferred_rows (id, v) VALUES (\"a\", \"1\")", null));
+
+        Assert.That(tx.TransactionId, Is.Not.EqualTo(HLCTimestamp.Zero), "first write must open the session");
+        await coord.CommitAsync(db, tx, CancellationToken.None);
+
+        KvTransaction q = await db.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(q, dbname, "SELECT v FROM deferred_rows", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await db.Transactions.CommitAsync(q);
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual("1", rows[0].Row["v"].StrValue);
+    }
+
+    [Test]
+    public async Task SetTransactionLocking_OnDeferredTx_ConfiguresBeforeSessionStart()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor) = await SetupAsync();
+
+        // Begin with the default (pessimistic) and no explicit selection.
+        KvTransaction tx = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            locking: null, deferStart: true);
+        Assert.That(tx.Locking, Is.EqualTo(CamusDBConfig.DefaultTransactionLocking));
+
+        // SET TRANSACTION LOCKING runs before any data statement and before the session opens.
+        (_, IAsyncEnumerable<QueryResultRow> c) =
+            await executor.ExecuteSQLQuery(new(tx, dbname, "SET TRANSACTION LOCKING OPTIMISTIC", null));
+        await c.ToListAsync();
+
+        Assert.That(tx.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic), "SET must reconfigure locking");
+        Assert.That(tx.TransactionId, Is.EqualTo(HLCTimestamp.Zero), "SET TRANSACTION LOCKING must not start the session");
+
+        await coord.RollbackAsync(tx, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task DeferredOptimistic_ReadThenWriteConflict_AbortsAtCommit()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor) = await SetupAsync();
+
+        await executor.ExecuteDDLSQL(new(
+            await db.Transactions.BeginAsync(), dbname,
+            "CREATE TABLE deferred_accounts (id STRING NOT NULL PRIMARY KEY, balance STRING NOT NULL)", null));
+
+        KvTransaction seed = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(seed, dbname,
+            "INSERT INTO deferred_accounts (id, balance) VALUES (\"a\", \"100\")", null));
+        await db.Transactions.CommitAsync(seed);
+
+        // T1: deferred optimistic. Its SELECT (before any write) must open the session and fold the
+        // read observation — this is the path that silently failed to fold before the scan ensure-start fix.
+        KvTransaction t1 = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            KeyValueTransactionLocking.Optimistic, deferStart: true);
+        (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
+            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM deferred_accounts", null));
+        List<QueryResultRow> t1rows = await t1cursor.ToListAsync();
+        Assert.AreEqual("100", t1rows.Single().Row["balance"].StrValue);
+
+        // A concurrent transaction modifies the row T1 read, and commits.
+        KvTransaction t2 = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(t2, dbname,
+            "UPDATE deferred_accounts SET balance = \"200\" WHERE id = \"a\"", null));
+        await db.Transactions.CommitAsync(t2);
+
+        // T1 writes a disjoint key then commits: with its read folded, commit-time validation sees the
+        // stale observation and aborts (read-write / write-skew).
+        await executor.ExecuteNonSQLQuery(new(t1, dbname,
+            "INSERT INTO deferred_accounts (id, balance) VALUES (\"b\", \"1\")", null));
+
+        Assert.ThrowsAsync<CamusDBException>(
+            async () => await coord.CommitAsync(db, t1, CancellationToken.None),
+            "a deferred optimistic transaction whose folded read was invalidated must abort at commit");
+    }
+
 
     /// <summary>
     /// Test-only accessor for the <c>protected static</c> <see cref="CommandsController.ParseRequestLevelMode"/>

@@ -71,7 +71,7 @@ public abstract class CommandsController : ControllerBase
             return (promoted, roTx);
         }
 
-        KvTransaction tx = await transactions.StartAsync(databaseName, isolationLevel, transactionMode, locking, cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await transactions.StartAsync(databaseName, isolationLevel, transactionMode, locking, cancellationToken: cancellationToken).ConfigureAwait(false);
         return (true, tx);
     }
 

@@ -218,7 +218,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             async Task AutocommitDmlBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", reqLevel2, reqMode2, reqLocking2, ct).ConfigureAwait(false);
+                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", reqLevel2, reqMode2, reqLocking2, cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(

@@ -199,6 +199,26 @@ set_transaction_stmt
                      NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, "ReadCommitted");
       }
+    | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER
+      {
+          // SET TRANSACTION LOCKING PESSIMISTIC | OPTIMISTIC
+          // This 4-token form must be listed last so the parser prefers to shift when a 5th
+          // TIDENTIFIER follows (gppg resolves shift/reduce by preferring shift, so the 5-token
+          // isolation productions fire when there are more identifiers ahead).
+          if (!string.Equals($3.s, "locking", StringComparison.OrdinalIgnoreCase))
+              throw new CamusDBException(
+                  CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC }");
+          string lockingMode = $4.s.ToUpperInvariant() switch {
+              "PESSIMISTIC" => "Pessimistic",
+              "OPTIMISTIC"  => "Optimistic",
+              _ => throw new CamusDBException(
+                      CamusDBErrorCodes.InvalidInput,
+                      "Unknown locking mode '" + $4.s + "'. Expected: PESSIMISTIC or OPTIMISTIC")
+          };
+          $$.n = new(NodeType.SetTransactionLocking,
+                     null, null, null, null, null, null, null, lockingMode);
+      }
     | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
       {
           if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||

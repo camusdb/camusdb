@@ -8,6 +8,7 @@
 
 using CamusDB.Core;
 using CamusDB.Core.Transactions;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.Core.Config.Models;
 
@@ -152,6 +153,13 @@ public class ConfigDefinition
     public string DefaultIsolationLevel { get; set; } = "serializable";
 
     /// <summary>
+    /// Cluster-wide default locking strategy when a transaction omits an explicit locking selection:
+    /// <c>pessimistic</c> (acquire-then-write, block on conflict) or <c>optimistic</c> (defer conflict
+    /// detection to read-set validation at commit). Default is <c>pessimistic</c>.
+    /// </summary>
+    public string DefaultTransactionLocking { get; set; } = "pessimistic";
+
+    /// <summary>
     /// Initial range-lock TTL in milliseconds. The coordinator renews a live session's range locks on
     /// its collection-interval tick, so this must exceed that interval (60 s by default) or a lock
     /// lapses before the first renewal. &lt;= 0 disables expiry. Default 150 000.
@@ -275,6 +283,19 @@ public class ConfigDefinition
         };
     }
 
+    /// <summary>Parses <see cref="DefaultTransactionLocking"/> to the Kahuna enum.</summary>
+    public KeyValueTransactionLocking ParseDefaultTransactionLocking()
+    {
+        return DefaultTransactionLocking switch
+        {
+            "pessimistic" => KeyValueTransactionLocking.Pessimistic,
+            "optimistic" => KeyValueTransactionLocking.Optimistic,
+            _ => throw Invalid(
+                "'default_transaction_locking' must be 'pessimistic' or 'optimistic', got '" +
+                DefaultTransactionLocking + "'"),
+        };
+    }
+
     /// <summary>
     /// Validates the configuration, throwing <see cref="CamusDBException"/> with
     /// <see cref="CamusDBErrorCodes.InvalidConfig"/> on the first problem found.
@@ -340,6 +361,11 @@ public class ConfigDefinition
             throw Invalid(
                 "'default_isolation_level' must be 'serializable' or 'read_committed', got '" +
                 DefaultIsolationLevel + "'");
+
+        if (DefaultTransactionLocking is not ("pessimistic" or "optimistic"))
+            throw Invalid(
+                "'default_transaction_locking' must be 'pessimistic' or 'optimistic', got '" +
+                DefaultTransactionLocking + "'");
 
         if (LockEscalationThreshold <= 0)
             throw Invalid($"'lock_escalation_threshold' must be > 0, got {LockEscalationThreshold}");

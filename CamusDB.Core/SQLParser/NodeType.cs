@@ -74,6 +74,13 @@ public enum NodeType
     Commit,
     Rollback,
     SetTransaction,
+    /// <summary>
+    /// <c>SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC }</c>. Selects the Kahuna
+    /// coordinator locking strategy for the current transaction. <c>yytext</c> carries the
+    /// resolved enum name ("Pessimistic" or "Optimistic"). Must be issued before any data
+    /// statement in the transaction, exactly like <see cref="SetTransaction"/>.
+    /// </summary>
+    SetTransactionLocking,
     SortAsc,
     SortDesc,
     CreateTable,

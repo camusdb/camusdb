@@ -2247,7 +2247,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         // Mark the transaction as having executed a statement for every statement type except
         // SET TRANSACTION — that one must be the first statement per standard SQL semantics.
-        if (ast.nodeType != NodeType.SetTransaction)
+        if (ast.nodeType != NodeType.SetTransaction && ast.nodeType != NodeType.SetTransactionLocking)
             ticket.TxnState.MarkStatementExecuted();
 
         switch (ast.nodeType)
@@ -2400,6 +2400,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // ApplyIsolationLevel throws if locks are already held, ensuring the level
                     // change cannot silently skip required read-locks already missed.
                     ticket.TxnState.ApplyIsolationLevel(level, mode);
+
+                    return (database, AsyncEnumerable.Empty<QueryResultRow>());
+                }
+
+            case NodeType.SetTransactionLocking:
+                {
+                    // yytext carries the resolved enum name ("Pessimistic" or "Optimistic") set by the grammar.
+                    if (!Enum.TryParse(ast.yytext, out Kahuna.Shared.KeyValue.KeyValueTransactionLocking locking))
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                            $"Unknown locking mode '{ast.yytext}' in SET TRANSACTION LOCKING");
+
+                    ticket.TxnState.ApplyLocking(locking);
 
                     return (database, AsyncEnumerable.Empty<QueryResultRow>());
                 }

@@ -69,6 +69,16 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void RejectsInvalidDefaultTransactionLocking()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("default_transaction_locking: eventual"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("default_transaction_locking"));
+    }
+
+    [Test]
     public void RejectsUnknownKahunaStorageBackend()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(

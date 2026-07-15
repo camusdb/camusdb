@@ -149,6 +149,7 @@ public sealed class KvTransactionsManager : IDisposable
         KeyValueTransactionLocking? locking = null,
         ReadValidation? readValidation = null,
         DecisionDurability? decisionDurability = null,
+        bool deferStart = false,
         CancellationToken cancellationToken = default)
     {
         CamusIsolationLevel level = isolationLevel ?? CamusDBConfig.DefaultIsolationLevel;
@@ -167,12 +168,49 @@ public sealed class KvTransactionsManager : IDisposable
         DecisionDurability decisionDurabilityMode = decisionDurability ?? CamusDBConfig.DefaultDecisionDurability;
 
         string uniqueId = Guid.NewGuid().ToString("N");
+        int mutationLimit = mutationLimitOverride ?? CamusDBConfig.MaxMutationsPerTransaction;
 
+        // Deferred start is opt-in and used ONLY for explicit client transactions begun through
+        // /start-transaction, where a subsequent SET TRANSACTION LOCKING may reconfigure the locking
+        // mode before the Kahuna session opens. Internally-begun transactions (catalog/registry/stats
+        // and autocommit statements) start eagerly: they never run SET TRANSACTION, and eager start
+        // keeps every write/lock path — including those outside KvTableStore — valid without a
+        // deferred-session guard. A deferred transaction can only reach KvTableStore and CatalogsManager
+        // write/lock paths, which call EnsureSessionStartedAsync.
+        if (deferStart && mintLocalT is not null)
+        {
+            // Build a KvTransaction shell with a locally-minted client id but no Kahuna session yet.
+            // The session opens lazily on the first write/lock/folded-read operation via SessionStarter,
+            // using the locking/isolation/mode values current at that point (after any SET TRANSACTION
+            // statements). Kahuna pins the locking mode at session start, so this is the only way
+            // SET TRANSACTION LOCKING can take effect.
+            Kommander.Time.HLCTimestamp clientId = mintLocalT(null);
+            KvTransaction txDeferred = new(
+                Kommander.Time.HLCTimestamp.Zero, uniqueId, isReadOnly: false, level, mode,
+                mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode,
+                clientId: clientId);
+
+            DecisionDurability capturedDecision = decisionDurabilityMode;
+            txDeferred.SessionStarter = async ct =>
+            {
+                TransactionHandle h = await StartKahunaTransactionAsync(
+                    uniqueId, "start Kahuna transaction",
+                    txDeferred.Locking, txDeferred.ReadValidation, capturedDecision, ct
+                ).ConfigureAwait(false);
+                txDeferred.SetSessionId(h.TransactionId);
+            };
+
+            Track(txDeferred);
+            return txDeferred;
+        }
+
+        // Eager start (the default): starts the Kahuna session immediately and sets
+        // TransactionId = ClientId = the Kahuna handle. Used for every internally-begun and autocommit
+        // transaction, and whenever deferral was not requested.
         TransactionHandle handle = await StartKahunaTransactionAsync(
             uniqueId, "start Kahuna transaction", lockingMode, readValidationMode, decisionDurabilityMode,
             cancellationToken).ConfigureAwait(false);
 
-        int mutationLimit = mutationLimitOverride ?? CamusDBConfig.MaxMutationsPerTransaction;
         KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: false, level, mode,
             mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode);
         Track(tx);
