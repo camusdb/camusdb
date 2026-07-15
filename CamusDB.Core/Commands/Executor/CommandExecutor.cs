@@ -2091,8 +2091,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
-        // Mark the transaction as having executed a statement (all DML is non-SET-TRANSACTION).
-        ticket.TxnState.MarkStatementExecuted();
+        // Mark the transaction as having executed a statement for every statement type except
+        // SET TRANSACTION / SET TRANSACTION LOCKING — those must be the first statement per standard
+        // SQL semantics, so they are exempt from the gate (mirrors ExecuteSQLQuery). A client routes
+        // these no-rows statements to whichever endpoint it uses for non-SELECT SQL, which is often
+        // this one.
+        if (ast.nodeType != NodeType.SetTransaction && ast.nodeType != NodeType.SetTransactionLocking)
+            ticket.TxnState.MarkStatementExecuted();
 
         // Retry boundary: two transient errors, two different retry owners.
         //   CADB0503 SchemaCatchingUp — retried HERE, inside ExecuteNonSQLQuery. The fence fires
@@ -2201,6 +2206,11 @@ public sealed class CommandExecutor : IAsyncDisposable
                     database.Cache?.InvalidateDatabase(database.Id);
                     return new(database, null!, 0);
                 }
+
+            case NodeType.SetTransaction:
+            case NodeType.SetTransactionLocking:
+                ApplySetTransactionStatement(ast, ticket);
+                return new(database, null!, 0);
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
@@ -2385,9 +2395,35 @@ public sealed class CommandExecutor : IAsyncDisposable
                 }
 
             case NodeType.SetTransaction:
+            case NodeType.SetTransactionLocking:
+                ApplySetTransactionStatement(ast, ticket);
+                return (database, AsyncEnumerable.Empty<QueryResultRow>());
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
+        }
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Applies a <c>SET TRANSACTION</c> / <c>SET TRANSACTION LOCKING</c> statement to the in-flight
+    /// transaction state. Shared by both SQL entry points: these statements return no rows, so a
+    /// client may route them to either <see cref="ExecuteSQLQuery"/> (the row-returning endpoint) or
+    /// <see cref="ExecuteNonSQLQuery"/> (the "rows affected" endpoint). Keeping the parse-and-apply
+    /// logic in one place means the two dispatchers cannot drift — a missing case here is why
+    /// <c>SET TRANSACTION LOCKING</c> previously threw "Unknown non-query AST stmt" when a client
+    /// sent it to the non-query endpoint. Callers must exempt these node types from the
+    /// "must be the first statement" gate before invoking this.
+    /// </summary>
+    private static void ApplySetTransactionStatement(NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        switch (ast.nodeType)
+        {
+            case NodeType.SetTransaction:
                 {
                     // yytext holds the isolation level ("Serializable"); leftAst.yytext holds the mode
-                    // ("ReadOnly" or "ReadWrite"). Both are set by the grammar (grammar cases 48/49).
+                    // ("ReadOnly" or "ReadWrite"). Both are set by the grammar.
                     if (!Enum.TryParse(ast.yytext, out CamusIsolationLevel level))
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                             $"Unknown isolation level '{ast.yytext}' in SET TRANSACTION");
@@ -2400,8 +2436,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // ApplyIsolationLevel throws if locks are already held, ensuring the level
                     // change cannot silently skip required read-locks already missed.
                     ticket.TxnState.ApplyIsolationLevel(level, mode);
-
-                    return (database, AsyncEnumerable.Empty<QueryResultRow>());
+                    return;
                 }
 
             case NodeType.SetTransactionLocking:
@@ -2412,16 +2447,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                             $"Unknown locking mode '{ast.yytext}' in SET TRANSACTION LOCKING");
 
                     ticket.TxnState.ApplyLocking(locking);
-
-                    return (database, AsyncEnumerable.Empty<QueryResultRow>());
+                    return;
                 }
 
             default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
+                throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt,
+                    "ApplySetTransactionStatement called with non-SET node: " + ast.nodeType);
         }
     }
-
-    #endregion
 
     private static async IAsyncEnumerable<QueryResultRow> ToAsyncEnumerable(QueryResultRow row)
     {

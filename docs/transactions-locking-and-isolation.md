@@ -265,10 +265,36 @@ checked only at **commit**. If another transaction committed a change to a key i
 to a key it read (read-write / write skew) in the meantime, the commit is aborted and the transaction
 retries. This trades blocking for validation — good for low-contention, read-mostly workloads.
 
-This is a *concurrency strategy*, orthogonal to the isolation level, and today it is selected only
-through the internal begin API (not `SET TRANSACTION`). One caveat: optimistic validation is based on
-the specific rows a transaction read, not on predicates, so it does not protect against phantoms — use
-pessimistic Serializable when you need that. See `kahuna-transaction-coordinator.md` for the mechanism.
+This is a *concurrency strategy*, orthogonal to the isolation level: any
+`{ReadCommitted, Serializable} × {Pessimistic, Optimistic}` combination is valid. One caveat: optimistic
+validation is based on the specific rows a transaction read, not on predicates, so it does not protect
+against phantoms — use pessimistic Serializable when you need that. See
+`kahuna-transaction-coordinator.md` for the mechanism.
+
+#### Selecting the locking mode
+
+Pessimistic is the default. Optimistic is opt-in, chosen three ways (precedence: per-request >
+`SET TRANSACTION LOCKING` > server default):
+
+- **HTTP request field.** Send `"locking": "Optimistic"` (case-insensitive; `"Pessimistic"` is the
+  other value) on `/start-transaction` for an explicit transaction, or on `/execute-sql-non-query` /
+  `/execute-sql-ddl` for a single autocommit statement — it sits next to `isolationLevel` /
+  `transactionMode`. An unrecognized value is rejected with `InvalidInput` (HTTP 400). The read-only
+  `/execute-sql-query` path ignores it: an autocommit `SELECT` runs as a read-only snapshot, which has
+  no locking mode.
+
+- **`SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC }`.** Inside an explicit transaction, issued
+  **before** any data statement (exactly like `SET TRANSACTION ISOLATION LEVEL …`; it may be combined
+  with it in either order). It must run first because the locking mode is pinned when the Kahuna
+  coordinator session opens — so an explicit transaction defers opening its session until the first
+  statement, letting `SET TRANSACTION LOCKING` configure it. Issuing it after a data statement is an
+  error.
+
+- **Server default.** `default_transaction_locking: pessimistic | optimistic` in `config.yml` sets the
+  cluster-wide default for any transaction that makes no explicit selection.
+
+See `kahuna-transaction-coordinator.md` for the deferred-session-start mechanism and how optimistic
+folding and validation work.
 
 ---
 

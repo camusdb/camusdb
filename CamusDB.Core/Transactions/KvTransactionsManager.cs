@@ -408,7 +408,17 @@ public sealed class KvTransactionsManager : IDisposable
 
         if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
         {
-            // Zero-snapshot fast path: no Kahuna transaction to finalize.
+            // Zero-snapshot fast path: no Kahuna transaction to finalize. Covers serializable read-only
+            // snapshots and a deferred-start transaction committed before its session ever opened (e.g.
+            // BEGIN then COMMIT with no statement). Finalize once and untrack so a tracked transaction
+            // does not linger as Active in activeTransactions; Untrack is a no-op for the untracked pure
+            // snapshot, and the Active guard keeps a repeat call idempotent without flipping status.
+            if (tx.Status == KvTransactionStatus.Active)
+            {
+                tx.Status = KvTransactionStatus.Committed;
+                Untrack(tx);
+            }
+
             // Return the minted snapshot T if available (Serializable snapshot reads),
             // otherwise return the current local HLC so RC reads also emit a usable token.
             if (!tx.ReadTimestamp.IsNull())
@@ -607,7 +617,18 @@ public sealed class KvTransactionsManager : IDisposable
         ArgumentNullException.ThrowIfNull(tx);
 
         if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
-            return; // Zero-snapshot read-only fast path: no Kahuna transaction to roll back
+        {
+            // Zero-snapshot read-only fast path: no Kahuna transaction to roll back. Finalize once and
+            // untrack so a tracked snapshot / never-started deferred transaction does not linger as
+            // Active; Untrack is a no-op for the untracked pure snapshot, and the Active guard keeps a
+            // repeat call idempotent without flipping status.
+            if (tx.Status == KvTransactionStatus.Active)
+            {
+                tx.Status = KvTransactionStatus.RolledBack;
+                Untrack(tx);
+            }
+            return;
+        }
 
         if (tx.Status != KvTransactionStatus.Active)
             throw new CamusDBException(

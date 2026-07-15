@@ -261,6 +261,32 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task SetTransactionLocking_ViaNonQueryEndpoint_Applies()
+    {
+        // A client routes a no-rows statement like SET TRANSACTION LOCKING to the non-query endpoint
+        // (ExecuteNonSQLQuery), not the row-returning one. That path previously threw
+        // "Unknown non-query AST stmt: SetTransactionLocking" because the handler existed only in
+        // ExecuteSQLQuery. Both SET variants must apply identically regardless of endpoint.
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor) = await SetupAsync();
+
+        KvTransaction tx = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            locking: null, deferStart: true);
+        Assert.That(tx.Locking, Is.EqualTo(CamusDBConfig.DefaultTransactionLocking));
+
+        // SET ISOLATION then SET LOCKING, both through the non-query endpoint, both before any data
+        // statement — must not throw and must reconfigure the in-flight transaction.
+        await executor.ExecuteNonSQLQuery(new(tx, dbname, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE", null));
+        await executor.ExecuteNonSQLQuery(new(tx, dbname, "SET TRANSACTION LOCKING OPTIMISTIC", null));
+
+        Assert.That(tx.IsolationLevel, Is.EqualTo(CamusIsolationLevel.Serializable), "SET ISOLATION via non-query applied");
+        Assert.That(tx.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic), "SET LOCKING via non-query applied");
+        Assert.That(tx.TransactionId, Is.EqualTo(HLCTimestamp.Zero), "neither SET starts the session");
+
+        await coord.RollbackAsync(tx, CancellationToken.None);
+    }
+
+    [Test]
     public async Task DeferredOptimistic_ReadThenWriteConflict_AbortsAtCommit()
     {
         (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor) = await SetupAsync();
@@ -300,6 +326,62 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
             "a deferred optimistic transaction whose folded read was invalidated must abort at commit");
     }
 
+
+    [Test]
+    public async Task SetIsolationAndLocking_BothApplyBeforeSessionStart()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor) = await SetupAsync();
+
+        KvTransaction tx = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite, deferStart: true);
+
+        // Two SET TRANSACTION statements, in either order, both before any data statement.
+        (_, IAsyncEnumerable<QueryResultRow> a) =
+            await executor.ExecuteSQLQuery(new(tx, dbname, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE", null));
+        await a.ToListAsync();
+        (_, IAsyncEnumerable<QueryResultRow> b) =
+            await executor.ExecuteSQLQuery(new(tx, dbname, "SET TRANSACTION LOCKING OPTIMISTIC", null));
+        await b.ToListAsync();
+
+        Assert.That(tx.IsolationLevel, Is.EqualTo(CamusIsolationLevel.Serializable), "SET ISOLATION applied");
+        Assert.That(tx.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic), "SET LOCKING applied");
+        Assert.That(tx.TransactionId, Is.EqualTo(HLCTimestamp.Zero), "neither SET statement starts the session");
+
+        await coord.RollbackAsync(tx, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task DeferredTx_CommittedWithoutStatement_FinalizesCleanly()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor _) = await SetupAsync();
+
+        // A client that opens a transaction and commits without running any statement never opens the
+        // Kahuna session (TransactionId stays Zero). It must still be finalized, not left Active in the
+        // manager's active-transaction list.
+        KvTransaction tx = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite, deferStart: true);
+        Assert.That(tx.TransactionId, Is.EqualTo(HLCTimestamp.Zero));
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.Active));
+
+        await coord.CommitAsync(db, tx, CancellationToken.None);
+
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.Committed),
+            "an empty deferred transaction must finalize on commit, not linger as Active");
+    }
+
+    [Test]
+    public async Task DeferredTx_RolledBackWithoutStatement_FinalizesCleanly()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor _) = await SetupAsync();
+
+        KvTransaction tx = await coord.StartAsync(
+            dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite, deferStart: true);
+
+        await coord.RollbackAsync(tx, CancellationToken.None);
+
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack),
+            "an empty deferred transaction must finalize on rollback, not linger as Active");
+    }
 
     /// <summary>
     /// Test-only accessor for the <c>protected static</c> <see cref="CommandsController.ParseRequestLevelMode"/>

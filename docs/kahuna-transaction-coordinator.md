@@ -119,7 +119,9 @@ batch is genuinely different work. When in doubt: one logical operation, one ope
 
 The concurrency strategy is chosen per transaction when it begins (via `BeginAsync`), defaulting
 to pessimistic. It is **orthogonal** to the SQL isolation level: a transaction is independently
-Serializable-or-ReadCommitted *and* Pessimistic-or-Optimistic.
+Serializable-or-ReadCommitted *and* Pessimistic-or-Optimistic. Clients select it through the
+`locking` request field or `SET TRANSACTION LOCKING` (see
+`transactions-locking-and-isolation.md` §6.4); the rest of this section is the mechanism.
 
 ### Pessimistic (the default)
 
@@ -151,6 +153,31 @@ a transaction actually read — not on *predicates*. It protects against changes
 but not against a concurrent insert of a new row that would have matched your `WHERE` clause
 (a phantom). Optimistic mode is therefore non-phantom; use pessimistic Serializable when you
 need phantom protection.
+
+### Deferred session start (so `SET TRANSACTION LOCKING` can work)
+
+Kahuna **pins the locking mode when the coordinator session opens** — it cannot change once the
+session exists. That is fine when the mode is known at `BeginAsync` (the request field, or the
+server default). But `SET TRANSACTION LOCKING` runs as the *first statement* of an already-open
+client transaction, after `/start-transaction` has returned — later than the session would
+normally start.
+
+To reconcile this, an **explicit** transaction begun through `/start-transaction`
+(`BeginAsync(deferStart: true)`) is created as a shell with **no Kahuna session yet**:
+`TransactionId` stays `Zero`, and a separately minted, stable `ClientId` is what the coordinator
+tracks and returns to the client. The session opens lazily on the transaction's **first**
+write, lock, or folded read — via `EnsureSessionStartedAsync`, which reads the *then-current*
+locking mode, so any `SET TRANSACTION LOCKING`/`SET TRANSACTION ISOLATION` issued first takes
+effect. `EnsureSessionStartedAsync` opens the session exactly once even under concurrent
+first-operations, and is a no-op once the session exists.
+
+Deferral is **opt-in and used only for that explicit path**. Every internally-begun transaction
+(catalog, registry, statistics) and every autocommit statement starts eagerly, so their write and
+lock paths always have a live session — deferral never touches them. A deferred transaction can
+only reach the write/lock/scan paths in `KvTableStore`, which call `EnsureSessionStartedAsync`
+first; DDL runs in its own eager transaction, never on the deferred one. A deferred transaction
+committed or rolled back before it ever opened a session (e.g. `BEGIN` then `COMMIT` with no
+statement) finalizes through the zero-identity fast path — no Kahuna round-trip.
 
 ---
 
@@ -276,6 +303,15 @@ If you touch a write, read, lock, or transaction-lifecycle path, keep these true
    so it is unchanged. When you add a new read call site, thread the coordinator key exactly the
    way the existing scan and point-read helpers do.
 
+6. **A deferred transaction must open its session before any op that needs a real id.** Deferral
+   is opt-in (`BeginAsync(deferStart: true)`, only the `/start-transaction` path). Any write, lock,
+   or *folded* read path a deferred transaction can reach must call `EnsureSessionStartedAsync`
+   before it embeds `tx.TransactionId` or reads `tx.FoldReads` — otherwise it runs with the `Zero`
+   id (unregistered / unfolded). Today that surface is exactly `KvTableStore`'s write/lock/scan
+   paths; if you make deferral reachable from another subsystem, ensure-start there too. Do **not**
+   defer internally-begun or autocommit transactions — eager start keeps their paths valid without
+   a guard. Never change the locking mode after the session is open (`ApplyLocking` enforces this).
+
 ---
 
 ## 11. Configuration touchpoints
@@ -284,7 +320,9 @@ If you touch a write, read, lock, or transaction-lifecycle path, keep these true
   to `BeginAsync`, each with a process-wide default in `CamusDBConfig`
   (`DefaultTransactionLocking`, `DefaultReadValidation`, `DefaultDecisionDurability`). The
   shipped defaults preserve the historical behavior: pessimistic, no extra read validation,
-  best-effort decisions.
+  best-effort decisions. The locking default is also wired to `config.yml`'s
+  `default_transaction_locking` (`pessimistic` | `optimistic`); clients override it per transaction
+  with the `locking` request field or `SET TRANSACTION LOCKING`.
 - **`RangeLockExpiresMs`** is the *initial* range-lock TTL. It must exceed the coordinator's
   collection interval so a lock survives to its first server renewal.
 - **`MaxSerializableTransactionLifetimeMs`** doubles as the Kahuna session `Timeout`: it bounds
