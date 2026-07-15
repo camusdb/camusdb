@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using CamusDB.App.Models;
 using Kommander.Time;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.App.Services;
 
@@ -74,17 +75,19 @@ public sealed class HttpTransactionCoordinator
     }
 
     public async Task<KvTransaction> StartAsync(string databaseName, CancellationToken cancellationToken = default) =>
-        await StartAsync(databaseName, isolationLevel: null, transactionMode: null, cancellationToken).ConfigureAwait(false);
+        await StartAsync(databaseName, isolationLevel: null, transactionMode: null, locking: null, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// Starts a new transaction with the requested isolation level and mode. When either argument
-    /// is <see langword="null"/> the server default (<see cref="CamusDBConfig.DefaultIsolationLevel"/>
-    /// and <see cref="CamusTransactionMode.ReadWrite"/>) applies.
+    /// Starts a new transaction with the requested isolation level, mode, and locking strategy.
+    /// When any argument is <see langword="null"/> the server default applies:
+    /// <see cref="CamusDBConfig.DefaultIsolationLevel"/>, <see cref="CamusTransactionMode.ReadWrite"/>,
+    /// and <see cref="CamusDBConfig.DefaultTransactionLocking"/> respectively.
     /// </summary>
     public async Task<KvTransaction> StartAsync(
         string databaseName,
         CamusIsolationLevel? isolationLevel,
         CamusTransactionMode? transactionMode,
+        KeyValueTransactionLocking? locking = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
@@ -92,7 +95,7 @@ public sealed class HttpTransactionCoordinator
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(isolationLevel, transactionMode, cancellationToken: cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginAsync(isolationLevel, transactionMode, locking: locking, cancellationToken: cancellationToken).ConfigureAwait(false);
         Register(database.Transactions, tx);
         return tx;
     }

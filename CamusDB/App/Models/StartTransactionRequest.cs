@@ -24,4 +24,11 @@ public sealed class StartTransactionRequest
     /// Accepted values: <c>"ReadWrite"</c> (default), <c>"ReadOnly"</c>.
     /// </summary>
     public string? TransactionMode { get; set; }
+
+    /// <summary>
+    /// Optional locking mode for this transaction.
+    /// Accepted values: <c>"Pessimistic"</c> (default), <c>"Optimistic"</c>.
+    /// When absent, the server applies <see cref="CamusDB.Core.CamusDBConfig.DefaultTransactionLocking"/>.
+    /// </summary>
+    public string? Locking { get; set; }
 }

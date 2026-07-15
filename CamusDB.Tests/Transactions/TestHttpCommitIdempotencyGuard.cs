@@ -46,7 +46,7 @@ public sealed class TestHttpCommitIdempotencyGuard : SharedNodeBaseTest
             dbname,
             CamusIsolationLevel.Serializable,
             CamusTransactionMode.ReadWrite,
-            CancellationToken.None);
+            cancellationToken: CancellationToken.None);
 
     /// <summary>Runs <paramref name="action"/> and captures the thrown exception (or null on success).</summary>
     private static async Task<Exception?> CaptureAsync(Func<Task> action)

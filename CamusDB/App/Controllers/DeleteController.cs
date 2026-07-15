@@ -71,7 +71,7 @@ public sealed class DeleteController : CommandsController
 
             async Task AutocommitBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", null, null, ct).ConfigureAwait(false);
+                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", null, null, cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     DeleteTicket ticket = new(

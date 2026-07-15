@@ -15,6 +15,7 @@ using CamusDB.Core.Transactions;
 using System.Text.Json;
 using CamusDB.App.Services;
 using System;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.App.Controllers;
 
@@ -52,7 +53,12 @@ public sealed class TransactionsController : CommandsController
                     ? parsedMode
                     : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown transaction mode: {request.TransactionMode}");
 
-            KvTransaction txState = await transactions.StartAsync(request.DatabaseName, isolationLevel, transactionMode).ConfigureAwait(false);
+            KeyValueTransactionLocking? locking = request.Locking is null ? null
+                : Enum.TryParse(request.Locking, ignoreCase: true, out KeyValueTransactionLocking parsedLocking) && Enum.IsDefined(parsedLocking)
+                    ? parsedLocking
+                    : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown locking mode: {request.Locking}");
+
+            KvTransaction txState = await transactions.StartAsync(request.DatabaseName, isolationLevel, transactionMode, locking).ConfigureAwait(false);
 
             return new JsonResult(new StartTransactionResponse("ok", txState.TransactionId.L, txState.TransactionId.C));
         }

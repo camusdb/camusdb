@@ -19,6 +19,7 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.SQLParser;
 using CamusDB.App.Services;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.App.Controllers;
 
@@ -47,7 +48,7 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
-            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode) = ParseRequestLevelMode(request);
+            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, _) = ParseRequestLevelMode(request);
 
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
@@ -184,7 +185,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             Console.WriteLine("sql: {0}", request.Sql?.Replace("\n", " ") ?? "");
 
-            (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2) = ParseRequestLevelMode(request);
+            (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2) = ParseRequestLevelMode(request);
 
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
             if (request.TxnIdPT > 0)
@@ -217,7 +218,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             async Task AutocommitDmlBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", reqLevel2, reqMode2, ct).ConfigureAwait(false);
+                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", reqLevel2, reqMode2, reqLocking2, ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -292,13 +293,14 @@ public sealed class ExecuteSQLController : CommandsController
 
                 if (!isDbManagement)
                 {
-                    (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3) = ParseRequestLevelMode(request);
+                    (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3, KeyValueTransactionLocking? reqLocking3) = ParseRequestLevelMode(request);
                     (newTransaction, txnState) = await BeginOrResumeAsync(
                         request.DatabaseName,
                         request.TxnIdPT,
                         request.TxnIdCounter,
                         isolationLevel: reqLevel3,
-                        transactionMode: reqMode3
+                        transactionMode: reqMode3,
+                        locking: reqLocking3
                     ).ConfigureAwait(false);
                 }
 

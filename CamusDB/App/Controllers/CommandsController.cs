@@ -13,6 +13,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Transactions;
 using CamusDB.App.Models;
 using CamusDB.App.Services;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.App.Controllers;
 
@@ -46,6 +47,7 @@ public abstract class CommandsController : ControllerBase
         bool promoteReadOnly = false,
         CamusIsolationLevel? isolationLevel = null,
         CamusTransactionMode? transactionMode = null,
+        KeyValueTransactionLocking? locking = null,
         CancellationToken cancellationToken = default)
     {
         if (txnIdPT > 0)
@@ -69,30 +71,45 @@ public abstract class CommandsController : ControllerBase
             return (promoted, roTx);
         }
 
-        KvTransaction tx = await transactions.StartAsync(databaseName, isolationLevel, transactionMode, cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await transactions.StartAsync(databaseName, isolationLevel, transactionMode, locking, cancellationToken).ConfigureAwait(false);
         return (true, tx);
     }
 
     /// <summary>
-    /// Parses the optional <c>IsolationLevel</c> and <c>TransactionMode</c> string fields from
-    /// a request into their typed enum equivalents. Unrecognised or null values resolve to
-    /// <c>null</c> — the server default (<see cref="CamusDBConfig.DefaultIsolationLevel"/> /
-    /// <see cref="CamusTransactionMode.ReadWrite"/>) applies.
+    /// Parses the optional <c>IsolationLevel</c>, <c>TransactionMode</c>, and <c>Locking</c>
+    /// string fields from a request into their typed enum equivalents. A null or absent field
+    /// resolves to <c>null</c> so the server default applies (<see cref="CamusDBConfig.DefaultIsolationLevel"/>,
+    /// <see cref="CamusTransactionMode.ReadWrite"/>, <see cref="CamusDBConfig.DefaultTransactionLocking"/>).
+    /// A present-but-unrecognised value for any field throws <see cref="CamusDBException"/> with
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> — the three fields validate identically, and
+    /// consistently with the dedicated <c>/start-transaction</c> endpoint, rather than silently
+    /// falling back to the default on a typo.
     /// </summary>
-    protected static (CamusIsolationLevel? level, CamusTransactionMode? mode) ParseRequestLevelMode(
+    protected static (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) ParseRequestLevelMode(
         ExecuteSQLRequest request)
     {
-        CamusIsolationLevel? level = null;
-        CamusTransactionMode? mode  = null;
+        CamusIsolationLevel? level = ParseEnumField<CamusIsolationLevel>(request.IsolationLevel, "isolation level");
+        CamusTransactionMode? mode = ParseEnumField<CamusTransactionMode>(request.TransactionMode, "transaction mode");
+        KeyValueTransactionLocking? locking = ParseEnumField<KeyValueTransactionLocking>(request.Locking, "locking mode");
 
-        if (request.IsolationLevel is not null &&
-            Enum.TryParse(request.IsolationLevel, ignoreCase: true, out CamusIsolationLevel parsed))
-            level = parsed;
+        return (level, mode, locking);
+    }
 
-        if (request.TransactionMode is not null &&
-            Enum.TryParse(request.TransactionMode, ignoreCase: true, out CamusTransactionMode parsedMode))
-            mode = parsedMode;
+    /// <summary>
+    /// Parses an optional request enum string field: <c>null</c>/absent yields <c>null</c> (use the
+    /// server default); any present value must be a defined member of <typeparamref name="TEnum"/>
+    /// (case-insensitive) or a <see cref="CamusDBErrorCodes.InvalidInput"/> is thrown. <see cref="Enum.IsDefined"/>
+    /// is required because <see cref="Enum.TryParse{TEnum}(string, bool, out TEnum)"/> also accepts
+    /// out-of-range numeric strings (e.g. <c>"5"</c>), which are not valid values.
+    /// </summary>
+    private static TEnum? ParseEnumField<TEnum>(string? value, string fieldName) where TEnum : struct, Enum
+    {
+        if (value is null)
+            return null;
 
-        return (level, mode);
+        if (!Enum.TryParse(value, ignoreCase: true, out TEnum parsed) || !Enum.IsDefined(parsed))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown {fieldName}: {value}");
+
+        return parsed;
     }
 }

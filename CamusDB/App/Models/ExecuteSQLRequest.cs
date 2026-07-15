@@ -37,5 +37,15 @@ public sealed class ExecuteSQLRequest
     /// </summary>
     public string? TransactionMode { get; set; }
 
+    /// <summary>
+    /// Optional locking mode for the autocommit transaction begun by this request.
+    /// Accepted values (case-insensitive): <c>"Pessimistic"</c>, <c>"Optimistic"</c>.
+    /// Ignored when <c>TxnIdPT</c> resumes an existing transaction, and ignored on the read-only
+    /// <c>/execute-sql-query</c> path (an autocommit <c>SELECT</c> runs as a read-only snapshot,
+    /// which has no locking mode). Applies to the writable autocommit paths
+    /// (<c>/execute-sql-non-query</c>, <c>/execute-sql-ddl</c>).
+    /// </summary>
+    public string? Locking { get; set; }
+
     public HLCTimestamp? CausalToken { get; set; }
 }

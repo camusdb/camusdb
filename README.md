@@ -12,16 +12,16 @@ CamusDB is an open-source NewSQL distributed database written in C# on .NET 10. 
 
 Features
 --------
-- **SQL dialect** — SELECT, INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
+- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
 - **Aggregation** — COUNT, SUM, AVG, MIN, MAX with GROUP BY and HAVING filters.
-- **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, BETWEEN, IS NULL, IN, NOT IN, scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
-- **Scalar functions** — string, math, date/time, cast, object id, and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
+- **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, regex match operators (~, ~*, !~, !~*), BETWEEN, IS NULL, IN, NOT IN, scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
+- **Scalar functions** — string, math, date/time, cast, object id, regex, and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
 - **Query planning** — physical plan trees for table scans, index scans, joins, aggregation, distinct, sorting, and limits, with predicate/projection/limit pushdown, index-based sort elision, join-order heuristics, index nested-loop joins for eligible equi-joins, semi/anti-join rewrite of indexed `IN`/`NOT IN` subqueries, index-driven value-list `IN`, and streaming `DISTINCT`. A small statistics-backed cost model (row counts, per-index counts, per-column min/max) chooses between index and full scans.
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
-- **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
+- **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, per-column ascending/descending ordered indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); there is no magic creation. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
 - **Copy-on-write database branching** — fork a database instantly with `CREATE DATABASE feature_x BRANCH FROM prod`. The branch shares the parent's data until it diverges (no row data is copied), reads see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Inspect the tree with `SHOW BRANCHES FROM db` and `SHOW ANCESTORS FROM db`. Ideal for cheap staging clones, schema-migration dry-runs, and per-PR ephemeral databases. See [Database Branching](#database-branching) below.
-- **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN.
+- **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, and `SHOW CREATE TABLE`.
 - **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
@@ -30,11 +30,19 @@ Features
 
 Column Types
 ------------
-- `string`
-- `int64`
-- `float64`
-- `bool`
-- `objectId`
+| Type | SQL keyword(s) | Notes |
+|------|----------------|-------|
+| String | `string`, `string(N)`, `varchar`, `char`, `text` | UTF-8 text; `string(N)` bounds the length |
+| Integer64 | `int64`, `int` | 64-bit signed integer |
+| Float64 | `float64` | 64-bit IEEE-754 |
+| Float32 | `float32`, `real` | 32-bit IEEE-754 |
+| Bool | `bool`, `boolean` | |
+| Id | `object_id`, `oid` | 24-hex ObjectId, the default primary-key type |
+| Uuid | `uuid`, `guid` | native 128-bit UUID; `gen_uuid_v4()` / `gen_uuid_v7()` |
+| Bytes | `bytes`, `blob` | binary; `0x…`-hex in SQL, base64 in JSON |
+| Date | `date` | calendar date |
+| DateTime | `datetime`, `timestamp` | date + time |
+| Array | `array(<elem>)` | homogeneous array of a scalar element type (not nested) |
 
 SQL examples
 ------------

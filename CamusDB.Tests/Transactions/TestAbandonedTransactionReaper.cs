@@ -43,7 +43,7 @@ public sealed class TestAbandonedTransactionReaper : SharedNodeBaseTest
             dbname,
             CamusIsolationLevel.Serializable,
             CamusTransactionMode.ReadWrite,
-            CancellationToken.None);
+            cancellationToken: CancellationToken.None);
 
     [Test]
     public async Task ReapsIdleTransactionAndRollsItBack()
