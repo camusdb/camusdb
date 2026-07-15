@@ -98,6 +98,23 @@ internal sealed class SubqueryRewriter
             expr.extendedFour, expr.extendedFive, expr.yytext, expr.extendedSix);
     }
 
+    /// <summary>
+    /// Rewrites a predicate expression (a <c>WHERE</c> clause, or an <c>UPDATE ... SET</c> value)
+    /// by pre-materializing any uncorrelated scalar / <c>IN</c> / <c>NOT IN</c> subquery it
+    /// contains into a literal, so the synchronous <c>SqlExecutor.EvalExpr</c> can evaluate it per
+    /// row. This is the same contract as the <c>WHERE</c> handling of
+    /// <see cref="RewriteSelectQueryAsync"/> and is used by <c>DELETE</c>/<c>UPDATE</c>, which have
+    /// no per-row EXISTS-preparer stage. <c>EXISTS</c> is intentionally left intact: materializing
+    /// a correlated EXISTS as if it were uncorrelated (as the projection rewriter does for FROM-less
+    /// SELECT) would silently return wrong rows, so it instead surfaces the explicit
+    /// "must be resolved" guard. Returns the same node reference when nothing was rewritten.
+    /// </summary>
+    public Task<NodeAst> RewriteWhereExpressionAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        ExecuteSQLTicket ticket)
+        => RewriteExpressionAsync(database, expr, ticket);
+
     public async Task<SelectQuery> RewriteSelectQueryAsync(
         DatabaseDescriptor database,
         SelectQuery query,

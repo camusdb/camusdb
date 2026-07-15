@@ -2128,6 +2128,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.Update:
                 {
                     UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
+                    updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket).ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
@@ -2147,6 +2148,27 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.Delete:
                 {
                     DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
+
+                    // Resolve any scalar / IN / NOT IN subquery in the WHERE clause to a literal
+                    // before evaluation (DELETE has no subquery rewrite of its own, unlike SELECT).
+                    // Done once here, outside the fence-retry loop, so the inner query is not
+                    // re-executed on each SchemaCatchingUp retry.
+                    if (deleteTicket.Where is not null)
+                    {
+                        NodeAst rewrittenWhere = await subqueryRewriter
+                            .RewriteWhereExpressionAsync(database, deleteTicket.Where, ticket)
+                            .ConfigureAwait(false);
+
+                        if (!ReferenceEquals(rewrittenWhere, deleteTicket.Where))
+                            deleteTicket = new DeleteTicket(
+                                txnState: deleteTicket.TxnState,
+                                databaseName: deleteTicket.DatabaseName,
+                                tableName: deleteTicket.TableName,
+                                where: rewrittenWhere,
+                                filters: deleteTicket.Filters,
+                                parameters: deleteTicket.Parameters,
+                                limit: deleteTicket.Limit);
+                    }
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
@@ -2399,6 +2421,61 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         await Task.CompletedTask;
         yield break;
+    }
+
+    /// <summary>
+    /// Pre-materializes uncorrelated scalar / <c>IN</c> / <c>NOT IN</c> subqueries in an
+    /// <c>UPDATE</c>'s <c>WHERE</c> clause and each <c>SET</c> value into literals, mirroring the
+    /// subquery rewrite that <c>SELECT</c> already performs, so the synchronous evaluator in
+    /// <see cref="RowUpdater"/> never sees an unresolved subquery node. Runs once before the
+    /// fence-retry loop so inner queries are not re-executed per retry. Rebuilds the ticket only
+    /// when something actually changed; <c>EXISTS</c> is left intact (see
+    /// <see cref="SubqueryRewriter.RewriteWhereExpressionAsync"/>).
+    /// </summary>
+    private async Task<UpdateTicket> RewriteUpdateSubqueriesAsync(
+        DatabaseDescriptor database, UpdateTicket ticket, ExecuteSQLTicket sqlTicket)
+    {
+        bool changed = false;
+
+        NodeAst? newWhere = ticket.Where;
+        if (newWhere is not null)
+        {
+            newWhere = await subqueryRewriter
+                .RewriteWhereExpressionAsync(database, newWhere, sqlTicket)
+                .ConfigureAwait(false);
+            changed |= !ReferenceEquals(newWhere, ticket.Where);
+        }
+
+        Dictionary<string, NodeAst>? newExprValues = ticket.ExprValues;
+        if (ticket.ExprValues is not null)
+        {
+            Dictionary<string, NodeAst> rewritten = new(ticket.ExprValues.Count);
+            foreach (KeyValuePair<string, NodeAst> entry in ticket.ExprValues)
+            {
+                NodeAst resolved = await subqueryRewriter
+                    .RewriteWhereExpressionAsync(database, entry.Value, sqlTicket)
+                    .ConfigureAwait(false);
+                rewritten[entry.Key] = resolved;
+                changed |= !ReferenceEquals(resolved, entry.Value);
+            }
+
+            if (changed)
+                newExprValues = rewritten;
+        }
+
+        if (!changed)
+            return ticket;
+
+        return new UpdateTicket(
+            txnState: ticket.TxnState,
+            databaseName: ticket.DatabaseName,
+            tableName: ticket.TableName,
+            plainValues: ticket.PlainValues,
+            exprValues: newExprValues,
+            where: newWhere,
+            filters: ticket.Filters,
+            parameters: ticket.Parameters,
+            limit: ticket.Limit);
     }
 
     /// <summary>
