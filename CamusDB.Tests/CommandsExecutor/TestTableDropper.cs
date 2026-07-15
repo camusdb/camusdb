@@ -54,8 +54,12 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
         );
 
         await executor.CreateTable(createTicket);
-        
+
         await database.Transactions.CommitAsync(txnState);
+
+        // The DDL transaction was committed above; the row inserts must run on their own
+        // transaction. Reusing a finalized transaction is rejected by the coordinator.
+        txnState = await database.Transactions.BeginAsync();
 
         List<string> objectsId = new(25);
 
@@ -83,6 +87,8 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
 
             objectsId.Add(objectId);
         }
+
+        await database.Transactions.CommitAsync(txnState);
 
         return (dbname, database, executor, catalogs, objectsId);
     }

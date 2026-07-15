@@ -50,10 +50,27 @@ public sealed class KvTransaction
 
     /// <summary>
     /// The unique identifier that routes commit/rollback to the correct Kahuna
-    /// transaction coordinator. Must match the value from <c>KeyValueTransactionOptions.UniqueId</c>
-    /// used to start the transaction.
+    /// transaction coordinator. Supplied as <c>KeyValueTransactionOptions.CoordinatorKey</c>
+    /// when the transaction is started; it pins the coordinator session to one partition leader.
     /// </summary>
     public string UniqueId { get; }
+
+    /// <summary>
+    /// The coordinator key that pins this transaction's server-side session to a partition leader.
+    /// Passed on every registered operation so the confirmed effect folds into the coordinator-owned
+    /// working set. Identical to <see cref="UniqueId"/> — the value CamusDB supplies as
+    /// <c>KeyValueTransactionOptions.CoordinatorKey</c> at start.
+    /// </summary>
+    public string CoordinatorKey => UniqueId;
+
+    /// <summary>
+    /// The routing identity handed to <c>LocateAndCommitTransaction</c> / <c>LocateAndRollbackTransaction</c>.
+    /// The Kahuna coordinator finalizes from its own working set, so the handle (transaction id +
+    /// coordinator key) is the only thing the client supplies at finalize — no client-built key list.
+    /// <see cref="TransactionHandle.RecordAnchorKey"/> is left null: it matters only for durable-decision
+    /// recovery, which the best-effort commit path does not use.
+    /// </summary>
+    public TransactionHandle Handle => new(TransactionId, UniqueId);
 
     /// <summary>Current lifecycle state. Set by <see cref="KvTransactionsManager"/>.</summary>
     public KvTransactionStatus Status { get; internal set; } = KvTransactionStatus.Active;
@@ -96,6 +113,48 @@ public sealed class KvTransaction
     /// (Read Committed) path is unchanged.</para>
     /// </summary>
     public HLCTimestamp ReadTimestamp { get; }
+
+    /// <summary>
+    /// Concurrency strategy the Kahuna coordinator was started with for this transaction.
+    /// <see cref="KeyValueTransactionLocking.Pessimistic"/> (the default) acquires locks before each
+    /// write and relies on them alone; <see cref="KeyValueTransactionLocking.Optimistic"/> defers
+    /// conflict detection to a read-set validation at commit, which requires reads to be folded into
+    /// the coordinator working set (see <see cref="FoldReads"/>).
+    /// </summary>
+    public KeyValueTransactionLocking Locking { get; }
+
+    /// <summary>
+    /// Whether reads issued by this transaction are tracked by the coordinator for a commit-time
+    /// read-set conflict check. <see cref="ReadValidation.None"/> (the default) skips tracking;
+    /// <see cref="ReadValidation.TrackAndValidate"/> requests the check even for a pessimistic
+    /// transaction. It cannot be combined with a fixed <see cref="ReadTimestamp"/> (a historical
+    /// snapshot has no live read dependency), so <see cref="BeginAsync"/> never sets both.
+    /// </summary>
+    public ReadValidation ReadValidation { get; }
+
+    /// <summary>
+    /// Whether each read this transaction performs should be registered with the coordinator so its
+    /// existence/base-revision observation folds into the server-owned working set and is validated
+    /// at commit. True only when the transaction actually wants read-set validation — optimistic
+    /// locking (which validates its read set by definition) or an explicit
+    /// <see cref="ReadValidation.TrackAndValidate"/> request — and only for a real registered
+    /// transaction reading the latest version (a <see cref="HLCTimestamp.Zero"/> identity has no
+    /// coordinator session to fold into, and a fixed <see cref="ReadTimestamp"/> snapshot carries no
+    /// live read dependency).
+    ///
+    /// <para><b>Not yet consumed by the read path.</b> This is the gate the scan/point-read helpers
+    /// will consult to decide whether to pass a coordinator key + operation id. Read folding is
+    /// blocked until Kahuna's streaming scan and batch-read entry points accept those registration
+    /// parameters (the point-read API already does; the dominant scan/batch paths do not). Until
+    /// then reads never fold, so optimistic transactions detect write-write conflicts (writes fold)
+    /// but not read-write / write-skew conflicts. Wiring this on without full scan coverage would be
+    /// misleading, since a scanned-then-modified row would go undetected.</para>
+    /// </summary>
+    public bool FoldReads =>
+        TransactionId != HLCTimestamp.Zero &&
+        ReadTimestamp.IsNull() &&
+        (Locking == KeyValueTransactionLocking.Optimistic ||
+         ReadValidation == ReadValidation.TrackAndValidate);
 
     /// <summary>
     /// Monotonic elapsed-time counter started when this transaction was created. Used to enforce
@@ -149,7 +208,9 @@ public sealed class KvTransaction
         CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
         CamusTransactionMode transactionMode = CamusTransactionMode.ReadWrite,
         HLCTimestamp readTimestamp = default,
-        int mutationLimit = 0)
+        int mutationLimit = 0,
+        KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic,
+        ReadValidation readValidation = ReadValidation.None)
     {
         TransactionId = transactionId;
         UniqueId = uniqueId;
@@ -158,6 +219,8 @@ public sealed class KvTransaction
         TransactionMode = transactionMode;
         ReadTimestamp = readTimestamp;
         this.mutationLimit = mutationLimit;
+        Locking = locking;
+        ReadValidation = readValidation;
         if (transactionId != HLCTimestamp.Zero)
             lifetimeWatch = Stopwatch.StartNew();
     }

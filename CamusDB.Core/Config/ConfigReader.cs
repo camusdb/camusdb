@@ -48,7 +48,6 @@ public class ConfigReader
         "raft_certificate",
         "default_isolation_level",
         "range_lock_expires_ms",
-        "range_lock_heartbeat_interval_ms",
         "max_serializable_transaction_lifetime_ms",
         "lock_escalation_threshold",
         "lock_wait_deadline_ms",

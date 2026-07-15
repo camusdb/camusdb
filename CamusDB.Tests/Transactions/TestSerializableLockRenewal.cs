@@ -24,11 +24,15 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Verifies Task 4 — range-lock lease renewal for long-running Serializable+RW transactions.
+/// Serializable+RW range-lock finalize/release behavior: commit and rollback release a
+/// transaction's range locks so a subsequent transaction sees the committed value or is no longer
+/// blocked, and Read Committed transactions take no serializable range lock.
 ///
-/// Tests use shortened TTLs (<see cref="CamusDBConfig.RangeLockExpiresMs"/>) and heartbeat
-/// intervals (<see cref="CamusDBConfig.RangeLockHeartbeatIntervalMs"/>) so they run in under
-/// a second without waiting the real 30 s range-lock TTL.
+/// <para>Range-lock <b>lease renewal</b> for long-running transactions is no longer a CamusDB
+/// concern: range-lock acquisitions are registered with the Kahuna transaction coordinator, which
+/// renews them on its collection-interval tick for the life of the session and releases them on
+/// finalize. That renewal (which operates on a ~60 s cadence, far too coarse to exercise with the
+/// sub-second TTLs used here) is verified at the Kahuna level, not in this fixture.</para>
 ///
 /// [NonParallelizable] because config knobs are process-global.
 /// </summary>
@@ -36,28 +40,18 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
 {
-    private int savedRangeLockExpiresMs;
-    private int savedHeartbeatIntervalMs;
     private int savedMaxLifetimeMs;
 
     [SetUp]
-    public void SetFastRenewal()
+    public void DisableLifetimeCap()
     {
-        savedRangeLockExpiresMs      = CamusDBConfig.RangeLockExpiresMs;
-        savedHeartbeatIntervalMs     = CamusDBConfig.RangeLockHeartbeatIntervalMs;
-        savedMaxLifetimeMs           = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
-
-        // 300 ms lock TTL + 100 ms heartbeat → renewal fires well before expiry.
-        CamusDBConfig.RangeLockExpiresMs          = 300;
-        CamusDBConfig.RangeLockHeartbeatIntervalMs = 100;
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = -1; // no cap during renewal tests
+        savedMaxLifetimeMs = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
+        CamusDBConfig.MaxSerializableTransactionLifetimeMs = -1; // no cap during these tests
     }
 
     [TearDown]
     public void RestoreConfig()
     {
-        CamusDBConfig.RangeLockExpiresMs          = savedRangeLockExpiresMs;
-        CamusDBConfig.RangeLockHeartbeatIntervalMs = savedHeartbeatIntervalMs;
         CamusDBConfig.MaxSerializableTransactionLifetimeMs = savedMaxLifetimeMs;
     }
 
@@ -113,98 +107,12 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 1. A Serializable+RW transaction held open past the original lock TTL
-    //    (300 ms) still commits — proves the heartbeat renewed the range lock
-    //    before it expired.
+    // Commit finalizes and releases the range locks; a new transaction sees the
+    // committed value.
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task LongRunningSerializableRW_CommitsAfterLockTtlElapses()
-    {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
-
-        string id = ObjectIdGenerator.Generate().ToString();
-        await InsertRowAsync(dbname, db, executor, id, 100L);
-
-        KvTransaction tx = await db.Transactions.BeginAsync(
-            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-
-        // Acquire a range lock by reading the row (S lock via S2PL).
-        long balance = await ReadBalanceAsync(dbname, executor, tx, id);
-        Assert.AreEqual(100L, balance);
-
-        // Sleep for 3× the lock TTL. Without renewal the lock would expire and the subsequent
-        // commit would fail because Kahuna sees the range lock as gone.
-        await Task.Delay(CamusDBConfig.RangeLockExpiresMs * 3 + 100);
-
-        // The heartbeat must have fired at least twice at 100 ms interval, refreshing the lock.
-        // CommitAsync succeeds if and only if the range lock is still held.
-        Assert.DoesNotThrowAsync(async () =>
-            await db.Transactions.CommitAsync(tx),
-            "Serializable+RW tx must commit after lock renewal kept range locks alive past their original TTL");
-    }
-
-    // -----------------------------------------------------------------------
-    // 2. A foreign write targeting the same row is still blocked after TTL
-    //    elapses — renewal kept the S lock active so Alice's read is protected.
-    // -----------------------------------------------------------------------
-
-    [Test]
-    public async Task LongRunningSerializableRW_ForeignWriteStillBlockedAfterTtlElapses()
-    {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
-
-        string id = ObjectIdGenerator.Generate().ToString();
-        await InsertRowAsync(dbname, db, executor, id, 100L);
-
-        KvTransaction alice = await db.Transactions.BeginAsync(
-            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-        await ReadBalanceAsync(dbname, executor, alice, id);
-
-        // Wait past the original TTL so that without renewal Bob would succeed.
-        await Task.Delay(CamusDBConfig.RangeLockExpiresMs * 3 + 100);
-
-        CamusDBException? conflict = null;
-        KvTransaction? bob = null;
-        try
-        {
-            bob = await db.Transactions.BeginAsync(
-                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-            await executor.Update(new UpdateTicket(
-                txnState: bob, databaseName: dbname, tableName: "accounts",
-                plainValues: new() { { "balance", new(ColumnType.Integer64, 999L) } },
-                exprValues: null, where: null,
-                filters: new() { new("id", "=", new(ColumnType.Id, id)) },
-                parameters: null));
-            await db.Transactions.CommitAsync(bob);
-        }
-        catch (CamusDBException ex)
-        {
-            conflict = ex;
-            if (bob is not null)
-                await db.Transactions.RollbackIfNotCompletedAsync(bob);
-        }
-        finally
-        {
-            await db.Transactions.RollbackIfNotCompletedAsync(alice);
-        }
-
-        Assert.IsNotNull(conflict,
-            "Bob's write must be blocked — the renewed range lock kept Alice's S lock alive");
-        Assert.IsTrue(
-            conflict!.Code == CamusDBErrorCodes.TransactionConflict ||
-            conflict.Code  == CamusDBErrorCodes.TransactionMustRetry,
-            $"Expected serialization conflict, got {conflict.Code}");
-    }
-
-    // -----------------------------------------------------------------------
-    // 3. Commit cancels the heartbeat — no background renewal fires after the
-    //    transaction finishes. Verified structurally: we read back that the
-    //    commit completes normally and a new tx sees the committed value.
-    // -----------------------------------------------------------------------
-
-    [Test]
-    public async Task CommitCancelsHeartbeat_NewTxSeesCommittedValue()
+    public async Task Commit_NewTxSeesCommittedValue()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
 
@@ -231,12 +139,11 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 4. Rollback cancels the heartbeat — a foreign write succeeds after
-    //    the rolled-back transaction's lock is released.
+    // Rollback releases the range lock — a foreign write succeeds afterward.
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task RollbackCancelsHeartbeat_ForeignWriteSucceedsAfterRollback()
+    public async Task Rollback_ForeignWriteSucceedsAfterRollback()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
 
@@ -247,7 +154,7 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
             CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
         await ReadBalanceAsync(dbname, executor, alice, id);
 
-        // Roll back — stops the heartbeat and releases the range lock.
+        // Roll back — releases the range lock.
         await db.Transactions.RollbackAsync(alice);
 
         // Bob can now write without conflict.
@@ -264,14 +171,11 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 5. RC transactions do NOT get a heartbeat — no background renewal task.
-    //    Structurally verified: the MaxSerializableTransactionLifetimeMs is -1
-    //    (cap disabled), so if a heartbeat started for RC it would just be
-    //    overhead but harmless. The real assertion is commit succeeds normally.
+    // Read Committed transactions take no serializable range lock and commit normally.
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task ReadCommittedTx_NoHeartbeatNeeded_CommitsNormally()
+    public async Task ReadCommittedTx_CommitsNormally()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
 
@@ -307,51 +211,4 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
             "MaxSerializableTransactionLifetimeMs default must be 1 hour (3 600 000 ms), not 25 s");
     }
 
-    // -----------------------------------------------------------------------
-    // 7. The heartbeat self-terminates once the transaction passes its absolute
-    //    lifetime cap. An ABANDONED Serializable+RW transaction (opened, read a
-    //    row, then never committed or rolled back) must NOT keep renewing its
-    //    range lock forever — otherwise the lock is held permanently and every
-    //    conflicting write aborts indefinitely. Once renewal stops, the lock
-    //    lapses at its next TTL and a foreign write succeeds. This is the exact
-    //    opposite of case 2, where the cap is disabled (-1) and the foreign
-    //    write stays blocked because renewal keeps the lock alive.
-    // -----------------------------------------------------------------------
-
-    [Test]
-    public async Task HeartbeatSelfTerminatesPastLifetimeCap_ForeignWriteSucceeds()
-    {
-        // Short absolute cap: the heartbeat must stop renewing shortly after 200 ms.
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 200;
-
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTableAsync();
-
-        string id = ObjectIdGenerator.Generate().ToString();
-        await InsertRowAsync(dbname, db, executor, id, 100L);
-
-        // Alice reads the row (acquires an S range lock) and is then abandoned — no commit/rollback.
-        KvTransaction alice = await db.Transactions.BeginAsync(
-            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-        await ReadBalanceAsync(dbname, executor, alice, id);
-
-        // Wait past the lifetime cap (200 ms) plus a full lock TTL (300 ms): the heartbeat has
-        // self-terminated and the un-renewed range lock has expired.
-        await Task.Delay(CamusDBConfig.RangeLockExpiresMs * 3 + 300);
-
-        // Bob writes the same row. With Alice's heartbeat stopped and her lock lapsed, he succeeds.
-        KvTransaction bob = await db.Transactions.BeginAsync(
-            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-        await executor.Update(new UpdateTicket(
-            txnState: bob, databaseName: dbname, tableName: "accounts",
-            plainValues: new() { { "balance", new(ColumnType.Integer64, 555L) } },
-            exprValues: null, where: null,
-            filters: new() { new("id", "=", new(ColumnType.Id, id)) },
-            parameters: null));
-
-        Assert.DoesNotThrowAsync(async () => await db.Transactions.CommitAsync(bob),
-            "Past the lifetime cap the heartbeat must stop renewing, so the abandoned tx's range lock lapses and a foreign write succeeds");
-
-        // Clean up the abandoned transaction (its heartbeat has already stopped).
-        await db.Transactions.RollbackIfNotCompletedAsync(alice);
-    }
 }

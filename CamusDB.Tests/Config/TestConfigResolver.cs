@@ -172,8 +172,7 @@ public sealed class TestConfigResolver
             string yml =
                 "lock_wait_deadline_ms: 250\n" +
                 "lock_escalation_threshold: 12\n" +
-                "range_lock_expires_ms: 15000\n" +
-                "range_lock_heartbeat_interval_ms: 4000";
+                "range_lock_expires_ms: 15000";
 
             ConfigDefinition config = new ConfigReader().Read(yml);
             ConfigResolver.ApplyToCamusDBConfig(config);
@@ -181,7 +180,6 @@ public sealed class TestConfigResolver
             Assert.That(CamusDBConfig.LockWaitDeadlineMs, Is.EqualTo(250));
             Assert.That(CamusDBConfig.LockEscalationThreshold, Is.EqualTo(12));
             Assert.That(CamusDBConfig.RangeLockExpiresMs, Is.EqualTo(15_000));
-            Assert.That(CamusDBConfig.RangeLockHeartbeatIntervalMs, Is.EqualTo(4000));
         }
         finally
         {

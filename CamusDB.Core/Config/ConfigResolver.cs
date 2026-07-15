@@ -86,7 +86,6 @@ public static class ConfigResolver
 
         CamusDBConfig.DefaultIsolationLevel = config.ParseDefaultIsolationLevel();
         CamusDBConfig.RangeLockExpiresMs = config.RangeLockExpiresMs;
-        CamusDBConfig.RangeLockHeartbeatIntervalMs = config.RangeLockHeartbeatIntervalMs;
         CamusDBConfig.MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs;
         CamusDBConfig.TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs;
         CamusDBConfig.TransactionReaperIntervalMs = config.TransactionReaperIntervalMs;

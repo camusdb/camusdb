@@ -151,11 +151,12 @@ public class ConfigDefinition
     /// </summary>
     public string DefaultIsolationLevel { get; set; } = "serializable";
 
-    /// <summary>Range-lock TTL in milliseconds. &lt;= 0 disables expiry. Default 30 000.</summary>
-    public int RangeLockExpiresMs { get; set; } = 30_000;
-
-    /// <summary>Range-lock heartbeat interval in milliseconds. Must be &lt; <see cref="RangeLockExpiresMs"/> when expiry is enabled.</summary>
-    public int RangeLockHeartbeatIntervalMs { get; set; } = 10_000;
+    /// <summary>
+    /// Initial range-lock TTL in milliseconds. The coordinator renews a live session's range locks on
+    /// its collection-interval tick, so this must exceed that interval (60 s by default) or a lock
+    /// lapses before the first renewal. &lt;= 0 disables expiry. Default 150 000.
+    /// </summary>
+    public int RangeLockExpiresMs { get; set; } = 150_000;
 
     /// <summary>Absolute Serializable+RW transaction lifetime cap in milliseconds. &lt;= 0 disables.</summary>
     public int MaxSerializableTransactionLifetimeMs { get; set; } = 3_600_000;
@@ -339,10 +340,6 @@ public class ConfigDefinition
             throw Invalid(
                 "'default_isolation_level' must be 'serializable' or 'read_committed', got '" +
                 DefaultIsolationLevel + "'");
-
-        if (RangeLockExpiresMs > 0 && RangeLockHeartbeatIntervalMs >= RangeLockExpiresMs)
-            throw Invalid(
-                "'range_lock_heartbeat_interval_ms' must be < 'range_lock_expires_ms' when expiry is enabled");
 
         if (LockEscalationThreshold <= 0)
             throw Invalid($"'lock_escalation_threshold' must be > 0, got {LockEscalationThreshold}");

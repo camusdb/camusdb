@@ -267,7 +267,11 @@ public sealed class TestRowUpdaterCloseDb : BaseTest
         await database.Transactions.CommitAsync(txnState);
 
         CloseDatabaseTicket closeTicket = new(dbname);
-        await executor.CloseDatabase(closeTicket);               
+        await executor.CloseDatabase(closeTicket);
+
+        // The previous transaction was committed above; a further write must run on a fresh
+        // transaction. Reusing a finalized transaction is rejected by the coordinator.
+        txnState = await database.Transactions.BeginAsync();
 
         queryByIdTicket = new(
             txnState: txnState,
@@ -314,5 +318,7 @@ public sealed class TestRowUpdaterCloseDb : BaseTest
 
         Assert.AreEqual(objectsId[0], result[0]["id"].StrValue);
         Assert.AreEqual("new updated value", result[0]["name"].StrValue);
+
+        await database.Transactions.CommitAsync(txnState);
     }
 }

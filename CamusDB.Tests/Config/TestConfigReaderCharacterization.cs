@@ -69,17 +69,6 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
-    public void RejectsHeartbeatNotLessThanExpires()
-    {
-        CamusDBException ex = Assert.Throws<CamusDBException>(
-            () => new ConfigReader().Read(
-                "range_lock_expires_ms: 5000\nrange_lock_heartbeat_interval_ms: 5000"))!;
-
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
-        Assert.That(ex.Message, Does.Contain("range_lock_heartbeat_interval_ms"));
-    }
-
-    [Test]
     public void RejectsUnknownKahunaStorageBackend()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(

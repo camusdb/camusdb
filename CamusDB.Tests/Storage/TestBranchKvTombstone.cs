@@ -48,18 +48,17 @@ public sealed class TestBranchKvTombstone
 
     private static async Task<KvTransaction> BeginTransaction(IKahuna kahuna, string uniqueId)
     {
-        (KeyValueResponseType type, HLCTimestamp txId) = await kahuna.LocateAndStartTransaction(
-            new KeyValueTransactionOptions { UniqueId = uniqueId, Locking = KeyValueTransactionLocking.Pessimistic },
+        (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = uniqueId, Locking = KeyValueTransactionLocking.Pessimistic },
             CancellationToken.None
         );
         Assert.AreEqual(KeyValueResponseType.Set, type);
-        return new KvTransaction(txId, uniqueId);
+        return new KvTransaction(handle.TransactionId, uniqueId);
     }
 
     private static async Task CommitTransaction(IKahuna kahuna, KvTransaction tx)
     {
-        KeyValueResponseType result = await kahuna.LocateAndCommitTransaction(
-            tx.UniqueId, tx.TransactionId, tx.GetAcquiredLocks(), tx.GetModifiedKeys(), [], CancellationToken.None);
+        (KeyValueResponseType result, _) = await kahuna.LocateAndCommitTransaction(tx.Handle, CancellationToken.None);
         Assert.AreEqual(KeyValueResponseType.Committed, result);
     }
 

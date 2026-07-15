@@ -1039,6 +1039,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         KeyValueDurability lockDurability;
         int lockRetries = 0;
 
+        // Stable per-operation ids reused across the retry loop so a replayed call folds once into the
+        // coordinator working set; the write and its lock must fold, or the commit-from-working-set would
+        // not persist this registry key.
+        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        TransactionOperationId setOperationId = TransactionOperationId.NewRandom();
+
         do
         {
             if (lockRetries > 0)
@@ -1046,7 +1052,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0,
-                KeyValueDurability.Persistent, CancellationToken.None
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
         }
         while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
@@ -1071,7 +1078,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             (setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 tx.TransactionId, key, value, null, -1,
                 flags, 0,
-                KeyValueDurability.Persistent, CancellationToken.None
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: setOperationId
             ).ConfigureAwait(false);
         }
         while (setType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
@@ -1096,6 +1104,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         KeyValueDurability lockDurability;
         int lockRetries = 0;
 
+        // Stable per-operation ids reused across the retry loop (see WriteRegistryKey) so the delete and its
+        // lock fold once into the coordinator working set and the commit persists the removal.
+        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
+
         do
         {
             if (lockRetries > 0)
@@ -1103,7 +1116,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0,
-                KeyValueDurability.Persistent, CancellationToken.None
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
         }
         while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
@@ -1126,7 +1140,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             (deleteType, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
                 tx.TransactionId, key,
-                KeyValueDurability.Persistent, CancellationToken.None
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: deleteOperationId
             ).ConfigureAwait(false);
         }
         while (deleteType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication

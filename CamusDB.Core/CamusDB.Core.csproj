@@ -74,10 +74,13 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.6.3" />
-    <PackageReference Include="Kahuna.Shared" Version="0.6.3" />
+    <!-- Temporary local source bridge to the Kahuna transaction-coordinator API. Restore the
+         Kahuna.Core / Kahuna.Shared PackageReferences (a published version carrying the coordinator
+         API) before merge; a sibling ProjectReference must not ship. -->
+    <ProjectReference Include="..\..\kahuna\Kahuna.Core\Kahuna.Core.csproj" />
+    <ProjectReference Include="..\..\kahuna\Kahuna.Shared\Kahuna.Shared.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
-    <PackageReference Include="System.IO.Hashing" Version="10.0.8" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <!-- System.Linq.Async removed: .NET 10 includes IAsyncEnumerable LINQ built-in -->

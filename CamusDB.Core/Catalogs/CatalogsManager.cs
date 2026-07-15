@@ -2376,13 +2376,20 @@ public sealed class CatalogsManager
         KeyValueDurability lockDurability;
         int lockRetries = 0;
 
+        // Stable per-operation ids reused across the retry loop so a replayed call after a lost response
+        // folds once into the coordinator working set instead of applying twice. The write and its lock
+        // must fold, or the DDL transaction's commit-from-working-set would not persist this meta key.
+        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        TransactionOperationId setOperationId = TransactionOperationId.NewRandom();
+
         do
         {
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
             (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
+                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
         }
         while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
@@ -2407,7 +2414,8 @@ public sealed class CatalogsManager
             (setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 tx.TransactionId, key, value, null, -1,
                 KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent, CancellationToken.None
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: setOperationId
             ).ConfigureAwait(false);
         }
         while (setType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
@@ -2428,13 +2436,19 @@ public sealed class CatalogsManager
         KeyValueDurability lockDurability;
         int lockRetries = 0;
 
+        // Stable per-operation ids reused across the retry loop (see WriteMetaKey) so the delete and its
+        // lock fold once into the coordinator working set and the DDL commit persists the removal.
+        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
+
         do
         {
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
             (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None
+                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
         }
         while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
@@ -2457,7 +2471,8 @@ public sealed class CatalogsManager
                 await Task.Delay(deleteRetries * 10).ConfigureAwait(false);
 
             (deleteType, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
-                tx.TransactionId, key, KeyValueDurability.Persistent, CancellationToken.None
+                tx.TransactionId, key, KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: deleteOperationId
             ).ConfigureAwait(false);
         }
         while (deleteType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication

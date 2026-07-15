@@ -228,27 +228,57 @@ public static class CamusDBConfig
     public static CamusIsolationLevel DefaultIsolationLevel = CamusIsolationLevel.Serializable;
 
     /// <summary>
-    /// TTL, in milliseconds, granted to each Kahuna range lock acquired by a serializable
-    /// read-write transaction. The range-lock heartbeat renews each lock before this window
-    /// expires, so live transactions are not bounded by this value.
-    ///
-    /// <para>A zero or negative value tells Kahuna to hold the lock indefinitely (no TTL).
-    /// Tests may lower this to exercise renewal under a short TTL.</para>
-    ///
-    /// Default: 30 000 ms (30 s).
+    /// Default Kahuna concurrency strategy applied when a transaction is begun without an explicit
+    /// locking mode. <see cref="Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic"/>
+    /// (acquire-then-write, block on conflict) preserves the historical behavior. An individual
+    /// transaction can opt into <see cref="Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic"/>
+    /// via the <c>locking</c> argument to <c>KvTransactionsManager.BeginAsync</c>; the coordinator then
+    /// defers conflict detection to read-set validation at commit instead of holding locks.
     /// </summary>
-    public static int RangeLockExpiresMs = 30_000;
+    public static global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking DefaultTransactionLocking =
+        global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic;
 
     /// <summary>
-    /// How often, in milliseconds, the background range-lock heartbeat re-acquires every range
-    /// lock held by a live Serializable+RW transaction. Must be well under
-    /// <see cref="RangeLockExpiresMs"/> to guarantee renewal before expiry.
-    ///
-    /// <para>Tests may lower this to exercise renewal without waiting 30 s.</para>
-    ///
-    /// Default: 10 000 ms (10 s) — a third of the 30 s range-lock TTL.
+    /// Default read-set validation policy applied when a transaction is begun without an explicit
+    /// value. <see cref="Kahuna.Shared.KeyValue.ReadValidation.None"/> keeps the historical behavior:
+    /// pessimistic transactions rely on their locks alone and do not fold read observations. A
+    /// transaction can opt into <see cref="Kahuna.Shared.KeyValue.ReadValidation.TrackAndValidate"/>
+    /// to additionally validate its read set at commit even while pessimistic. Optimistic transactions
+    /// always validate their read set regardless of this value.
     /// </summary>
-    public static int RangeLockHeartbeatIntervalMs = 10_000;
+    public static global::Kahuna.Shared.KeyValue.ReadValidation DefaultReadValidation =
+        global::Kahuna.Shared.KeyValue.ReadValidation.None;
+
+    /// <summary>
+    /// Default commit-decision durability applied when a transaction is begun without an explicit
+    /// value. <see cref="Kahuna.Shared.KeyValue.DecisionDurability.BestEffort"/> keeps the decision in
+    /// memory (it can be lost if the coordinator crashes before its next checkpoint) and is the
+    /// historical behavior. A transaction can opt into
+    /// <see cref="Kahuna.Shared.KeyValue.DecisionDurability.Durable"/> so the commit decision is
+    /// written to durable storage before the outcome is returned; the coordinator assigns the record
+    /// anchor from the first confirmed persistent write, so no client-side anchor plumbing is needed.
+    /// Durable mode rejects a transaction that confirmed any ephemeral modification.
+    /// </summary>
+    public static global::Kahuna.Shared.KeyValue.DecisionDurability DefaultDecisionDurability =
+        global::Kahuna.Shared.KeyValue.DecisionDurability.BestEffort;
+
+    /// <summary>
+    /// Initial TTL, in milliseconds, requested for each Kahuna range lock acquired by a serializable
+    /// read-write transaction. Range-lock acquisitions are registered with the transaction coordinator,
+    /// so once the lock is held the coordinator renews its lease every collection-interval tick for the
+    /// life of the session and releases it on finalize — the client no longer heartbeats it.
+    ///
+    /// <para><b>Timing invariant:</b> this initial TTL must comfortably exceed the coordinator's
+    /// collection interval (its renewal tick period, 60 s by default), because the lock must survive
+    /// from acquisition until the first server renewal. A value below that interval would let the lock
+    /// lapse before the coordinator renews it, silently breaking serializable isolation. 150 s survives
+    /// well past the first 60 s tick.</para>
+    ///
+    /// <para>A zero or negative value tells Kahuna to hold the lock indefinitely (no TTL).</para>
+    ///
+    /// Default: 150 000 ms (150 s).
+    /// </summary>
+    public static int RangeLockExpiresMs = 150_000;
 
     /// <summary>
     /// Maximum wall-clock lifetime, in milliseconds, for a <see cref="CamusIsolationLevel.Serializable"/>
@@ -256,8 +286,10 @@ public static class CamusDBConfig
     /// this duration elapses from <c>BeginAsync</c>, any subsequent operation (range lock acquisition,
     /// commit) throws <see cref="CamusDBErrorCodes.TransactionLifetimeExceeded"/>.
     ///
-    /// <para>With the range-lock heartbeat active, range locks never expire due to TTL; this cap only
-    /// bounds runaway transactions. A zero or negative value disables the deadline (useful in tests).</para>
+    /// <para>The coordinator renews a live session's range locks so they never expire due to TTL; this
+    /// cap only bounds runaway transactions. It is also supplied to Kahuna as the session
+    /// <c>Timeout</c>, so an abandoned session's locks are reclaimed by the server reaper after this
+    /// window plus its grace period. A zero or negative value disables the deadline (useful in tests).</para>
     ///
     /// Default: 3 600 000 ms (1 hour).
     /// </summary>
@@ -271,9 +303,10 @@ public static class CamusDBConfig
     ///
     /// <para>This targets abandoned transactions: a client that opens a transaction and then
     /// disconnects, crashes, or forgets to commit/rollback. Such a transaction is otherwise never
-    /// finalized, so its Serializable+RW range-lock heartbeat would renew its locks forever and
-    /// every conflicting transaction would keep aborting. The reaper reclaims it — freeing the
-    /// locks, rolling back the Kahuna transaction, and dropping it from the in-flight map.</para>
+    /// finalized, so the coordinator would keep renewing its Serializable+RW range locks and every
+    /// conflicting transaction would keep aborting. This CamusDB-side reaper reclaims it — freeing the
+    /// locks, rolling back the Kahuna transaction, and dropping it from the in-flight map — as does the
+    /// Kahuna server reaper once the session <c>Timeout</c> lapses.</para>
     ///
     /// <para>Only transactions tracked by the HTTP transaction coordinator (explicit
     /// <c>/start-transaction</c> sessions and promoted read-only scans) are subject to the reaper;
@@ -281,11 +314,12 @@ public static class CamusDBConfig
     /// tracked. A pause longer than this window inside an interactive session is treated as
     /// abandonment and rolled back.</para>
     ///
-    /// <para><c>&lt;= 0</c> disables the reaper entirely. Even when disabled, an abandoned
-    /// Serializable+RW transaction's locks are still bounded by
-    /// <see cref="MaxSerializableTransactionLifetimeMs"/> — the heartbeat stops renewing once that
-    /// cap is passed — so a disabled reaper degrades the worst case from "prompt cleanup" to
-    /// "reclaimed at the next TTL after the lifetime cap", never back to a permanent hold.</para>
+    /// <para><c>&lt;= 0</c> disables this CamusDB-side reaper. Even when disabled, an abandoned
+    /// Serializable+RW transaction's locks are still bounded by the Kahuna session <c>Timeout</c>
+    /// (set from <see cref="MaxSerializableTransactionLifetimeMs"/>): the server reaper reclaims the
+    /// session after that window plus its grace period, so a disabled CamusDB reaper degrades the
+    /// worst case from "prompt cleanup" to "reclaimed by the server after the lifetime cap", never
+    /// back to a permanent hold.</para>
     ///
     /// Default: 300 000 ms (5 minutes).
     /// </summary>

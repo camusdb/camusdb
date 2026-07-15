@@ -65,7 +65,7 @@ public sealed class TestKvTableStoreRetry
     /// <see cref="KeyValueResponseType.MustRetry"/> N times for specific operations before
     /// delegating to the underlying node. All other interface methods are delegated unchanged.
     /// </summary>
-    private sealed class FaultInjectingKahuna(IKahuna inner) : IKahuna
+    private sealed class FaultInjectingKahuna(IKahuna inner) : DelegatingKahuna(inner)
     {
         // Decrement post-check counters. Set to N before the call under test;
         // the wrapper returns MustRetry N times then delegates to the real node.
@@ -78,62 +78,54 @@ public sealed class TestKvTableStoreRetry
         public int InjectDeleteManyFaults;
 
         // ---- intercepted: single-key exclusive lock ----
-        public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> LocateAndTryAcquireExclusiveLock(
-            HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability, CancellationToken ct)
+        public override Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> LocateAndTryAcquireExclusiveLock(
+            HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectAcquireLockFaults-- > 0)
                 return Task.FromResult((KeyValueResponseType.MustRetry, string.Empty, durability, HLCTimestamp.Zero));
-            return inner.LocateAndTryAcquireExclusiveLock(txId, key, expiresMs, durability, ct);
+            return inner.LocateAndTryAcquireExclusiveLock(txId, key, expiresMs, durability, ct, coordinatorKey, operationId);
         }
 
         // ---- intercepted: single-key get ----
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
-            HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct)
+        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+            HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectGetValueFaults-- > 0)
                 return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
-            return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct);
+            return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct, coordinatorKey, operationId);
         }
 
         // ---- intercepted: single-key set ----
-        public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
+        public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
             HLCTimestamp txId, string key, byte[]? value, byte[]? compareValue, long compareRevision,
-            KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken ct, long routedGeneration = 0)
+            KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken ct, long routedGeneration = 0,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectSetKeyValueFaults-- > 0)
                 return Task.FromResult((KeyValueResponseType.MustRetry, -1L, HLCTimestamp.Zero));
-            return inner.LocateAndTrySetKeyValue(txId, key, value, compareValue, compareRevision, flags, expiresMs, durability, ct, routedGeneration);
+            return inner.LocateAndTrySetKeyValue(txId, key, value, compareValue, compareRevision, flags, expiresMs, durability, ct, routedGeneration, coordinatorKey, operationId);
         }
 
         // ---- intercepted: single-key delete ----
-        public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(
-            HLCTimestamp txId, string key, KeyValueDurability durability, CancellationToken ct)
+        public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(
+            HLCTimestamp txId, string key, KeyValueDurability durability, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectDeleteKeyValueFaults-- > 0)
                 return Task.FromResult((KeyValueResponseType.MustRetry, -1L, HLCTimestamp.Zero));
-            return inner.LocateAndTryDeleteKeyValue(txId, key, durability, ct);
+            return inner.LocateAndTryDeleteKeyValue(txId, key, durability, ct, coordinatorKey, operationId);
         }
 
-        // ---- pass-through: MVCC snapshot floor ----
-        public Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct)
-            => inner.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, ct);
-
-        public Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct)
-            => inner.LocateAndRenewSnapshotHold(holdId, leaseMs, ct);
-
-        public Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct)
-            => inner.LocateAndReleaseSnapshotHold(holdId, ct);
-
-        public Task<(HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct)
-            => inner.GetSnapshotFloor(ct);
-
         // ---- intercepted: batch acquire locks ----
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
-            HLCTimestamp txId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken ct)
+        public override Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+            HLCTimestamp txId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectAcquireManyFaults-- > 0)
                 return Task.FromResult(keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList());
-            return inner.LocateAndTryAcquireManyExclusiveLocks(txId, keys, ct);
+            return inner.LocateAndTryAcquireManyExclusiveLocks(txId, keys, ct, coordinatorKey, operationId);
         }
 
         // ---- intercepted: batch set ----
@@ -149,8 +141,9 @@ public sealed class TestKvTableStoreRetry
         // would come back NotSet → false DuplicateUniqueKeyValue.
         public Func<string, bool>? SetManyPartialFaultPredicate;
 
-        public async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
-            List<KahunaSetKeyValueRequestItem> items, CancellationToken ct)
+        public override async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
+            List<KahunaSetKeyValueRequestItem> items, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectSetManyFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList();
@@ -162,139 +155,24 @@ public sealed class TestKvTableStoreRetry
                 List<KahunaSetKeyValueRequestItem> toFault = items.Where(i =>  pred(i.Key ?? "")).ToList();
 
                 List<KahunaSetKeyValueResponseItem> innerResults = toSet.Count > 0
-                    ? await inner.LocateAndTrySetManyKeyValue(toSet, ct).ConfigureAwait(false)
+                    ? await inner.LocateAndTrySetManyKeyValue(toSet, ct, coordinatorKey, operationId).ConfigureAwait(false)
                     : [];
 
                 return [..innerResults, ..toFault.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry })];
             }
 
-            return await inner.LocateAndTrySetManyKeyValue(items, ct).ConfigureAwait(false);
+            return await inner.LocateAndTrySetManyKeyValue(items, ct, coordinatorKey, operationId).ConfigureAwait(false);
         }
 
         // ---- intercepted: batch delete ----
-        public Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
-            List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
+        public override Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
+            List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             if (InjectDeleteManyFaults-- > 0)
                 return Task.FromResult(items.Select(i => new KahunaDeleteKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList());
-            return inner.LocateAndTryDeleteManyKeyValue(items, ct);
+            return inner.LocateAndTryDeleteManyKeyValue(items, ct, coordinatorKey, operationId);
         }
-
-        // ---- delegated: transaction lifecycle ----
-        public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken ct)
-            => inner.LocateAndStartTransaction(options, ct);
-
-        public Task<KeyValueResponseType> LocateAndCommitTransaction(
-            string uniqueId, HLCTimestamp ts,
-            List<KeyValueTransactionModifiedKey> locks, List<KeyValueTransactionModifiedKey> modified,
-            List<KeyValueTransactionReadKey> reads, CancellationToken ct)
-            => inner.LocateAndCommitTransaction(uniqueId, ts, locks, modified, reads, ct);
-
-        public Task<KeyValueResponseType> LocateAndRollbackTransaction(
-            string uniqueId, HLCTimestamp ts,
-            List<KeyValueTransactionModifiedKey> locks, List<KeyValueTransactionModifiedKey> modified,
-            CancellationToken ct)
-            => inner.LocateAndRollbackTransaction(uniqueId, ts, locks, modified, ct);
-
-        // ---- delegated: scan (Kahuna handles MustRetry internally per page) ----
-        public IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
-            HLCTimestamp txId, string prefix,
-            string? startKey, bool startInclusive,
-            string? endKey, bool endInclusive,
-            int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct)
-            => inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct);
-
-        // ---- delegated: key-range registration ----
-        public void RegisterKeyRange(string keySpace) => inner.RegisterKeyRange(keySpace);
-        public Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken ct = default) => inner.RegisterKeyRangeAsync(keySpace, ct);
-        public Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken ct = default) => inner.RemoveKeyRangeAsync(keySpace, ct);
-
-        // ---- delegated: range and prefix lock release (needed for rollback) ----
-        public Task<(KeyValueResponseType, string)> LocateAndTryReleaseExclusiveLock(HLCTimestamp txId, string key, KeyValueDurability durability, CancellationToken ct)
-            => inner.LocateAndTryReleaseExclusiveLock(txId, key, durability, ct);
-
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability)>> LocateAndTryReleaseManyExclusiveLocks(HLCTimestamp txId, List<(string key, KeyValueDurability durability)> keys, CancellationToken ct)
-            => inner.LocateAndTryReleaseManyExclusiveLocks(txId, keys, ct);
-
-        // ---- all remaining IKahuna members: not called by KvTableStore in these tests ----
-        public Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(LockResponseType, ReadOnlyLockEntry?)> LocateAndGetLock(string resource, LockDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(LockResponseType, long)> TryLock(string resource, byte[] owner, int expiresMs, LockDurability durability) => throw new NotSupportedException();
-        public Task<(LockResponseType, long)> TryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability) => throw new NotSupportedException();
-        public Task<LockResponseType> TryUnlock(string resource, byte[] owner, LockDurability durability) => throw new NotSupportedException();
-        public Task<(LockResponseType, ReadOnlyLockEntry?)> GetLock(string resource, LockDurability durability) => throw new NotSupportedException();
-        public Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue2(List<KahunaSetKeyValueRequestItem> items, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryExistsValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> LocateAndTryCheckWriteIntent(HLCTimestamp txId, string key, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryExistsManyValues(HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryExtendKeyValue(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> LocateAndGetByBucket(HLCTimestamp txId, string prefixedKey, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueGetByRangeResult> LocateAndGetByRange(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int limit, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long, HLCTimestamp)> TrySetKeyValue(HLCTimestamp txId, string key, byte[]? value, byte[]? compareValue, long compareRevision, KeyValueFlags flags, int expiresMs, KeyValueDurability durability, long routedGeneration = 0) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long, HLCTimestamp)> TryExtendKeyValue(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long, HLCTimestamp)> TryDeleteKeyValue(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<List<KahunaDeleteKeyValueResponseItem>> DeleteManyNodeKeyValue(List<KahunaDeleteKeyValueRequestItem> items) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryGetValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryGetManyValues(HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> TryExistsValue(HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> TryExistsManyValues(HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> TryCheckWriteIntentValue(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> LocateAndTryAcquireExclusivePrefixLock(HLCTimestamp txId, string prefixKey, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp)> LocateAndTryAcquireRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp)> TryAcquireRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability, RangeLockMode mode) => throw new NotSupportedException();
-        public Task<List<KeyValueRangeLock>> GetRangeLocks(string keySpace) => throw new NotSupportedException();
-        public Task ImportRangeLocks(string keySpace, List<KeyValueRangeLock> locks) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(HLCTimestamp txId, string prefixKey, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> LocateAndTryPrepareMutations(HLCTimestamp txId, HLCTimestamp commitId, string key, KeyValueDurability durability, CancellationToken ct, long routedGeneration = 0) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)>> LocateAndTryPrepareManyMutations(HLCTimestamp txId, HLCTimestamp commitId, List<(string key, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long)> LocateAndTryCommitMutations(HLCTimestamp txId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryCommitManyMutations(HLCTimestamp txId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp txId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(HLCTimestamp txId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> TryAcquireExclusiveLock(HLCTimestamp txId, string key, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> TryAcquireExclusivePrefixLock(HLCTimestamp txId, string prefixKey, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp)> TryAcquireExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, int expiresMs, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp txId, string key, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> TryReleaseExclusivePrefixLock(HLCTimestamp txId, string prefixKey, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> TryReleaseExclusiveRangeLock(HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp txId, HLCTimestamp commitId, string key, KeyValueDurability durability, long routedGeneration = 0) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp txId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp txId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueTransactionResult> TryExecuteTransactionScript(byte[] script, string? hash, List<KeyValueParameter>? parameters) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp txId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => throw new NotSupportedException();
-        public Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(KeyValueResponseType, HLCTimestamp)> StartTransaction(KeyValueTransactionOptions options) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> CommitTransaction(HLCTimestamp ts, List<KeyValueTransactionModifiedKey> locks, List<KeyValueTransactionModifiedKey> modified, List<KeyValueTransactionReadKey> reads) => throw new NotSupportedException();
-        public Task<KeyValueResponseType> RollbackTransaction(HLCTimestamp ts, List<KeyValueTransactionModifiedKey> locks, List<KeyValueTransactionModifiedKey> modified) => throw new NotSupportedException();
-        public Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, SequenceDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(string name, string? idempotencyKey, SequenceDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<(SequenceResponseType, SequenceAllocation)> LocateAndReserveSequenceRange(string name, int count, string? idempotencyKey, SequenceDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<SequenceResponseType> LocateAndDeleteSequence(string name, SequenceDurability durability, CancellationToken ct) => throw new NotSupportedException();
-        public Task<bool> OnLogRestored(int partitionId, RaftLog log) => throw new NotSupportedException();
-        public Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => throw new NotSupportedException();
-        public void OnReplicationError(int partitionId, RaftLog log) => throw new NotSupportedException();
-        public Task FlushPersistenceAsync() => throw new NotSupportedException();
-        public Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => throw new NotSupportedException();
-
-        public bool IsBackupConfigured => inner.IsBackupConfigured;
-
-        public Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval)
-            => inner.BootstrapFromPitrBackupAsync(backupDir, leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
-
-        public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken ct = default) => throw new NotSupportedException();
     }
 
     // -----------------------------------------------------------------------
@@ -303,24 +181,17 @@ public sealed class TestKvTableStoreRetry
 
     private static async Task<KvTransaction> BeginTransaction(IKahuna kahuna, string uniqueId)
     {
-        (KeyValueResponseType type, HLCTimestamp txId) = await kahuna.LocateAndStartTransaction(
-            new KeyValueTransactionOptions { UniqueId = uniqueId, Locking = KeyValueTransactionLocking.Pessimistic },
+        (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = uniqueId, Locking = KeyValueTransactionLocking.Pessimistic },
             CancellationToken.None
         );
         Assert.AreEqual(KeyValueResponseType.Set, type);
-        return new KvTransaction(txId, uniqueId);
+        return new KvTransaction(handle.TransactionId, uniqueId);
     }
 
     private static async Task CommitTransaction(IKahuna kahuna, KvTransaction tx)
     {
-        KeyValueResponseType result = await kahuna.LocateAndCommitTransaction(
-            tx.UniqueId,
-            tx.TransactionId,
-            tx.GetAcquiredLocks(),
-            tx.GetModifiedKeys(),
-            [],
-            CancellationToken.None
-        );
+        (KeyValueResponseType result, _) = await kahuna.LocateAndCommitTransaction(tx.Handle, CancellationToken.None);
         Assert.AreEqual(KeyValueResponseType.Committed, result);
     }
 

@@ -726,6 +726,226 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// A transaction begun with <see cref="global::Kahuna.Shared.KeyValue.DecisionDurability.Durable"/>
+    /// must commit its writes and expose them to a later reader exactly like the best-effort default.
+    /// Every CamusDB row/index/meta write is persistent, so durable-decision mode (which rejects a
+    /// transaction that confirmed any ephemeral modification) accepts the commit; the coordinator
+    /// assigns the record anchor from the first confirmed persistent write, so no client anchor
+    /// plumbing is involved.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertWithDurableDecision()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE flags (id STRING NOT NULL PRIMARY KEY, name STRING NOT NULL)",
+            null));
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            decisionDurability: global::Kahuna.Shared.KeyValue.DecisionDurability.Durable);
+        await executor.ExecuteNonSQLQuery(new(tx, dbname,
+            "INSERT INTO flags (id, name) VALUES (\"ca\", \"Canada\")", null));
+        await database.Transactions.CommitAsync(tx);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id, name FROM flags", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txq);
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual("ca", rows[0].Row["id"].StrValue);
+        Assert.AreEqual("Canada", rows[0].Row["name"].StrValue);
+    }
+
+    /// <summary>
+    /// An optimistic transaction takes no explicit exclusive locks; its writes fold implicit point
+    /// locks into the coordinator working set, and the commit validates + finalizes them. This proves
+    /// an optimistic transaction can commit at all: without the coordinator folding a batch write's
+    /// implicit point lock, prepare would abort (empty lock set) and the row would never persist.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestOptimisticInsertCommitsAndIsReadable()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE cities (id STRING NOT NULL PRIMARY KEY, name STRING NOT NULL)",
+            null));
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            isolationLevel: CamusIsolationLevel.ReadCommitted,
+            locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
+        await executor.ExecuteNonSQLQuery(new(tx, dbname,
+            "INSERT INTO cities (id, name) VALUES (\"lis\", \"Lisbon\")", null));
+        await database.Transactions.CommitAsync(tx);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id, name FROM cities", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txq);
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual("lis", rows[0].Row["id"].StrValue);
+        Assert.AreEqual("Lisbon", rows[0].Row["name"].StrValue);
+    }
+
+    /// <summary>
+    /// Two CONCURRENT optimistic transactions inserting the same primary key must not both commit.
+    /// Optimistic transactions do not block on a lock; the conflict is detected at commit (competing
+    /// write intents on the same key), so exactly one wins and the table ends with a single row —
+    /// the same guarantee the pessimistic path gives, reached by validation instead of blocking.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestOptimisticConcurrentDuplicatePrimaryKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE ports (id STRING NOT NULL PRIMARY KEY, name STRING NOT NULL)",
+            null));
+
+        const string sql = "INSERT INTO ports (id, name) VALUES (\"rot\", \"Rotterdam\")";
+
+        async Task<bool> TryInsert()
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                isolationLevel: CamusIsolationLevel.ReadCommitted,
+                locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
+            try
+            {
+                await executor.ExecuteNonSQLQuery(new(tx, dbname, sql, null));
+                await database.Transactions.CommitAsync(tx);
+                return true;
+            }
+            catch (CamusDBException)
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx);
+                return false;
+            }
+        }
+
+        bool[] results = await Task.WhenAll(TryInsert(), TryInsert());
+        int succeeded = results.Count(ok => ok);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id FROM ports", null));
+        int rowCount = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txq);
+
+        Assert.AreEqual(1, rowCount, $"Expected exactly 1 row after concurrent optimistic duplicate inserts, found {rowCount}");
+        Assert.AreEqual(1, succeeded, $"Expected exactly 1 optimistic insert to succeed, {succeeded} did");
+    }
+
+    /// <summary>
+    /// Optimistic read-set validation: a transaction that read a row which a concurrent transaction
+    /// then modified and committed must ABORT at commit, even though the two transactions wrote
+    /// disjoint keys (a read-write / write-skew conflict). This exercises the read-folding path —
+    /// the optimistic transaction's read is registered as an observation and validated against the
+    /// current committed revision at commit.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestOptimisticReadWriteConflictAbortsAtCommit()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE accounts (id STRING NOT NULL PRIMARY KEY, balance STRING NOT NULL)",
+            null));
+
+        KvTransaction seed = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(seed, dbname,
+            "INSERT INTO accounts (id, balance) VALUES (\"a\", \"100\")", null));
+        await database.Transactions.CommitAsync(seed);
+
+        // T1 (optimistic) reads account "a" — folds a read observation at its current revision.
+        KvTransaction t1 = await database.Transactions.BeginAsync(
+            isolationLevel: CamusIsolationLevel.ReadCommitted,
+            locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
+        (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
+            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM accounts", null));
+        List<QueryResultRow> t1rows = await t1cursor.ToListAsync();
+        Assert.AreEqual("100", t1rows.Single().Row["balance"].StrValue);
+
+        // T2 concurrently updates the row T1 read, and commits — invalidating T1's observation.
+        KvTransaction t2 = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(t2, dbname,
+            "UPDATE accounts SET balance = \"200\" WHERE id = \"a\"", null));
+        await database.Transactions.CommitAsync(t2);
+
+        // T1 now writes a disjoint key and tries to commit. Its read set is stale → commit must abort.
+        await executor.ExecuteNonSQLQuery(new(t1, dbname,
+            "INSERT INTO accounts (id, balance) VALUES (\"b\", \"50\")", null));
+
+        Assert.ThrowsAsync<CamusDBException>(async () =>
+            await database.Transactions.CommitAsync(t1),
+            "Optimistic commit must abort when a read-set entry was modified by a committed peer");
+
+        // The aborted transaction's write must not have landed.
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id FROM accounts", null));
+        int rowCount = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txq);
+        Assert.AreEqual(1, rowCount, "The aborted optimistic transaction's insert must not persist");
+    }
+
+    /// <summary>
+    /// Control for <see cref="TestOptimisticReadWriteConflictAbortsAtCommit"/>: with no concurrent
+    /// modification of the read row, the optimistic transaction's read-set validates and it commits.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestOptimisticReadThenWriteCommitsWhenNoConflict()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE ledgers (id STRING NOT NULL PRIMARY KEY, balance STRING NOT NULL)",
+            null));
+
+        KvTransaction seed = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(seed, dbname,
+            "INSERT INTO ledgers (id, balance) VALUES (\"a\", \"100\")", null));
+        await database.Transactions.CommitAsync(seed);
+
+        KvTransaction t1 = await database.Transactions.BeginAsync(
+            isolationLevel: CamusIsolationLevel.ReadCommitted,
+            locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
+        (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
+            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM ledgers", null));
+        _ = await t1cursor.ToListAsync();
+
+        await executor.ExecuteNonSQLQuery(new(t1, dbname,
+            "INSERT INTO ledgers (id, balance) VALUES (\"b\", \"50\")", null));
+        await database.Transactions.CommitAsync(t1);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id FROM ledgers", null));
+        int rowCount = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txq);
+        Assert.AreEqual(2, rowCount, "A conflict-free optimistic transaction must commit its write");
+    }
+
+    /// <summary>
     /// Regression: two CONCURRENT transactions inserting the same primary key must not both
     /// commit. Exactly one must win; the table must end with a single row. This reproduces the
     /// realistic web-app race (e.g. two simultaneous requests with the same id).
@@ -756,7 +976,10 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
             }
             catch (CamusDBException)
             {
-                await database.Transactions.RollbackAsync(tx);
+                // The conflict may surface either at insert time (tx still Active) or at commit time
+                // (the coordinator aborts the loser and the tx is already finalized). Use the
+                // outcome-agnostic rollback so cleanup never throws "already RolledBack".
+                await database.Transactions.RollbackIfNotCompletedAsync(tx);
                 return false;
             }
         }

@@ -401,10 +401,19 @@ public sealed class KvTableStore
 
         while (true)
         {
+            // Register the range-lock acquisition with the coordinator so it folds into the session
+            // working set. This is what lets the coordinator renew the lock's TTL for the life of the
+            // transaction (retiring the client-side heartbeat) and release it on finalize. A fresh
+            // operation id per attempt matches the per-attempt retry/upgrade semantics, mirroring the
+            // point-lock batch path. A range lock always has a real transaction identity (checked
+            // above), so the coordinator key is always present here.
+            TransactionOperationId rangeLockOperationId = TransactionOperationId.NewRandom();
+
             (KeyValueResponseType type, HLCTimestamp holder) = await kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,
                 startKey, startInclusive, endKey, endInclusive,
-                RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken
+                RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken,
+                tx.CoordinatorKey, rangeLockOperationId
             ).ConfigureAwait(false);
 
             if (type == KeyValueResponseType.Locked)
@@ -568,7 +577,7 @@ public sealed class KvTableStore
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
-        (BranchKvKind kind, byte[]? payload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken).ConfigureAwait(false);
+        (BranchKvKind kind, byte[]? payload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
         if (kind == BranchKvKind.Tombstone) return null;   // explicitly deleted at this level
         if (payload is not null) return payload;            // found at this level
 
@@ -634,10 +643,17 @@ public sealed class KvTableStore
         List<(string key, long revision, KeyValueDurability durability)> pending = keys;
         int retries = 0;
 
+        // Register the batch read for read-set folding on the optimistic / TrackAndValidate path; empty
+        // coordinatorKey leaves it unregistered (pessimistic / snapshot). A fresh operation id per
+        // iteration matches the shrinking pending subset, exactly like the batch write paths.
+        string readCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+
         while (pending.Count > 0)
         {
+            TransactionOperationId readOperationId = readCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
             List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
-                await kahuna.LocateAndTryGetManyValues(tx.TransactionId, tx.ReadTimestamp, pending, cancellationToken)
+                await kahuna.LocateAndTryGetManyValues(tx.TransactionId, tx.ReadTimestamp, pending, cancellationToken, readCoordinatorKey, readOperationId)
                             .ConfigureAwait(false);
 
             List<(string key, long revision, KeyValueDurability durability)>? nextPending = null;
@@ -739,6 +755,12 @@ public sealed class KvTableStore
             long emitted = 0;
             int prefixLen = rowKeyPrefix.Length;
 
+            // Register the scan for read-set folding on the optimistic / TrackAndValidate path so every
+            // scanned row becomes a commit-time read observation; empty coordinatorKey leaves it
+            // unregistered (pessimistic / snapshot), byte-for-byte the prior behavior.
+            string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+            TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                 tx.TransactionId,
                 rowBucketPrefix,
@@ -747,7 +769,9 @@ public sealed class KvTableStore
                 DefaultPageSize,
                 tx.ReadTimestamp,
                 KeyValueDurability.Persistent,
-                cancellationToken).ConfigureAwait(false))
+                cancellationToken,
+                scanCoordinatorKey,
+                scanOperationId).ConfigureAwait(false))
             {
                 if (entry.Value is null)
                     continue;
@@ -786,7 +810,7 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, byte[]? payload)>[levelCount];
 
-            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
@@ -899,8 +923,8 @@ public sealed class KvTableStore
         if (ancestorStores.Length > 0)
         {
             // Branch: write a tombstone so the ancestry merge suppresses the inherited row.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-                () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
 
@@ -913,8 +937,8 @@ public sealed class KvTableStore
         else
         {
             // Root: physical delete — no ancestor namespace to suppress.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-                () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken),
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                (coordinatorKey, operationId) => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
 
@@ -957,7 +981,7 @@ public sealed class KvTableStore
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        (BranchKvKind idxKind, byte[]? idxPayload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken).ConfigureAwait(false);
+        (BranchKvKind idxKind, byte[]? idxPayload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
         if (idxKind == BranchKvKind.Tombstone) return null;   // tombstone at this level
         if (idxPayload is not null) return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
 
@@ -1021,7 +1045,11 @@ public sealed class KvTableStore
 
         if (ancestorStores.Length == 0)
         {
-            // Root database: stream directly without materialization.
+            // Root database: stream directly without materialization. Register for read-set folding
+            // on the optimistic / TrackAndValidate path; empty coordinatorKey = unregistered.
+            string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+            TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
             await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                 tx.TransactionId,
                 bucketPrefix,
@@ -1030,7 +1058,9 @@ public sealed class KvTableStore
                 DefaultPageSize,
                 tx.ReadTimestamp,
                 KeyValueDurability.Persistent,
-                cancellationToken).ConfigureAwait(false))
+                cancellationToken,
+                scanCoordinatorKey,
+                scanOperationId).ConfigureAwait(false))
             {
                 if (entry.Value is null)
                     continue;
@@ -1111,7 +1141,7 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, byte[]? payload)>[levelCount];
 
-            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
@@ -1264,8 +1294,8 @@ public sealed class KvTableStore
         else
             flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -1379,7 +1409,7 @@ public sealed class KvTableStore
         if (!isBranch)
         {
             // Phase 2 (root) — set every value in one round-trip.
-            await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+            await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -1416,8 +1446,8 @@ public sealed class KvTableStore
                         KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
                             tx, ix.IndexId, ix.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
 
-                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-                            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
+                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                             cancellationToken
                         ).ConfigureAwait(false);
 
@@ -1431,7 +1461,7 @@ public sealed class KvTableStore
                 }
             }
 
-            await SetManyWithRetry(batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
+            await SetManyWithRetry(tx, batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
         }
 
         // Track modified keys for the 2PC commit. Locks were already tracked inside
@@ -1445,14 +1475,29 @@ public sealed class KvTableStore
         List<(string key, int expiresMs, KeyValueDurability durability)> keys,
         CancellationToken ct)
     {
+        // Optimistic transactions take no explicit exclusive locks: each confirmed write folds an
+        // implicit point lock into the coordinator working set, and conflicts are detected at commit
+        // (write-intent conflict on the modified keys plus read-set validation). Skipping the acquire
+        // here is what makes an optimistic transaction lock-free; a concurrent writer is not blocked,
+        // and the loser aborts at prepare instead of at lock time.
+        if (tx.Locking == KeyValueTransactionLocking.Optimistic)
+            return;
+
         List<(string, int, KeyValueDurability)> pending = new(keys);
         long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
         while (pending.Count > 0)
         {
+            // A fresh operation id per batch call folds every acquired exclusive point lock into the
+            // coordinator working set as one registered operation, so commit/rollback release them. It is
+            // minted per iteration because the retry resends only the transient subset — a different batch
+            // that must register as its own operation. Without folding, the batch locks are foreign to the
+            // coordinator and a committed batch row reads back as if never written.
+            TransactionOperationId lockBatchOperationId = TransactionOperationId.NewRandom();
+
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses =
-                await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct).ConfigureAwait(false);
+                await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct, tx.CoordinatorKey, lockBatchOperationId).ConfigureAwait(false);
 
             // First pass: track every successfully locked key before any throw so that
             // the transaction rollback path can release them even if a later key fails.
@@ -1501,6 +1546,7 @@ public sealed class KvTableStore
     }
 
     private async Task SetManyWithRetry(
+        KvTransaction tx,
         List<KahunaSetKeyValueRequestItem> items,
         Dictionary<string, bool> uniqueByKey,
         CancellationToken ct)
@@ -1511,8 +1557,14 @@ public sealed class KvTableStore
 
         while (pending.Count > 0)
         {
+            // A fresh operation id per batch call folds the whole batch into the coordinator working set as
+            // one registered operation. It is minted per iteration (not once): the retry resends only the
+            // transient subset, a different batch/digest that must register as its own operation rather than
+            // collide with the previous id. The already-confirmed keys were folded by the earlier call.
+            TransactionOperationId batchOperationId = TransactionOperationId.NewRandom();
+
             List<KahunaSetKeyValueResponseItem> responses =
-                await kahuna.LocateAndTrySetManyKeyValue(pending, ct).ConfigureAwait(false);
+                await kahuna.LocateAndTrySetManyKeyValue(pending, ct, tx.CoordinatorKey, batchOperationId).ConfigureAwait(false);
 
             // Only rebuilt if a transient response forces a retry. Re-sending an already-Set
             // unique key would falsely report a duplicate (its MVCC entry now exists), so we
@@ -1681,10 +1733,10 @@ public sealed class KvTableStore
         if (!isBranch)
         {
             // Phase 2a (root) — physically delete old index entries.
-            await DeleteManyWithRetry(deleteItems, cancellationToken).ConfigureAwait(false);
+            await DeleteManyWithRetry(tx, deleteItems, cancellationToken).ConfigureAwait(false);
 
             // Phase 2b (root) — write row blobs and new index entries.
-            await SetManyWithRetry(setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+            await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -1726,8 +1778,8 @@ public sealed class KvTableStore
                         KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
                             tx, newIx.IndexId, newIx.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
 
-                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-                            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken),
+                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                             cancellationToken
                         ).ConfigureAwait(false);
 
@@ -1743,7 +1795,7 @@ public sealed class KvTableStore
                 }
             }
 
-            await SetManyWithRetry(batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
+            await SetManyWithRetry(tx, batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
         }
 
         // Track all modified keys for 2PC commit. Locks were already tracked inside AcquireManyWithRetry.
@@ -1816,7 +1868,7 @@ public sealed class KvTableStore
             }).ToList();
 
             await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
-            await SetManyWithRetry(tombstoneItems, new Dictionary<string, bool>(), cancellationToken).ConfigureAwait(false);
+            await SetManyWithRetry(tx, tombstoneItems, new Dictionary<string, bool>(), cancellationToken).ConfigureAwait(false);
 
             foreach (string key in keys)
                 tx.TrackModified(key, KeyValueDurability.Persistent);
@@ -1859,8 +1911,8 @@ public sealed class KvTableStore
         if (ancestorStores.Length > 0)
         {
             // Branch: write a tombstone so the ancestry merge suppresses the inherited index entry.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-                () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
 
@@ -1873,8 +1925,8 @@ public sealed class KvTableStore
         else
         {
             // Root: physical delete.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-                () => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken),
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                (coordinatorKey, operationId) => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
 
@@ -1971,14 +2023,14 @@ public sealed class KvTableStore
         }).ToList();
 
         await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
-        await DeleteManyWithRetry(deleteItems, cancellationToken).ConfigureAwait(false);
+        await DeleteManyWithRetry(tx, deleteItems, cancellationToken).ConfigureAwait(false);
 
         // Locks were already tracked inside AcquireManyWithRetry.
         foreach (string key in keys)
             tx.TrackModified(key, KeyValueDurability.Persistent);
     }
 
-    private async Task DeleteManyWithRetry(List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
+    private async Task DeleteManyWithRetry(KvTransaction tx, List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
     {
         List<KahunaDeleteKeyValueRequestItem> pending = new(items);
         long deadline = LockWaitDeadlineTicks();
@@ -1986,8 +2038,13 @@ public sealed class KvTableStore
 
         while (pending.Count > 0)
         {
+            // A fresh operation id per batch call folds the confirmed deletes into the coordinator working
+            // set as one registered operation, so commit finalizes them. Minted per iteration because the
+            // retry resends only the transient subset — its own operation, distinct from the first.
+            TransactionOperationId deleteBatchOperationId = TransactionOperationId.NewRandom();
+
             List<KahunaDeleteKeyValueResponseItem> responses =
-                await kahuna.LocateAndTryDeleteManyKeyValue(pending, ct).ConfigureAwait(false);
+                await kahuna.LocateAndTryDeleteManyKeyValue(pending, ct, tx.CoordinatorKey, deleteBatchOperationId).ConfigureAwait(false);
 
             List<KahunaDeleteKeyValueRequestItem> retry = [];
             Dictionary<string, KahunaDeleteKeyValueRequestItem>? byKey = null;
@@ -2046,8 +2103,8 @@ public sealed class KvTableStore
 
         byte[] encodedData = BranchKvCodec.EncodeValue(data);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, encodedData, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, encodedData, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -2088,8 +2145,8 @@ public sealed class KvTableStore
 
     private async Task SetTombstoneForTesting(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken),
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -2101,8 +2158,13 @@ public sealed class KvTableStore
 
     private async Task AcquireLock(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) = await RetryOnMustRetryLocked(
-            () => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken),
+        // Optimistic transactions take no explicit exclusive locks — see AcquireManyWithRetry. The
+        // write's implicit point lock and commit-time validation provide isolation instead.
+        if (tx.Locking == KeyValueTransactionLocking.Optimistic)
+            return;
+
+        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) = await RetryOnMustRetryRegistered(tx,
+            (coordinatorKey, operationId) => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -2260,6 +2322,37 @@ public sealed class KvTableStore
     }
 
     // -----------------------------------------------------------------------
+    // Coordinator-registered write/lock helpers
+    //
+    // A transactional mutation or exclusive point lock must fold into the Kahuna coordinator's
+    // server-owned working set, or LocateAndCommitTransaction(handle) would finalize an empty set and
+    // the write would never commit. Folding requires passing the transaction's coordinator key and a
+    // per-operation id: the coordinator registers the operation, records its confirmed effect, and
+    // caches the response keyed by that id. These overloads mint the operation id ONCE and reuse it
+    // across every lock-wait retry, so a retry after a lost response replays the cached effect instead
+    // of applying the mutation twice — this is the idempotent-retry guarantee. Each logical operation
+    // gets its own id (distinct key/digest under one id would be rejected as a duplicate).
+    // -----------------------------------------------------------------------
+
+    private static Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryRegistered(
+        KvTransaction tx,
+        Func<string, TransactionOperationId, Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,
+        CancellationToken ct)
+    {
+        TransactionOperationId operationId = TransactionOperationId.NewRandom();
+        return RetryOnMustRetryLocked(() => fn(tx.CoordinatorKey, operationId), ct);
+    }
+
+    private static Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RetryOnMustRetryRegistered(
+        KvTransaction tx,
+        Func<string, TransactionOperationId, Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>> fn,
+        CancellationToken ct)
+    {
+        TransactionOperationId operationId = TransactionOperationId.NewRandom();
+        return RetryOnMustRetryLocked(() => fn(tx.CoordinatorKey, operationId), ct);
+    }
+
+    // -----------------------------------------------------------------------
     // Branch lineage helpers (used by the branch-aware read paths above)
     // -----------------------------------------------------------------------
 
@@ -2351,14 +2444,23 @@ public sealed class KvTableStore
     // raw (kind, payload) pair decoded by BranchKvCodec.  A Kahuna miss returns (Value, null) —
     // the same signal as BranchKvCodec.Decode(null) — so callers treat null payload as "not here,
     // continue walking ancestry."  A Tombstone payload means "deleted at this level; stop walking."
+    // When coordinatorKey is non-empty the read is registered with the transaction coordinator so its
+    // existence/base-revision observation folds into the working set and is validated at commit — the
+    // optimistic / TrackAndValidate read path. Empty coordinatorKey (the default, and every ancestor
+    // snapshot probe) issues an unregistered read, identical to the pessimistic behavior. The operation
+    // id is minted once, outside the retry, so a transient MustRetry replays under the same id rather
+    // than registering a second read.
     private async Task<(BranchKvKind kind, byte[]? payload)> ProbeRaw(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
         string key,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string coordinatorKey = "")
     {
+        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await RetryOnMustRetry(
-            () => kahuna.LocateAndTryGetValue(txId, key, -1, readTimestamp, KeyValueDurability.Persistent, cancellationToken),
+            () => kahuna.LocateAndTryGetValue(txId, key, -1, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -2380,13 +2482,19 @@ public sealed class KvTableStore
     private async IAsyncEnumerable<(string rowIdHex, BranchKvKind kind, byte[]? payload)> ScanRowsRawAsync(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        string coordinatorKey = "")
     {
         int prefixLen = rowKeyPrefix.Length;
 
+        // Non-empty coordinatorKey registers the scan so every row it returns folds as a read
+        // observation for commit-time validation; the coordinator derives a distinct operation id per
+        // page from this base id. Empty (default, and all ancestor snapshots) scans unregistered.
+        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             txId, rowBucketPrefix, null, true, null, true, DefaultPageSize,
-            readTimestamp, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false))
+            readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
         {
             if (entry.Value is null) continue;
             string rowIdHex = key.AsSpan(prefixLen).ToString();
@@ -2406,7 +2514,8 @@ public sealed class KvTableStore
         string? fromEncoded, bool fromInclusive,
         string? toEncoded, bool toInclusive,
         bool unique,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        string coordinatorKey = "")
     {
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix = bucketPrefix + "/";
@@ -2417,9 +2526,12 @@ public sealed class KvTableStore
             ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
+        // See ScanRowsRawAsync: non-empty coordinatorKey registers the index scan for read-set folding.
+        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
         await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             txId, bucketPrefix, startKey, fromInclusive, endKey, toInclusive,
-            DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false))
+            DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
         {
             if (entry.Value is null || !kvKey.StartsWith(keyPrefix, StringComparison.Ordinal)) continue;
             string suffix = kvKey.Substring(prefixLen);
