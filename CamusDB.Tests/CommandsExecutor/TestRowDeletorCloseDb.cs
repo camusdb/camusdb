@@ -127,6 +127,9 @@ public class TestRowDeletorCloseDb : BaseTest
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
 
+        // The previous transaction was committed above; the read must run on a fresh transaction.
+        txnState = await database.Transactions.BeginAsync();
+
         queryByIdTicket = new(
             txnState: txnState,
             databaseName: dbname,
@@ -187,10 +190,13 @@ public class TestRowDeletorCloseDb : BaseTest
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
 
+        // The previous transaction was committed above; the read must run on a fresh transaction.
+        txnState = await database.Transactions.BeginAsync();
+
         queryTicket = new(
             txnState: txnState,
             databaseName: dbname,
-            tableName: "robots",            
+            tableName: "robots",
             index: null,
             projection: null,
             where: null,

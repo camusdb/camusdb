@@ -177,8 +177,11 @@ Key points for a newcomer:
   (rather than silently clobbering). This is **write-write conflict detection**.
 - **2PC makes the row and its indexes commit together.** You never observe a state where the row
   exists but its index entry doesn't.
-- **Locks are held until the transaction ends** (commit or rollback), then released. CamusDB tracks
-  every lock and intent on the transaction object so it can release them all at the end.
+- **Locks are held until the transaction ends** (commit or rollback), then released. CamusDB does not
+  assemble that list itself: Kahuna's **transaction coordinator** owns the transaction's working set —
+  every modified key and held lock is registered with it as the operation happens, so commit and
+  rollback just hand the coordinator a *handle* and it finalizes the set it accumulated. See
+  `kahuna-transaction-coordinator.md` for how that registration works.
 - **Schema safety.** A write also "pins" the schema version of the tables it touches at the start, and
   the commit is rejected if the schema changed underneath it (e.g., a column was dropped mid-write).
   This keeps DDL and DML from corrupting each other.
@@ -250,6 +253,22 @@ Serializable read-write     shared point lock per key     per-key lock; plus any
                                                            locked is held back (phantom + write
                                                            conflict protection)
 ```
+
+### 6.4 Pessimistic vs optimistic (an advanced, opt-in choice)
+
+Everything above describes **pessimistic** locking — take the lock first, block a conflicting party,
+resolve at lock time. That is the default and what almost all callers use.
+
+A transaction can instead be begun in **optimistic** mode. An optimistic transaction takes **no**
+explicit locks: it stages its writes and records the versions of the rows it reads, and conflicts are
+checked only at **commit**. If another transaction committed a change to a key it wrote (write-write) or
+to a key it read (read-write / write skew) in the meantime, the commit is aborted and the transaction
+retries. This trades blocking for validation — good for low-contention, read-mostly workloads.
+
+This is a *concurrency strategy*, orthogonal to the isolation level, and today it is selected only
+through the internal begin API (not `SET TRANSACTION`). One caveat: optimistic validation is based on
+the specific rows a transaction read, not on predicates, so it does not protect against phantoms — use
+pessimistic Serializable when you need that. See `kahuna-transaction-coordinator.md` for the mechanism.
 
 ---
 
@@ -397,10 +416,13 @@ statement, because retroactively upgrading the level would skip locks the earlie
   multi-statement transactions you replay from `BEGIN` yourself. The full contract — which error codes are
   retryable, and the patterns — is in `serializable-retry-contract.md`.
 - **Long-running is supported, but bounded.** A serializable read-write transaction's range locks are
-  kept alive by a background lease-renewal heartbeat, so it can stay open for a genuinely long
-  interactive session. There is still a hard **maximum lifetime** (about one hour) as a backstop: if a
-  transaction outlives it, it is **aborted with a clear error** at its next operation or at commit — it
-  never silently loses its isolation. (This bound only applies to serializable read-write.)
+  kept alive by the **Kahuna coordinator**, which renews a live transaction's range-lock leases for the
+  duration of its session and releases them on commit/rollback — so a transaction can stay open for a
+  genuinely long interactive session with no client-side heartbeat. There is still a hard **maximum
+  lifetime** (about one hour) as a backstop: if a transaction outlives it, it is **aborted with a clear
+  error** at its next operation or at commit — it never silently loses its isolation, and an abandoned
+  session is reclaimed by the server after that window. (This bound only applies to serializable
+  read-write.)
 
 Conflicts are detected and resolved **promptly** — a blocked writer or a deadlock fails fast (sub-second)
 rather than stalling on a lock timeout. Deadlocks have a **deterministic winner**: when two transactions
@@ -437,9 +459,10 @@ else is cheaper and fully concurrent under Read Committed.
 
 A map for when you want to read the real thing:
 
-- **`CamusDB.Core/Transactions/`** — `KvTransaction` (a transaction's identity, its tracked locks and
-  modified keys) and `KvTransactionsManager` (begin / commit / rollback, including the retry on
-  transient commit conflicts).
+- **`CamusDB.Core/Transactions/`** — `KvTransaction` (a transaction's identity — its Kahuna timestamp
+  and coordinator key — plus the concurrency policy it was begun with) and `KvTransactionsManager`
+  (begin / commit / rollback, including the retry on transient commit conflicts). The authoritative set
+  of modified keys and held locks lives in the Kahuna coordinator, not on `KvTransaction`.
 - **`CamusDB.Core/Storage/Kv/KvTableStore.cs`** — the per-table data layer: how rows and index entries
   are written/read as keys, the batched write path, and the range-lock methods
   (`AcquireRowRangeLockAsync`, `AcquireIndexRangeLockAsync`, `AcquireBoundedIndexRangeLockAsync`).
@@ -447,8 +470,11 @@ A map for when you want to read the real thing:
   where read locks (when enabled) are acquired before scanning.
 - **`CamusDB/App/Controllers/`** — the HTTP entry points; note where queries begin **read-only**
   transactions vs writes begin read-write ones.
-- **Kahuna (dependency)** — the actual MVCC store, per-key locks, range locks, and two-phase commit
-  coordinator. CamusDB calls into it through the `IKahuna` interface.
+- **Kahuna (dependency)** — the actual MVCC store, per-key locks, range locks, and the server-owned
+  two-phase-commit **transaction coordinator**. CamusDB calls into it through the `IKahuna` interface.
+  How CamusDB drives that coordinator — operation registration, folding, handle-based commit, optimistic
+  locking, and coordinator-owned range-lock renewal — is documented in
+  `kahuna-transaction-coordinator.md`.
 
 ---
 

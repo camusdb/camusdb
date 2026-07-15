@@ -94,6 +94,9 @@ internal sealed class TestRowInsertorCloseDb : BaseTest
         CloseDatabaseTicket closeTicket = new(dbname);
         await executor.CloseDatabase(closeTicket);
 
+        // The previous transaction was committed above; the read must run on a fresh transaction.
+        txnState = await database.Transactions.BeginAsync();
+
         QueryByIdTicket queryTicket = new(
             txnState: txnState,
             databaseName: dbname,
