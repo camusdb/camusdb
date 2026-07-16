@@ -686,7 +686,7 @@ public sealed class KvTransactionsManager : IDisposable
 
             List<(string key, KeyValueDurability durability)> serverKeys = new(snapshot.ModifiedKeys.Count);
             foreach (KeyValueTransactionModifiedKey k in snapshot.ModifiedKeys)
-                serverKeys.Add((k.Key, k.Durability));
+                serverKeys.Add((k.Key ?? string.Empty, k.Durability));
             return serverKeys;
         }
 

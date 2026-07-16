@@ -176,7 +176,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         FloatValue = value;
     }
 
-    public ColumnValue(ColumnType type, string value)
+    public ColumnValue(ColumnType type, string? value)
     {
         if (type != ColumnType.String && type != ColumnType.Id && type != ColumnType.Null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.String to string value");
