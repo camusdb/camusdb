@@ -1,4 +1,4 @@
-﻿
+
 /**
  * This file is part of CamusDB
  *
@@ -12,9 +12,12 @@ using System.Diagnostics;
 using CamusDB.App.Models;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core.Cache;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.SQLParser;
@@ -28,7 +31,15 @@ public sealed class ExecuteSQLController : CommandsController
 {
     public ExecuteSQLController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
     {
-        
+
+    }
+
+    private static List<ColumnSchemaDto> ToColumnDtos(IReadOnlyList<DerivedColumnSchema> schema)
+    {
+        List<ColumnSchemaDto> dtos = new(schema.Count);
+        foreach (DerivedColumnSchema col in schema)
+            dtos.Add(new ColumnSchemaDto { Name = col.Name, Type = col.Type });
+        return dtos;
     }
 
     [HttpPost]
@@ -59,17 +70,18 @@ public sealed class ExecuteSQLController : CommandsController
             // database context or transaction.
             if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors)
             {
+                QuerySchemaHolder schemaHolder = new();
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
                     database: request.DatabaseName ?? "",
                     sql: sql,
                     parameters: request.Parameters
                 );
-                (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
-                List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
+                (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
+                List<object?[]> rows = [];
                 await foreach (QueryResultRow row in cursor)
-                    rows.Add(row.Row);
-                return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
+                    rows.Add(CompactRowEncoder.EncodeRow(row.Row, schemaHolder.Schema));
+                return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, ToColumnDtos(schemaHolder.Schema), rows));
             }
 
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
@@ -79,17 +91,18 @@ public sealed class ExecuteSQLController : CommandsController
                 try
                 {
                     txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    QuerySchemaHolder schemaHolder = new();
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
                         database: request.DatabaseName ?? "",
                         sql: sql,
                         parameters: request.Parameters
                     );
-                    List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
-                    (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket).ConfigureAwait(false);
+                    List<object?[]> rows = [];
+                    (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
-                        rows.Add(row.Row);
-                    return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, rows));
+                        rows.Add(CompactRowEncoder.EncodeRow(row.Row, schemaHolder.Schema));
+                    return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, ToColumnDtos(schemaHolder.Schema), rows));
                 }
                 catch (Exception)
                 {
@@ -101,7 +114,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
-            List<IReadOnlyDictionary<string, ColumnValue>> resultRows = [];
+            List<object?[]> resultRows = [];
+            List<ColumnSchemaDto> resultColumns = [];
             Kommander.Time.HLCTimestamp causalToken = default;
             CacheMetadataHolder cacheMeta = new();
 
@@ -111,18 +125,20 @@ public sealed class ExecuteSQLController : CommandsController
                     request.DatabaseName ?? "", promote: true, request.CausalToken, ct).ConfigureAwait(false);
                 try
                 {
+                    QuerySchemaHolder schemaHolder = new();
                     ExecuteSQLTicket ticket = new(
                         txnState: tx,
                         database: request.DatabaseName ?? "",
                         sql: sql,
                         parameters: request.Parameters
                     );
-                    List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
-                    (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta).ConfigureAwait(false);
+                    List<object?[]> rows = [];
+                    (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
-                        rows.Add(row.Row);
+                        rows.Add(CompactRowEncoder.EncodeRow(row.Row, schemaHolder.Schema));
                     causalToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
+                    resultColumns = ToColumnDtos(schemaHolder.Schema);
                 }
                 catch
                 {
@@ -137,7 +153,7 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            ExecuteSQLQueryResponse queryResponse = new("ok", resultRows.Count, resultRows)
+            ExecuteSQLQueryResponse queryResponse = new("ok", resultRows.Count, resultColumns, resultRows)
             {
                 CausalToken = causalToken.IsNull() ? null : causalToken
             };

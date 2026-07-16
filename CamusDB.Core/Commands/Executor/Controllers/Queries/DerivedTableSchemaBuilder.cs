@@ -16,6 +16,72 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal static class DerivedTableSchemaBuilder
 {
+    // -------------------------------------------------------------------------
+    // Fixed schemas for SHOW commands — column order matches SchemaQuerier output.
+    // -------------------------------------------------------------------------
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowDatabasesSchema =
+    [
+        new("Database", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowTablesSchema =
+    [
+        new("tables", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowColumnsSchema =
+    [
+        new("Field",   ColumnType.String),
+        new("Type",    ColumnType.String),
+        new("Null",    ColumnType.String),
+        new("Key",     ColumnType.String),
+        new("Default", ColumnType.String),
+        new("Extra",   ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowIndexesSchema =
+    [
+        new("Table",      ColumnType.String),
+        new("Non_unique", ColumnType.String),
+        new("Key_name",   ColumnType.String),
+        new("Columns",    ColumnType.String),
+        new("Index_type", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateTableSchema =
+    [
+        new("Table",        ColumnType.String),
+        new("Create Table", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowDatabaseSchema =
+    [
+        new("database", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowBranchesSchema =
+    [
+        new("database",       ColumnType.String),
+        new("id",             ColumnType.String),
+        new("depth",          ColumnType.Integer64),
+        new("parent",         ColumnType.String),
+        new("fork_timestamp", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowAncestorsSchema =
+    [
+        new("database",       ColumnType.String),
+        new("id",             ColumnType.String),
+        new("depth",          ColumnType.Integer64),
+        new("fork_timestamp", ColumnType.String),
+    ];
+
+    // -------------------------------------------------------------------------
+    // Build — derives schema from a bound SELECT query.
+    // ExprAllFields (*) is expanded to all readable columns from every source.
+    // -------------------------------------------------------------------------
+
     public static IReadOnlyList<DerivedColumnSchema> Build(SelectQuery query, BoundSelectQuery innerBound)
     {
         List<DerivedColumnSchema> columns = new(query.Projections.Count);
@@ -24,8 +90,92 @@ internal static class DerivedTableSchemaBuilder
         for (int i = 0; i < query.Projections.Count; i++)
         {
             ProjectionItem projection = query.Projections[i];
+            NodeAst target = QueryExpressionClassifier.UnwrapAlias(projection.Expression);
+
+            if (target.nodeType == NodeType.ExprAllFields)
+            {
+                ExpandAllFields(innerBound, columns);
+                continue;
+            }
+
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection.Expression, i);
             ColumnType type = InferType(projection.Expression, innerBound, innerResolver);
+            columns.Add(new DerivedColumnSchema(name, type));
+        }
+
+        return columns;
+    }
+
+    /// <summary>
+    /// Expands a <c>SELECT *</c> into one output column per readable source column, matching the
+    /// exact keys the row cursor produces so positional encoding can look each value up by name.
+    /// <para>
+    /// A single-source query streams rows keyed by bare column name, so columns stay bare. A
+    /// multi-source query (any join, extra table, or derived/subquery source) is emitted by the
+    /// join executor, which qualifies every column as <c>{alias}.{column}</c> via
+    /// <see cref="QueryRowNameResolver.FormatQualifiedKey"/>; the schema must qualify identically or
+    /// a by-name lookup against the qualified row keys would silently miss and encode null. The
+    /// discriminator is <see cref="BoundSelectQuery.IsMultiSource"/> — the same flag that routes
+    /// execution to the join path. Derived (subquery) sources are included so their columns are not
+    /// dropped from a join's output schema.
+    /// </para>
+    /// Column order follows source declaration order (table sources first, then derived sources),
+    /// which matches the left-to-right merge order of a left-deep join; value correctness does not
+    /// depend on this order because encoding resolves each column by name.
+    /// </summary>
+    private static void ExpandAllFields(BoundSelectQuery innerBound, List<DerivedColumnSchema> columns)
+    {
+        bool qualify = innerBound.IsMultiSource;
+
+        foreach (BoundTableSource source in innerBound.Sources)
+        {
+            foreach (TableColumnSchema col in source.Table.Schema.Columns ?? [])
+            {
+                if (!SchemaElementStateRules.IsReadable(col))
+                    continue;
+
+                string name = qualify
+                    ? QueryRowNameResolver.FormatQualifiedKey(source.Alias, col.Name)
+                    : col.Name;
+
+                columns.Add(new DerivedColumnSchema(name, col.Type));
+            }
+        }
+
+        foreach (BoundDerivedTableSource derived in innerBound.DerivedSources)
+        {
+            foreach (DerivedColumnSchema col in derived.Columns)
+            {
+                string name = qualify
+                    ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.Name)
+                    : col.Name;
+
+                columns.Add(new DerivedColumnSchema(name, col.Type));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds the output schema for a FROM-less SELECT from its projection AST nodes.
+    /// Each projection's inferred type is derived using the same rules as <see cref="InferType"/>
+    /// with an empty bound query (no table sources).
+    /// </summary>
+    public static IReadOnlyList<DerivedColumnSchema> BuildFromless(
+        IReadOnlyList<NodeAst> projections,
+        IReadOnlyDictionary<string, ColumnValue> evaluatedRow)
+    {
+        List<DerivedColumnSchema> columns = new(projections.Count);
+
+        for (int i = 0; i < projections.Count; i++)
+        {
+            NodeAst projection = projections[i];
+            string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
+
+            // Infer from the evaluated value where possible; fall back to String for unknowns.
+            ColumnType type = evaluatedRow.TryGetValue(name, out ColumnValue? val)
+                ? (val.Type == ColumnType.Null ? ColumnType.String : val.Type)
+                : ColumnType.String;
+
             columns.Add(new DerivedColumnSchema(name, type));
         }
 

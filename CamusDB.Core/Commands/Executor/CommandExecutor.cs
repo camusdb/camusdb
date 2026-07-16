@@ -2223,7 +2223,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="ticket"></param>
     /// <returns></returns>
     /// <exception cref="Exception"></exception>
-    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null)
+    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
     {
         validator.Validate(ticket);
 
@@ -2234,6 +2234,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             DatabaseRegistry reg = await registryTask.ConfigureAwait(false);
             string? dbPattern = UnquoteLikePattern(ast.leftAst?.yytext);
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowDatabasesSchema;
             return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern));
         }
 
@@ -2249,7 +2251,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                     $"Database '{targetName}' does not exist");
             IReadOnlyList<DatabaseRegistryEntry> allEntries = await reg.ScanAllEntriesAsync().ConfigureAwait(false);
             if (ast.nodeType == NodeType.ShowBranches)
+            {
+                if (schemaOut is not null)
+                    schemaOut.Schema = DerivedTableSchemaBuilder.ShowBranchesSchema;
                 return (null!, schemaQuerier.ShowBranches(allEntries, target));
+            }
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowAncestorsSchema;
             return (null!, schemaQuerier.ShowAncestors(target, allEntries));
         }
 
@@ -2268,7 +2276,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // synthetic row. The grammar only admits a projection list plus optional
                     // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
                     if (ast.rightAst is null)
-                        return (database, await ExecuteFromlessSelectAsync(database, ast, ticket).ConfigureAwait(false));
+                        return (database, await ExecuteFromlessSelectAsync(database, ast, ticket, schemaOut).ConfigureAwait(false));
 
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
 
@@ -2328,8 +2336,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                             metaOut.Status = QueryCacheStatus.Bypass;
                             metaOut.BypassReason = QueryCacheBypassReason.Join;
                         }
+                        if (schemaOut is not null)
+                            schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
                         return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
                     }
+
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
 
                     TableDescriptor table = boundQuery.PrimaryTable;
 
@@ -2338,12 +2351,16 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.ShowTables:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowTablesSchema;
                     string? tablePattern = UnquoteLikePattern(ast.leftAst?.yytext);
                     return (database, schemaQuerier.ShowTables(database, tablePattern));
                 }
 
             case NodeType.ShowColumns:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowColumnsSchema;
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);
 
@@ -2352,6 +2369,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.ShowIndexes:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowIndexesSchema;
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);
 
@@ -2360,6 +2379,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.ShowCreateTable:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateTableSchema;
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);
 
@@ -2368,6 +2389,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.ShowDatabase:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowDatabaseSchema;
                     return (database, schemaQuerier.ShowDatabase(database));
                 }
 
@@ -2534,7 +2557,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// those are rejected with a clear <see cref="CamusDBErrorCodes.InvalidInput"/>.
     /// </summary>
     private async Task<IAsyncEnumerable<QueryResultRow>> ExecuteFromlessSelectAsync(
-        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut = null)
     {
         List<NodeAst> projections = new();
         FlattenProjectionList(ast.leftAst!, projections);
@@ -2565,6 +2588,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
             projected[name] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }
+
+        if (schemaOut is not null)
+            schemaOut.Schema = DerivedTableSchemaBuilder.BuildFromless(projections, projected);
 
         // A single constant row: apply OFFSET (any offset >= 1 skips it) then LIMIT (0 drops it).
         long offset = EvalRowCount(ast.extendedFour, ticket.Parameters, "OFFSET");
