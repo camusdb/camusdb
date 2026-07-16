@@ -518,15 +518,19 @@ public sealed class KvTransactionsManager : IDisposable
         tx.Status = KvTransactionStatus.Finalizing;
 
         // Cache invalidation protocol — gate write path.
-        // Collect modified keys once before the commit attempt so we can invalidate after success.
-        // Mark the affected keyspace buckets in-flight so concurrent cache probes bypass rather
-        // than racing to publish against an uncommitted write.
+        // The keys to invalidate are sourced from the coordinator's FROZEN server-owned working set,
+        // captured by closing the transaction to new registrations first (see CloseServerWorkingSetAsync).
+        // This is the authoritative set that the commit below finalizes against. Sourcing from it — rather
+        // than the client-side modified-key mirror — closes the window where a concurrent op folds a key
+        // into the working set after a client mirror was copied but before the fence installs. The
+        // affected keyspace buckets are marked in-flight so concurrent cache probes bypass rather than
+        // racing to publish against an uncommitted write.
         List<(string key, KeyValueDurability durability)>? modKeys = null;
         List<string>? keyspaces = null;
         bool markedInFlight = false;
         if (_cache is not null && !tx.IsReadOnly)
         {
-            modKeys = tx.GetModifiedKeyPairs();
+            modKeys = await CloseServerWorkingSetAsync(tx, cancellationToken).ConfigureAwait(false);
             if (modKeys.Count > 0)
             {
                 keyspaces = ExtractUniqueKeyspaces(modKeys);
@@ -559,9 +563,15 @@ public sealed class KvTransactionsManager : IDisposable
             {
                 // The coordinator owns the working set: every confirmed write and exclusive point lock
                 // was folded server-side as the operation completed, so commit supplies only the routing
-                // handle. The returned record-anchor key is unused on the best-effort path.
-                (result, _) = await kahuna.LocateAndCommitTransaction(tx.Handle, cancellationToken)
+                // handle.
+                (result, string? anchor) = await kahuna.LocateAndCommitTransaction(tx.Handle, cancellationToken)
                     .ConfigureAwait(false);
+
+                // Fold the coordinator's canonical record anchor onto the handle the moment it is known —
+                // including alongside a non-terminal MustRetry — so a finalize retried after the live
+                // coordinator session is lost still routes to the durable decision rather than returning
+                // an unknown Errored. No-op (stays null) on the best-effort path.
+                tx.CaptureRecordAnchor(anchor);
 
                 if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
                     break;
@@ -646,6 +656,52 @@ public sealed class KvTransactionsManager : IDisposable
             if (markedInFlight)
                 _cache!.PublishGate.AbortWrite(keyspaces!);
         }
+    }
+
+    /// <summary>
+    /// Closes the transaction's coordinator session to new registrations and returns the confirmed
+    /// modified keys from the <b>frozen server-owned working set</b> — the exact set the following commit
+    /// finalizes against. This is the authoritative source for cache invalidation: it waits for any
+    /// in-flight operation to drain and snapshots the result, so a key folded into the working set by a
+    /// concurrent op is included, unlike the client-side modified-key mirror which could miss it.
+    ///
+    /// <para>Close shares the finalize slot with commit but does <b>not</b> decide the transaction: it
+    /// leaves the session <see cref="KvTransactionStatus.Finalizing"/> and a later commit finalizes against
+    /// the same stored snapshot (repeated closes return it). A drain-deadline <c>MustRetry</c> is retried
+    /// with the same bounded back-off as commit; if the set still cannot be frozen, this falls back to the
+    /// client mirror so invalidation still happens (best-effort) and the commit below resolves the outcome.
+    /// The frozen record anchor is folded onto the handle here too, so it is known before the first commit.</para>
+    /// </summary>
+    private async Task<List<(string key, KeyValueDurability durability)>> CloseServerWorkingSetAsync(
+        KvTransaction tx, CancellationToken cancellationToken)
+    {
+        KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        TransactionWorkingSet? snapshot = null;
+        for (int attempt = 0; ; attempt++)
+        {
+            (result, snapshot) = await kahuna.LocateAndCloseTransaction(
+                tx.CoordinatorKey, tx.TransactionId, cancellationToken).ConfigureAwait(false);
+
+            if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
+                break;
+
+            await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (result == KeyValueResponseType.Set && snapshot is not null)
+        {
+            // Fold the frozen record anchor onto the handle now, before the first commit attempt.
+            tx.CaptureRecordAnchor(snapshot.RecordAnchorKey);
+
+            List<(string key, KeyValueDurability durability)> serverKeys = new(snapshot.ModifiedKeys.Count);
+            foreach (KeyValueTransactionModifiedKey k in snapshot.ModifiedKeys)
+                serverKeys.Add((k.Key, k.Durability));
+            return serverKeys;
+        }
+
+        // Could not freeze the server set (drain-deadline MustRetry, or an unexpected close result):
+        // fall back to the client mirror so cache invalidation still happens on a best-effort basis.
+        return tx.GetModifiedKeyPairs();
     }
 
     /// <summary>

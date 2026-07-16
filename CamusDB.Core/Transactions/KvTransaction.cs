@@ -97,13 +97,42 @@ public sealed class KvTransaction
     public string CoordinatorKey => UniqueId;
 
     /// <summary>
+    /// The coordinator-assigned record anchor: the first confirmed persistent modified key, folded onto
+    /// this transaction the moment the coordinator returns it — including alongside a non-terminal
+    /// <c>MustRetry</c>. It names the data partition that owns a Durable transaction record, so a
+    /// commit/rollback retried after the live coordinator session is lost can still be routed to the
+    /// durable decision; a lost <em>unanchored</em> handle can only return <c>Errored</c>. Null on the
+    /// best-effort path and until the first persistent write is confirmed.
+    /// </summary>
+    public string? RecordAnchorKey { get; private set; }
+
+    /// <summary>
     /// The routing identity handed to <c>LocateAndCommitTransaction</c> / <c>LocateAndRollbackTransaction</c>.
     /// The Kahuna coordinator finalizes from its own working set, so the handle (transaction id +
-    /// coordinator key) is the only thing the client supplies at finalize — no client-built key list.
-    /// <see cref="TransactionHandle.RecordAnchorKey"/> is left null: it matters only for durable-decision
-    /// recovery, which the best-effort commit path does not use.
+    /// coordinator key + any record anchor) is the only thing the client supplies at finalize — no
+    /// client-built key list. <see cref="RecordAnchorKey"/> is included so a finalize retried after the
+    /// coordinator session is lost still reaches the durable decision instead of an unknown
+    /// <c>Errored</c>. The coordinator key equals <see cref="UniqueId"/> (the value supplied as
+    /// <c>KeyValueTransactionOptions.CoordinatorKey</c> at start).
     /// </summary>
-    public TransactionHandle Handle => new(TransactionId, UniqueId);
+    public TransactionHandle Handle => new(TransactionId, UniqueId, RecordAnchorKey);
+
+    /// <summary>
+    /// Folds the coordinator-assigned record anchor onto this transaction so every subsequent
+    /// commit/rollback attempt carries it via <see cref="Handle"/>. Called from the commit path as soon
+    /// as the coordinator returns an anchor — <b>including alongside a non-terminal <c>MustRetry</c></b>,
+    /// which is precisely when a later retry (after the coordinator session or its node is lost) needs
+    /// the anchor to reach the durable decision. A null/empty anchor is a no-op, so the best-effort path
+    /// never gains one.
+    /// </summary>
+    public void CaptureRecordAnchor(string? anchor)
+    {
+        if (string.IsNullOrEmpty(anchor))
+            return;
+
+        lock (trackSync)
+            RecordAnchorKey = anchor;
+    }
 
     /// <summary>Current lifecycle state. Set by <see cref="KvTransactionsManager"/>.</summary>
     public KvTransactionStatus Status { get; internal set; } = KvTransactionStatus.Active;

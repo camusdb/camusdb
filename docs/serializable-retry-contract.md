@@ -35,19 +35,31 @@ locks.
 
 ## Retryable error codes
 
-Only three error codes indicate a transient serialization failure that retry can resolve.
-All others are permanent and must propagate to the caller without retrying.
+There are two distinct kinds of "retry", and they must not be confused:
+
+- **Replay from `BEGIN`** (three codes below): the transaction is dead and nothing it wrote survives,
+  so recovery re-runs the whole business operation on a fresh transaction.
+- **Retry the *same* finalize** (`CADB0509`, see the next section): the transaction is **not** dead —
+  a commit or rollback simply has not resolved yet. You re-issue the *same* `COMMIT`/`ROLLBACK` on the
+  *same* transaction. You must **not** replay the operation, because it may already have committed.
+
+All codes not listed as retryable are permanent and must propagate to the caller without retrying.
 
 | Code      | Name                       | When raised                                                                                       | Safe to retry? |
 |-----------|----------------------------|---------------------------------------------------------------------------------------------------|----------------|
-| CADB0502  | `TransactionConflict`      | A shared or exclusive lock conflicted with a concurrent holder. Kahuna rejected at lock-acquire time; no 2PC was attempted. | ✓ yes |
-| CADB0504  | `TransactionMustRetry`     | Kahuna returned `MustRetry` after exhausting its routing retry budget (leader election, partition move). No data was written. | ✓ yes |
-| CADB0505  | `TransactionLifetimeExceeded` | The transaction was held open longer than `MaxSerializableTransactionLifetimeMs` (about 1 h; range locks are kept alive by a renewal heartbeat up to that backstop). Its range locks were released before this error was raised. | ✓ yes |
+| CADB0502  | `TransactionConflict`      | A shared or exclusive lock conflicted with a concurrent holder — or a commit returned a definite `Aborted`. In every case no write survived. | ✓ replay from `BEGIN` |
+| CADB0504  | `TransactionMustRetry`     | A **pre-write** transient: a routing failure during start (leader election / partition move) after the bounded start retries, or a lock-wait deadline / write conflict in the storage layer. **No data was written** when it is raised. | ✓ replay from `BEGIN` |
+| CADB0505  | `TransactionLifetimeExceeded` | The transaction was held open longer than `MaxSerializableTransactionLifetimeMs`. Its staged writes/locks are rolled back through the coordinator before this error is raised. | ✓ replay from `BEGIN` |
+| CADB0509  | `TransactionFinalizeUnresolved` | A `COMMIT`/`ROLLBACK` returned the coordinator's non-terminal `MustRetry` past the bounded finalize retries: the outcome is **not known yet** (leadership flip mid-finalize, an in-progress drain, or a durable decision not yet marked complete). | ↻ retry the **same** finalize — **do not** replay |
 | CADB0300  | `DuplicateUniqueKeyValue`  | A unique-index constraint was violated.                                                           | ✗ no  |
 | CADB0301  | `NotNullViolation`         | A NOT NULL constraint was violated.                                                               | ✗ no  |
 | CADB0400  | `InvalidInput`             | Bad request (wrong type, missing field, `SET TRANSACTION` after statement, etc.).                | ✗ no  |
-| CADB0501  | `TransactionAlreadyCompleted` | Commit/rollback on a transaction that was already finalized.                                   | ✗ no  |
+| CADB0501  | `TransactionAlreadyCompleted` | Commit/rollback on a transaction that was already finalized, or a commit whose coordinator session is gone and whose outcome is unavailable (`Errored`). | ✗ no  |
 | others    | —                          | Schema errors, system corruption, unknown columns, etc.                                           | ✗ no  |
+
+`SerializableRetryHelper.IsRetryable` covers only the three **replay-from-`BEGIN`** codes (CADB0502,
+CADB0504, CADB0505). `CADB0509` is deliberately **excluded** from it — replaying the operation on a
+commit that may already have succeeded would double-apply it. See the next section for how to handle it.
 
 ### Checking retryability in code
 
@@ -59,6 +71,53 @@ catch (CamusDBException ex) when (SerializableRetryHelper.IsRetryable(ex))
     // safe to replay the whole transaction from BEGIN
 }
 ```
+
+---
+
+## Unresolved finalize: `TransactionFinalizeUnresolved` (CADB0509)
+
+Committing (or rolling back) a transaction asks the Kahuna coordinator for a **terminal** answer:
+`Committed` or `RolledBack`. The coordinator can also answer `MustRetry`, which means *"the final
+outcome is not known yet, or transient cleanup work remains — ask again on the same handle."* This is
+**not** a failure and **not** a rollback. It happens when leadership flips during the finalize, when the
+coordinator is still draining operations that were in flight when finalize began, or (in durable mode)
+when a commit decision has been made but not yet fully acknowledged.
+
+CamusDB retries this automatically on the same transaction with a bounded, backing-off loop. If the
+outcome is *still* unresolved after that bound, `CommitAsync`/`RollbackAsync` throw **CADB0509
+`TransactionFinalizeUnresolved`** instead of guessing. When this happens:
+
+- The transaction is left in the `Finalizing` state — **not** `Committed` and **not** `RolledBack`.
+- It stays tracked and its handle stays valid, so the *same* finalize can be resumed.
+- No further data operations are accepted on it (the finalize fence is installed).
+
+**The one rule that makes this safe:** re-issue the **same** `COMMIT` (or `ROLLBACK`) on the **same**
+transaction. Do **not** start a new transaction and replay the statements — the original commit may have
+already durably committed server-side, so replaying would apply the write twice.
+
+```csharp
+// Explicit transaction: resume the SAME finalize, never replay the operation.
+const int MaxFinalizeAttempts = 10;
+for (int attempt = 0; ; attempt++)
+{
+    try
+    {
+        await db.Transactions.CommitAsync(tx);   // same tx, same handle
+        break;                                    // Committed
+    }
+    catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionFinalizeUnresolved)
+    {
+        if (attempt >= MaxFinalizeAttempts) throw; // surface it; the session's timeout is the backstop
+        await Task.Delay(50 * (1 << Math.Min(attempt, 6)));
+    }
+}
+```
+
+Over HTTP the same rule applies: a `COMMIT`/`ROLLBACK` request that comes back as CADB0509 should be
+re-sent for the same transaction id, not turned into a fresh `BEGIN` + re-run of the statements.
+
+An abandoned transaction left `Finalizing` forever is bounded by the Kahuna session timeout, which
+reclaims the server-side session and releases its locks as the ultimate backstop.
 
 ---
 

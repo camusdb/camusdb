@@ -730,8 +730,10 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     /// must commit its writes and expose them to a later reader exactly like the best-effort default.
     /// Every CamusDB row/index/meta write is persistent, so durable-decision mode (which rejects a
     /// transaction that confirmed any ephemeral modification) accepts the commit; the coordinator
-    /// assigns the record anchor from the first confirmed persistent write, so no client anchor
-    /// plumbing is involved.
+    /// assigns the record anchor from the first confirmed persistent write. On this happy path the
+    /// commit resolves in one round, so anchor-based recovery is never exercised — but the anchor is
+    /// still folded onto the handle (<see cref="KvTransaction.RecordAnchorKey"/>) so a finalize retried
+    /// after coordinator loss can reach the durable decision.
     /// </summary>
     [Test]
     [NonParallelizable]

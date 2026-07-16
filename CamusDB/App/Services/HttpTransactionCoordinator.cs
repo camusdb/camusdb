@@ -62,6 +62,13 @@ public sealed class HttpTransactionCoordinator
         public bool TryBeginFinalize() => Interlocked.CompareExchange(ref finalizing, 1, 0) == 0;
 
         /// <summary>
+        /// True while a commit or rollback owns the finalize claim for this transaction. Read by
+        /// <see cref="GetState"/> so a data statement issued against a transaction that is already being
+        /// finalized is rejected at the HTTP boundary rather than racing the commit on the same session.
+        /// </summary>
+        public bool IsFinalizing => Volatile.Read(ref finalizing) == 1;
+
+        /// <summary>
         /// Releases a finalize claim after a <em>failed</em> attempt so a later sequential retry may
         /// proceed. Not called on success — a completed transaction is removed from the tracking
         /// map instead, so its claim can never be reused.
@@ -143,6 +150,15 @@ public sealed class HttpTransactionCoordinator
     {
         if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
+
+        // Reject a statement issued against a transaction that a commit/rollback is already finalizing:
+        // the coordinator has (or is about to) install its fence, so running a data statement now would
+        // race the finalize on the same session. This closes the DML-vs-commit window at the HTTP
+        // boundary, ahead of the server-side fence and the local Finalizing guard in the transaction.
+        if (entry.IsFinalizing)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                "A commit or rollback is in progress for this transaction; no further statements may run");
 
         // Every statement issued against an explicit transaction resolves it through here; refresh
         // the idle timer so the reaper only reclaims transactions the client has genuinely stopped
