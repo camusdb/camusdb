@@ -8,7 +8,11 @@
 
 using System;
 using System.IO;
+using System.Reflection;
 using NUnit.Framework;
+
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 
 using CamusDB.Core;
 using CamusDB.Core.Config;
@@ -124,5 +128,40 @@ public sealed class TestConfigReaderCharacterization
         Assert.That(config.Kahuna.RocksdbSharedMemory, Is.False);
         Assert.That(config.Kahuna.RocksdbSharedMemoryBudgetMb, Is.EqualTo(512));
         Assert.That(config.Kahuna.RocksdbSharedMemtableBudgetMb, Is.EqualTo(200));
+    }
+
+    [Test]
+    public void ReadsAbandonedTransactionReaperOverrides()
+    {
+        // The reaper keys were shipped in the sample config.yml but were missing from the
+        // allow-list, so enabling either one caused startup to reject the whole config as an
+        // "unknown option". Reading them here locks in that they are accepted and bound.
+        ConfigDefinition config = new ConfigReader().Read(
+            "transaction_idle_timeout_ms: 120000\ntransaction_reaper_interval_ms: 15000");
+
+        Assert.That(config.TransactionIdleTimeoutMs, Is.EqualTo(120000));
+        Assert.That(config.TransactionReaperIntervalMs, Is.EqualTo(15000));
+    }
+
+    /// <summary>
+    /// Guards the allow-list against drift: every settable <see cref="ConfigDefinition"/> property
+    /// binds from an underscored root YAML key, so each one MUST have a matching entry in
+    /// <see cref="ConfigReader.AllowedRootKeys"/> or the reader rejects a config that sets it.
+    /// A new property added without updating the allow-list fails here instead of at a user's startup.
+    /// </summary>
+    [Test]
+    public void EverySettablePropertyHasAnAllowedRootKey()
+    {
+        INamingConvention naming = UnderscoredNamingConvention.Instance;
+
+        foreach (PropertyInfo prop in typeof(ConfigDefinition).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (prop.GetSetMethod() is null)
+                continue;
+
+            string yamlKey = naming.Apply(prop.Name);
+            Assert.That(ConfigReader.AllowedRootKeys, Does.Contain(yamlKey),
+                $"Property '{prop.Name}' maps to root key '{yamlKey}' which is missing from AllowedRootKeys");
+        }
     }
 }

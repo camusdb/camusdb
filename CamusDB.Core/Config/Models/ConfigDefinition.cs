@@ -259,8 +259,13 @@ public class ConfigDefinition
     /// <summary>Maximum range deps per entry before promotion or bypass. Default: 256. Maps to <c>CamusDBConfig.QueryResultCacheMaxRanges</c>.</summary>
     public int QueryResultCacheMaxRanges { get; set; } = 256;
 
-    /// <summary>Single-flight waiter timeout in milliseconds before independent execution. Default: 250 ms. Maps to <c>CamusDBConfig.QueryResultCacheSingleFlightWaitMs</c>.</summary>
-    public int QueryResultCacheSingleFlightWaitMs { get; set; } = 250;
+    /// <summary>
+    /// Single-flight waiter timeout in milliseconds before independent execution. Default: 250 ms.
+    /// Property spelling is deliberately <c>Singleflight</c> (one word) so the underscored YAML key
+    /// binds as <c>query_result_cache_singleflight_wait_ms</c> — the documented key — rather than
+    /// <c>..._single_flight_...</c>. Maps to <c>CamusDBConfig.QueryResultCacheSingleFlightWaitMs</c>.
+    /// </summary>
+    public int QueryResultCacheSingleflightWaitMs { get; set; } = 250;
 
     /// <summary>Max keys probed during strict validation before treating the entry as invalid. Default: 10 000. Maps to <c>CamusDBConfig.QueryResultCacheStrictValidationMaxKeys</c>.</summary>
     public int QueryResultCacheStrictValidationMaxKeys { get; set; } = 10_000;

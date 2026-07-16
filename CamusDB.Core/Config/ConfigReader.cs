@@ -19,7 +19,7 @@ public class ConfigReader
     /// otherwise silently drop it (e.g. a misspelled <c>htttp_port</c> would leave the real
     /// <c>http_port</c> at its default with no warning).
     /// </summary>
-    private static readonly HashSet<string> AllowedRootKeys = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly HashSet<string> AllowedRootKeys = new(StringComparer.OrdinalIgnoreCase)
     {
         "data_dir",
         "mode",
@@ -50,6 +50,8 @@ public class ConfigReader
         "default_transaction_locking",
         "range_lock_expires_ms",
         "max_serializable_transaction_lifetime_ms",
+        "transaction_idle_timeout_ms",
+        "transaction_reaper_interval_ms",
         "lock_escalation_threshold",
         "lock_wait_deadline_ms",
         "key_range_sharding",

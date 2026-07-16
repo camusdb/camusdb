@@ -801,7 +801,7 @@ public sealed class TestQueryResultCacheCommitGate
         Assert.That(def.QueryResultCacheMaxDeps,              Is.EqualTo(4_096));
         Assert.That(def.QueryResultCacheMaxPointDeps,         Is.EqualTo(2_048));
         Assert.That(def.QueryResultCacheMaxRanges,            Is.EqualTo(256));
-        Assert.That(def.QueryResultCacheSingleFlightWaitMs,   Is.EqualTo(250));
+        Assert.That(def.QueryResultCacheSingleflightWaitMs,   Is.EqualTo(250));
         Assert.That(def.QueryResultCacheStrictValidationMaxKeys, Is.EqualTo(10_000));
         Assert.That(def.QueryResultCacheSweepIntervalMs,      Is.EqualTo(10_000));
     }

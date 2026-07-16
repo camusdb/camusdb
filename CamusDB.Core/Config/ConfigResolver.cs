@@ -130,7 +130,7 @@ public static class ConfigResolver
         CamusDBConfig.QueryResultCacheMaxDeps = config.QueryResultCacheMaxDeps;
         CamusDBConfig.QueryResultCacheMaxPointDeps = config.QueryResultCacheMaxPointDeps;
         CamusDBConfig.QueryResultCacheMaxRanges = config.QueryResultCacheMaxRanges;
-        CamusDBConfig.QueryResultCacheSingleFlightWaitMs = config.QueryResultCacheSingleFlightWaitMs;
+        CamusDBConfig.QueryResultCacheSingleFlightWaitMs = config.QueryResultCacheSingleflightWaitMs;
         CamusDBConfig.QueryResultCacheStrictValidationMaxKeys = config.QueryResultCacheStrictValidationMaxKeys;
         CamusDBConfig.QueryResultCacheSweepIntervalMs = config.QueryResultCacheSweepIntervalMs;
 
