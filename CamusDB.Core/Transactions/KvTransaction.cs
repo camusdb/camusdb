@@ -16,8 +16,25 @@ namespace CamusDB.Core.Transactions;
 /// <summary>Lifecycle state of a <see cref="KvTransaction"/>.</summary>
 public enum KvTransactionStatus
 {
+    /// <summary>Open and accepting data operations — the only state in which a read/write may register.</summary>
     Active,
+
+    /// <summary>
+    /// A commit or rollback has begun (the coordinator finalize fence is installed) but no terminal
+    /// Kahuna result has been observed yet. This state is <b>non-terminal</b>: the transaction stays
+    /// tracked and its handle stays valid so the <em>same</em> commit/rollback can be retried after a
+    /// non-terminal <c>MustRetry</c>. New data operations are rejected once finalizing. It exists so a
+    /// commit that returns <c>MustRetry</c> — meaning "outcome not known yet, retry the same handle" —
+    /// is never mistaken for a completed rollback (which would let the caller re-run a business
+    /// operation that may already have committed, double-applying it).
+    /// </summary>
+    Finalizing,
+
+    /// <summary>Terminal: the coordinator returned <c>Committed</c>. The session is complete.</summary>
     Committed,
+
+    /// <summary>Terminal: the coordinator returned <c>RolledBack</c> (or an equivalent definite
+    /// non-committing outcome). The session is complete.</summary>
     RolledBack
 }
 
@@ -326,6 +343,16 @@ public sealed class KvTransaction
     /// </summary>
     public Task EnsureSessionStartedAsync(CancellationToken ct)
     {
+        // Reject data operations once the transaction has begun finalizing (or has finalized):
+        // the coordinator installs a permanent fence at the first commit/rollback and rejects new
+        // work, so registering a write/lock here would strand a pending operation that blocks the
+        // finalize drain. This is the single client-side choke point for every write/lock path in
+        // KvTableStore, kept cheap (one enum compare) so it can guard them all.
+        if (Status != KvTransactionStatus.Active)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                $"Transaction {UniqueId} is {Status} and can no longer accept data operations");
+
         // Fast path: not a deferred transaction, or the session is already open.
         if (SessionStarter is null || TransactionId != HLCTimestamp.Zero)
             return Task.CompletedTask;

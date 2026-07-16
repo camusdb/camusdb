@@ -53,6 +53,20 @@ public sealed class KvTransactionsManager : IDisposable
     private const int MaxStartRetries = 32;
     private const int StartRetryDelayMs = 25;
 
+    // Bounded same-handle retry for commit/rollback when the coordinator returns the non-terminal
+    // MustRetry ("outcome not known yet, or transient work remains — retry with the same handle").
+    // On the best-effort path this is a leadership flip mid-finalize or an in-progress drain, both
+    // short-lived, so a capped exponential back-off (~2s across the attempts) resolves them without
+    // ever fabricating a terminal result. If it still has not resolved, the caller is told to retry
+    // the SAME finalize (CADB0509) — never to replay the business operation, which could double-apply.
+    private const int MaxFinalizeRetries = 12;
+    private const int FinalizeRetryBaseDelayMs = 25;
+    private const int FinalizeRetryMaxDelayMs = 250;
+
+    /// <summary>Capped exponential back-off for the finalize retry loop: 25, 50, 100, 200, 250, 250…</summary>
+    private static int FinalizeRetryDelayMs(int attempt) =>
+        (int)Math.Min((long)FinalizeRetryBaseDelayMs << Math.Min(attempt, 16), FinalizeRetryMaxDelayMs);
+
     /// <summary>
     /// Mints a local HLC timestamp without opening a Kahuna transaction. Used by the cheap
     /// serializable read-only snapshot path (<see cref="BeginReadOnlyAsync"/> with Serializable
@@ -426,7 +440,10 @@ public sealed class KvTransactionsManager : IDisposable
             return mintLocalT?.Invoke(null) ?? Kommander.Time.HLCTimestamp.Zero;
         }
 
-        if (tx.Status != KvTransactionStatus.Active)
+        // A transaction that already reached a terminal outcome cannot be finalized again. A
+        // Finalizing transaction is NOT terminal: it is the resume path for a commit that returned
+        // the non-terminal MustRetry, so it must fall through and retry the same handle.
+        if (tx.Status is KvTransactionStatus.Committed or KvTransactionStatus.RolledBack)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionAlreadyCompleted,
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
@@ -453,26 +470,52 @@ public sealed class KvTransactionsManager : IDisposable
             return mintLocalT?.Invoke(null) ?? tx.TransactionId;
         }
 
-        tx.ValidateSchemaPins();
-
-        // Enforce the serializable transaction lifetime deadline before touching Kahuna. Only
-        // Serializable+RW transactions acquire range locks whose TTL could expire mid-transaction;
-        // ReadCommitted and Serializable+RO transactions are exempt. A Serializable+RW transaction
-        // that has outlived MaxSerializableTransactionLifetimeMs is aborted here so its range locks
-        // never expire while still considered "live" — that would silently break serializable isolation.
-        // The caller must roll back and retry from BeginAsync.
-        if (tx.IsolationLevel == CamusIsolationLevel.Serializable &&
-            tx.TransactionMode == CamusTransactionMode.ReadWrite &&
-            tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+        // Pre-finalize checks run only on the first attempt (Active). A resumed commit (Finalizing,
+        // retrying its handle after a non-terminal MustRetry) has already passed them and must not be
+        // diverted — least of all into the lifetime-expiry rollback below, which would abort a commit
+        // that may already be in flight.
+        bool firstFinalizeAttempt = tx.Status == KvTransactionStatus.Active;
+        if (firstFinalizeAttempt)
         {
-            tx.Status = KvTransactionStatus.RolledBack;
-            await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
-            Untrack(tx);
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionLifetimeExceeded,
-                $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
-                $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+            tx.ValidateSchemaPins();
+
+            // Enforce the serializable transaction lifetime deadline before touching Kahuna. Only
+            // Serializable+RW transactions acquire range locks whose TTL could expire mid-transaction;
+            // ReadCommitted and Serializable+RO transactions are exempt. A Serializable+RW transaction
+            // that has outlived MaxSerializableTransactionLifetimeMs is aborted here so its range locks
+            // never expire while still considered "live" — that would silently break serializable
+            // isolation. The staged writes/locks/session are handed to a coordinator rollback (not just
+            // abandoned to the reaper); the caller then rolls back and retries from BeginAsync.
+            if (tx.IsolationLevel == CamusIsolationLevel.Serializable &&
+                tx.TransactionMode == CamusTransactionMode.ReadWrite &&
+                tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+            {
+                tx.Status = KvTransactionStatus.Finalizing;
+                try
+                {
+                    // Best-effort handle rollback so the coordinator drops the staged working set and
+                    // session; if it stays unresolved, the session's own timeout is the backstop.
+                    await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Never let cleanup mask the lifetime error the caller must see.
+                }
+                await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+                tx.Status = KvTransactionStatus.RolledBack;
+                Untrack(tx);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionLifetimeExceeded,
+                    $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
+                    $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+            }
         }
+
+        // Install the finalize fence locally: from here the transaction is no longer Active, so a
+        // stray data operation is rejected (see KvTransaction.EnsureSessionStartedAsync), and a
+        // concurrent/duplicate finalize sees a non-Active status. The status only advances to a
+        // terminal value once Kahuna returns one.
+        tx.Status = KvTransactionStatus.Finalizing;
 
         // Cache invalidation protocol — gate write path.
         // Collect modified keys once before the commit attempt so we can invalidate after success.
@@ -495,12 +538,16 @@ public sealed class KvTransactionsManager : IDisposable
             }
         }
 
-        // MustRetry from LocateAndCommitTransaction is a strictly pre-execution routing signal.
-        // Kahuna returns it only when AmILeader(partitionId) was false (so no commit was attempted)
-        // but WaitForLeader then resolved to the local endpoint — a transient leadership flip.
-        // CommitTransaction is never called before MustRetry is returned, so the transaction is
-        // still server-side Pending and commit idempotency is not required. Aborted is permanent.
-        const int MaxCommitRetries = 5;
+        // Finalize outcome semantics (Kahuna coordinator contract):
+        //   Committed  → terminal success.
+        //   MustRetry  → NON-terminal: the outcome is not known yet (leadership flip mid-finalize, an
+        //                in-progress drain, or a durable decision not yet Completed). Retry the SAME
+        //                handle; never fabricate a rollback and never replay the business operation —
+        //                the write may already have committed, so a replay could double-apply.
+        //   Aborted    → terminal, definite non-commit (conflict/deadline). The write did NOT commit,
+        //                so replaying from BeginAsync is safe → surfaced as CADB0502 (retryable).
+        //   Errored    → the handle is unknown/expired and the outcome is unavailable. Do NOT
+        //                reinterpret it as a conflict (no auto-replay) → surfaced as CADB0501.
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
         // Time the Kahuna 2PC commit itself — this is the span dominated by WAL fsync latency,
         // so surfacing it in the finalize log makes slow-commit diagnosis (e.g. native fsync cost)
@@ -508,7 +555,7 @@ public sealed class KvTransactionsManager : IDisposable
         ValueStopwatch commitTimer = ValueStopwatch.StartNew();
         try
         {
-            for (int attempt = 0; attempt <= MaxCommitRetries; attempt++)
+            for (int attempt = 0; ; attempt++)
             {
                 // The coordinator owns the working set: every confirmed write and exclusive point lock
                 // was folded server-side as the operation completed, so commit supplies only the routing
@@ -516,11 +563,10 @@ public sealed class KvTransactionsManager : IDisposable
                 (result, _) = await kahuna.LocateAndCommitTransaction(tx.Handle, cancellationToken)
                     .ConfigureAwait(false);
 
-                if (result != KeyValueResponseType.MustRetry)
+                if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
                     break;
 
-                if (attempt < MaxCommitRetries)
-                    await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
             }
 
             if (result == KeyValueResponseType.Committed)
@@ -546,8 +592,26 @@ public sealed class KvTransactionsManager : IDisposable
                 return mintLocalT?.Invoke(null) ?? tx.TransactionId;
             }
 
-            // Roll back the client-side transaction state so a subsequent
-            // RollbackIfNotCompletedAsync is a no-op.
+            if (result == KeyValueResponseType.MustRetry)
+            {
+                // Non-terminal: outcome unknown, coordinator session still live. Leave the transaction
+                // Finalizing and TRACKED, and leave the coordinator-owned locks in place — the caller
+                // must retry the SAME commit on the SAME handle. Only the cache in-flight mark is
+                // cleared so concurrent probes are not blocked while the resolution is pending.
+                if (markedInFlight)
+                {
+                    _cache!.PublishGate.AbortWrite(keyspaces!);
+                    markedInFlight = false;
+                }
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionFinalizeUnresolved,
+                    $"Transaction {tx.UniqueId} commit outcome is not yet resolved after {MaxFinalizeRetries} retries; " +
+                    "retry COMMIT on the same transaction (do not re-run the operation)"
+                );
+            }
+
+            // Terminal, non-committing outcome (Aborted / Errored / unexpected): the transaction is
+            // now dead. Mark it rolled back, drop the cache mark, release held read locks, and untrack.
             tx.Status = KvTransactionStatus.RolledBack;
 
             if (markedInFlight)
@@ -559,22 +623,20 @@ public sealed class KvTransactionsManager : IDisposable
             await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
 
-            // MustRetry after all retries exhausted = transient routing failure; caller must restart
-            // the whole operation from BeginAsync. CADB0504 (not CADB0501) signals this is transient.
-            // This is intentionally NOT auto-retried at the executor level: the operation may have been
-            // partially applied and the tx is spent (Status = RolledBack), so re-running the DML on the
-            // same tx is unsafe. Contrast with CADB0503 (fence), which fires before any write and IS
-            // auto-retried inside ExecuteNonSQLQuery on the same, still-usable transaction.
-            if (result == KeyValueResponseType.MustRetry)
+            // Aborted = definite non-commit (conflict/deadline). Nothing was committed, so replaying
+            // the whole operation from a fresh BeginAsync is safe → CADB0502 (retried by
+            // SerializableRetryHelper for autocommit statements).
+            if (result == KeyValueResponseType.Aborted)
                 throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    $"Transaction {tx.UniqueId} commit returned MustRetry after {MaxCommitRetries} retries; retry the operation from BeginAsync"
+                    CamusDBErrorCodes.TransactionConflict,
+                    $"Transaction {tx.UniqueId} commit was aborted by the coordinator (conflict or deadline); retry the operation from BeginAsync"
                 );
 
-            // Kahuna aborted — the transaction is permanently dead (conflict, timeout, etc.).
+            // Errored / anything else: the coordinator session is gone and the outcome is unavailable.
+            // Do NOT reinterpret it as a conflict (no auto-replay) — surface it as a non-retryable error.
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionAlreadyCompleted,
-                $"Transaction {tx.UniqueId} commit returned {result}"
+                $"Transaction {tx.UniqueId} commit returned {result}; the coordinator session is gone and the outcome is unavailable"
             );
         }
         finally
@@ -630,20 +692,39 @@ public sealed class KvTransactionsManager : IDisposable
             return;
         }
 
-        if (tx.Status != KvTransactionStatus.Active)
+        // Terminal transactions cannot be rolled back again; a Finalizing transaction is the resume
+        // path for a rollback that returned the non-terminal MustRetry and must fall through to retry.
+        if (tx.Status is KvTransactionStatus.Committed or KvTransactionStatus.RolledBack)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionAlreadyCompleted,
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
             );
 
-        tx.Status = KvTransactionStatus.RolledBack;
-        Untrack(tx);
+        // Install the finalize fence but do NOT mark terminal or untrack yet: the client-visible
+        // outcome must reflect what the coordinator actually returns. Rollback only reports RolledBack
+        // once every intent-bearing release is acknowledged; until then it returns MustRetry, and the
+        // handle must stay valid so the SAME rollback can be retried (marking RolledBack early and
+        // dropping the entry — the previous behaviour — reported success while intents could remain and
+        // left the caller unable to retry the handle Kahuna still expects).
+        tx.Status = KvTransactionStatus.Finalizing;
 
         ValueStopwatch rollbackTimer = ValueStopwatch.StartNew();
 
         // The coordinator rolls back from its own working set (staged writes and folded point locks);
         // the client supplies only the routing handle.
-        await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
+        KeyValueResponseType result = await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+
+        if (result == KeyValueResponseType.MustRetry)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionFinalizeUnresolved,
+                $"Transaction {tx.UniqueId} rollback outcome is not yet resolved after {MaxFinalizeRetries} retries; " +
+                "retry ROLLBACK on the same transaction"
+            );
+
+        // RolledBack, Aborted (a definite non-committing outcome — for a rollback request that is the
+        // intended result), or Errored (the handle is unknown/expired, so the session is already gone
+        // and there is nothing left to undo): all terminal and non-committing.
+        tx.Status = KvTransactionStatus.RolledBack;
 
         if (logger.IsEnabled(LogLevel.Debug))
         {
@@ -653,6 +734,31 @@ public sealed class KvTransactionsManager : IDisposable
         }
 
         await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
+        Untrack(tx);
+    }
+
+    /// <summary>
+    /// Issues <c>LocateAndRollbackTransaction</c> on the transaction's handle, retrying the
+    /// coordinator's non-terminal <see cref="KeyValueResponseType.MustRetry"/> a bounded number of
+    /// times with capped back-off. Returns the final coordinator outcome — the caller decides whether
+    /// a persistent <c>MustRetry</c> is surfaced (explicit rollback) or swallowed (best-effort cleanup
+    /// such as the lifetime-expiry abort). Retrying the same handle is exactly what the coordinator
+    /// contract requires: rollback returns <c>MustRetry</c> until every intent-bearing release is
+    /// acknowledged, and only then <c>RolledBack</c>.
+    /// </summary>
+    private async Task<KeyValueResponseType> RollbackHandleWithRetryAsync(KvTransaction tx, CancellationToken cancellationToken)
+    {
+        KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        for (int attempt = 0; ; attempt++)
+        {
+            result = await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
+
+            if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
+                break;
+
+            await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
+        }
+        return result;
     }
 
     /// <summary>

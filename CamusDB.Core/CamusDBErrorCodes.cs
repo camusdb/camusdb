@@ -67,17 +67,22 @@ public static class CamusDBErrorCodes
     public const string SchemaCatchingUp = "CADB0503";
 
     /// <summary>
-    /// Kahuna returned MustRetry from LocateAndCommitTransaction after exhausting all internal
-    /// retries (routing inconsistency during a leader flip). The transaction has been rolled back.
-    /// Unlike <see cref="TransactionAlreadyCompleted"/>, this is transient — the caller should
-    /// retry the entire operation from BeginAsync.
+    /// A <b>pre-write</b> transient signal: an operation could not be routed or a lock could not be
+    /// taken before any data was written — a leader flip/partition move during start
+    /// (<c>MustRetry</c> after the bounded start retries) or a lock-wait deadline / write conflict in
+    /// the storage layer. No write was applied, so the transaction is safe to replay from scratch.
+    /// Unlike <see cref="TransactionAlreadyCompleted"/>, this is transient — the caller should retry
+    /// the entire operation from BeginAsync.
+    ///
+    /// <para><b>Not</b> raised for a commit/rollback whose outcome is unknown — that is the
+    /// non-terminal <see cref="TransactionFinalizeUnresolved"/> (CADB0509), which must be retried on
+    /// the <em>same</em> handle rather than replayed, because the write may already have committed.</para>
     ///
     /// Retry boundary: the executor auto-retries the schema-catch-up fence (<see
     /// cref="SchemaCatchingUp"/>, CADB0503) inside ExecuteNonSQLQuery because the fence fires
-    /// before any write and the same transaction is still usable. CADB0504 is intentionally NOT
-    /// auto-retried at the executor level: by the time CommitAsync throws it, the operation may
-    /// have been partially applied and the transaction object is spent (Status = RolledBack).
-    /// The caller must rebuild the operation from scratch starting with a new BeginAsync.
+    /// before any write and the same transaction is still usable. CADB0504 is auto-retried by
+    /// <see cref="SerializableRetryHelper"/> for autocommit statements by replaying from a fresh
+    /// BeginAsync — safe precisely because nothing was written when it is raised.
     /// </summary>
     public const string TransactionMustRetry = "CADB0504";
 
@@ -115,6 +120,22 @@ public static class CamusDBErrorCodes
     /// of those branches. Drop all descendant branches first, then drop this database.
     /// </summary>
     public const string DatabaseHasLiveDescendants = "CADB0508";
+
+    /// <summary>
+    /// A commit or rollback returned the coordinator's non-terminal <c>MustRetry</c> after the
+    /// bounded same-handle finalize retries were exhausted: the final outcome is not known yet (a
+    /// leadership flip mid-finalize, a drain still in progress, or a durable decision not yet marked
+    /// Completed). The transaction is left in <see cref="Transactions.KvTransactionStatus.Finalizing"/>
+    /// — <b>not</b> rolled back — and stays tracked with its handle valid.
+    ///
+    /// <para>The caller must retry the <em>same</em> commit/rollback on the <em>same</em> transaction
+    /// (an explicit client re-issues COMMIT/ROLLBACK for the same id). It must <b>never</b> re-run the
+    /// business operation from a fresh BeginAsync: the write may already have committed server-side, so
+    /// replaying it could double-apply. For this reason CADB0509 is deliberately excluded from
+    /// <see cref="SerializableRetryHelper"/>'s replay-from-BEGIN set. An abandoned finalizing session is
+    /// bounded by the Kahuna session timeout as the ultimate backstop.</para>
+    /// </summary>
+    public const string TransactionFinalizeUnresolved = "CADB0509";
 
     public const string InvalidConfig = "CADB0600";
 
