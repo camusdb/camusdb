@@ -111,8 +111,27 @@ public static class SerializableRetryHelper
     }
 
     /// <inheritdoc cref="ExecuteAutocommitAsync(Func{CancellationToken,Task},int,CancellationToken)"/>
+    public static Task<T> ExecuteAutocommitAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        int maxAttempts = DefaultMaxAttempts,
+        CancellationToken cancellationToken = default)
+        => ExecuteAutocommitAsync(operation, static () => true, maxAttempts, cancellationToken);
+
+    /// <summary>
+    /// Variant of <see cref="ExecuteAutocommitAsync{T}(Func{CancellationToken,Task{T}},int,CancellationToken)"/>
+    /// that consults <paramref name="canRetry"/> before every replay and, when it returns
+    /// <see langword="false"/>, propagates the retryable error immediately instead of replaying.
+    ///
+    /// <para>Intended for <b>streaming</b> callers: once an attempt has emitted output on the wire
+    /// (a schema or row message), replaying from <c>BEGIN</c> would re-emit it and corrupt the
+    /// stream. Such a caller passes <c>canRetry: () =&gt; !alreadyWrote</c> so retry stays available
+    /// for early failures (before the first byte) but a conflict surfacing after output has begun is
+    /// reported as the terminal error. The predicate is checked only on the retry decision; the
+    /// first attempt always runs.</para>
+    /// </summary>
     public static async Task<T> ExecuteAutocommitAsync<T>(
         Func<CancellationToken, Task<T>> operation,
+        Func<bool> canRetry,
         int maxAttempts = DefaultMaxAttempts,
         CancellationToken cancellationToken = default)
     {
@@ -131,6 +150,12 @@ public static class SerializableRetryHelper
             catch (CamusDBException ex) when (IsRetryable(ex))
             {
                 lastRetryable = ex;
+
+                // A retryable failure whose side effects can no longer be undone (e.g. a streaming
+                // caller already wrote output on this attempt) must not replay — a re-run would
+                // double-emit. Report it as terminal instead.
+                if (!canRetry())
+                    throw;
 
                 if (attempt + 1 < maxAttempts)
                 {

@@ -193,6 +193,81 @@ public sealed class TestSerializableRetry : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
+    // 5b. Guarded overload (streaming): canRetry gates replay
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task RetryHelper_Guarded_RetriesWhileCanRetryIsTrue()
+    {
+        // canRetry stays true (nothing written) — behaves like the unguarded retry.
+        int attempts = 0;
+
+        int result = await SerializableRetryHelper.ExecuteAutocommitAsync(async ct =>
+        {
+            attempts++;
+            await Task.Yield();
+            if (attempts < 3)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, "simulated conflict");
+            return attempts;
+        }, canRetry: () => true, maxAttempts: 5);
+
+        Assert.AreEqual(3, attempts, "With canRetry always true the helper must retry to success");
+        Assert.AreEqual(3, result);
+    }
+
+    [Test]
+    public async Task RetryHelper_Guarded_StopsReplayOnceOutputWritten()
+    {
+        // Simulate a streaming attempt that emits output before hitting a retryable conflict: the
+        // guard must propagate the conflict as terminal instead of replaying (which would re-emit).
+        int attempts = 0;
+        bool wrote = false;
+
+        CamusDBException? caught = null;
+        try
+        {
+            await SerializableRetryHelper.ExecuteAutocommitAsync<int>(async ct =>
+            {
+                attempts++;
+                await Task.Yield();
+                wrote = true;   // "schema/row written on the wire"
+                throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, "conflict after write");
+            }, canRetry: () => !wrote, maxAttempts: 5);
+        }
+        catch (CamusDBException ex)
+        {
+            caught = ex;
+        }
+
+        Assert.AreEqual(1, attempts, "Once output was written the retryable conflict must NOT be replayed");
+        Assert.IsNotNull(caught);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, caught!.Code);
+    }
+
+    [Test]
+    public async Task RetryHelper_Guarded_RetriesWhenFailureIsBeforeFirstWrite()
+    {
+        // Early failures (before any output) are still replayed; once the attempt gets far enough to
+        // write, subsequent attempts would be blocked — but here the third attempt succeeds first.
+        int attempts = 0;
+        bool wrote = false;
+
+        int result = await SerializableRetryHelper.ExecuteAutocommitAsync(async ct =>
+        {
+            attempts++;
+            await Task.Yield();
+            if (attempts < 3)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, "early conflict, nothing written");
+            wrote = true;
+            return attempts;
+        }, canRetry: () => !wrote, maxAttempts: 5);
+
+        Assert.AreEqual(3, attempts, "Pre-write conflicts must still be retried");
+        Assert.AreEqual(3, result);
+        Assert.IsTrue(wrote);
+    }
+
+    // -----------------------------------------------------------------------
     // 6. Integration: real TransactionConflict resolved transparently by retry
     //
     // Alice holds a shared point lock on the row (Serializable+RW read).

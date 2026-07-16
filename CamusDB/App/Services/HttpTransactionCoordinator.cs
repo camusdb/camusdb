@@ -260,6 +260,39 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
+    /// Commits a tracked transaction using the manager recorded at <see cref="StartAsync"/> time,
+    /// without requiring the caller to supply a <see cref="DatabaseDescriptor"/>. Intended for use
+    /// by the gRPC service layer, where the transaction handle carries no database reference.
+    ///
+    /// <para>Shares the per-transaction finalize claim with <see cref="CommitAsync(DatabaseDescriptor,KvTransaction,CancellationToken)"/>
+    /// so a concurrent duplicate commit is rejected rather than double-driven. Throws
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> when the transaction is not tracked (i.e.
+    /// the handle is unknown or already finalized).</para>
+    /// </summary>
+    public async Task<HLCTimestamp> CommitTrackedAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+    {
+        if (!active.TryGetValue(Key(tx), out ActiveTransaction? entry))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
+
+        if (!entry.TryBeginFinalize())
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                "A commit or rollback is already in progress for this transaction");
+
+        try
+        {
+            HLCTimestamp token = await entry.Manager.CommitAsync(tx, cancellationToken).ConfigureAwait(false);
+            Unregister(tx);
+            return token;
+        }
+        catch
+        {
+            entry.EndFinalize();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Rolls back the transaction. Shares the per-transaction finalize claim with
     /// <see cref="CommitAsync"/> so an explicit rollback and a commit for the same id cannot run
     /// concurrently; the loser is rejected with <see cref="CamusDBErrorCodes.TransactionAlreadyCompleted"/>.

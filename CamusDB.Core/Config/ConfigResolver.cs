@@ -104,6 +104,7 @@ public static class ConfigResolver
 
         CamusDBConfig.KeyRangeShardingEnabled = keyRangeSharding;
         CamusDBConfig.ClusterPartitionCount = config.InitialPartitions;
+        CamusDBConfig.GrpcBatchMaxInFlight = config.GrpcBatchMaxInFlight;
         CamusDBConfig.CostBasedAccessPathEnabled = config.CostBasedAccessPathEnabled;
         CamusDBConfig.CostBasedJoinOrderEnabled = config.CostBasedJoinOrderEnabled;
         CamusDBConfig.PlanCacheEnabled = config.PlanCacheEnabled;

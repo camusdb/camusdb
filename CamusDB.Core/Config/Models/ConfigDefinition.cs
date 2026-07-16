@@ -147,6 +147,29 @@ public class ConfigDefinition
     public string RaftCertificate { get; set; } = "";
 
     /// <summary>
+    /// When <c>true</c>, binds a dedicated client-facing gRPC HTTP/2 port (<see cref="GrpcPort"/>)
+    /// and registers the <c>CamusSql</c> and <c>CamusRows</c> services plus gRPC reflection.
+    /// Defaults to <c>false</c> — the operator must consciously expose the gRPC endpoint.
+    /// </summary>
+    public bool GrpcEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Port for the client-facing gRPC listener (HTTP/2 only). Ignored when
+    /// <see cref="GrpcEnabled"/> is <c>false</c>. Default 5096.
+    /// When <see cref="RaftCertificate"/> is set the same cert is reused for TLS here; otherwise
+    /// the listener binds plaintext HTTP/2 (<c>h2c</c>), which is fine for local/dev use.
+    /// </summary>
+    public int GrpcPort { get; set; } = 5096;
+
+    /// <summary>
+    /// Maximum number of concurrently in-flight operations the server will execute per
+    /// <c>CamusSql.BatchExecute</c> duplex stream before applying backpressure (the read loop stops
+    /// pulling new requests until a slot frees). Bounds a single client's fan-out. Must be &gt; 0.
+    /// Default 64. Maps to <c>CamusDBConfig.GrpcBatchMaxInFlight</c>.
+    /// </summary>
+    public int GrpcBatchMaxInFlight { get; set; } = 64;
+
+    /// <summary>
     /// Cluster-wide default isolation when a transaction omits an explicit level:
     /// <c>serializable</c> or <c>read_committed</c>.
     /// </summary>
@@ -358,6 +381,9 @@ public class ConfigDefinition
 
         if (HttpsPort is <= 0 or > 65535)
             throw Invalid($"'https_port' must be in 1..65535, got {HttpsPort}");
+
+        if (GrpcPort is <= 0 or > 65535)
+            throw Invalid($"'grpc_port' must be in 1..65535, got {GrpcPort}");
 
         if (RaftNodeId <= 0)
             throw Invalid($"'raft_node_id' must be > 0, got {RaftNodeId}");

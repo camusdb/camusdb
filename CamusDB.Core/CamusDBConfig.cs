@@ -362,6 +362,12 @@ public static class CamusDBConfig
     public static int LockEscalationThreshold = 50;
 
     /// <summary>
+    /// Maximum concurrently in-flight operations the server executes per <c>CamusSql.BatchExecute</c>
+    /// duplex stream before applying backpressure. Bounds one client's fan-out. Default: 64.
+    /// </summary>
+    public static int GrpcBatchMaxInFlight = 64;
+
+    /// <summary>
     /// Maximum number of row + secondary-index mutations a single read-write transaction may
     /// accumulate, mirroring Cloud Spanner's per-commit mutation cap.
     ///

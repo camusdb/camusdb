@@ -72,6 +72,17 @@ builder.WebHost.ConfigureKestrel(kestrel =>
                 o.UseHttps(config.RaftCertificate);
         });
     }
+    // Dedicated client-facing gRPC port — HTTP/2 only. Plaintext (h2c) is fine for local dev;
+    // set grpc_cert (reuses raft_certificate) for TLS in exposed deployments.
+    if (config.GrpcEnabled)
+    {
+        kestrel.ListenAnyIP(config.GrpcPort, o =>
+        {
+            o.Protocols = HttpProtocols.Http2;
+            if (!string.IsNullOrEmpty(config.RaftCertificate))
+                o.UseHttps(config.RaftCertificate);
+        });
+    }
 });
 
 builder.Logging.ClearProviders();
@@ -205,6 +216,12 @@ if (config.IsClusterMode)
     builder.Services.AddGrpc();
 }
 
+// In standalone mode AddGrpc() was not called by the cluster branch above; call it now so
+// the client-facing CamusSqlService can be resolved in both modes. The Kestrel gRPC port is
+// only bound when grpc_enabled is true, so the service is externally reachable only then.
+if (!config.IsClusterMode)
+    builder.Services.AddGrpc();
+
 // Initialize min threads
 ThreadPool.SetMinThreads(1024, 512);
 
@@ -225,6 +242,10 @@ if (config.IsClusterMode)
     app.MapGrpcRaftRoutes();
     app.MapGrpcKahunaRoutes();
 }
+
+// Client-facing gRPC services (bound only when grpc_enabled; the port is only open then).
+if (config.GrpcEnabled)
+    app.MapGrpcService<CamusDB.App.Grpc.CamusSqlService>();
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
