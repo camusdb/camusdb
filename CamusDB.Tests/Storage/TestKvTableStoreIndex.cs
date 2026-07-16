@@ -640,7 +640,6 @@ public sealed class TestKvTableStoreIndex
 
         KvTransaction tx1 = await transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         await store.AcquireIndexRangeLockAsync(tx1, "idx_name");
-        Assert.AreEqual(0, tx1.GetAcquiredPrefixLocks().Count, "unmarked index must not acquire a prefix lock");
         Assert.AreEqual(0, tx1.GetAcquiredRangeLocks().Count, "unmarked index must not acquire a range lock");
 
         await transactions.CommitAsync(tx1);

@@ -403,16 +403,20 @@ public sealed class KvTableStore
         long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
+        // Register the range-lock acquisition with the coordinator so it folds into the session working
+        // set. This is what lets the coordinator renew the lock's TTL for the life of the transaction
+        // (retiring the client-side heartbeat) and release it on finalize. A range lock always has a real
+        // transaction identity (checked above), so the coordinator key is always present here.
+        //
+        // The operation id is bound to this exact range-lock declaration. It is RETAINED across transient
+        // MustRetry/WaitingForReplication retries, so if a completion ack was lost the coordinator replays
+        // the effect under the same id instead of stranding the original registration and double-folding
+        // the lock. A confirmed AlreadyLocked denial is a definite negative observation, so a wait-then-
+        // retry after one starts a fresh attempt id (a genuinely new acquire attempt).
+        TransactionOperationId rangeLockOperationId = TransactionOperationId.NewRandom();
+
         while (true)
         {
-            // Register the range-lock acquisition with the coordinator so it folds into the session
-            // working set. This is what lets the coordinator renew the lock's TTL for the life of the
-            // transaction (retiring the client-side heartbeat) and release it on finalize. A fresh
-            // operation id per attempt matches the per-attempt retry/upgrade semantics, mirroring the
-            // point-lock batch path. A range lock always has a real transaction identity (checked
-            // above), so the coordinator key is always present here.
-            TransactionOperationId rangeLockOperationId = TransactionOperationId.NewRandom();
-
             (KeyValueResponseType type, HLCTimestamp holder) = await kahuna.LocateAndTryAcquireRangeLock(
                 tx.TransactionId, bucketPrefix,
                 startKey, startInclusive, endKey, endInclusive,
@@ -458,6 +462,9 @@ public sealed class KvTableStore
                 if (requesterIsOlder && Stopwatch.GetTimestamp() < deadline)
                 {
                     await Task.Delay(RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
+                    // A confirmed denial ends this observation; the wait-then-retry is a fresh acquire
+                    // attempt, so mint a new id rather than replay the denied one.
+                    rangeLockOperationId = TransactionOperationId.NewRandom();
                     continue; // wait for the younger holder to finish
                 }
 
@@ -582,6 +589,9 @@ public sealed class KvTableStore
 
         string key = BuildRowKey(rowId);
 
+        // Gated on isolation + mode only, NOT on tx.Locking: a Serializable+RW read takes this shared
+        // predicate lock even when tx.Locking is Optimistic (that is the Serializable+Optimistic hybrid —
+        // optimistic writes, but predicate locks still keep the read phantom-free).
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
@@ -652,14 +662,16 @@ public sealed class KvTableStore
         int retries = 0;
 
         // Register the batch read for read-set folding on the optimistic / TrackAndValidate path; empty
-        // coordinatorKey leaves it unregistered (pessimistic / snapshot). A fresh operation id per
-        // iteration matches the shrinking pending subset, exactly like the batch write paths.
+        // coordinatorKey leaves it unregistered (pessimistic / snapshot). One operation id is bound to the
+        // pending read declaration: it is REUSED while the pending set is unchanged (an ack-loss resend of
+        // the identical batch, which the coordinator can only replay idempotently under the same id) and a
+        // fresh id is minted only when the set shrinks (confirmed reads removed). Unregistered reads carry
+        // the default id (no folding), so the identity is immaterial there.
         string readCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+        TransactionOperationId readOperationId = readCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
         while (pending.Count > 0)
         {
-            TransactionOperationId readOperationId = readCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
-
             List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
                 await kahuna.LocateAndTryGetManyValues(tx.TransactionId, tx.ReadTimestamp, pending, cancellationToken, readCoordinatorKey, readOperationId)
                             .ConfigureAwait(false);
@@ -690,6 +702,12 @@ public sealed class KvTableStore
                     $"Batch read was not ready after {MaxKahunaRetries} retries — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
+
+            // Shrinking set (some reads confirmed) → new, smaller declaration under a fresh id on the
+            // registered path. Unchanged set (every key transient) → identical resend of a lost ack →
+            // keep the same id so the coordinator replays the read observation idempotently.
+            if (readCoordinatorKey.Length != 0 && nextPending.Count != pending.Count)
+                readOperationId = TransactionOperationId.NewRandom();
             pending = nextPending;
         }
 
@@ -1506,11 +1524,18 @@ public sealed class KvTableStore
         // follow (SetManyWithRetry / DeleteManyWithRetry) have a valid TransactionId.
         await tx.EnsureSessionStartedAsync(ct).ConfigureAwait(false);
 
-        // Optimistic transactions take no explicit exclusive locks: each confirmed write folds an
-        // implicit point lock into the coordinator working set, and conflicts are detected at commit
-        // (write-intent conflict on the modified keys plus read-set validation). Skipping the acquire
-        // here is what makes an optimistic transaction lock-free; a concurrent writer is not blocked,
-        // and the loser aborts at prepare instead of at lock time.
+        // Optimistic transactions take no explicit exclusive WRITE locks: each confirmed write folds an
+        // implicit point lock into the coordinator working set, and write-write conflicts are detected at
+        // commit (write-intent conflict on the modified keys plus read-set validation). Skipping the
+        // acquire here makes the WRITE path non-blocking: a concurrent writer is not blocked and the loser
+        // aborts at prepare instead of at lock time.
+        //
+        // This is fully lock-free only under Read Committed. Under the default Serializable isolation the
+        // read/scan paths still take SHARED range/point locks and a following write UPGRADES them to
+        // Exclusive — both gated on the isolation level, NOT on tx.Locking (see GetRow / WriteRow). So a
+        // Serializable+Optimistic transaction is a HYBRID: optimistic write + read-set validation plus the
+        // retained predicate locks that keep the scan phantom-free. Serializable is deliberately not
+        // weakened to lock-free, because that would silently break its isolation guarantee.
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
             return;
 
@@ -1518,27 +1543,28 @@ public sealed class KvTableStore
         long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
+        // Bind one operation id to the current pending batch declaration. It folds every acquired
+        // exclusive point lock into the coordinator working set as one registered operation, so
+        // commit/rollback release them. The id is REUSED while the pending set is unchanged — an
+        // ack-loss resend of the identical batch, which the coordinator can only replay idempotently
+        // under the same id — and a fresh id is minted only when the set actually shrinks (confirmed
+        // locks were removed), a genuinely new, smaller declaration. Minting a new id for an unchanged
+        // resend would strand the original registration (blocking finalize drain) and could double-fold.
+        TransactionOperationId lockBatchOperationId = TransactionOperationId.NewRandom();
+
         while (pending.Count > 0)
         {
-            // A fresh operation id per batch call folds every acquired exclusive point lock into the
-            // coordinator working set as one registered operation, so commit/rollback release them. It is
-            // minted per iteration because the retry resends only the transient subset — a different batch
-            // that must register as its own operation. Without folding, the batch locks are foreign to the
-            // coordinator and a committed batch row reads back as if never written.
-            TransactionOperationId lockBatchOperationId = TransactionOperationId.NewRandom();
-
             List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses =
                 await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct, tx.CoordinatorKey, lockBatchOperationId).ConfigureAwait(false);
 
-            // First pass: track every successfully locked key before any throw so that
-            // the transaction rollback path can release them even if a later key fails.
-            // Mirrors the coordinator's two-pass pattern in AcquireLocksPessimistically.
-            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses)
+            // First pass: trace every successfully locked key (when lock tracing is on). The coordinator
+            // owns the folded point locks and releases them at finalize, so no client-side tracking is
+            // needed for cleanup.
+            if (CamusDBConfig.LockTracingEnabled)
             {
-                if (type == KeyValueResponseType.Locked)
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability _, _) in responses)
                 {
-                    tx.TrackLock(key, durability);
-                    if (CamusDBConfig.LockTracingEnabled)
+                    if (type == KeyValueResponseType.Locked)
                         Log.LogPointLockAcquired(logger, key, tx.UniqueId);
                 }
             }
@@ -1572,6 +1598,12 @@ public sealed class KvTableStore
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+
+            // A shrinking pending set (some keys were confirmed Locked) is a new, smaller declaration —
+            // register it under a fresh id. An unchanged set (every key transient) is the identical batch
+            // resent (e.g. a lost completion ack) — keep the id so the coordinator replays idempotently.
+            if (retry.Count != pending.Count)
+                lockBatchOperationId = TransactionOperationId.NewRandom();
             pending = retry;
         }
     }
@@ -1586,14 +1618,17 @@ public sealed class KvTableStore
         long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
+        // Bind one operation id to the current pending batch declaration. It folds the whole batch into
+        // the coordinator working set as one registered operation. The id is REUSED while the pending set
+        // is unchanged — an ack-loss resend of the identical batch, which the coordinator can only replay
+        // idempotently under the same id — and a fresh id is minted only when the set actually shrinks
+        // (confirmed keys removed), a genuinely new, smaller declaration. Resending the identical unique
+        // batch under a NEW id would let an already-staged SetIfNotExists read back as a false duplicate
+        // and strand the original pending op (blocking finalize drain).
+        TransactionOperationId batchOperationId = TransactionOperationId.NewRandom();
+
         while (pending.Count > 0)
         {
-            // A fresh operation id per batch call folds the whole batch into the coordinator working set as
-            // one registered operation. It is minted per iteration (not once): the retry resends only the
-            // transient subset, a different batch/digest that must register as its own operation rather than
-            // collide with the previous id. The already-confirmed keys were folded by the earlier call.
-            TransactionOperationId batchOperationId = TransactionOperationId.NewRandom();
-
             List<KahunaSetKeyValueResponseItem> responses =
                 await kahuna.LocateAndTrySetManyKeyValue(pending, ct, tx.CoordinatorKey, batchOperationId).ConfigureAwait(false);
 
@@ -1639,6 +1674,11 @@ public sealed class KvTableStore
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+
+            // Shrinking set (some keys confirmed Set/NotSet) → new, smaller declaration under a fresh id.
+            // Unchanged set (every key transient) → identical resend of a lost ack → keep the same id.
+            if (retry.Count != pending.Count)
+                batchOperationId = TransactionOperationId.NewRandom();
             pending = retry;
         }
     }
@@ -2076,13 +2116,15 @@ public sealed class KvTableStore
         long deadline = LockWaitDeadlineTicks();
         int retries = 0;
 
+        // Bind one operation id to the current pending batch declaration. It folds the confirmed deletes
+        // into the coordinator working set as one registered operation. The id is REUSED while the pending
+        // set is unchanged — an ack-loss resend of the identical batch, which the coordinator can only
+        // replay idempotently under the same id — and a fresh id is minted only when the set actually
+        // shrinks (confirmed deletes removed), a genuinely new, smaller declaration.
+        TransactionOperationId deleteBatchOperationId = TransactionOperationId.NewRandom();
+
         while (pending.Count > 0)
         {
-            // A fresh operation id per batch call folds the confirmed deletes into the coordinator working
-            // set as one registered operation, so commit finalizes them. Minted per iteration because the
-            // retry resends only the transient subset — its own operation, distinct from the first.
-            TransactionOperationId deleteBatchOperationId = TransactionOperationId.NewRandom();
-
             List<KahunaDeleteKeyValueResponseItem> responses =
                 await kahuna.LocateAndTryDeleteManyKeyValue(pending, ct, tx.CoordinatorKey, deleteBatchOperationId).ConfigureAwait(false);
 
@@ -2121,6 +2163,11 @@ public sealed class KvTableStore
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Batch delete conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+
+            // Shrinking set (some deletes confirmed) → new, smaller declaration under a fresh id.
+            // Unchanged set (every key transient) → identical resend of a lost ack → keep the same id.
+            if (retry.Count != pending.Count)
+                deleteBatchOperationId = TransactionOperationId.NewRandom();
             pending = retry;
         }
     }
@@ -2136,6 +2183,9 @@ public sealed class KvTableStore
         // AcquireLock is still called after the upgrade: the per-key write intent it sets is what
         // drives the 2PC commit path; the exclusive range lock drives predicate/reader exclusion.
         // Two different Kahuna mechanisms, each load-bearing for a different invariant.
+        // Gated on Serializable+RW, NOT on tx.Locking: even an optimistic transaction upgrades its
+        // retained shared predicate lock here — the hybrid keeps the read-then-write phantom-free while
+        // the write itself skips the explicit exclusive lock in AcquireLock.
         if (IsSerializableReadWrite(tx) && HasSharedPointLock(tx, rowBucketPrefix, key))
             await UpgradeToExclusivePointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
@@ -2202,12 +2252,14 @@ public sealed class KvTableStore
         // session is open for the write that follows even when optimistic skips the lock.
         await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
 
-        // Optimistic transactions take no explicit exclusive locks — see AcquireManyWithRetry. The
-        // write's implicit point lock and commit-time validation provide isolation instead.
+        // Optimistic transactions take no explicit exclusive WRITE lock — see AcquireManyWithRetry (the
+        // write's implicit point lock and commit-time validation replace it). Note this skips only the
+        // write lock: under Serializable, the read/scan predicate (range/point) locks still apply, so
+        // Serializable+Optimistic remains a hybrid rather than fully lock-free.
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
             return;
 
-        (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) = await RetryOnMustRetryRegistered(tx,
+        (KeyValueResponseType lockType, _, _, _) = await RetryOnMustRetryRegistered(tx,
             (coordinatorKey, operationId) => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
@@ -2218,7 +2270,6 @@ public sealed class KvTableStore
         if (lockType != KeyValueResponseType.Locked)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");
 
-        tx.TrackLock(key, lockDurability);
         if (CamusDBConfig.LockTracingEnabled)
             Log.LogPointLockAcquired(logger, key, tx.UniqueId);
     }

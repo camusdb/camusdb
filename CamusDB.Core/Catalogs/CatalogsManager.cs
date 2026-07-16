@@ -2373,7 +2373,6 @@ public sealed class CatalogsManager
     private static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
     {
         KeyValueResponseType lockType;
-        KeyValueDurability lockDurability;
         int lockRetries = 0;
 
         // Stable per-operation ids reused across the retry loop so a replayed call after a lost response
@@ -2387,7 +2386,7 @@ public sealed class CatalogsManager
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
-            (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None,
                 coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
@@ -2400,8 +2399,6 @@ public sealed class CatalogsManager
                 CamusDBErrorCodes.SystemSpaceCorrupt,
                 $"Failed to acquire meta lock on '{key}': {lockType}"
             );
-
-        tx.TrackLock(key, lockDurability);
 
         KeyValueResponseType setType;
         int setRetries = 0;
@@ -2433,7 +2430,6 @@ public sealed class CatalogsManager
     private static async Task DeleteMetaKey(IKahuna kahuna, KvTransaction tx, string key)
     {
         KeyValueResponseType lockType;
-        KeyValueDurability lockDurability;
         int lockRetries = 0;
 
         // Stable per-operation ids reused across the retry loop (see WriteMetaKey) so the delete and its
@@ -2446,7 +2442,7 @@ public sealed class CatalogsManager
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
-            (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None,
                 coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
@@ -2459,8 +2455,6 @@ public sealed class CatalogsManager
                 CamusDBErrorCodes.SystemSpaceCorrupt,
                 $"Failed to acquire meta lock on '{key}': {lockType}"
             );
-
-        tx.TrackLock(key, lockDurability);
 
         KeyValueResponseType deleteType;
         int deleteRetries = 0;

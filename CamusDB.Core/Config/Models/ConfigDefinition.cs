@@ -384,6 +384,40 @@ public class ConfigDefinition
 
         Kahuna.Validate();
 
+        // Compose the Kahuna session-timeout cap with the engine's serializable lifetime. The engine
+        // starts every session with Timeout = MaxSerializableTransactionLifetimeMs and Kahuna clamps it
+        // to the node's MaxTransactionTimeout. An explicit 'max_transaction_timeout_ms' below the
+        // lifetime makes that lifetime unreachable (sessions are silently reaped early), so reject it
+        // rather than let the two knobs disagree. When the cap is left unset the option builder derives
+        // it from the lifetime, so there is nothing to check here.
+        if (Kahuna.MaxTransactionTimeoutMs is int kahunaMaxTimeout
+            && MaxSerializableTransactionLifetimeMs > 0
+            && kahunaMaxTimeout < MaxSerializableTransactionLifetimeMs)
+            throw Invalid(
+                $"'kahuna.max_transaction_timeout_ms' ({kahunaMaxTimeout}) must be >= " +
+                $"'max_serializable_transaction_lifetime_ms' ({MaxSerializableTransactionLifetimeMs}); " +
+                "a smaller cap silently truncates the serializable transaction lifetime");
+
+        // Cross-check the range-lock TTL against the coordinator's renewal cadence. The coordinator
+        // renews a live session's range locks on its collection-interval tick (Kahuna's default is
+        // 60 s), so the TTL must comfortably outlast one tick or a lock lapses before its first renewal
+        // and a concurrent writer can slip into the scanned range. Require a 2x margin over the
+        // effective interval. A non-positive TTL disables expiry (server-side renewal owns the lease),
+        // so it is exempt.
+        if (RangeLockExpiresMs > 0)
+        {
+            const int RangeLockRenewalMarginFactor = 2;
+            int effectiveCollectionIntervalMs = Kahuna.CollectionIntervalMs ?? 60_000;
+            long minSafeRangeLockTtl = (long)effectiveCollectionIntervalMs * RangeLockRenewalMarginFactor;
+
+            if (RangeLockExpiresMs < minSafeRangeLockTtl)
+                throw Invalid(
+                    $"'range_lock_expires_ms' ({RangeLockExpiresMs}) must be >= {RangeLockRenewalMarginFactor}x the " +
+                    $"effective Kahuna collection interval ({effectiveCollectionIntervalMs} ms => {minSafeRangeLockTtl} ms); " +
+                    "the coordinator renews range locks on that tick, so a smaller TTL lapses before the first renewal " +
+                    "(raise 'range_lock_expires_ms', lower 'kahuna.collection_interval_ms', or set the TTL <= 0 to disable expiry)");
+        }
+
         // Forwarding endpoints: http_peers, when supplied, must be parallel to peers so
         // the raft-endpoint → HTTP base-URI map in Program.cs is unambiguous. An entry
         // count mismatch silently disables the explicit map and falls back to the

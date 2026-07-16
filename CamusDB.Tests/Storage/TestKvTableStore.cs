@@ -318,8 +318,10 @@ public sealed class TestKvTableStore
         Assert.AreEqual(2, scannedIds.Count);
     }
 
+    // Only the modified-key mirror is kept client-side (for cache invalidation when the frozen server
+    // working set is unavailable). Point locks are owned by the coordinator and no longer mirrored here.
     [Test]
-    public async Task InsertRow_TracksModifiedAndLockKeys()
+    public async Task InsertRow_TracksModifiedKey()
     {
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t8");
         await using EmbeddedKahuna __ = node;
@@ -331,8 +333,7 @@ public sealed class TestKvTableStore
         KvTransaction tx = await BeginTransaction(node.Kahuna, "t8-track");
         await store.InsertRow(tx, rowId, data);
 
-        Assert.AreEqual(1, tx.GetModifiedKeys().Count, "One modified key must be tracked");
-        Assert.AreEqual(1, tx.GetAcquiredLocks().Count, "One acquired lock must be tracked");
+        Assert.AreEqual(1, tx.GetModifiedKeyPairs().Count, "One modified key must be tracked for cache invalidation");
 
         await CommitTransaction(node.Kahuna, tx);
     }
@@ -370,6 +371,120 @@ public sealed class TestKvTableStore
             Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
 
             await transactions.CommitAsync(tx2);
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    /// <summary>
+    /// Counts the client-issued lock-release RPCs on the outer <see cref="IKahuna"/> surface. The
+    /// coordinator releases a transaction's folded range/prefix locks from inside the node (via its own
+    /// manager) as part of finalize, so a correct client must issue <b>zero</b> release calls on this
+    /// surface — the pre-coordinator client-side release would double-release every predicate lock.
+    /// </summary>
+    private sealed class ReleaseCountingKahuna(IKahuna inner) : DelegatingKahuna(inner)
+    {
+        public int RangeReleaseCalls;
+        public int PrefixReleaseCalls;
+
+        public override Task<KeyValueResponseType> LocateAndTryReleaseExclusiveRangeLock(
+            HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
+            KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            Interlocked.Increment(ref RangeReleaseCalls);
+            return inner.LocateAndTryReleaseExclusiveRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive, durability, cancellationToken, coordinatorKey, operationId);
+        }
+
+        public override Task<KeyValueResponseType> LocateAndTryReleaseExclusivePrefixLock(
+            HLCTimestamp transactionId, string prefixKey, KeyValueDurability durability, CancellationToken cancellationToken,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            Interlocked.Increment(ref PrefixReleaseCalls);
+            return inner.LocateAndTryReleaseExclusivePrefixLock(transactionId, prefixKey, durability, cancellationToken, coordinatorKey, operationId);
+        }
+    }
+
+    // A Serializable+RW transaction that acquired a range lock must NOT release it from the client on
+    // commit or rollback — the coordinator owns the folded lock and releases it exactly once at finalize.
+    [Test]
+    [NonParallelizable]
+    public async Task RangeLock_FinalizedByCoordinator_NoClientSideRelease()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            EmbeddedKahuna node = new();
+            await node.StartAsync(CancellationToken.None);
+            await node.WaitForLeaderAsync("norelease/warmup", CancellationToken.None);
+            await using EmbeddedKahuna __ = node;
+
+            ReleaseCountingKahuna counting = new(node.Kahuna);
+            KvTableStore store = new(counting, "testdb", "norelease");
+            KvTransactionsManager transactions = new(counting);
+
+            // Commit path.
+            KvTransaction committed = await transactions.BeginAsync(
+                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+            await store.AcquireRowRangeLockAsync(committed, exclusive: true);
+            Assert.AreEqual(1, committed.GetAcquiredRangeLocks().Count, "the range lock must be tracked for coverage");
+            await transactions.CommitAsync(committed);
+
+            // Rollback path.
+            KvTransaction rolledBack = await transactions.BeginAsync(
+                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+            await store.AcquireRowRangeLockAsync(rolledBack, exclusive: true);
+            await transactions.RollbackAsync(rolledBack);
+
+            Assert.AreEqual(0, counting.RangeReleaseCalls,
+                "the client must not issue any range-lock release; the coordinator releases the folded lock at finalize");
+            Assert.AreEqual(0, counting.PrefixReleaseCalls,
+                "the client must not issue any prefix-lock release");
+        }
+        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+    }
+
+    // "Optimistic" only skips the exclusive WRITE lock. Under Serializable, reads still take shared
+    // predicate locks (gated on isolation, not on locking), so Serializable+Optimistic is a HYBRID — it
+    // is not lock-free. Read Committed+Optimistic takes no predicate lock and is fully lock-free. This
+    // pins that contract at the mechanism level (predicate-lock tracking), the honest counterpart to the
+    // lock-free optimistic tests that run under Read Committed.
+    [Test]
+    [NonParallelizable]
+    public async Task SerializableOptimistic_StillTakesReadPredicateLock_Hybrid()
+    {
+        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
+        CamusDBConfig.KeyRangeShardingEnabled = true;
+        try
+        {
+            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("hybridopt");
+            await using EmbeddedKahuna __ = node;
+
+            KvTransactionsManager transactions = new(node.Kahuna);
+
+            ObjectIdValue rowId = new(9, 9, 9);
+            KvTransaction seed = await transactions.BeginAsync();
+            await store.InsertRow(seed, rowId, [1]);
+            await transactions.CommitAsync(seed);
+
+            // Serializable + Optimistic: the write lock is skipped, but the READ still takes a shared
+            // predicate lock — the hybrid.
+            KvTransaction hybrid = await transactions.BeginAsync(
+                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite,
+                locking: KeyValueTransactionLocking.Optimistic);
+            Assert.That(hybrid.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic), "the tx must be optimistic");
+            await store.GetRow(hybrid, rowId);
+            Assert.Greater(hybrid.GetAcquiredRangeLocks().Count, 0,
+                "Serializable+Optimistic must still take a shared read predicate lock (hybrid, not lock-free)");
+            await transactions.RollbackAsync(hybrid);
+
+            // Read Committed + Optimistic: fully lock-free — no predicate lock on the read.
+            KvTransaction lockFree = await transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+                locking: KeyValueTransactionLocking.Optimistic);
+            await store.GetRow(lockFree, rowId);
+            Assert.AreEqual(0, lockFree.GetAcquiredRangeLocks().Count,
+                "ReadCommitted+Optimistic must take no read predicate lock (fully lock-free)");
+            await transactions.RollbackAsync(lockFree);
         }
         finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
     }

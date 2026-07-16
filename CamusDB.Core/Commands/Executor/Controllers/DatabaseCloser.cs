@@ -34,16 +34,16 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         DatabaseDescriptor databaseDescriptor = await databaseDescriptorLazy;
 
-        // Roll back transactions still active at close time while the node is alive, so their
-        // range locks are released cleanly (rather than lingering until TTL expiry) and their
-        // heartbeat loops are stopped. Best-effort: a failure here must not block the close.
+        // Roll back transactions still active at close time while the node is alive, so the coordinator
+        // releases their working set (including range locks) cleanly rather than leaving them to lapse
+        // on the session timeout. Best-effort: a failure here must not block the close.
         try
         {
             await databaseDescriptor.Transactions.RollbackAllActiveAsync().ConfigureAwait(false);
         }
         catch
         {
-            // descriptor.Dispose() below still cancels any remaining heartbeat loops
+            // The abandoned sessions are reclaimed by the coordinator reaper on their timeout.
         }
 
         databaseDescriptor.Dispose();

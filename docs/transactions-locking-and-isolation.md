@@ -259,16 +259,31 @@ Serializable read-write     shared point lock per key     per-key lock; plus any
 Everything above describes **pessimistic** locking — take the lock first, block a conflicting party,
 resolve at lock time. That is the default and what almost all callers use.
 
-A transaction can instead be begun in **optimistic** mode. An optimistic transaction takes **no**
-explicit locks: it stages its writes and records the versions of the rows it reads, and conflicts are
-checked only at **commit**. If another transaction committed a change to a key it wrote (write-write) or
-to a key it read (read-write / write skew) in the meantime, the commit is aborted and the transaction
-retries. This trades blocking for validation — good for low-contention, read-mostly workloads.
+A transaction can instead be begun in **optimistic** mode. An optimistic transaction skips the explicit
+**exclusive write lock**: it stages its writes and records the versions of the rows it reads, and
+write-write / read-write conflicts are checked only at **commit**. If another transaction committed a
+change to a key it wrote (write-write) or to a key it read (read-write / write skew) in the meantime, the
+commit is aborted and the transaction retries. This trades write-time blocking for commit-time validation
+— good for low-contention, read-mostly workloads.
 
 This is a *concurrency strategy*, orthogonal to the isolation level: any
-`{ReadCommitted, Serializable} × {Pessimistic, Optimistic}` combination is valid. One caveat: optimistic
-validation is based on the specific rows a transaction read, not on predicates, so it does not protect
-against phantoms — use pessimistic Serializable when you need that. See
+`{ReadCommitted, Serializable} × {Pessimistic, Optimistic}` combination is valid. **But "optimistic" does
+not mean the same thing at both isolation levels** — read what you actually get:
+
+| | **Read Committed + Optimistic** | **Serializable + Optimistic** |
+|---|---|---|
+| Explicit write locks | none | none (write folds an implicit intent) |
+| Read/scan predicate locks | none | **still taken** (shared range/point locks) |
+| Lock-free? | **yes**, fully | **no** — this is a *hybrid* |
+| Phantom protection | ✗ (validates observed rows only) | ✓ (predicate locks fence the scan) |
+
+The predicate-lock behavior is gated on the **isolation level**, not on the locking mode: a
+Serializable read still takes its shared predicate lock and a following write upgrades it to exclusive,
+even when the transaction is optimistic. So **Serializable + Optimistic is a hybrid** — optimistic
+write/read-set validation *plus* the retained predicate locks that keep it phantom-free — and only
+**Read Committed + Optimistic** is fully lock-free (and, being lock-free, is phantom-vulnerable: its
+validation covers the specific rows it read, not predicates). Serializable is deliberately never weakened
+to lock-free, because that would silently break its isolation guarantee. See
 `kahuna-transaction-coordinator.md` for the mechanism.
 
 #### Selecting the locking mode

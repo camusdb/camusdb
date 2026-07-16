@@ -120,6 +120,9 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.DefaultTransactionTimeoutMs is int txnTimeout)
             baseline.DefaultTransactionTimeout = txnTimeout;
 
+        if (kahuna.MaxTransactionTimeoutMs is int maxTxnTimeout)
+            baseline.MaxTransactionTimeout = maxTxnTimeout;
+
         if (kahuna.LocksWorkers is int locksWorkers)
             baseline.LocksWorkers = locksWorkers;
 
@@ -203,6 +206,20 @@ public static class EmbeddedKahunaOptionsBuilder
                 $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.RocksDbSharedMemtableBudgetMb}) must be <= " +
                 $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.RocksDbSharedMemoryBudgetMb})");
         }
+
+        // Compose the session-timeout cap with the engine's serializable lifetime. Every session is
+        // started with Timeout = MaxSerializableTransactionLifetimeMs, and Kahuna clamps that to the
+        // node's MaxTransactionTimeout — so if the node cap is left at its 300 s default, a configured
+        // 1 h lifetime is silently truncated and the reaper reclaims the session (and its range locks /
+        // MVCC snapshot) an hour early. Lift the node cap to admit the configured lifetime. An operator
+        // who pinned an explicit 'max_transaction_timeout_ms' below the lifetime is rejected in
+        // ConfigDefinition.Validate before we get here, so this only ever raises an unset/derived cap;
+        // it never lowers an explicit one (max(...) guards the case where an explicit cap already
+        // exceeds the lifetime). A non-positive lifetime disables the engine cap, leaving the node
+        // default untouched.
+        int lifetimeMs = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
+        if (lifetimeMs > 0 && baseline.MaxTransactionTimeout < lifetimeMs)
+            baseline.MaxTransactionTimeout = lifetimeMs;
 
         return baseline;
     }

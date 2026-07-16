@@ -1036,7 +1036,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private async Task<bool> WriteRegistryKey(KvTransaction tx, string key, byte[] value, bool ifAbsent = false)
     {
         KeyValueResponseType lockType;
-        KeyValueDurability lockDurability;
         int lockRetries = 0;
 
         // Stable per-operation ids reused across the retry loop so a replayed call folds once into the
@@ -1050,7 +1049,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
-            (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0,
                 KeyValueDurability.Persistent, CancellationToken.None,
                 coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
@@ -1063,8 +1062,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             throw new CamusDBException(
                 CamusDBErrorCodes.SystemSpaceCorrupt,
                 $"Failed to lock registry key '{key}': {lockType}");
-
-        tx.TrackLock(key, lockDurability);
 
         KeyValueFlags flags = ifAbsent ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
         KeyValueResponseType setType;
@@ -1101,7 +1098,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private async Task DeleteRegistryKey(KvTransaction tx, string key)
     {
         KeyValueResponseType lockType;
-        KeyValueDurability lockDurability;
         int lockRetries = 0;
 
         // Stable per-operation ids reused across the retry loop (see WriteRegistryKey) so the delete and its
@@ -1114,7 +1110,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             if (lockRetries > 0)
                 await Task.Delay(lockRetries * 10).ConfigureAwait(false);
 
-            (lockType, _, lockDurability, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
                 tx.TransactionId, key, 0,
                 KeyValueDurability.Persistent, CancellationToken.None,
                 coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
@@ -1127,8 +1123,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             throw new CamusDBException(
                 CamusDBErrorCodes.SystemSpaceCorrupt,
                 $"Failed to lock registry key '{key}': {lockType}");
-
-        tx.TrackLock(key, lockDurability);
 
         KeyValueResponseType deleteType;
         int deleteRetries = 0;
@@ -1159,17 +1153,17 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        // Roll back any transaction still active on the system store while the node is alive,
-        // then dispose the transactions manager so its range-lock heartbeat loops are cancelled.
-        // An undisposed manager keeps a heartbeat loop awaiting forever, which roots the manager
-        // and the system Kahuna node it references — leaking a whole node per registry instance.
+        // Roll back any transaction still active on the system store while the node is alive so the
+        // coordinator releases their working set, then dispose the transactions manager to release the
+        // system Kahuna node it references — an undisposed manager roots that node, leaking a whole node
+        // per registry instance.
         try
         {
             await transactions.RollbackAllActiveAsync().ConfigureAwait(false);
         }
         catch
         {
-            // best-effort: transactions.Dispose() below still cancels any remaining loops
+            // best-effort: abandoned sessions are reclaimed by the coordinator reaper on timeout
         }
 
         transactions.Dispose();

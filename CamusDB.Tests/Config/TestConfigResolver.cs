@@ -197,17 +197,19 @@ public sealed class TestConfigResolver
 
         try
         {
+            // range_lock_expires_ms must clear the renewal-margin cross-check (>= 2x the 60 s default
+            // collection interval), so use a valid value that still exercises the round-trip.
             string yml =
                 "lock_wait_deadline_ms: 250\n" +
                 "lock_escalation_threshold: 12\n" +
-                "range_lock_expires_ms: 15000";
+                "range_lock_expires_ms: 150000";
 
             ConfigDefinition config = new ConfigReader().Read(yml);
             ConfigResolver.ApplyToCamusDBConfig(config);
 
             Assert.That(CamusDBConfig.LockWaitDeadlineMs, Is.EqualTo(250));
             Assert.That(CamusDBConfig.LockEscalationThreshold, Is.EqualTo(12));
-            Assert.That(CamusDBConfig.RangeLockExpiresMs, Is.EqualTo(15_000));
+            Assert.That(CamusDBConfig.RangeLockExpiresMs, Is.EqualTo(150_000));
         }
         finally
         {

@@ -290,4 +290,146 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
 
         Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-off", kahuna));
     }
+
+    // ── Transaction-timeout composition (session Timeout vs node MaxTransactionTimeout) ──────────
+
+    /// <summary>
+    /// Runs <paramref name="body"/> with the global serializable-lifetime static pinned to
+    /// <paramref name="lifetimeMs"/>, restoring it afterward. The option builder derives the node's
+    /// MaxTransactionTimeout from this static, so these tests must set it deterministically rather than
+    /// inherit whatever a prior test left behind.
+    /// </summary>
+    private static void WithSerializableLifetime(int lifetimeMs, Action body)
+    {
+        int saved = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
+        CamusDBConfig.MaxSerializableTransactionLifetimeMs = lifetimeMs;
+        try
+        {
+            body();
+        }
+        finally
+        {
+            CamusDBConfig.MaxSerializableTransactionLifetimeMs = saved;
+        }
+    }
+
+    [Test]
+    public void MaxTransactionTimeout_DerivedFromSerializableLifetime_WhenUnset()
+    {
+        // The engine passes MaxSerializableTransactionLifetimeMs as each session's Timeout; the node cap
+        // must be lifted to admit it, or Kahuna clamps the session to its 300 s default and reaps a long
+        // transaction early. With no explicit override the builder derives the cap from the lifetime.
+        WithSerializableLifetime(1_800_000, () =>
+        {
+            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-derive", new KahunaOptionsConfig());
+            Assert.That(built.MaxTransactionTimeout, Is.EqualTo(1_800_000));
+        });
+    }
+
+    [Test]
+    public void ExplicitMaxTransactionTimeout_AboveLifetime_IsNotLowered()
+    {
+        // An operator who pins a cap larger than the lifetime keeps it; the derive step only ever raises
+        // an unset/too-small cap, never lowers an explicit one.
+        WithSerializableLifetime(600_000, () =>
+        {
+            KahunaOptionsConfig kahuna = new() { MaxTransactionTimeoutMs = 900_000 };
+            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-explicit", kahuna);
+            Assert.That(built.MaxTransactionTimeout, Is.EqualTo(900_000));
+        });
+    }
+
+    [Test]
+    public void NonPositiveLifetime_LeavesNodeMaxTimeoutAtDefault()
+    {
+        // A disabled lifetime cap (<= 0) means "no engine-imposed maximum", so the node keeps Kahuna's
+        // own default MaxTransactionTimeout untouched.
+        WithSerializableLifetime(0, () =>
+        {
+            EmbeddedKahunaOptions defaults = new();
+            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-disabled", new KahunaOptionsConfig());
+            Assert.That(built.MaxTransactionTimeout, Is.EqualTo(defaults.MaxTransactionTimeout));
+        });
+    }
+
+    [Test]
+    public void NonPositiveMaxTransactionTimeout_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { MaxTransactionTimeoutMs = 0 }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("max_transaction_timeout_ms"));
+    }
+
+    [Test]
+    public void DefaultTimeoutAboveMaxTimeout_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { DefaultTransactionTimeoutMs = 10_000, MaxTransactionTimeoutMs = 5_000 }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("default_transaction_timeout_ms"));
+        Assert.That(ex.Message, Does.Contain("max_transaction_timeout_ms"));
+    }
+
+    // ── ConfigDefinition cross-field composition (timeout cap + range-lock TTL) ───────────────────
+
+    [Test]
+    public void DefaultConfig_PassesCrossFieldValidation()
+    {
+        // Sanity: the shipped defaults (150 s TTL vs 60 s interval, 1 h lifetime, no explicit cap) are
+        // internally consistent and must validate.
+        Assert.DoesNotThrow(() => new ConfigDefinition().Validate());
+    }
+
+    [Test]
+    public void ExplicitKahunaMaxTimeout_BelowSerializableLifetime_IsRejected()
+    {
+        ConfigDefinition config = new()
+        {
+            MaxSerializableTransactionLifetimeMs = 3_600_000,
+            Kahuna = new KahunaOptionsConfig { MaxTransactionTimeoutMs = 100_000 },
+        };
+
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => config.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("max_transaction_timeout_ms"));
+        Assert.That(ex.Message, Does.Contain("max_serializable_transaction_lifetime_ms"));
+    }
+
+    [Test]
+    public void RangeLockTtl_BelowTwiceCollectionInterval_IsRejected()
+    {
+        // TTL 100 s but the coordinator renews on the (default 60 s) collection tick: 100 s < 2x60 s, so
+        // the lock could lapse before its first renewal.
+        ConfigDefinition config = new() { RangeLockExpiresMs = 100_000 };
+
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => config.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("range_lock_expires_ms"));
+        Assert.That(ex.Message, Does.Contain("collection interval"));
+    }
+
+    [Test]
+    public void RangeLockTtl_BelowTwiceExplicitCollectionInterval_IsRejected()
+    {
+        // A raised collection interval must be honored by the cross-check: 150 s TTL < 2x90 s = 180 s.
+        ConfigDefinition config = new()
+        {
+            RangeLockExpiresMs = 150_000,
+            Kahuna = new KahunaOptionsConfig { CollectionIntervalMs = 90_000 },
+        };
+
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => config.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("range_lock_expires_ms"));
+    }
+
+    [Test]
+    public void RangeLockTtl_DisabledWithNonPositive_IsAccepted()
+    {
+        // A non-positive TTL disables client-side expiry (server-side renewal owns the lease), so the
+        // renewal-margin cross-check is skipped.
+        ConfigDefinition config = new() { RangeLockExpiresMs = 0 };
+        Assert.DoesNotThrow(() => config.Validate());
+    }
 }

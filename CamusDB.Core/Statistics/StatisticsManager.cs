@@ -690,7 +690,7 @@ public sealed class StatisticsManager
         {
             // Fold the write and its lock into the coordinator working set so the commit persists the stats
             // blob; a fresh id per call is sufficient (no retry loop here).
-            (KeyValueResponseType lockType, _, KeyValueDurability lockDurability, _) =
+            (KeyValueResponseType lockType, _, _, _) =
                 await database.Kahuna.Kahuna.LocateAndTryAcquireExclusiveLock(
                     tx.TransactionId, kahunaKey, 0, KeyValueDurability.Persistent, CancellationToken.None,
                     coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom()
@@ -701,8 +701,6 @@ public sealed class StatisticsManager
                 await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
                 return;
             }
-
-            tx.TrackLock(kahunaKey, lockDurability);
 
             (KeyValueResponseType setType, _, _) = await database.Kahuna.Kahuna.LocateAndTrySetKeyValue(
                 tx.TransactionId, kahunaKey, bytes, null, -1,

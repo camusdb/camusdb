@@ -56,8 +56,8 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # ── Isolation and locking ─────────────────────────────────────────────────────
 # default_isolation_level: serializable       # serializable | read_committed
 # default_transaction_locking: pessimistic    # pessimistic | optimistic
-# range_lock_expires_ms: 150000           # initial range-lock TTL; must exceed the coordinator renewal tick (60s); <= 0 = no expiry
-# max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables absolute cap; also the Kahuna session timeout
+# range_lock_expires_ms: 150000           # initial range-lock TTL; must be >= 2x the effective kahuna.collection_interval_ms (60s default) or startup is rejected; <= 0 = no expiry
+# max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables absolute cap; also the Kahuna session timeout (the node's kahuna.max_transaction_timeout_ms is derived from this unless pinned larger)
 # lock_escalation_threshold: 50           # shared-point locks before bucket escalation (> 0)
 # lock_wait_deadline_ms: 500              # per-operation Serializable conflict cap (> 0)
 # key_range_sharding: false               # opt tables into Kahuna key-range routing
@@ -147,6 +147,7 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 #   wal_revision: v1
 #   wal_sync_writes: true
 #   default_transaction_timeout_ms: 5000
+#   max_transaction_timeout_ms: 3600000  # hard cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset => derived from that lifetime so a long serializable txn is not clamped/reaped early
 #   locks_workers: 8
 #   key_value_workers: 8
 #   background_writer_workers: 1
@@ -162,7 +163,7 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 #   max_bytes_per_actor: 268435456      # size-based eviction: cap on in-memory bytes per actor (256 MiB)
 #   cache_entry_ttl_ms: 300000          # idle TTL before an aged cache entry may be evicted (5 min)
 #   cache_entries_to_remove: 1000       # max aged entries evicted per collection sweep
-#   collection_interval_ms: 60000       # background eviction-sweep cadence (60 s)
+#   collection_interval_ms: 60000       # background eviction-sweep + range-lock renewal cadence (60 s); range_lock_expires_ms must be >= 2x this
 #   compact_every_operations: 1000      # take a Raft-log compaction point every N operations
 #   compact_number_entries: 50          # trailing log entries retained at each compaction point
 #   max_entries_per_compaction: 5000    # cap on entries removed by a single compaction pass

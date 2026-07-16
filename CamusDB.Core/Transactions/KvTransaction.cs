@@ -39,8 +39,13 @@ public enum KvTransactionStatus
 }
 
 /// <summary>
-/// The bounds of a Kahuna key-range lock held by a transaction, retained so the lock can be
-/// released over the identical interval on commit/rollback and renewed by the heartbeat.
+/// The bounds of a Kahuna key-range lock held by a transaction, retained purely as
+/// <b>in-transaction coverage state</b>: the local index that lets a later read skip re-acquiring a
+/// point lock already covered by a whole-bucket lock (<see cref="KvTransaction.HasWholeBucketLock"/>)
+/// and lets the escalation heuristic count per-bucket point locks
+/// (<see cref="KvTransaction.CountPointLocksForBucket"/>). It is <b>not</b> finalization state — the
+/// coordinator owns and releases the folded range lock on commit/rollback (and renews its TTL while the
+/// session is live), so this list is never replayed at finalize.
 /// A whole-bucket lock is <c>(prefix, null, true, null, true)</c>.
 /// </summary>
 public readonly record struct RangeLockBounds(
@@ -51,9 +56,14 @@ public readonly record struct RangeLockBounds(
 /// Holds the runtime state of a single CamusDB transaction backed by Kahuna.
 ///
 /// Each instance owns a Kahuna <see cref="HLCTimestamp"/> obtained from
-/// <c>LocateAndStartTransaction</c> and accumulates the sets of acquired locks and
-/// modified keys that must be forwarded to <c>LocateAndCommitTransaction</c> /
-/// <c>LocateAndRollbackTransaction</c> at the end of the transaction.
+/// <c>LocateAndStartTransaction</c>. The coordinator owns the authoritative working set (staged
+/// writes, point/range locks, read observations) and finalizes from it given only the
+/// <see cref="Handle"/> — the client forwards no key list at commit/rollback. The only local
+/// bookkeeping kept here is <b>in-transaction</b> state that the client itself consults while the
+/// transaction runs: the range-lock coverage index (for lock-coverage/escalation decisions) and the
+/// modified-key set (used to invalidate the query result cache when the frozen server working set is
+/// unavailable — see <see cref="KvTransactionsManager.CloseServerWorkingSetAsync"/>). Neither is
+/// replayed at finalize.
 ///
 /// This object is NOT thread-safe — one transaction per logical thread/task.
 /// </summary>
@@ -138,8 +148,6 @@ public sealed class KvTransaction
     public KvTransactionStatus Status { get; internal set; } = KvTransactionStatus.Active;
 
     private readonly Lock trackSync = new();
-    private HashSet<(string key, KeyValueDurability durability)>? acquiredLocks;
-    private HashSet<(string prefix, KeyValueDurability durability)>? acquiredPrefixLocks;
     private HashSet<RangeLockBounds>? acquiredRangeLocks;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
@@ -457,49 +465,11 @@ public sealed class KvTransaction
     }
 
     /// <summary>
-    /// Records that an exclusive lock was acquired on <paramref name="key"/>.
-    /// Idempotent — re-adding the same key is a no-op.
-    /// </summary>
-    public void TrackLock(string key, KeyValueDurability durability)
-    {
-        lock (trackSync)
-        {
-            acquiredLocks ??= [];
-            acquiredLocks.Add((key, durability));
-        }
-    }
-
-    /// <summary>
-    /// Records that an exclusive <b>prefix</b> (range) lock was acquired for this transaction.
-    /// Unlike per-key write intents, a read-only prefix lock is not cleared by the commit/rollback
-    /// 2PC (which only finalizes <em>modified</em> keys), so <see cref="KvTransactionsManager"/>
-    /// releases these explicitly on commit and rollback. Idempotent.
-    /// </summary>
-    public void TrackPrefixLock(string prefix, KeyValueDurability durability)
-    {
-        lock (trackSync)
-        {
-            acquiredPrefixLocks ??= [];
-            acquiredPrefixLocks.Add((prefix, durability));
-        }
-    }
-
-    /// <summary>Snapshot of the prefix (range) locks acquired by this transaction.</summary>
-    public IReadOnlyList<(string prefix, KeyValueDurability durability)> GetAcquiredPrefixLocks()
-    {
-        lock (trackSync)
-        {
-            if (acquiredPrefixLocks is null || acquiredPrefixLocks.Count == 0)
-                return [];
-
-            return [.. acquiredPrefixLocks];
-        }
-    }
-
-    /// <summary>
     /// Records that a Kahuna key-range lock was acquired for this transaction (key-range routed
-    /// spaces). Like prefix locks, range locks are read-only and not finalized by the 2PC, so
-    /// <see cref="KvTransactionsManager"/> releases them explicitly over the same bounds. Idempotent.
+    /// spaces). Tracked only as in-transaction coverage state for
+    /// <see cref="HasWholeBucketLock"/> / <see cref="CountPointLocksForBucket"/>; the coordinator owns
+    /// the folded lock and releases it at finalize, so this is never replayed at commit/rollback.
+    /// Idempotent.
     /// </summary>
     public void TrackRangeLock(
         string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
@@ -636,30 +606,6 @@ public sealed class KvTransaction
         return schemaPins is not null && schemaPins.TryGetValue(resource, out SchemaVersionPin pin)
             ? pin.SchemaVersion
             : null;
-    }
-
-    /// <summary>Returns the acquired-locks list in the shape Kahuna's commit/rollback expects.</summary>
-    public List<KeyValueTransactionModifiedKey> GetAcquiredLocks()
-    {
-        if (acquiredLocks is null)
-            return [];
-
-        List<KeyValueTransactionModifiedKey> result = new(acquiredLocks.Count);
-        foreach ((string key, KeyValueDurability durability) in acquiredLocks)
-            result.Add(new KeyValueTransactionModifiedKey { Key = key, Durability = durability });
-        return result;
-    }
-
-    /// <summary>Returns the modified-keys list in the shape Kahuna's commit/rollback expects.</summary>
-    public List<KeyValueTransactionModifiedKey> GetModifiedKeys()
-    {
-        if (modifiedKeys is null)
-            return [];
-
-        List<KeyValueTransactionModifiedKey> result = new(modifiedKeys.Count);
-        foreach ((string key, KeyValueDurability durability) in modifiedKeys)
-            result.Add(new KeyValueTransactionModifiedKey { Key = key, Durability = durability });
-        return result;
     }
 
     /// <summary>

@@ -24,6 +24,7 @@ public sealed class KahunaOptionsConfig
         "wal_revision",
         "wal_sync_writes",
         "default_transaction_timeout_ms",
+        "max_transaction_timeout_ms",
         "locks_workers",
         "key_value_workers",
         "background_writer_workers",
@@ -61,6 +62,18 @@ public sealed class KahunaOptionsConfig
     public bool? WalSyncWrites { get; set; }
 
     public int? DefaultTransactionTimeoutMs { get; set; }
+
+    /// <summary>
+    /// Hard upper bound (milliseconds) on any admitted transaction session timeout. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.MaxTransactionTimeout"/>. The engine passes
+    /// <c>MaxSerializableTransactionLifetimeMs</c> as each session's timeout, and Kahuna clamps every
+    /// requested timeout to this cap — so leaving it at Kahuna's 300 s default silently truncates a
+    /// longer serializable lifetime. When unset, the option builder derives it from the configured
+    /// lifetime so the two agree; when set, it must be &gt;= that lifetime (checked in
+    /// <see cref="ConfigDefinition.Validate"/>) or the lifetime cap is unreachable. Raising it also
+    /// lengthens how long an abandoned session's MVCC snapshot is retained before reaping.
+    /// </summary>
+    public int? MaxTransactionTimeoutMs { get; set; }
 
     public int? LocksWorkers { get; set; }
 
@@ -158,6 +171,13 @@ public sealed class KahunaOptionsConfig
 
         if (DefaultTransactionTimeoutMs is <= 0)
             throw InvalidConfig($"'kahuna.default_transaction_timeout_ms' must be > 0, got {DefaultTransactionTimeoutMs}");
+
+        if (MaxTransactionTimeoutMs is <= 0)
+            throw InvalidConfig($"'kahuna.max_transaction_timeout_ms' must be > 0, got {MaxTransactionTimeoutMs}");
+
+        if (DefaultTransactionTimeoutMs is int defaultTimeout && MaxTransactionTimeoutMs is int maxTimeout && defaultTimeout > maxTimeout)
+            throw InvalidConfig(
+                $"'kahuna.default_transaction_timeout_ms' ({defaultTimeout}) must be <= 'kahuna.max_transaction_timeout_ms' ({maxTimeout})");
 
         if (LocksWorkers is <= 0)
             throw InvalidConfig($"'kahuna.locks_workers' must be > 0, got {LocksWorkers}");

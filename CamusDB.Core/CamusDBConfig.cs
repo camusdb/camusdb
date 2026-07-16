@@ -233,7 +233,15 @@ public static class CamusDBConfig
     /// (acquire-then-write, block on conflict) preserves the historical behavior. An individual
     /// transaction can opt into <see cref="Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic"/>
     /// via the <c>locking</c> argument to <c>KvTransactionsManager.BeginAsync</c>; the coordinator then
-    /// defers conflict detection to read-set validation at commit instead of holding locks.
+    /// defers <b>write-write</b> conflict detection to commit-time read-set/write-intent validation
+    /// instead of taking explicit exclusive write locks.
+    ///
+    /// <para><b>Scope of "lock-free."</b> Optimistic is fully lock-free only under Read Committed. Under
+    /// the default Serializable isolation, reads and scans still take shared range/point predicate locks
+    /// and a following write upgrades them to exclusive — that gating is on the isolation level, not on
+    /// this setting. So a Serializable+Optimistic transaction is a <b>hybrid</b>: optimistic write and
+    /// read-set validation combined with the predicate locks that keep it phantom-free. Serializable is
+    /// intentionally not weakened to lock-free.</para>
     /// </summary>
     public static global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking DefaultTransactionLocking =
         global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic;

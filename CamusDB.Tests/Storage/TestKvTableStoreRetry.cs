@@ -76,6 +76,13 @@ public sealed class TestKvTableStoreRetry
         public int InjectAcquireManyFaults;
         public int InjectSetManyFaults;
         public int InjectDeleteManyFaults;
+        public int InjectRangeLockFaults;
+
+        // Operation ids seen per batch/range call, in order — lets a test assert the id is reused across
+        // an unchanged transient resend and freshly minted only when the pending set shrinks.
+        public List<TransactionOperationId> SetManyOpIds { get; } = [];
+        public List<TransactionOperationId> AcquireManyOpIds { get; } = [];
+        public List<TransactionOperationId> RangeLockOpIds { get; } = [];
 
         // ---- intercepted: single-key exclusive lock ----
         public override Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> LocateAndTryAcquireExclusiveLock(
@@ -119,13 +126,16 @@ public sealed class TestKvTableStoreRetry
         }
 
         // ---- intercepted: batch acquire locks ----
-        public override Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
+        public override async Task<List<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp HolderTransactionId)>> LocateAndTryAcquireManyExclusiveLocks(
             HLCTimestamp txId, List<(string key, int expiresMs, KeyValueDurability durability)> keys, CancellationToken ct,
             string coordinatorKey = "", TransactionOperationId operationId = default)
         {
+            AcquireManyOpIds.Add(operationId);
+
             if (InjectAcquireManyFaults-- > 0)
-                return Task.FromResult(keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList());
-            return inner.LocateAndTryAcquireManyExclusiveLocks(txId, keys, ct, coordinatorKey, operationId);
+                return keys.Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, HLCTimestamp.Zero)).ToList();
+
+            return await inner.LocateAndTryAcquireManyExclusiveLocks(txId, keys, ct, coordinatorKey, operationId).ConfigureAwait(false);
         }
 
         // ---- intercepted: batch set ----
@@ -145,6 +155,8 @@ public sealed class TestKvTableStoreRetry
             List<KahunaSetKeyValueRequestItem> items, CancellationToken ct,
             string coordinatorKey = "", TransactionOperationId operationId = default)
         {
+            SetManyOpIds.Add(operationId);
+
             if (InjectSetManyFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList();
 
@@ -172,6 +184,19 @@ public sealed class TestKvTableStoreRetry
             if (InjectDeleteManyFaults-- > 0)
                 return Task.FromResult(items.Select(i => new KahunaDeleteKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList());
             return inner.LocateAndTryDeleteManyKeyValue(items, ct, coordinatorKey, operationId);
+        }
+
+        // ---- intercepted: range lock ----
+        public override Task<(KeyValueResponseType, HLCTimestamp HolderTransactionId)> LocateAndTryAcquireRangeLock(
+            HLCTimestamp transactionId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
+            int expiresMs, KeyValueDurability durability, RangeLockMode mode, CancellationToken cancellationToken,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            RangeLockOpIds.Add(operationId);
+            if (InjectRangeLockFaults-- > 0)
+                return Task.FromResult((KeyValueResponseType.MustRetry, HLCTimestamp.Zero));
+            return inner.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
+                expiresMs, durability, mode, cancellationToken, coordinatorKey, operationId);
         }
     }
 
@@ -536,5 +561,155 @@ public sealed class TestKvTableStoreRetry
         await CommitTransaction(stub, lookupTx);
 
         Assert.AreEqual(rowId, found, "Unique index entry must map to the inserted row");
+    }
+
+    // -----------------------------------------------------------------------
+    // Stable operation identity across the transient-retry resend
+    //
+    // These pin the CamusDB half of the contract: the operation id bound to a batch/range declaration
+    // is RETAINED while the pending set is resent unchanged, and only re-minted when the pending set
+    // shrinks (a genuinely new declaration). The retained id is what lets Kahuna's
+    // ParticipantOperationCache fold a lost-ack retry exactly once; that end-to-end idempotent replay
+    // is Kahuna's own contract (and is covered by Kahuna's tests) — it cannot be driven from here,
+    // because the completion-loss window lives inside the node and is invisible to this outer wrapper.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// A whole-batch set-many transient (every key <c>MustRetry</c>, nothing applied) is resent
+    /// unchanged: the pending set did not shrink, so the retry must reuse the SAME operation id. That
+    /// stable identity is the precondition for Kahuna to replay a lost-ack completion exactly once
+    /// instead of re-running <c>SetIfNotExists</c> and fabricating a duplicate.
+    /// </summary>
+    [Test]
+    public async Task WriteRowsBatch_SetManyFullRetry_ReusesSameId()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_setid_full");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        byte[] rowData = [1, 2, 3];
+        CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 77L)]);
+        const string IndexId = "idx_setid_unique";
+
+        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = rowData };
+        row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
+
+        stub.InjectSetManyFaults = 1; // whole batch MustRetry once, nothing written; retry resends unchanged
+
+        KvTransaction tx = await BeginTransaction(stub, "setid_full_w");
+        await store.WriteRowsBatch(tx, [row]);
+        await CommitTransaction(stub, tx);
+
+        Assert.That(stub.SetManyOpIds.Count, Is.GreaterThanOrEqualTo(2), "the transient forced a set-many resend");
+        Assert.That(stub.SetManyOpIds.Distinct().Count(), Is.EqualTo(1),
+            "an unchanged (full-batch) resend must reuse the same operation id");
+
+        KvTransaction readTx = await BeginTransaction(stub, "setid_full_r");
+        byte[]? result = await store.GetRow(readTx, rowId);
+        ObjectIdValue? found = await store.LookupUnique(readTx, IndexId, indexKey);
+        await CommitTransaction(stub, readTx);
+
+        Assert.AreEqual(rowData, result, "row must be readable after the resend");
+        Assert.AreEqual(rowId, found, "unique index entry must map to the row exactly once");
+    }
+
+    /// <summary>
+    /// Partial transient: the first set-many confirms the unique index key and faults only the
+    /// (non-unique) row key. The retry resends a STRICTLY SMALLER batch — a genuinely new declaration —
+    /// so a fresh operation id must be minted. Reusing the id would fold the shrunk batch into the
+    /// original registration; this asserts the "shrank ⟹ new id" half of the identity rule.
+    /// </summary>
+    [Test]
+    public async Task WriteRowsBatch_SetManyPartialTransient_ShrinkMintsNewId()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_shrink_set");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 88L)]);
+        const string IndexId = "idx_shrink_unique";
+
+        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = [4, 5] };
+        row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
+
+        // First call SETs the unique index key and faults only the row key; the retry carries just the
+        // row key (a smaller batch), which must trigger a fresh operation id.
+        stub.SetManyPartialFaultPredicate = key => !key.Contains(":i:", StringComparison.Ordinal);
+
+        KvTransaction tx = await BeginTransaction(stub, "shrink_set_w");
+        await store.WriteRowsBatch(tx, [row]);
+        await CommitTransaction(stub, tx);
+
+        Assert.That(stub.SetManyOpIds.Count, Is.GreaterThanOrEqualTo(2), "the partial fault forced a resend");
+        Assert.That(stub.SetManyOpIds[0], Is.Not.EqualTo(stub.SetManyOpIds[1]),
+            "a shrinking (partial) resend must mint a fresh operation id");
+    }
+
+    /// <summary>
+    /// A whole-batch lock acquisition transient (every key <c>MustRetry</c>) is resent unchanged: the
+    /// pending set did not shrink, so the retry must reuse the same operation id. Re-acquiring the same
+    /// locks under the same id lets the coordinator fold the acquisition once rather than double-fold it.
+    /// </summary>
+    [Test]
+    public async Task WriteRowsBatch_AcquireManyFullRetry_ReusesSameId()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_lockid_full");
+        await using EmbeddedKahuna __ = node;
+
+        List<(ObjectIdValue rowId, byte[] data)> expected = Enumerable.Range(0, 3)
+            .Select(i => (Generate(), new byte[] { (byte)i }))
+            .ToList();
+        List<KvTableStore.RowWrite> batch = expected
+            .Select(e => new KvTableStore.RowWrite { RowId = e.rowId, RowData = e.data })
+            .ToList();
+
+        stub.InjectAcquireManyFaults = 1; // whole batch MustRetry once; retry resends the same keys
+
+        KvTransaction tx = await BeginTransaction(stub, "lockid_full_w");
+        await store.WriteRowsBatch(tx, batch);
+        await CommitTransaction(stub, tx);
+
+        Assert.That(stub.AcquireManyOpIds.Count, Is.GreaterThanOrEqualTo(2), "the transient forced an acquire-many resend");
+        Assert.That(stub.AcquireManyOpIds.Distinct().Count(), Is.EqualTo(1),
+            "an unchanged (full-batch) lock resend must reuse the same operation id");
+
+        KvTransaction readTx = await BeginTransaction(stub, "lockid_full_r");
+        foreach ((ObjectIdValue rowId, byte[] data) in expected)
+            Assert.AreEqual(data, await store.GetRow(readTx, rowId), $"row {rowId} must be readable after the resend");
+        await CommitTransaction(stub, readTx);
+    }
+
+    /// <summary>
+    /// A range-lock acquisition retried through transient <c>MustRetry</c> must retain the same
+    /// operation id across every attempt. A lost completion ack on a range lock would otherwise strand
+    /// the original registration and double-fold the lock into the session working set. Only a confirmed
+    /// <c>AlreadyLocked</c> denial (not exercised here) starts a fresh attempt id.
+    /// </summary>
+    [Test]
+    public async Task AcquireRowRangeLock_MustRetry_RetainsSameId()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_rangeid");
+        await using EmbeddedKahuna __ = node;
+
+        (KeyValueResponseType type, TransactionHandle handle) = await stub.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = "rangeid_w", Locking = KeyValueTransactionLocking.Pessimistic },
+            CancellationToken.None
+        );
+        Assert.AreEqual(KeyValueResponseType.Set, type);
+
+        // Serializable + read-write is the only shape that acquires range locks with an isolation-
+        // critical expiry, so this drives AcquireRangeLockAsync down its real acquisition path.
+        KvTransaction tx = new(handle.TransactionId, "rangeid_w", isReadOnly: false,
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        stub.InjectRangeLockFaults = 2; // two transient MustRetry before the real acquire
+
+        await store.AcquireRowRangeLockAsync(tx, exclusive: true);
+
+        Assert.That(stub.RangeLockOpIds.Count, Is.EqualTo(3), "two MustRetry retries plus the successful acquire");
+        Assert.That(stub.RangeLockOpIds.Distinct().Count(), Is.EqualTo(1),
+            "a range-lock retried through transient MustRetry must retain the same operation id");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
     }
 }

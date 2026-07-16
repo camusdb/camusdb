@@ -389,21 +389,15 @@ public sealed class KvTransactionsManager : IDisposable
 
         string uniqueId = Guid.NewGuid().ToString("N");
 
-        (KeyValueResponseType type, TransactionHandle handle) =
-            await kahuna.LocateAndStartTransaction(
-                new KeyValueTransactionOptions
-                {
-                    CoordinatorKey = uniqueId,
-                    Locking        = KeyValueTransactionLocking.Pessimistic
-                },
-                cancellationToken
-            ).ConfigureAwait(false);
-
-        if (type != KeyValueResponseType.Set)
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                $"Failed to start read-only transaction: {type}"
-            );
+        // Route through the shared start helper so a promoted read-only scan gets the same session
+        // timeout (MaxSerializableTransactionLifetimeMs, not Kahuna's 5 s default) and the same
+        // MustRetry/WaitingForReplication warmup retry as a read-write Begin. A bare start here would
+        // give the scan's shared range locks a 5 s session lease and no retry against a still-electing
+        // partition, so a slow serializable scan could have its snapshot reaped mid-read.
+        TransactionHandle handle = await StartKahunaTransactionAsync(
+            uniqueId, "start read-only transaction",
+            KeyValueTransactionLocking.Pessimistic, ReadValidation.None, DecisionDurability.BestEffort,
+            cancellationToken).ConfigureAwait(false);
 
         KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: true,
             transactionMode: CamusTransactionMode.ReadOnly);
@@ -452,8 +446,8 @@ public sealed class KvTransactionsManager : IDisposable
         // Serializable+ReadOnly transactions hold no write intents and no range locks — a lightweight
         // rollback of the empty Kahuna transaction is equivalent to commit and avoids the full 2PC
         // roundtrip. Promoted ReadCommitted+ReadOnly scan transactions are excluded: they may hold
-        // shared range locks that must be released via ReleaseHeldRangeLocksAsync, so they go through
-        // the normal commit path below.
+        // shared range locks that the coordinator's finalize must release, so they go through the
+        // normal commit path below.
         if (tx.IsReadOnly && tx.TransactionMode == CamusTransactionMode.ReadOnly &&
             tx.IsolationLevel == CamusIsolationLevel.Serializable)
         {
@@ -501,7 +495,6 @@ public sealed class KvTransactionsManager : IDisposable
                 {
                     // Never let cleanup mask the lifetime error the caller must see.
                 }
-                await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
                 tx.Status = KvTransactionStatus.RolledBack;
                 Untrack(tx);
                 throw new CamusDBException(
@@ -584,9 +577,8 @@ public sealed class KvTransactionsManager : IDisposable
                 tx.Status = KvTransactionStatus.Committed;
                 if (logger.IsEnabled(LogLevel.Debug))
                 {
-                    int lockCount = tx.GetAcquiredLocks().Count;
                     long elapsedMs = commitTimer.GetElapsedMilliseconds();
-                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, lockCount, elapsedMs);
+                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, elapsedMs);
                 }
 
                 // Gate: bump generation, evict stale entries, clear in-flight mark — all inside
@@ -597,7 +589,6 @@ public sealed class KvTransactionsManager : IDisposable
                     markedInFlight = false;
                 }
 
-                await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
                 Untrack(tx);
                 return mintLocalT?.Invoke(null) ?? tx.TransactionId;
             }
@@ -621,7 +612,8 @@ public sealed class KvTransactionsManager : IDisposable
             }
 
             // Terminal, non-committing outcome (Aborted / Errored / unexpected): the transaction is
-            // now dead. Mark it rolled back, drop the cache mark, release held read locks, and untrack.
+            // now dead. Mark it rolled back, drop the cache mark, and untrack. The coordinator's
+            // finalize already released the working set (point + range locks, read snapshots).
             tx.Status = KvTransactionStatus.RolledBack;
 
             if (markedInFlight)
@@ -630,7 +622,6 @@ public sealed class KvTransactionsManager : IDisposable
                 markedInFlight = false;
             }
 
-            await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
             Untrack(tx);
 
             // Aborted = definite non-commit (conflict/deadline). Nothing was committed, so replaying
@@ -784,12 +775,10 @@ public sealed class KvTransactionsManager : IDisposable
 
         if (logger.IsEnabled(LogLevel.Debug))
         {
-            int lockCount = tx.GetAcquiredLocks().Count;
             long elapsedMs = rollbackTimer.GetElapsedMilliseconds();
-            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, lockCount, elapsedMs);
+            Log.LogTransactionFinalized(logger, "rolled back", tx.UniqueId, elapsedMs);
         }
 
-        await ReleaseHeldRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
         Untrack(tx);
     }
 
@@ -815,78 +804,6 @@ public sealed class KvTransactionsManager : IDisposable
             await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
         }
         return result;
-    }
-
-    /// <summary>
-    /// Releases the exclusive prefix (range) locks the transaction acquired for serializable
-    /// scans. The 2PC commit/rollback only finalizes intents on <em>modified</em> keys, so a
-    /// read-only prefix lock must be released here or it would linger until its safety-net expiry.
-    /// Release is idempotent (a no-op if Kahuna already cleared it); failures are swallowed so a
-    /// best-effort cleanup never masks the commit/rollback outcome (the expiry is the backstop).
-    /// </summary>
-    /// <summary>
-    /// Releases every read-only lock the transaction holds — both hash-mode prefix locks and
-    /// key-range locks. Both kinds bypass the 2PC finalize path (which only clears write intents),
-    /// so they are released explicitly here on commit and rollback. Best-effort throughout.
-    /// </summary>
-    private async Task ReleaseHeldRangeLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
-    {
-        await ReleasePrefixLocksAsync(tx, cancellationToken).ConfigureAwait(false);
-        await ReleaseRangeLocksAsync(tx, cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task ReleasePrefixLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
-    {
-        IReadOnlyList<(string prefix, KeyValueDurability durability)> prefixLocks = tx.GetAcquiredPrefixLocks();
-        if (prefixLocks.Count == 0)
-            return;
-
-        foreach ((string prefix, KeyValueDurability durability) in prefixLocks)
-        {
-            try
-            {
-                await kahuna.LocateAndTryReleaseExclusivePrefixLock(
-                    tx.TransactionId, prefix, durability, cancellationToken).ConfigureAwait(false);
-                Log.LogRangeLockReleased(logger, "Prefix", prefix, "-∞", "+∞", tx.UniqueId);
-            }
-            catch
-            {
-                // Best-effort: the lock's safety-net expiry releases it if this fails.
-            }
-        }
-    }
-
-    /// <summary>
-    /// Releases any Kahuna key-range locks the transaction acquired (key-range routed spaces), over
-    /// the same bounds they were taken on. Like prefix locks these are read-only and not finalized by
-    /// the 2PC, so they are released explicitly here. Best-effort — the lock expiry is the backstop.
-    /// </summary>
-    private async Task ReleaseRangeLocksAsync(KvTransaction tx, CancellationToken cancellationToken)
-    {
-        IReadOnlyList<RangeLockBounds> rangeLocks = tx.GetAcquiredRangeLocks();
-        if (rangeLocks.Count == 0)
-            return;
-
-        foreach (RangeLockBounds bounds in rangeLocks)
-        {
-            try
-            {
-                await kahuna.LocateAndTryReleaseExclusiveRangeLock(
-                    tx.TransactionId, bounds.Prefix,
-                    bounds.StartKey, bounds.StartInclusive, bounds.EndKey, bounds.EndInclusive,
-                    bounds.Durability, cancellationToken).ConfigureAwait(false);
-                if (logger.IsEnabled(LogLevel.Debug))
-                {
-                    string modeStr = bounds.Mode.ToString();
-                    Log.LogRangeLockReleased(logger, modeStr, bounds.Prefix,
-                        bounds.StartKey ?? "-∞", bounds.EndKey ?? "+∞", tx.UniqueId);
-                }
-            }
-            catch
-            {
-                // Best-effort: the lock's safety-net expiry releases it if this fails.
-            }
-        }
     }
 
     /// <summary>

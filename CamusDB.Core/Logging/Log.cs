@@ -141,8 +141,8 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Debug, Message = "Lock released: {Mode} range on '{Bucket}' [{Start} .. {End}] tx={TxId}")]
     public static partial void LogRangeLockReleased(ILogger logger, string mode, string bucket, string start, string end, string txId);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Transaction {Outcome}: tx={TxId}, released {PointLocks} exclusive point lock(s) in {ElapsedMs} ms")]
-    public static partial void LogTransactionFinalized(ILogger logger, string outcome, string txId, int pointLocks, long elapsedMs);
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Transaction {Outcome}: tx={TxId} in {ElapsedMs} ms")]
+    public static partial void LogTransactionFinalized(ILogger logger, string outcome, string txId, long elapsedMs);
 
     // SQL parser cache
 

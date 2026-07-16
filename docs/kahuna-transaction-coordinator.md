@@ -133,9 +133,9 @@ client retry loop for the common case.
 
 ### Optimistic (opt-in)
 
-An optimistic transaction takes **no explicit locks**. Its writes still fold their implicit
-point locks and modified keys, and its reads fold observations. Nothing blocks; conflicts are
-detected at **commit** during prepare:
+An optimistic transaction skips the explicit **exclusive write lock**. Its writes still fold their
+implicit point locks and modified keys, and its reads fold observations. Nothing blocks *on the
+write path*; write-write and read-write conflicts are detected at **commit** during prepare:
 
 - **Write–write:** two optimistic transactions that modified the same key both try to place a
   write intent on it at prepare. The second one conflicts and aborts. Exactly one wins.
@@ -148,11 +148,23 @@ The write path skips explicit lock acquisition for an optimistic transaction; th
 registers reads so they can be validated (see the next section). A losing optimistic transaction
 surfaces as a `CamusDBException` from `CommitAsync`.
 
-**Boundary to know:** optimistic validation is based on *read observations* — the specific rows
-a transaction actually read — not on *predicates*. It protects against changes to rows you read,
-but not against a concurrent insert of a new row that would have matched your `WHERE` clause
-(a phantom). Optimistic mode is therefore non-phantom; use pessimistic Serializable when you
-need phantom protection.
+**"Optimistic" is not lock-free at every isolation level — this is the key boundary.** Skipping the
+write lock is the *only* thing the locking mode changes. The read/scan **predicate locks** are gated on
+the *isolation level*, not on the locking mode:
+
+- **Read Committed + Optimistic** takes no predicate locks, so it is fully lock-free. Its validation
+  covers *read observations* — the specific rows the transaction read — not *predicates*, so it does
+  **not** protect against a concurrent insert of a new row that would have matched a `WHERE` clause
+  (a phantom). If you need phantom protection here, use Serializable.
+- **Serializable + Optimistic** is a **hybrid**: the write path is optimistic (no explicit write lock,
+  commit-time validation), but reads and scans still take **shared range/point predicate locks** and a
+  following write upgrades them to exclusive — exactly as under Serializable + Pessimistic. So it *is*
+  phantom-free, and it is *not* lock-free. Serializable is deliberately never weakened to lock-free,
+  because that would silently break its isolation guarantee.
+
+(The fully phantom-vulnerable, lock-free read path is Read Committed; the lock-free *and* phantom-free
+option is a Serializable **read-only snapshot**, which holds no locks because it reads a fixed MVCC
+timestamp — a different mechanism from optimistic locking.)
 
 ### Deferred session start (so `SET TRANSACTION LOCKING` can work)
 
