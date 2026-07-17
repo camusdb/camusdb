@@ -15,6 +15,10 @@ CamusDB.Sandbox/Data
 CamusDB.MicroBenchmarks/bin
 CamusDB.MicroBenchmarks/obj
 CamusDB.MicroBenchmarks/*.md
+CamusDB.Grpc.Client.Tests/bin
+CamusDB.Grpc.Client.Tests/obj
+CamusDB.Grpc.Client/bin
+CamusDB.Grpc.Client/obj
 CamusDB.Core\SQLParser.Language.analyzer.lst
 CamusDB.Core\sqlParser.Language.grammar.lst
 BenchmarkDotNet.Artifacts/

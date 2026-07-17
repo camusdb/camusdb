@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using Grpc.Core;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
@@ -360,22 +361,30 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     // ─── BatchExecute (duplex) ────────────────────────────────────────────────
 
     /// <summary>
-    /// Pipelines many <c>ExecuteQuery</c> / <c>ExecuteNonQuery</c> statements over one bidirectional
-    /// stream so a client avoids a unary round-trip per statement. Each inbound request carries a
+    /// Pipelines many statements over one bidirectional stream so a client avoids a unary round-trip
+    /// per statement. Besides <c>QUERY</c> / <c>NON_QUERY</c>, the transaction lifecycle rides the same
+    /// stream — <c>START</c> begins a transaction and returns its handle in-band, <c>COMMIT</c> /
+    /// <c>ROLLBACK</c> finalize it — so a whole unit of work (begin, statements, commit) is one duplex
+    /// call and many concurrent transactions keep the stream busy. Each inbound request carries a
     /// client-monotonic <c>request_id</c>; every response echoes it, and responses for different ids
     /// interleave on the shared stream (the client demultiplexes by id).
     ///
     /// <para>Ops that share a <see cref="TxnHandle"/> execute in <b>arrival order</b> (a per-handle
     /// serial chain preserves the <c>KvTransaction</c> ordering and read-your-writes the coordinator
-    /// session assumes); autocommit ops (no handle) run concurrently up to
-    /// <see cref="CamusDBConfig.GrpcBatchMaxInFlight"/>, which also backpressures the read loop.</para>
+    /// session assumes); a <c>START</c> carries no handle yet and runs concurrently, and autocommit ops
+    /// (no handle) run concurrently up to <see cref="CamusDBConfig.GrpcBatchMaxInFlight"/>, which also
+    /// backpressures the read loop. The chain is per stream, so a client must pin all of one
+    /// transaction's ops to a single stream for the ordering to hold.</para>
     ///
-    /// <para>Per-op outcome is reported <b>in-band</b> — a <c>QueryComplete</c> / <c>NonQueryReply</c>
-    /// on success (carrying the causal token), a <c>BatchError</c> on failure (carrying the
-    /// <c>CADBxxxx</c> code so the client can apply the retry taxonomy) — because gRPC trailers are
-    /// per-call and this call carries many ops. A failed op never tears down the others. Batched ops
-    /// are not server-retried: a retryable conflict surfaces as its code and the client replays that
-    /// op. A dropped stream rolls back any in-flight autocommit work via each op's own handler.</para>
+    /// <para>Per-op outcome is reported <b>in-band</b> — <c>QueryComplete</c> / <c>NonQueryReply</c> /
+    /// <c>start_reply</c> / <c>commit_reply</c> / <c>rollback_reply</c> on success (carrying the causal
+    /// token where one exists), a <c>BatchError</c> on failure (carrying the <c>CADBxxxx</c> code so the
+    /// client can apply the retry taxonomy) — because gRPC trailers are per-call and this call carries
+    /// many ops. A failed op never tears down the others. Batched ops are not server-retried: a
+    /// retryable conflict surfaces as its code and the client replays that op. A transaction that a
+    /// <c>START</c> opened on this stream and never finalized is rolled back on teardown so a dropped or
+    /// half-closed stream cannot orphan it; in-flight autocommit work rolls back via each op's own
+    /// handler.</para>
     /// </summary>
     public override async Task BatchExecute(
         IAsyncStreamReader<BatchExecuteRequest> requestStream,
@@ -387,9 +396,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         int maxInFlight = Math.Max(1, CamusDBConfig.GrpcBatchMaxInFlight);
         SemaphoreSlim inFlight = new(maxInFlight, maxInFlight);
 
-        // Per-txn-handle serial chains so same-handle ops run strictly in arrival order.
+        // Per-txn-handle serial chains so same-handle ops run strictly in arrival order. The chain is
+        // per stream (this call): it orders only same-handle ops that arrive here, which is why the
+        // client must pin all of a transaction's ops to one stream — see the client routing contract.
         Dictionary<string, Task> chains = new();
         List<Task> ops = new();
+
+        // Transactions begun by a batched START on this stream but not yet finalized. A stream that
+        // ends (normally or by cancellation) without a matching COMMIT/ROLLBACK must not leak an open
+        // transaction, so any survivor here is rolled back on teardown. Written from concurrent op
+        // handlers, hence concurrent.
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles = new();
 
         try
         {
@@ -402,12 +419,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 if (handleKey is not null)
                 {
                     Task prev = chains.TryGetValue(handleKey, out Task? p) ? p : Task.CompletedTask;
-                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, ct);
+                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, startedHandles, ct);
                     chains[handleKey] = op;
                 }
                 else
                 {
-                    op = RunBatchOpAsync(req, responseStream, writeLock, ct);
+                    op = RunBatchOpAsync(req, responseStream, writeLock, startedHandles, ct);
                 }
 
                 _ = op.ContinueWith(_ => inFlight.Release(), TaskScheduler.Default);
@@ -422,6 +439,36 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // work; drain best-effort so nothing is left running.
             try { await Task.WhenAll(ops).ConfigureAwait(false); } catch { /* handled per-op */ }
         }
+        finally
+        {
+            await RollbackStartedSurvivorsAsync(startedHandles).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Rolls back any transaction that a batched START opened on a stream that is now tearing down
+    /// without a matching COMMIT/ROLLBACK, so a client crash or half-close cannot orphan an open
+    /// transaction. Best-effort and idempotent: a handle already finalized elsewhere throws from
+    /// <see cref="HttpTransactionCoordinator.GetState"/> and is treated as nothing-to-do. Uses no
+    /// cancellation token because it must still run when the stream's token is already cancelled.
+    /// </summary>
+    private async Task RollbackStartedSurvivorsAsync(
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles)
+    {
+        foreach (KeyValuePair<string, (long pt, uint counter)> entry in startedHandles.ToArray())
+        {
+            if (!startedHandles.TryRemove(entry.Key, out _))
+                continue;
+            try
+            {
+                KvTransaction tx = transactions.GetState(entry.Value.pt, entry.Value.counter);
+                await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Already finalized/unknown — nothing to roll back.
+            }
+        }
     }
 
     private static string? HandleKey(TxnHandle? handle)
@@ -433,12 +480,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchExecuteRequest req,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
         CancellationToken ct)
     {
         // RunBatchOpAsync never throws, so the previous op cannot fault the chain — but await it
         // defensively so a same-handle op only starts once its predecessor has fully completed.
         try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
-        await RunBatchOpAsync(req, stream, writeLock, ct).ConfigureAwait(false);
+        await RunBatchOpAsync(req, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -449,6 +497,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchExecuteRequest req,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
         CancellationToken ct)
     {
         try
@@ -456,10 +505,26 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             SqlRequest request = req.Request
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Batch request is missing 'request'");
 
-            if (req.Kind == BatchStatementKind.Query)
-                await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, ct).ConfigureAwait(false);
-            else
-                await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, ct).ConfigureAwait(false);
+            switch (req.Kind)
+            {
+                case BatchStatementKind.Query:
+                    await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.Start:
+                    await RunBatchStartAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.Commit:
+                    await RunBatchCommitAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.Rollback:
+                    await RunBatchRollbackAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.NonQuery:
+                case BatchStatementKind.Unspecified:
+                default:
+                    await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, ct).ConfigureAwait(false);
+                    break;
+            }
         }
         catch (OperationCanceledException)
         {
@@ -604,6 +669,99 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             RequestId = requestId,
             NonQuery = reply,
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Begins a transaction from a batched START op and returns its server-minted handle in-band. The
+    /// handle is recorded in <paramref name="startedHandles"/> so a stream that ends without a matching
+    /// COMMIT/ROLLBACK rolls it back on teardown. START carries no handle, so it is never chained — the
+    /// client awaits this reply before sending the transaction's statements, so it never races them.
+    /// </summary>
+    private async Task RunBatchStartAsync(
+        int requestId,
+        SqlRequest request,
+        IServerStreamWriter<BatchExecuteResponse> stream,
+        SemaphoreSlim writeLock,
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        CancellationToken ct)
+    {
+        (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) =
+            ParseLevelMode(request);
+
+        KvTransaction tx = await transactions.StartAsync(
+            request.Database, level, mode, locking, deferStart: true, cancellationToken: ct).ConfigureAwait(false);
+
+        TxnHandle handle = new()
+        {
+            TxnIdPt      = tx.ClientId.L,
+            TxnIdCounter = (uint)tx.ClientId.C,
+        };
+        startedHandles[$"{handle.TxnIdPt}:{handle.TxnIdCounter}"] = (handle.TxnIdPt, handle.TxnIdCounter);
+
+        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        {
+            RequestId  = requestId,
+            StartReply = handle,
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Commits the transaction named by a batched COMMIT op's <c>txn_handle</c> and returns its causal
+    /// token in-band. The handle is removed from <paramref name="startedHandles"/> only on success, so a
+    /// failed commit (e.g. a conflict, or the finalize gate rejecting a duplicate) still leaves teardown
+    /// free to roll back if the transaction is somehow still open. Chained after the handle's statements.
+    /// </summary>
+    private async Task RunBatchCommitAsync(
+        int requestId,
+        SqlRequest request,
+        IServerStreamWriter<BatchExecuteResponse> stream,
+        SemaphoreSlim writeLock,
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        CancellationToken ct)
+    {
+        if (request.TxnHandle is not { TxnIdPt: > 0 } handle)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "COMMIT batch op requires a txn_handle");
+
+        KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+        HLCTimestamp token = await transactions.CommitTrackedAsync(txnState, ct).ConfigureAwait(false);
+        startedHandles.TryRemove($"{handle.TxnIdPt}:{handle.TxnIdCounter}", out _);
+
+        CommitReply reply = new();
+        if (!token.IsNull())
+            ApplyCausalToken(reply, token);
+
+        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        {
+            RequestId   = requestId,
+            CommitReply = reply,
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Rolls back the transaction named by a batched ROLLBACK op's <c>txn_handle</c>. Removes the handle
+    /// from <paramref name="startedHandles"/> on success so teardown does not roll it back a second time.
+    /// Chained after the handle's statements.
+    /// </summary>
+    private async Task RunBatchRollbackAsync(
+        int requestId,
+        SqlRequest request,
+        IServerStreamWriter<BatchExecuteResponse> stream,
+        SemaphoreSlim writeLock,
+        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        CancellationToken ct)
+    {
+        if (request.TxnHandle is not { TxnIdPt: > 0 } handle)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ROLLBACK batch op requires a txn_handle");
+
+        KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+        await transactions.RollbackAsync(txnState, ct).ConfigureAwait(false);
+        startedHandles.TryRemove($"{handle.TxnIdPt}:{handle.TxnIdCounter}", out _);
+
+        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        {
+            RequestId     = requestId,
+            RollbackReply = new RollbackReply(),
         }, ct).ConfigureAwait(false);
     }
 

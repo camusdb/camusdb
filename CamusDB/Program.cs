@@ -245,7 +245,10 @@ if (config.IsClusterMode)
 
 // Client-facing gRPC services (bound only when grpc_enabled; the port is only open then).
 if (config.GrpcEnabled)
+{
     app.MapGrpcService<CamusDB.App.Grpc.CamusSqlService>();
+    app.MapGrpcService<CamusDB.App.Grpc.CamusRowsService>();
+}
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

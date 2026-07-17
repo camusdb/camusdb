@@ -120,6 +120,13 @@ enum BatchStatementKind {
   BATCH_STATEMENT_KIND_UNSPECIFIED = 0;
   BATCH_STATEMENT_KIND_QUERY       = 1;   // route to ExecuteQuery — streams schema + rows
   BATCH_STATEMENT_KIND_NON_QUERY   = 2;   // route to ExecuteNonQuery — single reply
+  // Transaction lifecycle folded onto the same stream so a whole unit of work (begin, statements,
+  // commit) rides one duplex call and many concurrent transactions keep the stream busy. START reuses
+  // SqlRequest.database + isolation/mode/locking (sql ignored) and its reply carries the server-minted
+  // handle; COMMIT/ROLLBACK reference SqlRequest.txn_handle.
+  BATCH_STATEMENT_KIND_START       = 3;   // begin a transaction — reply carries the TxnHandle
+  BATCH_STATEMENT_KIND_COMMIT      = 4;   // commit request.txn_handle — reply carries the causal token
+  BATCH_STATEMENT_KIND_ROLLBACK    = 5;   // roll back request.txn_handle
 }
 
 message BatchExecuteRequest {
@@ -151,6 +158,9 @@ message BatchExecuteResponse {
     QueryComplete query_complete = 4;   // QUERY: terminator
     NonQueryReply non_query      = 5;   // NON_QUERY: single terminal reply
     BatchError    error          = 6;   // terminal error for this request_id
+    TxnHandle     start_reply    = 7;   // START: terminator — the server-minted handle
+    CommitReply   commit_reply   = 8;   // COMMIT: terminator — causal token
+    RollbackReply rollback_reply = 9;   // ROLLBACK: terminator
   }
 }
 

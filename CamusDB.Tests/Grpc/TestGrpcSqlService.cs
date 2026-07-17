@@ -780,6 +780,149 @@ public class TestGrpcSqlService : BaseTest
     private static List<BatchExecuteResponse> ForId(List<BatchExecuteResponse> all, int id) =>
         all.Where(r => r.RequestId == id).ToList();
 
+    private static BatchExecuteRequest BStart(int id, string db)
+        => new() { RequestId = id, Kind = BatchStatementKind.Start, Request = new SqlRequest { Database = db } };
+
+    private static BatchExecuteRequest BCommit(int id, string db, TxnHandle handle)
+        => new() { RequestId = id, Kind = BatchStatementKind.Commit, Request = new SqlRequest { Database = db, TxnHandle = handle } };
+
+    private static BatchExecuteRequest BRollback(int id, string db, TxnHandle handle)
+        => new() { RequestId = id, Kind = BatchStatementKind.Rollback, Request = new SqlRequest { Database = db, TxnHandle = handle } };
+
+    private static bool IsTerminal(BatchExecuteResponse m) => m.PayloadCase is
+        BatchExecuteResponse.PayloadOneofCase.QueryComplete or
+        BatchExecuteResponse.PayloadOneofCase.NonQuery or
+        BatchExecuteResponse.PayloadOneofCase.Error or
+        BatchExecuteResponse.PayloadOneofCase.StartReply or
+        BatchExecuteResponse.PayloadOneofCase.CommitReply or
+        BatchExecuteResponse.PayloadOneofCase.RollbackReply;
+
+    [Test]
+    public async Task BatchExecute_StartStatementsCommit_OverOneStream()
+    {
+        string dbName = await CreateTestDatabaseWithTableAsync(
+            "CREATE TABLE items (id oid PRIMARY KEY, name string(100))");
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> reader = new();
+        ObservingStreamWriter<BatchExecuteResponse> writer = new();
+        Task server = service.BatchExecute(reader, writer, Ctx());
+
+        // BEGIN over the stream — learn the server-minted handle from the in-band start_reply.
+        reader.Push(BStart(1, dbName));
+        BatchExecuteResponse startResp = await writer.WaitFor(m =>
+            m.RequestId == 1 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.StartReply);
+        TxnHandle handle = startResp.StartReply;
+        Assert.That(handle.TxnIdPt, Is.GreaterThan(0), "START must return a real handle");
+
+        // Two inserts + COMMIT, all referencing the handle — a whole unit of work on one stream.
+        reader.Push(BNonQuery(2, dbName, "INSERT INTO items (id, name) VALUES (gen_id(), 'a')", handle));
+        reader.Push(BNonQuery(3, dbName, "INSERT INTO items (id, name) VALUES (gen_id(), 'b')", handle));
+        reader.Push(BCommit(4, dbName, handle));
+        BatchExecuteResponse commitResp = await writer.WaitFor(m =>
+            m.RequestId == 4 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.CommitReply);
+        reader.Complete();
+        await server;
+
+        Assert.That(
+            commitResp.CommitReply.CausalTokenL != 0 || commitResp.CommitReply.CausalTokenC != 0
+            || commitResp.CommitReply.CausalTokenN != 0,
+            Is.True, "COMMIT reply must carry the causal token in-band");
+
+        // Both rows are durable after the batched commit — no unary round-trips were used.
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync(dbName, "SELECT id FROM items");
+        GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: 2, "id");
+    }
+
+    [Test]
+    public async Task BatchExecute_StartedButNotFinalized_RollsBackOnStreamEnd()
+    {
+        string dbName = await CreateTestDatabaseWithTableAsync(
+            "CREATE TABLE items (id oid PRIMARY KEY, name string(100))");
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> reader = new();
+        ObservingStreamWriter<BatchExecuteResponse> writer = new();
+        Task server = service.BatchExecute(reader, writer, Ctx());
+
+        reader.Push(BStart(1, dbName));
+        TxnHandle handle = (await writer.WaitFor(m =>
+            m.RequestId == 1 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.StartReply)).StartReply;
+
+        reader.Push(BNonQuery(2, dbName, "INSERT INTO items (id, name) VALUES (gen_id(), 'ghost')", handle));
+        await writer.WaitFor(m => m.RequestId == 2 && IsTerminal(m));
+
+        // Half-close WITHOUT a COMMIT/ROLLBACK — teardown must roll the transaction back.
+        reader.Complete();
+        await server;
+
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync(dbName, "SELECT id FROM items");
+        GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: 0, "id");
+
+        // The handle is gone: committing it now must fail (no orphaned open transaction).
+        Assert.ThrowsAsync<RpcException>(async () => await service.CommitTransaction(handle, Ctx()));
+    }
+
+    [Test]
+    public async Task BatchExecute_DoubleCommit_SecondReportsBatchError()
+    {
+        string dbName = await CreateTestDatabaseWithTableAsync(
+            "CREATE TABLE items (id oid PRIMARY KEY, name string(100))");
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> reader = new();
+        ObservingStreamWriter<BatchExecuteResponse> writer = new();
+        Task server = service.BatchExecute(reader, writer, Ctx());
+
+        reader.Push(BStart(1, dbName));
+        TxnHandle handle = (await writer.WaitFor(m =>
+            m.RequestId == 1 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.StartReply)).StartReply;
+
+        reader.Push(BNonQuery(2, dbName, "INSERT INTO items (id, name) VALUES (gen_id(), 'x')", handle));
+        reader.Push(BCommit(3, dbName, handle));
+        await writer.WaitFor(m => m.RequestId == 3 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.CommitReply);
+
+        // Second commit on the same handle — the finalize gate must reject it as an in-band BatchError.
+        reader.Push(BCommit(4, dbName, handle));
+        BatchExecuteResponse second = await writer.WaitFor(m => m.RequestId == 4 && IsTerminal(m));
+        reader.Complete();
+        await server;
+
+        Assert.That(second.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.Error));
+        Assert.That(second.Error.Code, Is.Not.Empty);
+    }
+
+    [Test]
+    public async Task BatchExecute_TwoTransactions_Interleaved_AreIndependent()
+    {
+        string dbName = await CreateTestDatabaseWithTableAsync(
+            "CREATE TABLE items (id oid PRIMARY KEY, name string(100))");
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> reader = new();
+        ObservingStreamWriter<BatchExecuteResponse> writer = new();
+        Task server = service.BatchExecute(reader, writer, Ctx());
+
+        // Two independent transactions opened on the same stream.
+        reader.Push(BStart(1, dbName));
+        reader.Push(BStart(2, dbName));
+        TxnHandle a = (await writer.WaitFor(m => m.RequestId == 1 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.StartReply)).StartReply;
+        TxnHandle b = (await writer.WaitFor(m => m.RequestId == 2 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.StartReply)).StartReply;
+
+        reader.Push(BNonQuery(3, dbName, "INSERT INTO items (id, name) VALUES (gen_id(), 'aaa')", a));
+        reader.Push(BNonQuery(4, dbName, "INSERT INTO items (id, name) VALUES (gen_id(), 'bbb')", b));
+        await writer.WaitFor(m => m.RequestId == 3 && IsTerminal(m));
+        await writer.WaitFor(m => m.RequestId == 4 && IsTerminal(m));
+
+        // Commit A, roll back B — independence means only A's row survives.
+        reader.Push(BCommit(5, dbName, a));
+        reader.Push(BRollback(6, dbName, b));
+        await writer.WaitFor(m => m.RequestId == 5 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.CommitReply);
+        await writer.WaitFor(m => m.RequestId == 6 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.RollbackReply);
+        reader.Complete();
+        await server;
+
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync(dbName, "SELECT name FROM items");
+        GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: 1, "name");
+        Assert.That(GrpcAssert.RowValues(msgs, msgs[0].Schema, 0)["name"].StringValue, Is.EqualTo("aaa"));
+    }
+
     [Test]
     public async Task BatchExecute_MixedOps_EachCorrelatedByRequestId()
     {

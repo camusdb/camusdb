@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
@@ -102,6 +103,89 @@ internal sealed class FakeAsyncStreamReader<T> : IAsyncStreamReader<T>
             return Task.FromResult(true);
         }
         return Task.FromResult(false);
+    }
+}
+
+/// <summary>
+/// Interactive <see cref="IAsyncStreamReader{T}"/> backed by an unbounded channel, so a test can push
+/// requests to a running <c>BatchExecute</c> handler <b>after</b> observing earlier responses — needed
+/// for the START → statements → COMMIT flow, where the transaction's statements can only be sent once
+/// the START reply's handle is known. Call <see cref="Push"/> to enqueue a request and
+/// <see cref="Complete"/> to half-close the request stream (which triggers server teardown).
+/// </summary>
+internal sealed class ChannelAsyncStreamReader<T> : IAsyncStreamReader<T>
+{
+    private readonly Channel<T> channel = Channel.CreateUnbounded<T>();
+
+    public T Current { get; private set; } = default!;
+
+    public void Push(T item) => channel.Writer.TryWrite(item);
+
+    public void Complete() => channel.Writer.TryComplete();
+
+    public async Task<bool> MoveNext(CancellationToken cancellationToken)
+    {
+        if (await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false)
+            && channel.Reader.TryRead(out T? item))
+        {
+            Current = item!;
+            return true;
+        }
+        return false;
+    }
+}
+
+/// <summary>
+/// <see cref="IServerStreamWriter{T}"/> stub that accumulates messages and lets a test asynchronously
+/// wait for the first message matching a predicate (e.g. "the COMMIT reply for request 4"). Thread-safe:
+/// the <c>BatchExecute</c> handler writes from concurrent op tasks.
+/// </summary>
+internal sealed class ObservingStreamWriter<T> : IServerStreamWriter<T>
+{
+    private readonly object gate = new();
+    private readonly List<T> written = new();
+    private readonly List<(Func<T, bool> predicate, TaskCompletionSource<T> tcs)> waiters = new();
+
+    public WriteOptions? WriteOptions { get; set; }
+
+    public IReadOnlyList<T> Written
+    {
+        get { lock (gate) return written.ToArray(); }
+    }
+
+    public Task WriteAsync(T message) => WriteAsync(message, CancellationToken.None);
+
+    public Task WriteAsync(T message, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            written.Add(message);
+            for (int i = waiters.Count - 1; i >= 0; i--)
+            {
+                if (waiters[i].predicate(message))
+                {
+                    waiters[i].tcs.TrySetResult(message);
+                    waiters.RemoveAt(i);
+                }
+            }
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Completes when a written message first matches <paramref name="predicate"/>.</summary>
+    public Task<T> WaitFor(Func<T, bool> predicate)
+    {
+        lock (gate)
+        {
+            foreach (T m in written)
+                if (predicate(m))
+                    return Task.FromResult(m);
+
+            TaskCompletionSource<T> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            waiters.Add((predicate, tcs));
+            return tcs.Task;
+        }
     }
 }
 
