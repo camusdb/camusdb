@@ -61,6 +61,42 @@ public sealed class ObjectId
         dest[23] = ToHexChar(_c & 0x0f);
     }
 
+    /// <summary>
+    /// Writes the 24-character lowercase-hex form of an ObjectId directly as ASCII bytes into
+    /// <paramref name="dest"/>. Every hex character is ASCII, so each byte is the char cast to
+    /// <c>byte</c>. Used to compose a unique-index KV value (row-id payload) without first
+    /// materializing a 24-char string and a separate UTF-8 array.
+    /// </summary>
+    public static void WriteHexAscii(Span<byte> dest, int _a, int _b, int _c)
+    {
+        dest[0] = (byte)ToHexChar((_a >> 28) & 0x0f);
+        dest[1] = (byte)ToHexChar((_a >> 24) & 0x0f);
+        dest[2] = (byte)ToHexChar((_a >> 20) & 0x0f);
+        dest[3] = (byte)ToHexChar((_a >> 16) & 0x0f);
+        dest[4] = (byte)ToHexChar((_a >> 12) & 0x0f);
+        dest[5] = (byte)ToHexChar((_a >> 8) & 0x0f);
+        dest[6] = (byte)ToHexChar((_a >> 4) & 0x0f);
+        dest[7] = (byte)ToHexChar(_a & 0x0f);
+
+        dest[8] = (byte)ToHexChar((_b >> 28) & 0x0f);
+        dest[9] = (byte)ToHexChar((_b >> 24) & 0x0f);
+        dest[10] = (byte)ToHexChar((_b >> 20) & 0x0f);
+        dest[11] = (byte)ToHexChar((_b >> 16) & 0x0f);
+        dest[12] = (byte)ToHexChar((_b >> 12) & 0x0f);
+        dest[13] = (byte)ToHexChar((_b >> 8) & 0x0f);
+        dest[14] = (byte)ToHexChar((_b >> 4) & 0x0f);
+        dest[15] = (byte)ToHexChar(_b & 0x0f);
+
+        dest[16] = (byte)ToHexChar((_c >> 28) & 0x0f);
+        dest[17] = (byte)ToHexChar((_c >> 24) & 0x0f);
+        dest[18] = (byte)ToHexChar((_c >> 20) & 0x0f);
+        dest[19] = (byte)ToHexChar((_c >> 16) & 0x0f);
+        dest[20] = (byte)ToHexChar((_c >> 12) & 0x0f);
+        dest[21] = (byte)ToHexChar((_c >> 8) & 0x0f);
+        dest[22] = (byte)ToHexChar((_c >> 4) & 0x0f);
+        dest[23] = (byte)ToHexChar(_c & 0x0f);
+    }
+
     private static bool TryParseHexChar(char c, out int value)
     {
         if (c is >= '0' and <= '9')

@@ -132,9 +132,9 @@ public sealed class TestKvTransactionsManager
         await store.InsertRow(tx, rowId, data);
         await mgr.CommitAsync(tx);
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNotNull(got);
-        Assert.AreEqual(data, got);
+        Assert.AreEqual(data, got!.Value.ToArray());
     }
 
     [Test]
@@ -151,7 +151,7 @@ public sealed class TestKvTransactionsManager
         await store.InsertRow(tx, rowId, data);
         await mgr.RollbackAsync(tx);
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "Rolled-back data must not be visible");
     }
 
@@ -242,8 +242,8 @@ public sealed class TestKvTransactionsManager
         await mgr.CommitAsync(tx1);
         await mgr.RollbackAsync(tx2);
 
-        byte[]? got1 = await store.GetRow(KvTransaction.CreateReadOnly(), id1);
-        byte[]? got2 = await store.GetRow(KvTransaction.CreateReadOnly(), id2);
+        ReadOnlyMemory<byte>? got1 = await store.GetRow(KvTransaction.CreateReadOnly(), id1);
+        ReadOnlyMemory<byte>? got2 = await store.GetRow(KvTransaction.CreateReadOnly(), id2);
 
         Assert.IsNotNull(got1, "Committed row must be visible");
         Assert.IsNull(got2, "Rolled-back row must not be visible");
@@ -271,7 +271,7 @@ public sealed class TestKvTransactionsManager
         }
 
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "Row written in rolled-back transaction must not be visible");
     }
 
@@ -293,7 +293,7 @@ public sealed class TestKvTransactionsManager
 
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx1.Status);
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx2.Status);
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "Rows from rolled-back transactions must not be visible");
     }
 
@@ -366,9 +366,9 @@ public sealed class TestKvTransactionsManager
         Assert.AreEqual(KvTransactionStatus.Committed, tx.Status,
             "CommitAsync must succeed after retrying through transient MustRetry responses");
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNotNull(got, "Row written in a successfully committed tx must be visible");
-        Assert.AreEqual(data, got);
+        Assert.AreEqual(data, got!.Value.ToArray());
     }
 
     // Enough consecutive MustRetry responses to exhaust the bounded finalize retry loop (attempts
@@ -449,9 +449,9 @@ public sealed class TestKvTransactionsManager
         Assert.AreEqual(KvTransactionStatus.Committed, tx.Status,
             "A retried commit on the same handle must reach a terminal Committed once the coordinator resolves");
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNotNull(got, "The row must be visible after the resumed commit");
-        Assert.AreEqual(data, got);
+        Assert.AreEqual(data, got!.Value.ToArray());
     }
 
     // rollback MustRetry is likewise non-terminal: RollbackAsync must inspect the coordinator result
@@ -487,7 +487,7 @@ public sealed class TestKvTransactionsManager
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status,
             "A retried rollback on the same handle must reach terminal RolledBack once the coordinator acknowledges");
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "A rolled-back write must not be visible");
     }
 

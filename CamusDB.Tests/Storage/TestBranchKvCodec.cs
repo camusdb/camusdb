@@ -27,11 +27,11 @@ public sealed class TestBranchKvCodec
         byte[] payload = [0x10, 0x20, 0x30, 0x40, 0x50];
 
         byte[] encoded = BranchKvCodec.EncodeValue(payload);
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode(encoded);
+        BranchKvValue result = BranchKvCodec.Decode(encoded);
 
-        Assert.AreEqual(BranchKvKind.Value, kind);
-        Assert.IsNotNull(decoded);
-        Assert.AreEqual(payload, decoded);
+        Assert.AreEqual(BranchKvKind.Value, result.Kind);
+        Assert.IsTrue(result.HasPayload);
+        Assert.AreEqual(payload, result.Payload.ToArray());
     }
 
     [Test]
@@ -46,9 +46,9 @@ public sealed class TestBranchKvCodec
         Assert.AreEqual((byte)BranchKvKind.Value, encoded[0]);
         Assert.AreEqual(payload.Length + 1, encoded.Length);
 
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode(encoded);
-        Assert.AreEqual(BranchKvKind.Value, kind);
-        Assert.AreEqual(payload, decoded);
+        BranchKvValue result = BranchKvCodec.Decode(encoded);
+        Assert.AreEqual(BranchKvKind.Value, result.Kind);
+        Assert.AreEqual(payload, result.Payload.ToArray());
     }
 
     [Test]
@@ -59,28 +59,28 @@ public sealed class TestBranchKvCodec
         Assert.AreEqual(1, encoded.Length);
         Assert.AreEqual((byte)BranchKvKind.Tombstone, encoded[0]);
 
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode(encoded);
-        Assert.AreEqual(BranchKvKind.Tombstone, kind);
-        Assert.IsNull(decoded);
+        BranchKvValue result = BranchKvCodec.Decode(encoded);
+        Assert.AreEqual(BranchKvKind.Tombstone, result.Kind);
+        Assert.IsFalse(result.HasPayload);
     }
 
     [Test]
     public void Decode_Null_IsTreatedAsMiss()
     {
         // A null Kahuna value (DoesNotExist) decodes to a null payload — the caller's miss signal.
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode(null);
+        BranchKvValue result = BranchKvCodec.Decode(null);
 
-        Assert.AreEqual(BranchKvKind.Value, kind);
-        Assert.IsNull(decoded);
+        Assert.AreEqual(BranchKvKind.Value, result.Kind);
+        Assert.IsFalse(result.HasPayload);
     }
 
     [Test]
     public void Decode_Empty_IsTreatedAsMiss()
     {
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode([]);
+        BranchKvValue result = BranchKvCodec.Decode([]);
 
-        Assert.AreEqual(BranchKvKind.Value, kind);
-        Assert.IsNull(decoded);
+        Assert.AreEqual(BranchKvKind.Value, result.Kind);
+        Assert.IsFalse(result.HasPayload);
     }
 
     [Test]
@@ -93,9 +93,9 @@ public sealed class TestBranchKvCodec
 
         Assert.AreEqual(1, encoded.Length);
 
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode(encoded);
-        Assert.AreEqual(BranchKvKind.Value, kind);
-        Assert.IsNull(decoded);
+        BranchKvValue result = BranchKvCodec.Decode(encoded);
+        Assert.AreEqual(BranchKvKind.Value, result.Kind);
+        Assert.IsFalse(result.HasPayload);
     }
 
     [Test]
@@ -103,9 +103,9 @@ public sealed class TestBranchKvCodec
     {
         byte[] payload = Enumerable.Range(0, 4096).Select(i => (byte)(i % 256)).ToArray();
 
-        (BranchKvKind kind, byte[]? decoded) = BranchKvCodec.Decode(BranchKvCodec.EncodeValue(payload));
+        BranchKvValue result = BranchKvCodec.Decode(BranchKvCodec.EncodeValue(payload));
 
-        Assert.AreEqual(BranchKvKind.Value, kind);
-        Assert.AreEqual(payload, decoded);
+        Assert.AreEqual(BranchKvKind.Value, result.Kind);
+        Assert.AreEqual(payload, result.Payload.ToArray());
     }
 }

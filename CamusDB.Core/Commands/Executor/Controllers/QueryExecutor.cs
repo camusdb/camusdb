@@ -646,8 +646,8 @@ internal sealed class QueryExecutor
             yield break;
         }
 
-        byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
-        if (data is null || data.Length == 0)
+        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
+        if (data is null || data.Value.Length == 0)
             yield break;
 
         if (scanStats is not null)
@@ -660,7 +660,7 @@ internal sealed class QueryExecutor
             table.Schema,
             txId,
             resolvedRowId,
-            data,
+            data.Value,
             plan.ScanRequiredColumns,
             plan.TableSchemaVersion).ConfigureAwait(false);
 
@@ -747,17 +747,17 @@ internal sealed class QueryExecutor
 
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
-            byte[]?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 ObjectIdValue batchRowId = page[i];
-                byte[]? data = batchResult[i];
-                if (data is null || data.Length == 0)
+                ReadOnlyMemory<byte>? data = batchResult[i];
+                if (data is null || data.Value.Length == 0)
                     continue;
                 deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
                 if (scanStats is not null) scanStats.RowsRead++;
                 Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
-                    table.Schema, txId, batchRowId, data,
+                    table.Schema, txId, batchRowId, data.Value,
                     plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
                 if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                     yield return new(batchRowId, row);
@@ -851,8 +851,8 @@ internal sealed class QueryExecutor
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
-                byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
-                if (data is null || data.Length == 0)
+                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
+                if (data is null || data.Value.Length == 0)
                     continue;
 
                 deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
@@ -861,7 +861,7 @@ internal sealed class QueryExecutor
                     scanStats.RowsRead++;
 
                 Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
-                    table.Schema, txId, rowId.Value, data,
+                    table.Schema, txId, rowId.Value, data.Value,
                     plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
 
                 if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
@@ -891,8 +891,8 @@ internal sealed class QueryExecutor
                     if (!seen.Add(rowId))
                         continue;
 
-                    byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
-                    if (data is null || data.Length == 0)
+                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
+                    if (data is null || data.Value.Length == 0)
                         continue;
 
                     deps?.RecordPoint(table.Store.RowPointKey(rowId));
@@ -901,7 +901,7 @@ internal sealed class QueryExecutor
                         scanStats.RowsRead++;
 
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
-                        table.Schema, txId, rowId, data,
+                        table.Schema, txId, rowId, data.Value,
                         plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
 
                     if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
@@ -932,15 +932,15 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
-        byte[]? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
-        if (data is null || data.Length == 0)
+        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
+        if (data is null || data.Value.Length == 0)
             yield break;
 
         yield return await RowEncoder.DecodeAsync(
             table.Schema,
             txId,
             rowId.Value,
-            data,
+            data.Value,
             visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
     }
 

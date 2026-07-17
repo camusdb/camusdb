@@ -746,7 +746,7 @@ public sealed class TestMultiPartitionRouting
             KvTableStore store = new(reopened.Kahuna.Kahuna, reopened.Id, reopenedTable.Id!);
             List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
 
-            await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(txn))
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in store.ScanRows(txn))
                 rows.Add(await RowEncoder.DecodeAsync(reopenedTable, txn.TransactionId, rowId, data));
 
             await reopened.Transactions.CommitAsync(txn);

@@ -56,7 +56,7 @@ internal sealed class QueryScanner
         // for the life of a scan), so building it once and reusing it is safe.
         Dictionary<int, RowLayout> layoutCache = new();
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
             if (data.Length == 0)
                 continue;
@@ -170,12 +170,12 @@ internal sealed class QueryScanner
         // Fetch and decode one buffered page; yields rows in the order they appear in the page.
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
-            byte[]?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 ObjectIdValue batchRowId = page[i];
-                byte[]? data = batchResult[i];
-                if (data is null || data.Length == 0)
+                ReadOnlyMemory<byte>? data = batchResult[i];
+                if (data is null || data.Value.Length == 0)
                 {
                     logger.LogWarning("Row {RowId} found in index {IndexName} but data is missing in table {TableName}", batchRowId, index.Name, table.Name);
                     continue;
@@ -183,7 +183,7 @@ internal sealed class QueryScanner
                 deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
                 if (scanStats is not null) scanStats.RowsRead++;
                 QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
-                    table.Schema, txId, batchRowId, data,
+                    table.Schema, txId, batchRowId, data.Value,
                     plan.ScanRequiredColumns, visibilityVersion, layoutCache).ConfigureAwait(false);
                 if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                     yield return new QueryResultRow(batchRowId, queryRow);

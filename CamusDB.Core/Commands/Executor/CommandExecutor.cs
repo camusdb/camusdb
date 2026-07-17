@@ -1048,7 +1048,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             try
             {
-                await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
+                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
                     tx, afterRowId: afterRowId).ConfigureAwait(false))
                 {
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(

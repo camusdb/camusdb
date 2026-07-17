@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -92,7 +93,7 @@ public sealed class TestBranchKvTombstone
         await CommitTransaction(node.Kahuna, tombTx);
 
         // The tombstone must read back as a miss, not as the old value.
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got, "A tombstoned row must read as a miss, not return the stale value");
     }
 
@@ -116,7 +117,7 @@ public sealed class TestBranchKvTombstone
         await CommitTransaction(node.Kahuna, tombTx);
 
         List<string> scanned = [];
-        await foreach ((ObjectIdValue rowId, byte[] _) in store.ScanRows(KvTransaction.CreateReadOnly()))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in store.ScanRows(KvTransaction.CreateReadOnly()))
             scanned.Add(rowId.ToString());
 
         Assert.AreEqual(1, scanned.Count, "ScanRows must skip the tombstoned row");

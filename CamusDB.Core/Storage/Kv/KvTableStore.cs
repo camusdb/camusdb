@@ -581,7 +581,7 @@ public sealed class KvTableStore
     /// and held until commit, preventing a concurrent writer from committing a modification to
     /// the same key while this transaction is still live.
     /// </summary>
-    public async Task<byte[]?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
+    public async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
         // Serializable+RW acquires a shared point lock: the session must be open first.
         // For all other transaction types this is a no-op (zero-snapshot reads proceed without a session).
@@ -595,18 +595,18 @@ public sealed class KvTableStore
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
-        (BranchKvKind kind, byte[]? payload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
-        if (kind == BranchKvKind.Tombstone) return null;   // explicitly deleted at this level
-        if (payload is not null) return payload;            // found at this level
+        BranchKvValue probe = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
+        if (probe.Kind == BranchKvKind.Tombstone) return null;   // explicitly deleted at this level
+        if (probe.HasPayload) return probe.Payload;              // found at this level
 
         // Miss at level-0: walk ancestry levels until a hit or a tombstone (stop walking).
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
         {
             BranchMetrics.RecordAncestorProbe();
             string ancestorKey = ancestorStore.BuildRowKey(rowId);
-            (kind, payload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
-            if (kind == BranchKvKind.Tombstone) return null;
-            if (payload is not null) return payload;
+            probe = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
+            if (probe.Kind == BranchKvKind.Tombstone) return null;
+            if (probe.HasPayload) return probe.Payload;
         }
 
         return null;
@@ -633,7 +633,7 @@ public sealed class KvTableStore
     /// modified. Serializable read-write callers that need shared point locks must use
     /// <see cref="GetRow"/> per entry.
     /// </summary>
-    public async Task<byte[]?[]> GetRowsBatch(
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
         CancellationToken cancellationToken = default)
@@ -711,31 +711,30 @@ public sealed class KvTableStore
             pending = nextPending;
         }
 
-        byte[]?[] output = new byte[]?[rowIds.Count];
+        ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];
 
         for (int i = 0; i < rowIds.Count; i++)
         {
             string rowKey = keys[i].key;
 
-            byte[]? payload = null;
-            BranchKvKind kind = BranchKvKind.Value;
+            BranchKvValue decoded = BranchKvValue.Miss;
 
             if (byKey.TryGetValue(rowKey, out (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) res)
                 && res.responseType == KeyValueResponseType.Get
                 && res.entry is not null)
             {
-                (kind, payload) = BranchKvCodec.Decode(res.entry.Value);
+                decoded = BranchKvCodec.Decode(res.entry.Value);
             }
 
-            if (kind == BranchKvKind.Tombstone)
+            if (decoded.Kind == BranchKvKind.Tombstone)
             {
                 output[i] = null;
                 continue;
             }
 
-            if (payload is not null)
+            if (decoded.HasPayload)
             {
-                output[i] = payload;
+                output[i] = decoded.Payload;
                 continue;
             }
 
@@ -746,13 +745,17 @@ public sealed class KvTableStore
                 {
                     BranchMetrics.RecordAncestorProbe();
                     string ancestorKey = ancestorStore.BuildRowKey(rowIds[i]);
-                    (kind, payload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
-                    if (kind == BranchKvKind.Tombstone) break;
-                    if (payload is not null) break;
+                    decoded = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
+                    if (decoded.Kind == BranchKvKind.Tombstone) break;
+                    if (decoded.HasPayload) break;
                 }
             }
 
-            output[i] = payload;
+            // Cast the value branch to the nullable type explicitly. Without it, the bare `null`
+            // literal binds to byte[] via ReadOnlyMemory's implicit array conversion, making the whole
+            // conditional a non-nullable (empty) ReadOnlyMemory<byte> — so a miss would surface as an
+            // empty present value instead of null.
+            output[i] = decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null;
         }
 
         return output;
@@ -766,7 +769,7 @@ public sealed class KvTableStore
     /// the scan is pinned to that snapshot for its entire duration, including across page
     /// boundaries. All other transaction types pass Zero (read-committed fast path, unchanged).
     /// </summary>
-    public async IAsyncEnumerable<(ObjectIdValue rowId, byte[] data)> ScanRows(
+    public async IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> ScanRows(
         KvTransaction tx,
         long? maxRows = null,
         ObjectIdValue? afterRowId = null,
@@ -808,8 +811,8 @@ public sealed class KvTableStore
                 if (entry.Value is null)
                     continue;
 
-                (BranchKvKind rowKind, byte[]? rowPayload) = BranchKvCodec.Decode(entry.Value);
-                if (rowKind == BranchKvKind.Tombstone || rowPayload is null)
+                BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
+                if (decoded.Kind == BranchKvKind.Tombstone || !decoded.HasPayload)
                     continue;
 
                 // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
@@ -825,7 +828,7 @@ public sealed class KvTableStore
                 if (maxRows is not null && emitted >= maxRows.Value)
                     yield break;
 
-                yield return (rowId, rowPayload);
+                yield return (rowId, decoded.Payload);
                 emitted++;
             }
         }
@@ -840,7 +843,7 @@ public sealed class KvTableStore
             // for the same key.
 
             int levelCount = 1 + ancestorStores.Length;
-            var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, byte[]? payload)>[levelCount];
+            var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
             iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
@@ -853,7 +856,7 @@ public sealed class KvTableStore
                 BranchMetrics.RecordScanIterators(ancestorStores.Length);
 
             // Priority key: (rowIdHex ordinal-ascending, levelIndex ascending) so ties go to the nearest level.
-            PriorityQueue<(int level, string hex, BranchKvKind kind, byte[]? payload),
+            PriorityQueue<(int level, string hex, BranchKvKind kind, ReadOnlyMemory<byte>? payload),
                           (string hex, int level)> heap = new(
                 Comparer<(string hex, int level)>.Create(static (a, b) =>
                 {
@@ -878,14 +881,14 @@ public sealed class KvTableStore
                 {
                     if (await iters[i].MoveNextAsync().ConfigureAwait(false))
                     {
-                        (string hex, BranchKvKind kind, byte[]? payload) = iters[i].Current;
+                        (string hex, BranchKvKind kind, ReadOnlyMemory<byte>? payload) = iters[i].Current;
                         heap.Enqueue((i, hex, kind, payload), (hex, i));
                     }
                 }
 
                 while (heap.Count > 0)
                 {
-                    (int levelIdx, string rowIdHex, BranchKvKind kind, byte[]? payload) = heap.Dequeue();
+                    (int levelIdx, string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload) = heap.Dequeue();
 
                     if (rowIdHex != lastHex)
                     {
@@ -895,7 +898,7 @@ public sealed class KvTableStore
                         if (kind == BranchKvKind.Value && payload is not null &&
                             (afterHex is null || string.CompareOrdinal(rowIdHex, afterHex) > 0))
                         {
-                            yield return (ObjectId.ToValue(rowIdHex), payload);
+                            yield return (ObjectId.ToValue(rowIdHex), payload.Value);
                             emitted++;
 
                             if (maxRows is not null && emitted >= maxRows.Value)
@@ -906,7 +909,7 @@ public sealed class KvTableStore
 
                     if (await iters[levelIdx].MoveNextAsync().ConfigureAwait(false))
                     {
-                        (string nextHex, BranchKvKind nextKind, byte[]? nextPayload) = iters[levelIdx].Current;
+                        (string nextHex, BranchKvKind nextKind, ReadOnlyMemory<byte>? nextPayload) = iters[levelIdx].Current;
                         heap.Enqueue((levelIdx, nextHex, nextKind, nextPayload), (nextHex, levelIdx));
                     }
                 }
@@ -1016,18 +1019,18 @@ public sealed class KvTableStore
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        (BranchKvKind idxKind, byte[]? idxPayload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
-        if (idxKind == BranchKvKind.Tombstone) return null;   // tombstone at this level
-        if (idxPayload is not null) return ObjectId.ToValue(idxPayload);
+        BranchKvValue idx = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
+        if (idx.Kind == BranchKvKind.Tombstone) return null;   // tombstone at this level
+        if (idx.HasPayload) return ObjectId.ToValue(idx.Payload.Span);
 
         // Miss at level-0: walk ancestry.
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
         {
             BranchMetrics.RecordAncestorProbe();
             string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
-            (idxKind, idxPayload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
-            if (idxKind == BranchKvKind.Tombstone) return null;
-            if (idxPayload is not null) return ObjectId.ToValue(idxPayload);
+            idx = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
+            if (idx.Kind == BranchKvKind.Tombstone) return null;
+            if (idx.HasPayload) return ObjectId.ToValue(idx.Payload.Span);
         }
 
         return null;
@@ -1105,8 +1108,8 @@ public sealed class KvTableStore
                 if (entry.Value is null)
                     continue;
 
-                (BranchKvKind scanKind, byte[]? scanPayload) = BranchKvCodec.Decode(entry.Value);
-                if (scanKind == BranchKvKind.Tombstone)
+                BranchKvValue scanDecoded = BranchKvCodec.Decode(entry.Value);
+                if (scanDecoded.Kind == BranchKvKind.Tombstone)
                     continue;
 
                 if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
@@ -1122,11 +1125,11 @@ public sealed class KvTableStore
                     // Unique index value = the row-id as UTF-8 bytes (wrapped in the envelope).
                     // Skip entries whose payload is empty — they indicate a corrupt or partially
                     // written entry and should not surface to callers.
-                    if (scanPayload is null)
+                    if (!scanDecoded.HasPayload)
                         continue;
 
                     encodedKey = suffix.ToString();
-                    rowId = ObjectId.ToValue(scanPayload);
+                    rowId = ObjectId.ToValue(scanDecoded.Payload.Span);
                 }
                 else
                 {
@@ -1179,7 +1182,7 @@ public sealed class KvTableStore
             // second filter for the ComparePrefix edge cases documented on the root path above.
 
             int levelCount = 1 + ancestorStores.Length;
-            var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, byte[]? payload)>[levelCount];
+            var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
             iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
@@ -1191,7 +1194,7 @@ public sealed class KvTableStore
             if (ancestorStores.Length > 0)
                 BranchMetrics.RecordScanIterators(ancestorStores.Length);
 
-            PriorityQueue<(int level, string suffix, BranchKvKind kind, byte[]? payload),
+            PriorityQueue<(int level, string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload),
                           (string suffix, int level)> heap = new(
                 Comparer<(string suffix, int level)>.Create(static (a, b) =>
                 {
@@ -1210,14 +1213,14 @@ public sealed class KvTableStore
                 {
                     if (await iters[i].MoveNextAsync().ConfigureAwait(false))
                     {
-                        (string suffix, BranchKvKind kind, byte[]? payload) = iters[i].Current;
+                        (string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload) = iters[i].Current;
                         heap.Enqueue((i, suffix, kind, payload), (suffix, i));
                     }
                 }
 
                 while (heap.Count > 0)
                 {
-                    (int levelIdx, string suffix, BranchKvKind kind, byte[]? payload) = heap.Dequeue();
+                    (int levelIdx, string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload) = heap.Dequeue();
 
                     if (suffix != lastSuffix)
                     {
@@ -1234,7 +1237,7 @@ public sealed class KvTableStore
                                 if (payload is not null)
                                 {
                                     encKey = suffix;
-                                    rowId = ObjectId.ToValue(payload);
+                                    rowId = ObjectId.ToValue(payload.Value.Span);
                                 }
                             }
                             else if (suffix.Length >= RowIdHexLength)
@@ -1274,7 +1277,7 @@ public sealed class KvTableStore
 
                     if (await iters[levelIdx].MoveNextAsync().ConfigureAwait(false))
                     {
-                        (string nextSuffix, BranchKvKind nextKind, byte[]? nextPayload) = iters[levelIdx].Current;
+                        (string nextSuffix, BranchKvKind nextKind, ReadOnlyMemory<byte>? nextPayload) = iters[levelIdx].Current;
                         heap.Enqueue((levelIdx, nextSuffix, nextKind, nextPayload), (nextSuffix, levelIdx));
                     }
                 }
@@ -1350,8 +1353,8 @@ public sealed class KvTableStore
                     () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken),
                     cancellationToken
                 ).ConfigureAwait(false);
-                (BranchKvKind _, byte[]? existingPayload) = BranchKvCodec.Decode(existing?.Value);
-                string existingRowId = existingPayload is not null ? Encoding.UTF8.GetString(existingPayload) : "";
+                BranchKvValue existingDecoded = BranchKvCodec.Decode(existing?.Value);
+                string existingRowId = existingDecoded.HasPayload ? Encoding.UTF8.GetString(existingDecoded.Payload.Span) : "";
                 if (existingRowId != rowId.ToString())
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
                 // else: same rowId — idempotent re-write on resume, continue
@@ -1379,6 +1382,13 @@ public sealed class KvTableStore
     public sealed class RowWrite
     {
         public required ObjectIdValue RowId { get; init; }
+
+        /// <summary>
+        /// The row's final Kahuna storage value — the <see cref="BranchKvKind.Value"/>-enveloped row
+        /// bytes as produced by <see cref="RowEncoder.EncodeStorageValue"/>. It is written to KV
+        /// verbatim (no further enveloping), so the whole write costs one allocation, not raw-row plus
+        /// a re-enveloped copy.
+        /// </summary>
         public required byte[] RowData { get; init; }
         public List<IndexWrite> IndexEntries { get; } = [];
     }
@@ -1419,7 +1429,7 @@ public sealed class KvTableStore
         foreach (RowWrite row in rows)
         {
             string rowKey = BuildRowKey(row.RowId);
-            byte[] rowValue = BranchKvCodec.EncodeValue(row.RowData);
+            byte[] rowValue = row.RowData;   // already the enveloped storage value (EncodeStorageValue)
             lockKeys.Add((rowKey, 0, KeyValueDurability.Persistent));
 
             if (!isBranch)
@@ -1441,7 +1451,7 @@ public sealed class KvTableStore
                 if (!isBranch)
                 {
                     uniqueByKey[kvKey] = ix.Unique;
-                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString())), CompareValue = null, CompareRevision = -1, Flags = ix.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId), CompareValue = null, CompareRevision = -1, Flags = ix.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 }
             }
         }
@@ -1470,7 +1480,7 @@ public sealed class KvTableStore
             foreach (RowWrite row in rows)
             {
                 string rowKey = BuildRowKey(row.RowId);
-                byte[] rowValue = BranchKvCodec.EncodeValue(row.RowData);
+                byte[] rowValue = row.RowData;   // already the enveloped storage value (EncodeStorageValue)
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
@@ -1479,7 +1489,7 @@ public sealed class KvTableStore
                     string kvKey = ix.Unique
                         ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
                         : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
-                    byte[] value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString()));
+                    byte[] value = BranchKvCodec.EncodeIndexRowId(row.RowId);
 
                     if (!ix.Unique)
                     {
@@ -1696,6 +1706,11 @@ public sealed class KvTableStore
     public sealed class RowUpdate
     {
         public required ObjectIdValue RowId { get; init; }
+
+        /// <summary>
+        /// The row's final Kahuna storage value — the <see cref="BranchKvKind.Value"/>-enveloped row
+        /// bytes from <see cref="RowEncoder.EncodeStorageValue"/>. Written verbatim (no re-enveloping).
+        /// </summary>
         public required byte[] NewRowData { get; init; }
 
         /// <summary>Old secondary-index entries to remove (only for changed keys).</summary>
@@ -1759,7 +1774,7 @@ public sealed class KvTableStore
         foreach (RowUpdate row in rows)
         {
             string rowKey = BuildRowKey(row.RowId);
-            byte[] rowValue = BranchKvCodec.EncodeValue(row.NewRowData);
+            byte[] rowValue = row.NewRowData;   // already the enveloped storage value (EncodeStorageValue)
             AddLockKey(rowKey);
 
             if (!isBranch)
@@ -1793,7 +1808,7 @@ public sealed class KvTableStore
                 if (!isBranch)
                 {
                     uniqueByKey[kvKey] = newIx.Unique;
-                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString())), CompareValue = null, CompareRevision = -1, Flags = newIx.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId), CompareValue = null, CompareRevision = -1, Flags = newIx.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 }
             }
         }
@@ -1821,7 +1836,7 @@ public sealed class KvTableStore
             foreach (RowUpdate row in rows)
             {
                 string rowKey = BuildRowKey(row.RowId);
-                byte[] rowValue = BranchKvCodec.EncodeValue(row.NewRowData);
+                byte[] rowValue = row.NewRowData;   // already the enveloped storage value (EncodeStorageValue)
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
@@ -1839,7 +1854,7 @@ public sealed class KvTableStore
                     string kvKey = newIx.Unique
                         ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
                         : BuildNonUniqueIndexKey(newIx.IndexId, newIx.Key, row.RowId);
-                    byte[] value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(row.RowId.ToString()));
+                    byte[] value = BranchKvCodec.EncodeIndexRowId(row.RowId);
 
                     if (!newIx.Unique)
                     {
@@ -2485,18 +2500,18 @@ public sealed class KvTableStore
         // Post-lock probe: first access to this key in the transaction, so Kahuna creates the
         // MVCC snapshot from the current committed state — after any competing writer released
         // the lock by committing or rolling back.
-        (BranchKvKind existingKind, byte[]? existingPayload) = await ProbeRaw(
+        BranchKvValue existing = await ProbeRaw(
             tx.TransactionId, HLCTimestamp.Zero, kvKey, cancellationToken).ConfigureAwait(false);
 
-        if (existingKind == BranchKvKind.Tombstone)
+        if (existing.Kind == BranchKvKind.Tombstone)
             // Slot was explicitly cleared in this branch; replace the tombstone with the new value.
             return KeyValueFlags.Set;
 
-        if (existingKind == BranchKvKind.Value && existingPayload is not null)
+        if (existing.Kind == BranchKvKind.Value && existing.HasPayload)
         {
             // Live value at level-0: idempotent same-row write (e.g. backfill resume or an UPDATE
             // that touches non-indexed columns) is allowed; a different rowId is a conflict.
-            if (Encoding.UTF8.GetString(existingPayload) != rowId.ToString())
+            if (Encoding.UTF8.GetString(existing.Payload.Span) != rowId.ToString())
                 throw new CamusDBException(
                     CamusDBErrorCodes.DuplicateUniqueKeyValue,
                     $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
@@ -2508,15 +2523,15 @@ public sealed class KvTableStore
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
         {
             string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
-            (BranchKvKind ancestorKind, byte[]? ancestorPayload) = await ancestorStore.ProbeRaw(
+            BranchKvValue ancestor = await ancestorStore.ProbeRaw(
                 HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
 
-            if (ancestorKind == BranchKvKind.Tombstone)
+            if (ancestor.Kind == BranchKvKind.Tombstone)
                 break;   // an ancestor branch cleared this slot; treat as available
 
-            if (ancestorKind == BranchKvKind.Value && ancestorPayload is not null)
+            if (ancestor.Kind == BranchKvKind.Value && ancestor.HasPayload)
             {
-                if (Encoding.UTF8.GetString(ancestorPayload) != rowId.ToString())
+                if (Encoding.UTF8.GetString(ancestor.Payload.Span) != rowId.ToString())
                     throw new CamusDBException(
                         CamusDBErrorCodes.DuplicateUniqueKeyValue,
                         $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
@@ -2545,7 +2560,7 @@ public sealed class KvTableStore
     // snapshot probe) issues an unregistered read, identical to the pessimistic behavior. The operation
     // id is minted once, outside the retry, so a transient MustRetry replays under the same id rather
     // than registering a second read.
-    private async Task<(BranchKvKind kind, byte[]? payload)> ProbeRaw(
+    private async Task<BranchKvValue> ProbeRaw(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
         string key,
@@ -2564,7 +2579,7 @@ public sealed class KvTableStore
                 $"Read of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
 
         if (type != KeyValueResponseType.Get || entry is null)
-            return (BranchKvKind.Value, null);  // Kahuna miss — continue ancestry walk
+            return BranchKvValue.Miss;  // Kahuna miss — continue ancestry walk
 
         return BranchKvCodec.Decode(entry.Value);
     }
@@ -2574,7 +2589,7 @@ public sealed class KvTableStore
     // caller can apply the nearest-wins/tombstone-suppression rule across levels.
     // Yields every row entry from this store's namespace at the given snapshot.
     // txId is the live transaction id for level-0 reads (use HLCTimestamp.Zero for ancestor snapshots).
-    private async IAsyncEnumerable<(string rowIdHex, BranchKvKind kind, byte[]? payload)> ScanRowsRawAsync(
+    private async IAsyncEnumerable<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)> ScanRowsRawAsync(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
@@ -2593,8 +2608,8 @@ public sealed class KvTableStore
         {
             if (entry.Value is null) continue;
             string rowIdHex = key.AsSpan(prefixLen).ToString();
-            (BranchKvKind kind, byte[]? payload) = BranchKvCodec.Decode(entry.Value);
-            yield return (rowIdHex, kind, payload);
+            BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
+            yield return (rowIdHex, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
         }
     }
 
@@ -2602,7 +2617,7 @@ public sealed class KvTableStore
     // given snapshot.  txId is the live transaction id for level-0 reads (HLCTimestamp.Zero for
     // ancestor snapshots).  fromEncoded/toEncoded are the raw encoded key strings (no prefix) so
     // this store builds its own start/end keys in its own keyspace ({dbId}:{tableId}:i:{indexId}/…).
-    private async IAsyncEnumerable<(string suffix, BranchKvKind kind, byte[]? payload)> ScanIndexRawAsync(
+    private async IAsyncEnumerable<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)> ScanIndexRawAsync(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
         string indexId,
@@ -2630,8 +2645,8 @@ public sealed class KvTableStore
         {
             if (entry.Value is null || !kvKey.StartsWith(keyPrefix, StringComparison.Ordinal)) continue;
             string suffix = kvKey.Substring(prefixLen);
-            (BranchKvKind kind, byte[]? payload) = BranchKvCodec.Decode(entry.Value);
-            yield return (suffix, kind, payload);
+            BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
+            yield return (suffix, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
         }
     }
 

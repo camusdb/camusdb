@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -113,8 +114,8 @@ public sealed class TestTransactionMutationLimit
         await mgr.RollbackAsync(tx);
 
         KvTransaction reader = KvTransaction.CreateReadOnly();
-        byte[]? row1 = await store.GetRow(reader, new ObjectIdValue(1, 0, 0));
-        byte[]? row4 = await store.GetRow(reader, new ObjectIdValue(4, 0, 0));
+        ReadOnlyMemory<byte>? row1 = await store.GetRow(reader, new ObjectIdValue(1, 0, 0));
+        ReadOnlyMemory<byte>? row4 = await store.GetRow(reader, new ObjectIdValue(4, 0, 0));
 
         Assert.IsNull(row1, "Rolled-back row 1 must not be visible");
         Assert.IsNull(row4, "Never-written row 4 must not be visible");
@@ -144,7 +145,7 @@ public sealed class TestTransactionMutationLimit
         await store.WriteRowsBatch(tx, [new KvTableStore.RowWrite
         {
             RowId = rowId1,
-            RowData = [1],
+            RowData = BranchKvCodec.EncodeValue([1]),
             IndexEntries =
             {
                 new KvTableStore.IndexWrite("idx_a", key1a, Unique: false),
@@ -163,7 +164,7 @@ public sealed class TestTransactionMutationLimit
             store.WriteRowsBatch(tx, [new KvTableStore.RowWrite
             {
                 RowId = rowId2,
-                RowData = [2],
+                RowData = BranchKvCodec.EncodeValue([2]),
                 IndexEntries =
                 {
                     new KvTableStore.IndexWrite("idx_a", key2a, Unique: false),
@@ -193,7 +194,7 @@ public sealed class TestTransactionMutationLimit
         // Build a batch of 10 rows (10 mutations) — exceeds limit of 5.
         List<KvTableStore.RowWrite> rows = [];
         for (int i = 0; i < 10; i++)
-            rows.Add(new KvTableStore.RowWrite { RowId = new ObjectIdValue(i, 0, 0), RowData = [(byte)i] });
+            rows.Add(new KvTableStore.RowWrite { RowId = new ObjectIdValue(i, 0, 0), RowData = BranchKvCodec.EncodeValue([(byte)i]) });
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => store.WriteRowsBatch(tx, rows));
@@ -205,7 +206,7 @@ public sealed class TestTransactionMutationLimit
         KvTransaction reader = KvTransaction.CreateReadOnly();
         for (int i = 0; i < 10; i++)
         {
-            byte[]? row = await store.GetRow(reader, new ObjectIdValue(i, 0, 0));
+            ReadOnlyMemory<byte>? row = await store.GetRow(reader, new ObjectIdValue(i, 0, 0));
             Assert.IsNull(row, $"Batch row {i} must not be visible after rollback");
         }
     }

@@ -175,7 +175,7 @@ public sealed class Serializator
 
     /// <summary>Reads a 4-byte length prefix and the following byte payload.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static byte[] ReadBytesPayload(byte[] buffer, ref int pointer)
+    public static byte[] ReadBytesPayload(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         int length = ReadInt32(buffer, ref pointer);
         return ReadByteArray(buffer, length, ref pointer);
@@ -287,23 +287,23 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static short ReadInt16(byte[] buffer, ref int pointer)
+    public static short ReadInt16(ReadOnlySpan<byte> buffer, ref int pointer)
     {
-        short number = BinaryPrimitives.ReadInt16LittleEndian(buffer.AsSpan(pointer));
+        short number = BinaryPrimitives.ReadInt16LittleEndian(buffer.Slice(pointer));
         pointer += 2;
         return number;
     }
 
-    public static float ReadFloat(byte[] buffer, ref int pointer)
+    public static float ReadFloat(ReadOnlySpan<byte> buffer, ref int pointer)
     {
-        float number = BinaryPrimitives.ReadSingleLittleEndian(buffer.AsSpan(pointer));
+        float number = BinaryPrimitives.ReadSingleLittleEndian(buffer.Slice(pointer));
         pointer += 4;
         return number;
     }
 
-    public static double ReadDouble(byte[] buffer, ref int pointer)
+    public static double ReadDouble(ReadOnlySpan<byte> buffer, ref int pointer)
     {
-        double number = BinaryPrimitives.ReadDoubleLittleEndian(buffer.AsSpan(pointer));
+        double number = BinaryPrimitives.ReadDoubleLittleEndian(buffer.Slice(pointer));
         pointer += 8;
         return number;
     }
@@ -320,9 +320,9 @@ public sealed class Serializator
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static long ReadInt64(byte[] buffer, ref int pointer)
+    public static long ReadInt64(ReadOnlySpan<byte> buffer, ref int pointer)
     {
-        long number = BitConverter.ToInt64(buffer, pointer);
+        long number = BinaryPrimitives.ReadInt64LittleEndian(buffer.Slice(pointer, 8));
         pointer += 8;
         return number;
     }
@@ -358,21 +358,20 @@ public sealed class Serializator
         return new ObjectIdValue(a, b, c);
     }
 
-    public static string ReadString(byte[] buffer, ref int pointer)
+    public static string ReadString(ReadOnlySpan<byte> buffer, ref int pointer)
     {
         int length = ReadInt32(buffer, ref pointer);
         if (length == 0)
             return "";
 
-        string str = Encoding.Unicode.GetString(buffer.AsSpan(pointer, length));
+        string str = Encoding.Unicode.GetString(buffer.Slice(pointer, length));
         pointer += length;
         return str;
     }
 
-    public static byte[] ReadByteArray(byte[] buffer, int length, ref int pointer)
+    public static byte[] ReadByteArray(ReadOnlySpan<byte> buffer, int length, ref int pointer)
     {
-        byte[] bytes = new byte[length];
-        Buffer.BlockCopy(buffer, pointer, bytes, 0, length);
+        byte[] bytes = buffer.Slice(pointer, length).ToArray();
         pointer += length;
         return bytes;
     }

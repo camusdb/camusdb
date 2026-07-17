@@ -216,7 +216,7 @@ internal sealed class TestSchemaElementStatesDml : SharedNodeBaseTest
         KvTransaction tx = await database.Transactions.BeginAsync();
         try
         {
-            await foreach ((CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(tx))
+            await foreach ((CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(tx))
             {
                 Dictionary<string, ColumnValue> row =
                     await RowEncoder.DecodeWritableAsync(table.Schema, tx.TransactionId, rowId, data);

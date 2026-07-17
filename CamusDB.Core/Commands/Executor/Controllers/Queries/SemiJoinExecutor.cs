@@ -132,12 +132,12 @@ internal sealed class SemiJoinExecutor
             if (node.InnerFilter is null)
                 return true;
 
-            byte[]? data = await inner.Store.GetRow(outerTicket.TxnState, rowId.Value).ConfigureAwait(false);
-            if (data is null || data.Length == 0)
+            ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId.Value).ConfigureAwait(false);
+            if (data is null || data.Value.Length == 0)
                 return false;
 
             Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(
-                inner.Schema, txId, rowId.Value, data, required, inner.Schema.Version).ConfigureAwait(false);
+                inner.Schema, txId, rowId.Value, data.Value, required, inner.Schema.Version).ConfigureAwait(false);
 
             return EvalFilter(node.InnerFilter, innerRow, parameters);
         }
@@ -157,12 +157,12 @@ internal sealed class SemiJoinExecutor
             false, true, false,
             maxRows: null))
         {
-            byte[]? data = await inner.Store.GetRow(outerTicket.TxnState, rowId).ConfigureAwait(false);
-            if (data is null || data.Length == 0)
+            ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId).ConfigureAwait(false);
+            if (data is null || data.Value.Length == 0)
                 continue;
 
             Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(
-                inner.Schema, txId, rowId, data, required, inner.Schema.Version).ConfigureAwait(false);
+                inner.Schema, txId, rowId, data.Value, required, inner.Schema.Version).ConfigureAwait(false);
 
             // For types where NextSortValue returns null (String, Id), upperBound is null and the
             // scan may run past the equality range. Always verify the actual key matches.
@@ -186,7 +186,7 @@ internal sealed class SemiJoinExecutor
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
         {
             if (data.Length == 0)
                 continue;
@@ -225,7 +225,7 @@ internal sealed class SemiJoinExecutor
         // is not part of the subquery result set and must not poison the anti-join.
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
         {
             if (data.Length == 0)
                 continue;
@@ -256,7 +256,7 @@ internal sealed class SemiJoinExecutor
         TableDescriptor inner = node.InnerTable;
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
 
-        await foreach ((ObjectIdValue _, byte[] data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: 1))
+        await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: 1))
         {
             if (data.Length > 0)
                 return true;

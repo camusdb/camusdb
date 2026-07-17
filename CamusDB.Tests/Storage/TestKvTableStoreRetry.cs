@@ -253,11 +253,11 @@ public sealed class TestKvTableStoreRetry
         stub.InjectGetValueFaults = 2;
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_get_r");
-        byte[]? result = await store.GetRow(readTx, rowId);
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result);
-        Assert.AreEqual(data, result);
+        Assert.AreEqual(data, result!.Value.ToArray());
         Assert.AreEqual(-1, stub.InjectGetValueFaults, "All 2 injected faults were consumed before success");
     }
 
@@ -279,11 +279,11 @@ public sealed class TestKvTableStoreRetry
         Assert.AreEqual(-1, stub.InjectAcquireLockFaults, "All 2 injected lock faults were consumed");
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_lock_r");
-        byte[]? result = await store.GetRow(readTx, rowId);
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result);
-        Assert.AreEqual(data, result);
+        Assert.AreEqual(data, result!.Value.ToArray());
     }
 
     [Test]
@@ -304,11 +304,11 @@ public sealed class TestKvTableStoreRetry
         Assert.AreEqual(-1, stub.InjectSetKeyValueFaults, "All 2 injected set faults were consumed");
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_set_r");
-        byte[]? result = await store.GetRow(readTx, rowId);
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result);
-        Assert.AreEqual(data, result);
+        Assert.AreEqual(data, result!.Value.ToArray());
     }
 
     [Test]
@@ -332,7 +332,7 @@ public sealed class TestKvTableStoreRetry
         Assert.AreEqual(-1, stub.InjectDeleteKeyValueFaults, "All 2 injected delete faults were consumed");
 
         KvTransaction readTx = await BeginTransaction(stub, "rt_del_r");
-        byte[]? result = await store.GetRow(readTx, rowId);
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNull(result, "Row must be absent after DeleteRow");
@@ -356,7 +356,7 @@ public sealed class TestKvTableStoreRetry
         List<KvTableStore.RowWrite> batch = expected.Select(e => new KvTableStore.RowWrite
         {
             RowId = e.rowId,
-            RowData = e.data,
+            RowData = BranchKvCodec.EncodeValue(e.data),
         }).ToList();
 
         stub.InjectAcquireManyFaults = 2;
@@ -370,9 +370,9 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_batchlock_r");
         foreach ((ObjectIdValue rowId, byte[] data) in expected)
         {
-            byte[]? result = await store.GetRow(readTx, rowId);
+            ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
             Assert.IsNotNull(result, $"Row {rowId} must be readable after WriteRowsBatch");
-            Assert.AreEqual(data, result);
+            Assert.AreEqual(data, result!.Value.ToArray());
         }
         await CommitTransaction(stub, readTx);
     }
@@ -391,7 +391,7 @@ public sealed class TestKvTableStoreRetry
         List<KvTableStore.RowWrite> batch = expected.Select(e => new KvTableStore.RowWrite
         {
             RowId = e.rowId,
-            RowData = e.data,
+            RowData = BranchKvCodec.EncodeValue(e.data),
         }).ToList();
 
         stub.InjectSetManyFaults = 2;
@@ -405,9 +405,9 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_batchset_r");
         foreach ((ObjectIdValue rowId, byte[] data) in expected)
         {
-            byte[]? result = await store.GetRow(readTx, rowId);
+            ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
             Assert.IsNotNull(result, $"Row {rowId} must be readable after WriteRowsBatch");
-            Assert.AreEqual(data, result);
+            Assert.AreEqual(data, result!.Value.ToArray());
         }
         await CommitTransaction(stub, readTx);
     }
@@ -429,7 +429,7 @@ public sealed class TestKvTableStoreRetry
         List<KvTableStore.RowWrite> batch = rowIds.Select(id => new KvTableStore.RowWrite
         {
             RowId = id,
-            RowData = [99],
+            RowData = BranchKvCodec.EncodeValue([99]),
         }).ToList();
 
         KvTransaction writeTx = await BeginTransaction(stub, "rt_delock_w");
@@ -450,7 +450,7 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_delock_r");
         foreach (ObjectIdValue rowId in rowIds)
         {
-            byte[]? result = await store.GetRow(readTx, rowId);
+            ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
             Assert.IsNull(result, $"Row {rowId} must be absent after DeleteRowsBatch");
         }
         await CommitTransaction(stub, readTx);
@@ -468,7 +468,7 @@ public sealed class TestKvTableStoreRetry
         List<KvTableStore.RowWrite> batch = rowIds.Select(id => new KvTableStore.RowWrite
         {
             RowId = id,
-            RowData = [42],
+            RowData = BranchKvCodec.EncodeValue([42]),
         }).ToList();
 
         KvTransaction writeTx = await BeginTransaction(stub, "rt_delmany_w");
@@ -488,7 +488,7 @@ public sealed class TestKvTableStoreRetry
         KvTransaction readTx = await BeginTransaction(stub, "rt_delmany_r");
         foreach (ObjectIdValue rowId in rowIds)
         {
-            byte[]? result = await store.GetRow(readTx, rowId);
+            ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
             Assert.IsNull(result, $"Row {rowId} must be absent after DeleteRowsBatch");
         }
         await CommitTransaction(stub, readTx);
@@ -529,7 +529,7 @@ public sealed class TestKvTableStoreRetry
         KvTableStore.RowWrite row = new()
         {
             RowId = rowId,
-            RowData = rowData,
+            RowData = BranchKvCodec.EncodeValue(rowData),
         };
         row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
 
@@ -549,11 +549,11 @@ public sealed class TestKvTableStoreRetry
 
         // Verify the row is readable.
         KvTransaction readTx = await BeginTransaction(stub, "rt_partial_r");
-        byte[]? result = await store.GetRow(readTx, rowId);
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
         await CommitTransaction(stub, readTx);
 
         Assert.IsNotNull(result, "Row must be readable after WriteRowsBatch with partial MustRetry");
-        Assert.AreEqual(rowData, result);
+        Assert.AreEqual(rowData, result!.Value.ToArray());
 
         // Verify the unique index entry is present by doing a point lookup.
         KvTransaction lookupTx = await BeginTransaction(stub, "rt_partial_lu");
@@ -591,7 +591,7 @@ public sealed class TestKvTableStoreRetry
         CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 77L)]);
         const string IndexId = "idx_setid_unique";
 
-        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = rowData };
+        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = BranchKvCodec.EncodeValue(rowData) };
         row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
 
         stub.InjectSetManyFaults = 1; // whole batch MustRetry once, nothing written; retry resends unchanged
@@ -605,11 +605,11 @@ public sealed class TestKvTableStoreRetry
             "an unchanged (full-batch) resend must reuse the same operation id");
 
         KvTransaction readTx = await BeginTransaction(stub, "setid_full_r");
-        byte[]? result = await store.GetRow(readTx, rowId);
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId);
         ObjectIdValue? found = await store.LookupUnique(readTx, IndexId, indexKey);
         await CommitTransaction(stub, readTx);
 
-        Assert.AreEqual(rowData, result, "row must be readable after the resend");
+        Assert.AreEqual(rowData, result!.Value.ToArray(), "row must be readable after the resend");
         Assert.AreEqual(rowId, found, "unique index entry must map to the row exactly once");
     }
 
@@ -629,7 +629,7 @@ public sealed class TestKvTableStoreRetry
         CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 88L)]);
         const string IndexId = "idx_shrink_unique";
 
-        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = [4, 5] };
+        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = BranchKvCodec.EncodeValue([4, 5]) };
         row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
 
         // First call SETs the unique index key and faults only the row key; the retry carries just the
@@ -660,7 +660,7 @@ public sealed class TestKvTableStoreRetry
             .Select(i => (Generate(), new byte[] { (byte)i }))
             .ToList();
         List<KvTableStore.RowWrite> batch = expected
-            .Select(e => new KvTableStore.RowWrite { RowId = e.rowId, RowData = e.data })
+            .Select(e => new KvTableStore.RowWrite { RowId = e.rowId, RowData = BranchKvCodec.EncodeValue(e.data) })
             .ToList();
 
         stub.InjectAcquireManyFaults = 1; // whole batch MustRetry once; retry resends the same keys
@@ -675,7 +675,7 @@ public sealed class TestKvTableStoreRetry
 
         KvTransaction readTx = await BeginTransaction(stub, "lockid_full_r");
         foreach ((ObjectIdValue rowId, byte[] data) in expected)
-            Assert.AreEqual(data, await store.GetRow(readTx, rowId), $"row {rowId} must be readable after the resend");
+            Assert.AreEqual(data, (await store.GetRow(readTx, rowId))!.Value.ToArray(), $"row {rowId} must be readable after the resend");
         await CommitTransaction(stub, readTx);
     }
 

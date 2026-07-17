@@ -564,7 +564,7 @@ public sealed class TestSnapshotReadCluster
         Assert.IsNotNull(snapBeforeIndexResult,
             "Pre-snapshot row's PK-index entry must be visible through the snapshot");
 
-        byte[]? snapBeforeRowBytes = await table.Store.GetRow(snapshot, snapBeforeIndexResult!.Value);
+        ReadOnlyMemory<byte>? snapBeforeRowBytes = await table.Store.GetRow(snapshot, snapBeforeIndexResult!.Value);
 
         Assert.IsNotNull(snapBeforeRowBytes,
             "Pre-snapshot row data must be visible through the snapshot when the index entry is visible");
@@ -578,7 +578,7 @@ public sealed class TestSnapshotReadCluster
         Assert.IsNull(snapAfterIndexResult,
             "Post-snapshot row's PK-index entry must be invisible through the snapshot");
 
-        byte[]? snapAfterRowBytes = await table.Store.GetRow(snapshot, afterRowId);
+        ReadOnlyMemory<byte>? snapAfterRowBytes = await table.Store.GetRow(snapshot, afterRowId);
 
         Assert.IsNull(snapAfterRowBytes,
             "Post-snapshot row data must be invisible through the snapshot even when the physical rowId is known externally");

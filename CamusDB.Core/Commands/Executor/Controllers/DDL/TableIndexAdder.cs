@@ -201,7 +201,7 @@ internal sealed class TableIndexAdder
 
         int rows = 0;
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
             tx,
             afterRowId: afterRowId).ConfigureAwait(false))
         {

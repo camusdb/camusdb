@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -86,7 +87,7 @@ public sealed class TestSerializableReadWrite
 
         // Reader: acquires shared point lock on rowId.
         KvTransaction reader = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-        byte[]? seen = await store.GetRow(reader, rowId);
+        ReadOnlyMemory<byte>? seen = await store.GetRow(reader, rowId);
         Assert.IsNotNull(seen);
 
         // Writer: the set operation is blocked immediately by Kahuna's range lock fence in
@@ -159,8 +160,8 @@ public sealed class TestSerializableReadWrite
         KvTransaction r2 = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
 
         // Both readers acquire shared point locks on the same key — neither should throw.
-        byte[]? seen1 = await store.GetRow(r1, rowId);
-        byte[]? seen2 = await store.GetRow(r2, rowId);
+        ReadOnlyMemory<byte>? seen1 = await store.GetRow(r1, rowId);
+        ReadOnlyMemory<byte>? seen2 = await store.GetRow(r2, rowId);
 
         Assert.IsNotNull(seen1, "First Serializable+RW reader must see the row");
         Assert.IsNotNull(seen2, "Second Serializable+RW reader must see the row (S∩S compatible)");
@@ -186,7 +187,7 @@ public sealed class TestSerializableReadWrite
 
         // Reader at ReadCommitted (default): no shared lock acquired.
         KvTransaction reader = await mgr.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
-        byte[]? seen = await store.GetRow(reader, rowId);
+        ReadOnlyMemory<byte>? seen = await store.GetRow(reader, rowId);
         Assert.IsNotNull(seen);
 
         // Writer commits to the same key while reader is live — must succeed.
@@ -215,7 +216,7 @@ public sealed class TestSerializableReadWrite
 
         // Snapshot reader: TransactionId=Zero → AcquireRangeLockAsync early-returns, no lock.
         KvTransaction snapshot = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
-        byte[]? seen = await store.GetRow(snapshot, rowId);
+        ReadOnlyMemory<byte>? seen = await store.GetRow(snapshot, rowId);
         Assert.IsNotNull(seen);
 
         // Writer commits to the same key while snapshot reader is live — must succeed.
@@ -249,7 +250,7 @@ public sealed class TestSerializableReadWrite
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
 
         // Read acquires shared point lock on rowId (owned by tx).
-        byte[]? seen = await store.GetRow(tx, rowId);
+        ReadOnlyMemory<byte>? seen = await store.GetRow(tx, rowId);
         Assert.IsNotNull(seen);
 
         // Write to the same key within the same tx — Kahuna skips its own range lock,
@@ -308,7 +309,7 @@ public sealed class TestSerializableReadWrite
 
         // Tx A: read K → shared point lock.
         KvTransaction txA = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-        byte[]? seen = await store.GetRow(txA, rowId);
+        ReadOnlyMemory<byte>? seen = await store.GetRow(txA, rowId);
         Assert.IsNotNull(seen);
 
         // Tx C: concurrent third writer — must be blocked by A's shared range lock.

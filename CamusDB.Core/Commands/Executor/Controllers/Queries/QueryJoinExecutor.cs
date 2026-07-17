@@ -436,11 +436,12 @@ internal sealed class QueryJoinExecutor
         QueryPlan plan,
         RightDecodeState? decodeState = null)
     {
-        byte[]? data = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
-        if (data is null || data.Length == 0)
+        if (dataOpt is null || dataOpt.Value.Length == 0)
             return null;
 
+        ReadOnlyMemory<byte> data = dataOpt.Value;
         QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
             source.Table.Schema,
             plan.Ticket.TxnState.TransactionId,
@@ -544,7 +545,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordRange(table.Store.RowKeySpace);
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
 
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(plan.Ticket.TxnState).ConfigureAwait(false))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -606,11 +607,12 @@ internal sealed class QueryJoinExecutor
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
-            if (data is null || data.Length == 0)
+            if (dataOpt is null || dataOpt.Value.Length == 0)
                 continue;
 
+            ReadOnlyMemory<byte> data = dataOpt.Value;
             QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
@@ -671,11 +673,12 @@ internal sealed class QueryJoinExecutor
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
 
-            if (data is null || data.Length == 0)
+            if (dataOpt is null || dataOpt.Value.Length == 0)
                 continue;
 
+            ReadOnlyMemory<byte> data = dataOpt.Value;
             QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
                 txId,
@@ -738,12 +741,12 @@ internal sealed class QueryJoinExecutor
 
                 deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-                byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value).ConfigureAwait(false);
-                if (data is null || data.Length == 0)
+                ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value).ConfigureAwait(false);
+                if (data is null || data.Value.Length == 0)
                     continue;
 
                 QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                    table.Schema, txId, rowId.Value, data,
+                    table.Schema, txId, rowId.Value, data.Value,
                     required,
                     GetTableSchemaVersionForAlias(plan, source.Alias),
                     layoutCache).ConfigureAwait(false);
@@ -778,12 +781,12 @@ internal sealed class QueryJoinExecutor
 
                     deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-                    byte[]? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
-                    if (data is null || data.Length == 0)
+                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+                    if (data is null || data.Value.Length == 0)
                         continue;
 
                     QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                        table.Schema, txId, rowId, data,
+                        table.Schema, txId, rowId, data.Value,
                         required,
                         GetTableSchemaVersionForAlias(plan, source.Alias),
                         layoutCache).ConfigureAwait(false);

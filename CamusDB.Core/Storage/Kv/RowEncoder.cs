@@ -43,6 +43,11 @@ public static class RowEncoder
         Writable
     }
 
+    /// <summary>
+    /// Serializes a row into a bare, un-enveloped byte buffer (no <see cref="BranchKvKind"/> marker).
+    /// Prefer <see cref="EncodeStorageValue"/> for anything written to Kahuna; this bare form is for
+    /// callers/tests that genuinely need the payload without the storage envelope.
+    /// </summary>
     public static byte[] Encode(TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row, ObjectIdValue rowId)
     {
         ArgumentNullException.ThrowIfNull(schema);
@@ -51,7 +56,38 @@ public static class RowEncoder
         int length = CalculateBufferLength(schema, row);
         byte[] buffer = new byte[length];
         int pointer = 0;
+        EncodeInto(buffer, ref pointer, schema, row, rowId);
+        return buffer;
+    }
 
+    /// <summary>
+    /// Serializes a row directly into its final Kahuna storage form: byte 0 is the
+    /// <see cref="BranchKvKind.Value"/> marker and the row payload follows in the same array. This
+    /// removes the second allocation-and-copy that <see cref="BranchKvCodec.EncodeValue"/> would incur
+    /// on top of <see cref="Encode"/> — the value that Kahuna stores is produced with a single
+    /// allocation. The output is byte-identical to <c>BranchKvCodec.EncodeValue(Encode(...))</c>.
+    /// </summary>
+    public static byte[] EncodeStorageValue(TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row, ObjectIdValue rowId)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        ArgumentNullException.ThrowIfNull(row);
+
+        int length = CalculateBufferLength(schema, row);
+        byte[] buffer = new byte[1 + length];
+        buffer[0] = (byte)BranchKvKind.Value;
+        int pointer = 1;
+        EncodeInto(buffer, ref pointer, schema, row, rowId);
+        return buffer;
+    }
+
+    /// <summary>
+    /// Writes the row header and column values into <paramref name="buffer"/> starting at
+    /// <paramref name="pointer"/>. The caller owns buffer sizing (via <see cref="CalculateBufferLength"/>)
+    /// and any leading bytes (e.g. a storage-envelope marker); this method only advances
+    /// <paramref name="pointer"/> past the bytes it writes.
+    /// </summary>
+    private static void EncodeInto(byte[] buffer, ref int pointer, TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row, ObjectIdValue rowId)
+    {
         Serializator.WriteType(buffer, SerializatorTypes.TypeInteger32, ref pointer);
         Serializator.WriteInt32(buffer, schema.Version, ref pointer);
 
@@ -146,26 +182,36 @@ public static class RowEncoder
                     throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type);
             }
         }
-
-        return buffer;
     }
 
-    public static Dictionary<string, ColumnValue> Decode(
-        TableSchema schema,
-        ObjectIdValue rowId,
-        byte[] data,
-        IReadOnlySet<string>? requiredColumns = null)
+    /// <summary>
+    /// Reads the fixed row header (schema-version marker + value, rowId marker + value) from the front
+    /// of a serialized row, advancing <paramref name="pointer"/> past it, and returns the stored schema
+    /// version. The rowId in the payload duplicates the KV key and is discarded. Kept synchronous and
+    /// span-based so async decoders can read the header before awaiting lazy schema-history loads
+    /// without holding a span across the await.
+    /// </summary>
+    private static int ReadRowHeader(ReadOnlySpan<byte> data, ref int pointer)
     {
-        ArgumentNullException.ThrowIfNull(schema);
-        ArgumentNullException.ThrowIfNull(data);
-
-        int pointer = 0;
-
         Serializator.ReadType(data, ref pointer);                    // schema type marker
         int schemaVersion = Serializator.ReadInt32(data, ref pointer);
 
         Serializator.ReadType(data, ref pointer);                    // rowId type marker
         Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
+
+        return schemaVersion;
+    }
+
+    public static Dictionary<string, ColumnValue> Decode(
+        TableSchema schema,
+        ObjectIdValue rowId,
+        ReadOnlySpan<byte> data,
+        IReadOnlySet<string>? requiredColumns = null)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+
+        int pointer = 0;
+        int schemaVersion = ReadRowHeader(data, ref pointer);
 
         List<TableColumnSchema> columns = schema.GetSchemaHistory(schemaVersion).Columns!;
         return DecodeColumns(
@@ -182,20 +228,16 @@ public static class RowEncoder
         TableSchema schema,
         HLCTimestamp txId,
         ObjectIdValue rowId,
-        byte[] data,
+        ReadOnlyMemory<byte> data,
         IReadOnlySet<string>? requiredColumns = null,
         long? visibilitySchemaVersion = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
-        ArgumentNullException.ThrowIfNull(data);
 
+        // Read the fixed header synchronously (span released before the await); the schema version it
+        // yields selects which lazily-loaded history layout to await.
         int pointer = 0;
-
-        Serializator.ReadType(data, ref pointer);                    // schema type marker
-        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
-
-        Serializator.ReadType(data, ref pointer);                    // rowId type marker
-        Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
+        int schemaVersion = ReadRowHeader(data.Span, ref pointer);
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
@@ -204,7 +246,7 @@ public static class RowEncoder
         return DecodeColumns(
             columns,
             visibilityColumns,
-            data,
+            data.Span,
             ref pointer,
             requiredColumns,
             ColumnVisibility.PublicOnly,
@@ -215,20 +257,14 @@ public static class RowEncoder
         TableSchema schema,
         HLCTimestamp txId,
         ObjectIdValue rowId,
-        byte[] data,
+        ReadOnlyMemory<byte> data,
         IReadOnlySet<string>? requiredColumns = null,
         long? visibilitySchemaVersion = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
-        ArgumentNullException.ThrowIfNull(data);
 
         int pointer = 0;
-
-        Serializator.ReadType(data, ref pointer);
-        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
-
-        Serializator.ReadType(data, ref pointer);
-        Serializator.ReadObjectId(data, ref pointer);
+        int schemaVersion = ReadRowHeader(data.Span, ref pointer);
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
@@ -237,7 +273,7 @@ public static class RowEncoder
         return DecodeColumns(
             columns,
             visibilityColumns,
-            data,
+            data.Span,
             ref pointer,
             requiredColumns,
             ColumnVisibility.Writable,
@@ -275,21 +311,15 @@ public static class RowEncoder
         TableSchema schema,
         HLCTimestamp txId,
         ObjectIdValue rowId,
-        byte[] data,
+        ReadOnlyMemory<byte> data,
         IReadOnlySet<string>? requiredColumns = null,
         long? visibilitySchemaVersion = null,
         Dictionary<int, RowLayout>? layoutCache = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
-        ArgumentNullException.ThrowIfNull(data);
 
         int pointer = 0;
-
-        Serializator.ReadType(data, ref pointer);                    // schema type marker
-        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
-
-        Serializator.ReadType(data, ref pointer);                    // rowId type marker
-        Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
+        int schemaVersion = ReadRowHeader(data.Span, ref pointer);
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
@@ -312,7 +342,7 @@ public static class RowEncoder
             layout,
             columns,
             visibilityColumns,
-            data,
+            data.Span,
             ref pointer,
             requiredColumns,
             ColumnVisibility.PublicOnly,
@@ -375,7 +405,7 @@ public static class RowEncoder
         RowLayout layout,
         List<TableColumnSchema> columns,
         List<TableColumnSchema>? currentColumns,
-        byte[] data,
+        ReadOnlySpan<byte> data,
         ref int pointer,
         IReadOnlySet<string>? requiredColumns,
         ColumnVisibility visibility,
@@ -452,7 +482,7 @@ public static class RowEncoder
     private static Dictionary<string, ColumnValue> DecodeColumns(
         List<TableColumnSchema> columns,
         List<TableColumnSchema>? currentColumns,
-        byte[] data,
+        ReadOnlySpan<byte> data,
         ref int pointer,
         IReadOnlySet<string>? requiredColumns,
         ColumnVisibility visibility,
@@ -551,7 +581,7 @@ public static class RowEncoder
         return null;
     }
 
-    private static ColumnValue ReadColumnValue(TableColumnSchema column, byte[] data, ref int pointer)
+    private static ColumnValue ReadColumnValue(TableColumnSchema column, ReadOnlySpan<byte> data, ref int pointer)
     {
         switch (column.Type)
         {
@@ -708,7 +738,7 @@ public static class RowEncoder
         }
     }
 
-    private static void SkipColumnValue(ColumnType columnType, byte[] data, ref int pointer)
+    private static void SkipColumnValue(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
     {
         switch (columnType)
         {
@@ -902,7 +932,7 @@ public static class RowEncoder
         }
     }
 
-    private static ColumnValue ReadArrayElement(ColumnType elementType, byte[] data, ref int pointer)
+    private static ColumnValue ReadArrayElement(ColumnType elementType, ReadOnlySpan<byte> data, ref int pointer)
     {
         int t = Serializator.ReadType(data, ref pointer);
         if (t == SerializatorTypes.TypeNull)
@@ -923,13 +953,13 @@ public static class RowEncoder
         };
     }
 
-    private static ColumnValue ReadUuidElement(byte[] data, ref int pointer)
+    private static ColumnValue ReadUuidElement(ReadOnlySpan<byte> data, ref int pointer)
     {
         (long high, long low) = Serializator.ReadUuid(data, ref pointer);
         return new ColumnValue(ColumnType.Uuid, high, low);
     }
 
-    private static void SkipArrayElement(byte[] data, ref int pointer)
+    private static void SkipArrayElement(ReadOnlySpan<byte> data, ref int pointer)
     {
         int t = Serializator.ReadType(data, ref pointer);
         switch (t)

@@ -95,7 +95,7 @@ public sealed class TestKvTableStore
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t1");
         await using EmbeddedKahuna __ = node;
 
-        byte[]? result = await store.GetRow(KvTransaction.CreateReadOnly(), new ObjectIdValue(1, 2, 3));
+        ReadOnlyMemory<byte>? result = await store.GetRow(KvTransaction.CreateReadOnly(), new ObjectIdValue(1, 2, 3));
 
         Assert.IsNull(result);
     }
@@ -114,10 +114,10 @@ public sealed class TestKvTableStore
         await store.InsertRow(tx, rowId, data);
         await CommitTransaction(node.Kahuna, tx);
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
 
         Assert.IsNotNull(got);
-        Assert.AreEqual(data, got);
+        Assert.AreEqual(data, got!.Value.ToArray());
     }
 
     [Test]
@@ -140,10 +140,10 @@ public sealed class TestKvTableStore
         await store.UpdateRow(tx2, rowId, v2);
         await CommitTransaction(node.Kahuna, tx2);
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
 
         Assert.IsNotNull(got);
-        Assert.AreEqual(v2, got);
+        Assert.AreEqual(v2, got!.Value.ToArray());
     }
 
     [Test]
@@ -164,7 +164,7 @@ public sealed class TestKvTableStore
         await store.DeleteRow(tx2, rowId);
         await CommitTransaction(node.Kahuna, tx2);
 
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
         Assert.IsNull(got);
     }
 
@@ -185,8 +185,8 @@ public sealed class TestKvTableStore
         }
         await CommitTransaction(node.Kahuna, tx);
 
-        List<(ObjectIdValue rowId, byte[] data)> scanned = [];
-        await foreach ((ObjectIdValue rowId, byte[] data) in store.ScanRows(KvTransaction.CreateReadOnly()))
+        List<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> scanned = [];
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in store.ScanRows(KvTransaction.CreateReadOnly()))
             scanned.Add((rowId, data));
 
         Assert.AreEqual(3, scanned.Count, "Scan must return all inserted rows");
@@ -202,8 +202,8 @@ public sealed class TestKvTableStore
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t6");
         await using EmbeddedKahuna __ = node;
 
-        List<(ObjectIdValue, byte[])> scanned = [];
-        await foreach ((ObjectIdValue id, byte[] data) in store.ScanRows(KvTransaction.CreateReadOnly()))
+        List<(ObjectIdValue, ReadOnlyMemory<byte>)> scanned = [];
+        await foreach ((ObjectIdValue id, ReadOnlyMemory<byte> data) in store.ScanRows(KvTransaction.CreateReadOnly()))
             scanned.Add((id, data));
 
         Assert.AreEqual(0, scanned.Count);
@@ -497,7 +497,7 @@ public sealed class TestKvTableStore
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("gbatch-empty");
         await using EmbeddedKahuna __ = node;
 
-        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), []);
+        ReadOnlyMemory<byte>?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), []);
 
         Assert.AreEqual(0, result.Length);
     }
@@ -509,7 +509,7 @@ public sealed class TestKvTableStore
         await using EmbeddedKahuna __ = node;
 
         ObjectIdValue[] ids = [new(1, 0, 0), new(2, 0, 0), new(3, 0, 0)];
-        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
+        ReadOnlyMemory<byte>?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
 
         Assert.AreEqual(3, result.Length);
         Assert.IsNull(result[0]);
@@ -537,14 +537,14 @@ public sealed class TestKvTableStore
         }
         await CommitTransaction(node.Kahuna, tx);
 
-        byte[]?[] batchResult = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
+        ReadOnlyMemory<byte>?[] batchResult = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
 
         Assert.AreEqual(ids.Length, batchResult.Length, "batch result count must match id count");
         for (int i = 0; i < ids.Length; i++)
         {
-            byte[]? single = await store.GetRow(KvTransaction.CreateReadOnly(), ids[i]);
+            ReadOnlyMemory<byte>? single = await store.GetRow(KvTransaction.CreateReadOnly(), ids[i]);
             Assert.IsNotNull(batchResult[i], $"batch result[{i}] must not be null");
-            Assert.AreEqual(single, batchResult[i], $"batch result[{i}] must equal single GetRow result");
+            Assert.AreEqual(single!.Value.ToArray(), batchResult[i]!.Value.ToArray(), $"batch result[{i}] must equal single GetRow result");
         }
     }
 
@@ -577,15 +577,15 @@ public sealed class TestKvTableStore
         }
         await CommitTransaction(node.Kahuna, tx);
 
-        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
+        ReadOnlyMemory<byte>?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(), ids);
 
         Assert.AreEqual(ids.Length, result.Length);
         for (int i = 0; i < ids.Length; i++)
         {
             Assert.IsNotNull(result[i], $"result[{i}] must not be null");
             // Verify this slot holds exactly the sentinel for ids[i], not another row's bytes.
-            byte[]? expected = await store.GetRow(KvTransaction.CreateReadOnly(), ids[i]);
-            Assert.AreEqual(expected, result[i],
+            ReadOnlyMemory<byte>? expected = await store.GetRow(KvTransaction.CreateReadOnly(), ids[i]);
+            Assert.AreEqual(expected!.Value.ToArray(), result[i]!.Value.ToArray(),
                 $"result[{i}] bytes must match GetRow(ids[{i}]={ids[i]}) — sentinel {sentinels[i]}");
         }
     }
@@ -611,14 +611,14 @@ public sealed class TestKvTableStore
         await store.InsertRow(tx, present2, data2);
         await CommitTransaction(node.Kahuna, tx);
 
-        byte[]?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(),
+        ReadOnlyMemory<byte>?[] result = await store.GetRowsBatch(KvTransaction.CreateReadOnly(),
             [present1, missing, present2]);
 
         Assert.AreEqual(3, result.Length);
         Assert.IsNotNull(result[0], "present1 must be found");
         Assert.IsNull(result[1],    "missing must return null");
         Assert.IsNotNull(result[2], "present2 must be found");
-        Assert.AreEqual(data1, result[0]);
-        Assert.AreEqual(data2, result[2]);
+        Assert.AreEqual(data1, result[0]!.Value.ToArray());
+        Assert.AreEqual(data2, result[2]!.Value.ToArray());
     }
 }

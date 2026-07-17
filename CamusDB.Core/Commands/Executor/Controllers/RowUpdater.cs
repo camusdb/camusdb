@@ -379,7 +379,7 @@ public sealed class RowUpdater
     {
         // Batch-load raw row bytes for the whole chunk in one Kahuna round-trip.
         List<ObjectIdValue> rowIds = chunkRows.Select(r => r.RowId).ToList();
-        byte[]?[] rawRows = await table.Store.GetRowsBatch(tx, rowIds).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatch(tx, rowIds).ConfigureAwait(false);
 
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
 
@@ -387,13 +387,13 @@ public sealed class RowUpdater
         {
             QueryResultRow queryRow = chunkRows[i];
             ObjectIdValue rowId = queryRow.RowId;
-            byte[]? rawData = rawRows[i];
+            ReadOnlyMemory<byte>? rawData = rawRows[i];
 
-            if (rawData is null || rawData.Length == 0)
+            if (rawData is null || rawData.Value.Length == 0)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
 
             Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
-                table.Schema, tx.TransactionId, rowId, rawData,
+                table.Schema, tx.TransactionId, rowId, rawData.Value,
                 visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
 
             Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, queryRow, ticket);
@@ -402,7 +402,7 @@ public sealed class RowUpdater
             CheckForNotNulls(table, newRow);
             CheckEnforcer.EnforceOnRow(table, newRow);
 
-            byte[] newData = RowEncoder.Encode(table.Schema, newRow, rowId);
+            byte[] newData = RowEncoder.EncodeStorageValue(table.Schema, newRow, rowId);
 
             KvTableStore.RowUpdate rowUpdate = new() { RowId = rowId, NewRowData = newData };
             CollectIndexUpdates(table, rowId, oldRow, newRow, rowUpdate);

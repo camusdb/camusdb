@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -98,9 +99,9 @@ public sealed class TestSnapshotRead
         await OverwriteRow(mgr, store, rowId, updated);
 
         // Snapshot should still see the original bytes.
-        byte[]? seen = await store.GetRow(roTx, rowId);
+        ReadOnlyMemory<byte>? seen = await store.GetRow(roTx, rowId);
         Assert.IsNotNull(seen);
-        Assert.AreEqual(original, seen,
+        Assert.AreEqual(original, seen!.Value.ToArray(),
             "A Serializable+ReadOnly snapshot must not observe a write committed after the snapshot timestamp");
     }
 
@@ -155,16 +156,16 @@ public sealed class TestSnapshotRead
 
         // First scan under snapshot.
         List<byte[]> first = [];
-        await foreach ((_, byte[] d) in store.ScanRows(roTx))
-            first.Add(d);
+        await foreach ((_, ReadOnlyMemory<byte> d) in store.ScanRows(roTx))
+            first.Add(d.ToArray());
 
         // Concurrent update committed after snapshot.
         await OverwriteRow(mgr, store, rowId, v2);
 
         // Second scan under same snapshot.
         List<byte[]> second = [];
-        await foreach ((_, byte[] d) in store.ScanRows(roTx))
-            second.Add(d);
+        await foreach ((_, ReadOnlyMemory<byte> d) in store.ScanRows(roTx))
+            second.Add(d.ToArray());
 
         Assert.AreEqual(first.Count, second.Count,
             "Row count must be identical across repeated scans within the same snapshot");
@@ -190,10 +191,10 @@ public sealed class TestSnapshotRead
         await OverwriteRow(mgr, store, rowId, v2);
 
         // Default BeginAsync = ReadCommitted, reads at Zero (latest committed).
-        byte[]? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
+        ReadOnlyMemory<byte>? got = await store.GetRow(KvTransaction.CreateReadOnly(), rowId);
 
         Assert.IsNotNull(got);
-        Assert.AreEqual(v2, got, "Read Committed must always return the latest committed value");
+        Assert.AreEqual(v2, got!.Value.ToArray(), "Read Committed must always return the latest committed value");
     }
 
     // -----------------------------------------------------------------------

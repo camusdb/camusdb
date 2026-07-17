@@ -187,15 +187,15 @@ internal sealed class RowDeleter
         ObjectIdValue rowId
     )
     {
-        byte[]? data = await table.Store.GetRow(tx, rowId).ConfigureAwait(false);
-        if (data is null || data.Length == 0)
+        ReadOnlyMemory<byte>? data = await table.Store.GetRow(tx, rowId).ConfigureAwait(false);
+        if (data is null || data.Value.Length == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before delete");
 
         return await RowEncoder.DecodeWritableAsync(
             table.Schema,
             tx.TransactionId,
             rowId,
-            data,
+            data.Value,
             visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
     }
 

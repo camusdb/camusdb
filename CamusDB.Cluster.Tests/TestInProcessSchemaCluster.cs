@@ -537,7 +537,7 @@ public sealed class TestInProcessSchemaCluster
         KvTransaction scanTx = await leaderNode.Database!.Transactions.BeginAsync();
 
         int physicallyBackfilled = 0;
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(scanTx))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(scanTx))
         {
             Dictionary<string, ColumnValue> physical = await RowEncoder.DecodeWritableAsync(
                 table.Schema, scanTx.TransactionId, rowId, data,

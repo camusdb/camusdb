@@ -194,7 +194,7 @@ internal sealed class RowInserter
             KvTableStore.RowWrite write = new()
             {
                 RowId = rowId,
-                RowData = RowEncoder.Encode(table.Schema, values, rowId)
+                RowData = RowEncoder.EncodeStorageValue(table.Schema, values, rowId)
             };
 
             foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)

@@ -90,7 +90,7 @@ internal sealed class TableAnalyzer
         // Request one row past the sample limit so the sentinel can set isSampled=true;
         // the sentinel is detected below and not counted toward rowCount.
         long? scanLimit = limit.HasValue ? limit.Value + 1 : null;
-        await foreach ((ObjectIdValue rowId, byte[] data) in table.Store.ScanRows(tx, maxRows: scanLimit))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(tx, maxRows: scanLimit))
         {
             if (limit.HasValue && rowCount >= limit.Value)
             {
@@ -98,7 +98,7 @@ internal sealed class TableAnalyzer
                 break;
             }
 
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data);
+            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data.Span);
             rowCount++;
 
             foreach (string col in indexedColumns)

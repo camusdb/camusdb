@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -246,8 +247,8 @@ public sealed class TestSerializableLockEscalation
         // Verify: a fresh RC read sees the updated value
         KvTransaction snap = await mgr.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
-        byte[]? data = await store.GetRow(snap, ids[0]);
-        Assert.AreEqual((byte)77, data?[0], "Committed write must be visible after escalation");
+        ReadOnlyMemory<byte>? data = await store.GetRow(snap, ids[0]);
+        Assert.AreEqual((byte)77, data!.Value.Span[0], "Committed write must be visible after escalation");
         await mgr.RollbackAsync(snap);
     }
 
