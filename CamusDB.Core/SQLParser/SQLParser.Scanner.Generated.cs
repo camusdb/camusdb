@@ -5,8 +5,8 @@
 //  See accompanying file GPLEXcopyright.rtf.
 //
 //  GPLEX Version:  1.2.3
-//  DateTime: 12/07/2026 9:22:41 PM
-//  GPLEX input file <SQLParser/SQLParser.Language.analyzer.lex - 12/07/2026 9:19:50 PM>
+//  DateTime: 17/07/2026 5:24:04 PM
+//  GPLEX input file <SQLParser/SQLParser.Language.analyzer.lex - 17/07/2026 5:22:19 PM>
 //  GPLEX frame file <embedded resource>
 //
 //  Option settings: verbose, parser, stack, minimize
@@ -2681,8 +2681,10 @@ namespace CamusDB.Core.SQLParser
 /* NxS[ 377] */ new Table(0, 0, -1, null), // Shortest string "/*"
 /* NxS[ 378] */ // Shortest string "--"
       new Table(10, 4, 378, new short[] {-1, 378, 378, -1}),
-/* NxS[ 379] */ new Table(0, 0, -1, null), // Shortest string "''"
-/* NxS[ 380] */ new Table(0, 0, -1, null), // Shortest string "\"\""
+/* NxS[ 379] */ // Shortest string "''"
+      new Table(39, 1, -1, new short[] {391}),
+/* NxS[ 380] */ // Shortest string "\"\""
+      new Table(34, 1, -1, new short[] {390}),
 /* NxS[ 381] */ new Table(0, 0, -1, null), // Shortest string "!="
 /* NxS[ 382] */ // Shortest string "!~"
       new Table(42, 1, -1, new short[] {383}),

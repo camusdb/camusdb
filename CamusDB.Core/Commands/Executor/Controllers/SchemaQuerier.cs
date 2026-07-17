@@ -146,6 +146,7 @@ internal sealed class SchemaQuerier
             createTableSql.Append(GetSQLType(column));
             createTableSql.Append(' ');
             createTableSql.Append(GetSQLConstraint(column));
+            createTableSql.Append(GetSQLDefault(column));
             createTableSql.Append(',');
             i++;
         }
@@ -385,5 +386,46 @@ internal sealed class SchemaQuerier
 
         return "NULL";
     }
+
+    /// <summary>
+    /// Renders the trailing <c>DEFAULT(...)</c> clause for a column definition in
+    /// <see cref="ShowCreateTable"/>, or an empty string when the column has no default. A per-row
+    /// function default (e.g. <c>gen_id</c>, <c>gen_uuid_v7</c>) round-trips as
+    /// <c>DEFAULT(gen_id())</c>; a constant default is emitted as a re-parseable SQL literal so the
+    /// rendered <c>CREATE TABLE</c> re-creates the same default when executed.
+    /// </summary>
+    private static string GetSQLDefault(TableColumnSchema column)
+    {
+        if (column.DefaultFunction is not null)
+            return $" DEFAULT({column.DefaultFunction}())";
+
+        if (column.DefaultValue is null || column.DefaultValue.Type == ColumnType.Null)
+            return "";
+
+        ColumnValue d = column.DefaultValue;
+        string literal = d.Type switch
+        {
+            ColumnType.String => RenderStringLiteral(d.StrValue!),
+            ColumnType.Id => "'" + d.StrValue! + "'",
+            ColumnType.Uuid => "'" + d.UuidValue! + "'",
+            ColumnType.Bool => d.BoolValue ? "true" : "false",
+            ColumnType.Integer64 => d.LongValue.ToString(CultureInfo.InvariantCulture),
+            ColumnType.Float64 => d.FloatValue.ToString(CultureInfo.InvariantCulture),
+            ColumnType.Float32 => ((float)d.FloatValue).ToString(CultureInfo.InvariantCulture),
+            ColumnType.Date or ColumnType.DateTime => "'" + d.IsoValue! + "'",
+            ColumnType.Bytes => "0x" + Convert.ToHexString(d.BytesValue ?? []),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render default for type: " + d.Type),
+        };
+        return $" DEFAULT({literal})";
+    }
+
+    /// <summary>
+    /// Renders a string value as a re-parseable single-quoted SQL string literal, doubling any embedded
+    /// single quote (<c>'</c> → <c>''</c>) — the escape the lexer accepts. A double quote inside a
+    /// single-quoted literal is taken verbatim, so no escaping is needed for it; a backslash is also
+    /// preserved as-is. This round-trips any value, including one containing both quote characters.
+    /// </summary>
+    private static string RenderStringLiteral(string value) =>
+        "'" + value.Replace("'", "''") + "'";
 
 }

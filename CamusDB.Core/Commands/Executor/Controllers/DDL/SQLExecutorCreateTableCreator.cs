@@ -612,15 +612,6 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         }
     }
 
-    /// <summary>
-    /// Strips the outer single/double quote from a string-literal token, matching the unquoting
-    /// applied when a <see cref="NodeType.String"/> node is evaluated at runtime.
-    /// </summary>
-    private static string UnquoteStringLiteral(string raw) =>
-        raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\'')
-            ? raw[1..^1]
-            : raw.Trim('"');
-
     private static bool IsAggregateFunction(string name) => name switch
     {
         "count" or "sum" or "avg" or "min" or "max" or "count_distinct"

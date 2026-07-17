@@ -123,8 +123,8 @@ OctEsc          \\{OctDig}{3}
 HexEsc          \\x{HexDig}{2}
 UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
-String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\"
-StringSingle    \'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC})*\'
+String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\"\")*\"
+StringSingle    \'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\'\')*\'
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
 Placeholder     (@)([a-zA-Z0-9_]+)

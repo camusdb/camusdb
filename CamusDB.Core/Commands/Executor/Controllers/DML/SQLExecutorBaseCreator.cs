@@ -95,6 +95,26 @@ internal abstract class SQLExecutorBaseCreator
     private static bool IsNumeric(ColumnType type) =>
         type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
 
+    /// <summary>
+    /// Decodes a string-literal token (<see cref="NodeType.String"/> <c>yytext</c>) into its value:
+    /// strips the outer quote and collapses a doubled quote of the same kind to a single one
+    /// (<c>''</c> → <c>'</c> inside a single-quoted string, <c>""</c> → <c>"</c> inside a double-quoted
+    /// string — the MySQL/SQL-standard escape the lexer emits as a doubled quote). Other characters,
+    /// including backslashes, are preserved verbatim (there is no backslash-escape decoding). A value
+    /// that needs the other quote kind carries it literally, since only the delimiter quote is doubled.
+    /// </summary>
+    internal static string UnquoteStringLiteral(string raw)
+    {
+        if (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\''))
+        {
+            char quote = raw[0];
+            string inner = raw[1..^1];
+            return quote == '\'' ? inner.Replace("''", "'") : inner.Replace("\"\"", "\"");
+        }
+
+        return raw.Trim('"');
+    }
+
     public static ColumnValue EvalExpr(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
@@ -117,14 +137,7 @@ internal abstract class SQLExecutorBaseCreator
                 return new ColumnValue(ColumnType.Float64, doubleValue);
 
             case NodeType.String:
-            {
-                string raw = expr.yytext!;
-                // Strip the outer quoting character (single or double quote).
-                string unquoted = (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\''))
-                    ? raw[1..^1]
-                    : raw.Trim('"');
-                return new ColumnValue(ColumnType.String, unquoted);
-            }
+                return new ColumnValue(ColumnType.String, UnquoteStringLiteral(expr.yytext!));
 
             case NodeType.Bool:
                 if (!bool.TryParse(expr.yytext!, out bool boolValue))

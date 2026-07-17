@@ -426,4 +426,80 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
         Assert.IsFalse(ddl.Contains("chk_qty"), $"Dropped constraint should not appear in DDL: {ddl}");
         Assert.IsFalse(ddl.Contains("CHECK"), $"No CHECK should appear after drop: {ddl}");
     }
+
+    [Test]
+    public async Task ShowCreateTable_RendersColumnDefaults_FunctionAndConstant_RoundTrips()
+    {
+        // SHOW CREATE TABLE must render both a per-row function default (gen_id()) and constant
+        // defaults, and the emitted DDL must re-parse and re-apply those defaults.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE gear (" +
+            "  id oid NOT NULL DEFAULT(gen_id()), " +
+            "  qty int64 DEFAULT(1), " +
+            "  label string(50) DEFAULT('none'), " +
+            "  enabled bool DEFAULT(true), " +
+            "  PRIMARY KEY (id))", null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE gear");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.That(ddl, Does.Contain("DEFAULT(gen_id())"), $"function default must render: {ddl}");
+        Assert.That(ddl, Does.Contain("DEFAULT(1)"),        $"integer default must render: {ddl}");
+        Assert.That(ddl, Does.Contain("DEFAULT('none')"),   $"string default must render: {ddl}");
+        Assert.That(ddl, Does.Contain("DEFAULT(true)"),     $"bool default must render: {ddl}");
+
+        // Re-parse the emitted DDL under a new name.
+        string ddl2 = ddl.Replace("`gear`", "`gear2`", System.StringComparison.Ordinal);
+        await DdlAsync(executor, db, dbname, ddl2);
+
+        // Insert omitting every defaulted column: gen_id() must populate the PK per row and the
+        // constant defaults must apply on the round-tripped table.
+        KvTransaction tx3 = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx3, dbname,
+            "INSERT INTO gear2 (label) VALUES ('x')", null));
+        await db.Transactions.CommitAsync(tx3);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SELECT qty, label, enabled FROM gear2");
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(1L,   rows[0].Row["qty"].LongValue,  "constant int default applied on round-tripped table");
+        Assert.AreEqual("x",  rows[0].Row["label"].StrValue);
+        Assert.AreEqual(true, rows[0].Row["enabled"].BoolValue, "constant bool default applied");
+    }
+
+    [Test]
+    public async Task ShowCreateTable_StringDefaultWithSingleQuote_RendersDoubleQuoted_RoundTrips()
+    {
+        // The lexer does no '' / "" doubling and no escape decoding, so a default whose value contains
+        // a single quote must be rendered double-quoted to re-parse to the same value (and vice versa).
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        // Value provided via a double-quoted literal so it carries a real apostrophe: it's
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE notes (id oid NOT NULL DEFAULT(gen_id()), tag string(50) DEFAULT(\"it's\"), PRIMARY KEY (id))", null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE notes");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.That(ddl, Does.Contain("DEFAULT('it''s')"),
+            $"a single-quote-containing default must render single-quoted with '' doubling: {ddl}");
+
+        // Round-trip: re-parse and confirm the default value survives exactly.
+        string ddl2 = ddl.Replace("`notes`", "`notes2`", System.StringComparison.Ordinal);
+        await DdlAsync(executor, db, dbname, ddl2);
+
+        KvTransaction tx3 = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx3, dbname,
+            "INSERT INTO notes2 (id) VALUES (gen_id())", null));
+        await db.Transactions.CommitAsync(tx3);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SELECT tag FROM notes2");
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual("it's", rows[0].Row["tag"].StrValue, "single-quote default value must survive the round-trip");
+    }
 }
