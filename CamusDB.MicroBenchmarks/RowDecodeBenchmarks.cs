@@ -198,11 +198,11 @@ public class RowDecodeBenchmarks
     public async Task<QueryRow> FullRow_QueryRow()
     {
         // New path with per-scan layout cache — layout built once per schema version.
-        Dictionary<int, RowLayout> cache = new();
+        RowEncoder.RowDecodeState cache = new();
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _fullRows[i],
-                layoutCache: cache).ConfigureAwait(false);
+                decodeState: cache).ConfigureAwait(false);
         return last!;
     }
 
@@ -213,7 +213,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _fullRows[i],
-                layoutCache: null).ConfigureAwait(false);
+                decodeState: null).ConfigureAwait(false);
         return last!;
     }
 
@@ -231,11 +231,11 @@ public class RowDecodeBenchmarks
     [Benchmark(Description = "Projected_QueryRow")]
     public async Task<QueryRow> Projected_QueryRow()
     {
-        Dictionary<int, RowLayout> cache = new();
+        RowEncoder.RowDecodeState cache = new();
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _projRows[i],
-                _projected, layoutCache: cache).ConfigureAwait(false);
+                _projected, decodeState: cache).ConfigureAwait(false);
         return last!;
     }
 
@@ -255,11 +255,11 @@ public class RowDecodeBenchmarks
     [Benchmark(Description = "SchemaHistory_QueryRow")]
     public async Task<QueryRow> SchemaHistory_QueryRow()
     {
-        Dictionary<int, RowLayout> cache = new();
+        RowEncoder.RowDecodeState cache = new();
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaHistory, TxId, RowId, _historyRows[i],
-                visibilitySchemaVersion: 1, layoutCache: cache).ConfigureAwait(false);
+                visibilitySchemaVersion: 1, decodeState: cache).ConfigureAwait(false);
         return last!;
     }
 }

@@ -46,10 +46,12 @@ public sealed class ExecuteSQLController : CommandsController
     [Route("/execute-sql-query")]
     public async Task<JsonResult> ExecuteSQLQuery()
     {
+        // Server-side wall clock for the whole handler, reported back as ServerTimeMs so a caller
+        // can subtract it from its own observed latency to isolate network/connection overhead.
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
         try
         {
-            //Stopwatch stopwatch = Stopwatch.StartNew();
-
             ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
@@ -76,7 +78,7 @@ public sealed class ExecuteSQLController : CommandsController
                 List<object?[]> rows = [];
                 await foreach (QueryResultRow row in cursor)
                     rows.Add(CompactRowEncoder.EncodeRow(row.Row, schemaHolder.Schema));
-                return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, ToColumnDtos(schemaHolder.Schema), rows));
+                return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, ToColumnDtos(schemaHolder.Schema), rows) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
             }
 
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
@@ -97,7 +99,7 @@ public sealed class ExecuteSQLController : CommandsController
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(CompactRowEncoder.EncodeRow(row.Row, schemaHolder.Schema));
-                    return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, ToColumnDtos(schemaHolder.Schema), rows));
+                    return new JsonResult(new ExecuteSQLQueryResponse("ok", rows.Count, ToColumnDtos(schemaHolder.Schema), rows) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
                 }
                 catch (Exception)
                 {
@@ -163,19 +165,20 @@ public sealed class ExecuteSQLController : CommandsController
                 queryResponse.CacheName = cacheMeta.CacheName;
             }
 
+            queryResponse.ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds;
             return new JsonResult(queryResponse);
         }
         catch (CamusDBException e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = 500 };
         }
     }
 
@@ -183,6 +186,10 @@ public sealed class ExecuteSQLController : CommandsController
     [Route("/execute-sql-non-query")]
     public async Task<JsonResult> ExecuteNonSQLQuery()
     {
+        // Server-side wall clock for the whole handler (parse + execute + commit), returned as
+        // ServerTimeMs so a caller can separate processing time from network round-trip cost.
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
         try
         {
             ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
@@ -207,7 +214,7 @@ public sealed class ExecuteSQLController : CommandsController
                         parameters: request.Parameters
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows));
+                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
                 }
                 catch (Exception)
                 {
@@ -250,19 +257,19 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitDmlBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows) { CausalToken = causalToken2.IsNull() ? null : causalToken2 });
+            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows) { CausalToken = causalToken2.IsNull() ? null : causalToken2, ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
         }
         catch (CamusDBException e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = 500 };
         }
     }
 

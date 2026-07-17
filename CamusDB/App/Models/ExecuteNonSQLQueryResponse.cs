@@ -22,6 +22,14 @@ public sealed class ExecuteNonSQLQueryResponse
 
     public HLCTimestamp? CausalToken { get; set; }
 
+    /// <summary>
+    /// Total server-side processing time for this request in milliseconds — measured from the
+    /// moment the controller began handling it (request-body parse, SQL parse, execution, and
+    /// commit) until the response was built. Excludes network transit and client time, so a large
+    /// gap between this and the client's observed latency isolates network/connection overhead.
+    /// </summary>
+    public double? ServerTimeMs { get; set; }
+
     public ExecuteNonSQLQueryResponse(string status, int rows)
     {
         Status = status;

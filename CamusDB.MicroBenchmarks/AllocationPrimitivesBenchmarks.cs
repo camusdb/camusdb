@@ -129,22 +129,22 @@ public class AllocationPrimitivesBenchmarks
     [Benchmark(Description = "ProjectedSkip_WideExcluded")]
     public async Task<QueryRow> ProjectedSkip_WideExcluded()
     {
-        Dictionary<int, RowLayout> cache = new();
+        RowEncoder.RowDecodeState cache = new();
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_wideSchema, TxId, RowId, _wideRows[i],
-                _narrowProjection, layoutCache: cache).ConfigureAwait(false);
+                _narrowProjection, decodeState: cache).ConfigureAwait(false);
         return last!;
     }
 
     [Benchmark(Description = "NullBoolHeavyDecode")]
     public async Task<QueryRow> NullBoolHeavyDecode()
     {
-        Dictionary<int, RowLayout> cache = new();
+        RowEncoder.RowDecodeState cache = new();
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_nullBoolSchema, TxId, RowId, _nullBoolRows[i],
-                layoutCache: cache).ConfigureAwait(false);
+                decodeState: cache).ConfigureAwait(false);
         return last!;
     }
 }

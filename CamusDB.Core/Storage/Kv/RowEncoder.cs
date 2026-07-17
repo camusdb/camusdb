@@ -44,6 +44,60 @@ public static class RowEncoder
     }
 
     /// <summary>
+    /// One precomputed instruction for a single stored (history) column when decoding a row into a
+    /// <see cref="QueryRow"/>. <see cref="OutputOrdinal"/> is the slot in the output value array to
+    /// read this column into, or <c>-1</c> to skip the column's bytes (projected out or not visible).
+    /// <see cref="Type"/> is the physical column type used to read/skip the value. Carrying just the
+    /// type (not the whole <see cref="TableColumnSchema"/>) keeps the per-row loop branch-light.
+    /// </summary>
+    internal readonly struct ColumnDecodeStep
+    {
+        public readonly ColumnType Type;
+        public readonly int OutputOrdinal;
+
+        public ColumnDecodeStep(ColumnType type, int outputOrdinal)
+        {
+            Type = type;
+            OutputOrdinal = outputOrdinal;
+        }
+    }
+
+    /// <summary>
+    /// The fully-resolved plan for decoding every row that shares one stored schema version within a
+    /// scan into a <see cref="QueryRow"/>. Built once (a build may await lazy schema-history loading),
+    /// then executed per row with no visibility checks, required-column set lookups, layout index
+    /// lookups, or current-column searches — those decisions are all baked into <see cref="Steps"/>
+    /// and <see cref="InjectedDefaults"/> at build time.
+    /// </summary>
+    internal sealed class RowDecodePlan
+    {
+        /// <summary>Shared output layout (column names + ordinals) for every row on this plan.</summary>
+        public required RowLayout Layout { get; init; }
+
+        /// <summary>One step per stored column, in byte-stream order: read into an ordinal or skip.</summary>
+        public required ColumnDecodeStep[] Steps { get; init; }
+
+        /// <summary>
+        /// Output slots for columns that are visible in the current schema but were added after this
+        /// row was written (absent from the byte stream): each gets its default value. Ordinals here
+        /// never overlap a <see cref="Steps"/> read ordinal, so they are written unconditionally.
+        /// </summary>
+        public required (int Ordinal, ColumnValue Value)[] InjectedDefaults { get; init; }
+    }
+
+    /// <summary>
+    /// Per-scan memoisation of <see cref="RowDecodePlan"/> keyed by the stored schema version embedded
+    /// in each row. A scan fixes the required-column set, visibility version, and visibility mode, so
+    /// every row at the same stored version shares one plan (usually a single entry). Create one
+    /// instance per scan and pass it to <see cref="DecodeToQueryRowAsync"/>; never share it across
+    /// scans that differ in those inputs, and never treat it as global transaction state.
+    /// </summary>
+    public sealed class RowDecodeState
+    {
+        internal readonly Dictionary<int, RowDecodePlan> Plans = new();
+    }
+
+    /// <summary>
     /// Serializes a row into a bare, un-enveloped byte buffer (no <see cref="BranchKvKind"/> marker).
     /// Prefer <see cref="EncodeStorageValue"/> for anything written to Kahuna; this bare form is for
     /// callers/tests that genuinely need the payload without the storage envelope.
@@ -286,14 +340,15 @@ public static class RowEncoder
     /// access by position.
     ///
     /// <para>
-    /// <paramref name="layoutCache"/> is a per-scan memoisation table keyed by the stored schema
-    /// version embedded in each row's bytes. Because <paramref name="requiredColumns"/> and
+    /// <paramref name="decodeState"/> is a per-scan memoisation of the full <see cref="RowDecodePlan"/>
+    /// (layout plus precomputed per-column read/skip steps and injected defaults) keyed by the stored
+    /// schema version embedded in each row's bytes. Because <paramref name="requiredColumns"/> and
     /// <paramref name="visibilitySchemaVersion"/> are constant for the life of a single scan, every
-    /// row written under the same stored version produces the same <see cref="RowLayout"/>. Passing
-    /// a non-null dictionary causes the layout to be built once and reused for all subsequent rows
-    /// with that stored version — the common case is one entry, built on the first decoded row.
-    /// Pass <see langword="null"/> when a stable per-scan dictionary is unavailable (e.g. one-off
-    /// decodes outside a scan loop).
+    /// row written under the same stored version shares one plan. Passing a non-null state builds the
+    /// plan once and executes it for all subsequent rows with that stored version — the common case is
+    /// a single entry, built on the first decoded row. Only the build may await (lazy schema-history
+    /// loading); executing the plan touches no schema metadata and does no per-column layout/visibility
+    /// work. Pass <see langword="null"/> for one-off decodes outside a scan loop.
     /// </para>
     ///
     /// <para>
@@ -314,40 +369,129 @@ public static class RowEncoder
         ReadOnlyMemory<byte> data,
         IReadOnlySet<string>? requiredColumns = null,
         long? visibilitySchemaVersion = null,
-        Dictionary<int, RowLayout>? layoutCache = null)
+        RowDecodeState? decodeState = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
 
         int pointer = 0;
         int schemaVersion = ReadRowHeader(data.Span, ref pointer);
 
-        List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
-        List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
-            ? columns
-            : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
-
-        bool injectMissing = visibilitySchemaVersion is not null;
-
-        // Resolve or build the layout for this stored schema version. The layout is identical for
-        // every row at the same stored version when requiredColumns and visibilitySchemaVersion
-        // are constant (which they always are within a single scan).
-        RowLayout layout;
-        if (layoutCache is null || !layoutCache.TryGetValue(schemaVersion, out layout!))
+        // Resolve or build the decode plan for this stored schema version. Plan BUILDING may await lazy
+        // schema-history loading; plan EXECUTION below is fully synchronous and span-based, so no span
+        // crosses an await.
+        RowDecodePlan plan;
+        if (decodeState is null || !decodeState.Plans.TryGetValue(schemaVersion, out plan!))
         {
-            layout = BuildRowLayout(columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
-            layoutCache?.Add(schemaVersion, layout);
+            List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
+            List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
+                ? columns
+                : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
+            bool injectMissing = visibilitySchemaVersion is not null;
+
+            plan = BuildRowDecodePlan(columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
+            decodeState?.Plans.Add(schemaVersion, plan);
         }
 
-        return DecodeColumnsToQueryRow(
-            layout,
-            columns,
-            visibilityColumns,
-            data.Span,
-            ref pointer,
-            requiredColumns,
-            ColumnVisibility.PublicOnly,
-            injectMissing,
-            rowId);
+        return ExecuteDecodePlan(plan, data.Span, ref pointer, rowId);
+    }
+
+    /// <summary>
+    /// Builds the reusable <see cref="RowDecodePlan"/> for a combination of stored (history) columns,
+    /// current visibility columns, required-column filter, and visibility mode. This performs all the
+    /// per-column visibility, required-set, layout-index, and current-column-search work once so the
+    /// per-row execution loop does none of it. Output is decode-equivalent to the previous inline
+    /// two-pass decode.
+    /// </summary>
+    private static RowDecodePlan BuildRowDecodePlan(
+        List<TableColumnSchema> columns,
+        List<TableColumnSchema>? currentColumns,
+        IReadOnlySet<string>? requiredColumns,
+        ColumnVisibility visibility,
+        bool injectMissingCurrentColumns)
+    {
+        RowLayout layout = BuildRowLayout(columns, currentColumns, requiredColumns, visibility, injectMissingCurrentColumns);
+        bool decodeAll = requiredColumns is null;
+
+        // One step per stored column, in byte-stream order. A visible + required column whose name is
+        // in the layout reads into its ordinal; everything else skips its bytes.
+        ColumnDecodeStep[] steps = new ColumnDecodeStep[columns.Count];
+        bool[] written = new bool[layout.Count];
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+            int ord = -1;
+            if (IsVisible(column, currentColumns, visibility) &&
+                (decodeAll || requiredColumns!.Contains(column.Name)))
+            {
+                int candidate = layout.IndexOf(column.Name);
+                if (candidate >= 0)
+                {
+                    ord = candidate;
+                    written[candidate] = true;
+                }
+            }
+            steps[i] = new ColumnDecodeStep(column.Type, ord);
+        }
+
+        // Columns added after this row was written are absent from the byte stream: precompute their
+        // default value and output slot. Mirrors the inject-missing pass, including the "already
+        // decoded from bytes" guard (an ordinal a step writes is excluded here).
+        (int Ordinal, ColumnValue Value)[] injected;
+        if (injectMissingCurrentColumns && currentColumns is not null)
+        {
+            List<(int, ColumnValue)> list = new();
+            foreach (TableColumnSchema current in currentColumns)
+            {
+                int ord = layout.IndexOf(current.Name);
+                if (ord < 0) continue;
+                if (written[ord]) continue;                                  // decoded from bytes
+                if (FindCurrentColumn(current, columns) is not null) continue; // present in history, not new
+
+                bool visible = visibility switch
+                {
+                    ColumnVisibility.PublicOnly => SchemaElementStateRules.IsReadable(current),
+                    ColumnVisibility.Writable   => SchemaElementStateRules.IsWritable(current),
+                    _ => false
+                };
+                if (!visible) continue;
+                if (!decodeAll && !requiredColumns!.Contains(current.Name)) continue;
+
+                list.Add((ord, current.DefaultValue ?? ColumnValue.Null));
+            }
+            injected = list.ToArray();
+        }
+        else
+        {
+            injected = [];
+        }
+
+        return new RowDecodePlan { Layout = layout, Steps = steps, InjectedDefaults = injected };
+    }
+
+    /// <summary>
+    /// Executes a prebuilt <see cref="RowDecodePlan"/> against one row's bytes. Fully synchronous — the
+    /// per-column loop does only a read-or-skip on the precomputed step, with no visibility checks,
+    /// required-set lookups, layout index lookups, or current-column searches.
+    /// </summary>
+    private static QueryRow ExecuteDecodePlan(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId)
+    {
+        ColumnValue[] values = new ColumnValue[plan.Layout.Count];
+
+        ColumnDecodeStep[] steps = plan.Steps;
+        for (int i = 0; i < steps.Length; i++)
+        {
+            ColumnDecodeStep step = steps[i];
+            if (step.OutputOrdinal >= 0)
+                values[step.OutputOrdinal] = ReadColumnValue(step.Type, data, ref pointer);
+            else
+                SkipColumnValue(step.Type, data, ref pointer);
+        }
+
+        (int Ordinal, ColumnValue Value)[] injected = plan.InjectedDefaults;
+        for (int i = 0; i < injected.Length; i++)
+            values[injected[i].Ordinal] = injected[i].Value;
+
+        return new QueryRow(rowId, plan.Layout, values);
     }
 
     /// <summary>
@@ -401,69 +545,6 @@ public static class RowEncoder
         return RowLayout.ForColumns(outputNames);
     }
 
-    private static QueryRow DecodeColumnsToQueryRow(
-        RowLayout layout,
-        List<TableColumnSchema> columns,
-        List<TableColumnSchema>? currentColumns,
-        ReadOnlySpan<byte> data,
-        ref int pointer,
-        IReadOnlySet<string>? requiredColumns,
-        ColumnVisibility visibility,
-        bool injectMissingCurrentColumns,
-        ObjectIdValue rowId)
-    {
-        bool decodeAll = requiredColumns is null;
-        ColumnValue[] values = new ColumnValue[layout.Count];
-
-        // Decode the byte stream, filling each included column's ordinal slot.
-        for (int i = 0; i < columns.Count; i++)
-        {
-            TableColumnSchema column = columns[i];
-
-            if (!IsVisible(column, currentColumns, visibility))
-            {
-                SkipColumnValue(column.Type, data, ref pointer);
-                continue;
-            }
-
-            if (decodeAll || requiredColumns!.Contains(column.Name))
-            {
-                int ord = layout.IndexOf(column.Name);
-                if (ord >= 0)
-                    values[ord] = ReadColumnValue(column, data, ref pointer);
-                else
-                    SkipColumnValue(column.Type, data, ref pointer);
-            }
-            else
-                SkipColumnValue(column.Type, data, ref pointer);
-        }
-
-        // Inject default values for columns added after this row was written (absent from bytes).
-        if (injectMissingCurrentColumns && currentColumns is not null)
-        {
-            foreach (TableColumnSchema current in currentColumns)
-            {
-                int ord = layout.IndexOf(current.Name);
-                if (ord < 0) continue;
-                if (values[ord] is not null) continue; // already decoded from bytes
-                if (FindCurrentColumn(current, columns) is not null) continue; // present in history, not a new column
-
-                bool visible = visibility switch
-                {
-                    ColumnVisibility.PublicOnly => SchemaElementStateRules.IsReadable(current),
-                    ColumnVisibility.Writable   => SchemaElementStateRules.IsWritable(current),
-                    _ => false
-                };
-                if (!visible) continue;
-                if (!decodeAll && !requiredColumns!.Contains(current.Name)) continue;
-
-                values[ord] = current.DefaultValue ?? ColumnValue.Null;
-            }
-        }
-
-        return new QueryRow(rowId, layout, values);
-    }
-
     private static async ValueTask<List<TableColumnSchema>?> GetVisibilityColumnsAsync(
         TableSchema schema,
         HLCTimestamp txId,
@@ -503,7 +584,7 @@ public static class RowEncoder
             }
 
             if (decodeAll || requiredColumns!.Contains(column.Name))
-                result.Add(column.Name, ReadColumnValue(column, data, ref pointer));
+                result.Add(column.Name, ReadColumnValue(column.Type, data, ref pointer));
             else
                 SkipColumnValue(column.Type, data, ref pointer);
         }
@@ -581,9 +662,9 @@ public static class RowEncoder
         return null;
     }
 
-    private static ColumnValue ReadColumnValue(TableColumnSchema column, ReadOnlySpan<byte> data, ref int pointer)
+    private static ColumnValue ReadColumnValue(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
     {
-        switch (column.Type)
+        switch (columnType)
         {
             case ColumnType.Id:
             {
@@ -734,7 +815,7 @@ public static class RowEncoder
             }
 
             default:
-                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + column.Type);
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);
         }
     }
 

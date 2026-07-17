@@ -17,7 +17,13 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 public static class EmbeddedKahunaOptionsBuilder
 {
-    /// <summary>Baseline cluster options matching the historical hardcoded <c>Program.cs</c> literals.</summary>
+    /// <summary>
+    /// Baseline cluster options. Uses RocksDB for both KV and WAL — the same default backend as the
+    /// standalone baseline (<see cref="StandaloneRocksDbBaseline"/>), so both modes are RocksDB unless
+    /// a <c>kahuna:</c> config block overrides the backend. Keeps the cluster-specific election timeouts
+    /// (2000/4000 ms). A <c>kahuna: { storage: sqlite, wal_storage: sqlite }</c> override restores the
+    /// former sqlite behavior for callers that need it.
+    /// </summary>
     public static EmbeddedKahunaOptions ClusterBaseline(ConfigDefinition config)
     {
         string dataDir = !string.IsNullOrEmpty(config.DataDir)
@@ -31,10 +37,10 @@ public static class EmbeddedKahunaOptionsBuilder
             Host = config.RaftHost,
             Port = config.RaftPort,
             InitialPartitions = config.InitialPartitions,
-            Storage = "sqlite",
+            Storage = "rocksdb",
             StoragePath = Path.Combine(dataDir, "kv"),
             StorageRevision = "v1",
-            WalStorage = "sqlite",
+            WalStorage = "rocksdb",
             WalPath = Path.Combine(dataDir, "wal"),
             WalRevision = "v1",
             StartElectionTimeout = 2000,

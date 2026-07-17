@@ -54,7 +54,7 @@ internal sealed class QueryScanner
         // holds one entry; mixed-version scans hold a handful. The layout is identical for all
         // rows at the same stored version (requiredColumns and visibilityVersion are constant
         // for the life of a scan), so building it once and reusing it is safe.
-        Dictionary<int, RowLayout> layoutCache = new();
+        RowEncoder.RowDecodeState decodeState = new();
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
@@ -74,7 +74,7 @@ internal sealed class QueryScanner
                 data,
                 plan.ScanRequiredColumns,
                 visibilityVersion,
-                layoutCache).ConfigureAwait(false);
+                decodeState).ConfigureAwait(false);
 
             if (scanStats is not null)
                 scanStats.RowsRead++;
@@ -163,7 +163,7 @@ internal sealed class QueryScanner
         // Index order is preserved: the page is filled in scan order and batch results are
         // indexed positionally, so rows are decoded and yielded in scan order. Missing rows
         // (null bytes from the batch) preserve the warn-and-skip contract of the per-entry path.
-        Dictionary<int, RowLayout> layoutCache = new();
+        RowEncoder.RowDecodeState decodeState = new();
         int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
 
@@ -184,7 +184,7 @@ internal sealed class QueryScanner
                 if (scanStats is not null) scanStats.RowsRead++;
                 QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,
-                    plan.ScanRequiredColumns, visibilityVersion, layoutCache).ConfigureAwait(false);
+                    plan.ScanRequiredColumns, visibilityVersion, decodeState).ConfigureAwait(false);
                 if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                     yield return new QueryResultRow(batchRowId, queryRow);
             }

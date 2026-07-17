@@ -126,24 +126,31 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 
 # ── Kahuna engine (cluster and standalone) ────────────────────────────────────
 # Allow-listed passthrough to EmbeddedKahunaOptions. Omit the section or any key to
-# keep the mode-specific CamusDB baseline (cluster: sqlite + election 2000/4000 ms;
-# standalone: sqlite per-database node). Unknown keys are rejected at startup.
+# keep the mode-specific CamusDB baseline. Both modes default to rocksdb for KV and WAL:
+#   standalone — rocksdb for both KV and WAL.
+#   cluster    — rocksdb for both KV and WAL, plus election 2000/4000 ms.
+# Any key you set below overrides that baseline. Unknown keys are rejected at startup.
 #
 # Storage backends:
 #   memory   — no persistence; data is lost on restart. Dev/test only.
-#   sqlite   — default; per-partition files {storage_path}/kahuna{N}_{revision}.db
+#   sqlite   — per-partition files {storage_path}/kahuna{N}_{revision}.db (opt-in override).
 #   rocksdb  — higher write throughput; directory tree under {storage_path}/{revision}/
-#              Recommended for standalone nodes with write-heavy workloads.
+#              (default for both modes; recommended for write-heavy workloads).
 #
-# To enable RocksDB for both KV and WAL, uncomment:
+# wal_sync_writes (default true) fsyncs the WAL on every write for crash durability. On macOS/APFS
+# an fsync is ~10 ms, so a write-heavy load (many autocommits, or a large batch whose commit is not
+# group-fsynced) can be dominated by fsync latency. Set it false for dev/bulk loads to trade that
+# durability for a large speedup; keep it true in production.
+#
+# To opt out of the rocksdb default and use sqlite for both KV and WAL:
 # kahuna:
-#   storage: rocksdb
-#   wal_storage: rocksdb
+#   storage: sqlite
+#   wal_storage: sqlite
 #
 # kahuna:
-#   storage: sqlite              # memory | sqlite | rocksdb
+#   storage: rocksdb             # memory | sqlite | rocksdb (default rocksdb)
 #   storage_revision: v1
-#   wal_storage: sqlite           # memory | sqlite | rocksdb
+#   wal_storage: rocksdb          # memory | sqlite | rocksdb (default rocksdb)
 #   wal_revision: v1
 #   wal_sync_writes: true
 #   default_transaction_timeout_ms: 5000

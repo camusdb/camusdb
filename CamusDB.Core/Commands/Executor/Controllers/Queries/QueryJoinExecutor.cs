@@ -421,8 +421,8 @@ internal sealed class QueryJoinExecutor
     /// fails the filter.
     /// <para>
     /// When <paramref name="decodeState"/> is provided, <see cref="RowEncoder.DecodeToQueryRowAsync"/>
-    /// reuses its <see cref="RightDecodeState.LayoutCache"/> to avoid rebuilding the
-    /// <see cref="RowLayout"/> on each call, and the residual-filter qualification uses
+    /// reuses its <see cref="RightDecodeState.DecodeState"/> to avoid rebuilding the row-decode plan
+    /// on each call, and the residual-filter qualification uses
     /// <see cref="QueryRowMerger.QualifyRowAsQueryRow"/> with a cached
     /// <see cref="RightDecodeState.QualifiedLayout"/> — eliminating the per-row
     /// <c>Dictionary&lt;string,ColumnValue&gt;</c> allocation of
@@ -449,7 +449,7 @@ internal sealed class QueryJoinExecutor
             data,
             GetRequiredColumnsForAlias(plan, source.Alias),
             GetTableSchemaVersionForAlias(plan, source.Alias),
-            decodeState?.LayoutCache).ConfigureAwait(false);
+            decodeState?.DecodeState).ConfigureAwait(false);
 
         if (executionFilter is not null)
         {
@@ -539,7 +539,7 @@ internal sealed class QueryJoinExecutor
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         IReadOnlySet<string>? required = requiredColumns ?? GetRequiredColumnsForAlias(plan, source.Alias);
         QueryDependencyCollector? deps = plan.DepCollector;
-        Dictionary<int, RowLayout> layoutCache = new();
+        RowEncoder.RowDecodeState rowDecodeState = new();
         RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.RowKeySpace);
@@ -559,7 +559,7 @@ internal sealed class QueryJoinExecutor
                 data,
                 required,
                 GetTableSchemaVersionForAlias(plan, source.Alias),
-                layoutCache).ConfigureAwait(false);
+                rowDecodeState).ConfigureAwait(false);
 
             if (executionFilter is not null)
             {
@@ -593,7 +593,7 @@ internal sealed class QueryJoinExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = index.Type == IndexType.Unique;
-        Dictionary<int, RowLayout> layoutCache = new();
+        RowEncoder.RowDecodeState rowDecodeState = new();
         RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
@@ -620,7 +620,7 @@ internal sealed class QueryJoinExecutor
                 data,
                 required,
                 GetTableSchemaVersionForAlias(plan, source.Alias),
-                layoutCache).ConfigureAwait(false);
+                rowDecodeState).ConfigureAwait(false);
 
             if (executionFilter is not null)
             {
@@ -653,7 +653,7 @@ internal sealed class QueryJoinExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = rangeNode.Index.Type == IndexType.Unique;
-        Dictionary<int, RowLayout> layoutCache = new();
+        RowEncoder.RowDecodeState rowDecodeState = new();
         RowLayout? qualifiedLayout = null;
 
         // Index range scan: the index bucket range covers membership phantoms; per-row point
@@ -686,7 +686,7 @@ internal sealed class QueryJoinExecutor
                 data,
                 required,
                 GetTableSchemaVersionForAlias(plan, source.Alias),
-                layoutCache).ConfigureAwait(false);
+                rowDecodeState).ConfigureAwait(false);
 
             if (rangeNode.ExecutionFilter is not null)
             {
@@ -720,7 +720,7 @@ internal sealed class QueryJoinExecutor
         bool isUnique = inListNode.Index.Type == IndexType.Unique;
         HashSet<ObjectIdValue> seen = new();
         QueryDependencyCollector? deps = plan.DepCollector;
-        Dictionary<int, RowLayout> layoutCache = new();
+        RowEncoder.RowDecodeState rowDecodeState = new();
         RowLayout? qualifiedLayout = null;
 
         // IN-list scan: record the index bucket once (covers all per-value range probes) and schema.
@@ -749,7 +749,7 @@ internal sealed class QueryJoinExecutor
                     table.Schema, txId, rowId.Value, data.Value,
                     required,
                     GetTableSchemaVersionForAlias(plan, source.Alias),
-                    layoutCache).ConfigureAwait(false);
+                    rowDecodeState).ConfigureAwait(false);
 
                 if (inListNode.ExecutionFilter is not null)
                 {
@@ -789,7 +789,7 @@ internal sealed class QueryJoinExecutor
                         table.Schema, txId, rowId, data.Value,
                         required,
                         GetTableSchemaVersionForAlias(plan, source.Alias),
-                        layoutCache).ConfigureAwait(false);
+                        rowDecodeState).ConfigureAwait(false);
 
                     if (inListNode.ExecutionFilter is not null)
                     {
@@ -1797,10 +1797,11 @@ internal sealed class QueryJoinExecutor
     /// Carries the two pieces of mutable state that the index-nested-loop right-side probe
     /// needs to reuse across iterations of the outer left-row loop:
     /// <list type="bullet">
-    ///   <item><see cref="LayoutCache"/> — keyed by stored schema version; holds the
-    ///   <see cref="RowLayout"/> built by <see cref="RowEncoder.DecodeToQueryRowAsync"/> for
-    ///   each version encountered. Avoids rebuilding a <see cref="FrozenDictionary{TKey,TValue}"/>
-    ///   on every right-row decode.</item>
+    ///   <item><see cref="DecodeState"/> — the per-probe <see cref="RowEncoder.RowDecodeState"/>,
+    ///   keyed by stored schema version; holds the precomputed row-decode plan built by
+    ///   <see cref="RowEncoder.DecodeToQueryRowAsync"/> for each version encountered, so the plan
+    ///   (layout plus per-column read/skip steps) is built at most once per version instead of on
+    ///   every right-row decode.</item>
     ///   <item><see cref="QualifiedLayout"/> — the alias-prefixed layout built from the first
     ///   right <see cref="QueryRow"/>; reused on every subsequent right-row qualify so
     ///   <see cref="QueryRowMerger.BuildQualifiedLayout"/> is called at most once per join node
@@ -1811,7 +1812,7 @@ internal sealed class QueryJoinExecutor
     /// </summary>
     private sealed class RightDecodeState
     {
-        internal readonly Dictionary<int, RowLayout> LayoutCache = new();
+        internal readonly RowEncoder.RowDecodeState DecodeState = new();
         internal RowLayout? QualifiedLayout;
     }
 
