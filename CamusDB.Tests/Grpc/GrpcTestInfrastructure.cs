@@ -190,6 +190,28 @@ internal sealed class ObservingStreamWriter<T> : IServerStreamWriter<T>
 }
 
 /// <summary>
+/// Server-side <see cref="IServerStreamWriter{T}"/> that forwards writes into an unbounded channel, so
+/// an in-process transport can bridge a real <c>BatchExecute</c> server call to a client reader loop.
+/// </summary>
+internal sealed class ChannelServerStreamWriter<T> : IServerStreamWriter<T>
+{
+    private readonly Channel<T> channel;
+
+    public ChannelServerStreamWriter(Channel<T> channel) => this.channel = channel;
+
+    public WriteOptions? WriteOptions { get; set; }
+
+    public Task WriteAsync(T message) => WriteAsync(message, CancellationToken.None);
+
+    public Task WriteAsync(T message, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        channel.Writer.TryWrite(message);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
 /// Helpers shared across the gRPC service test fixtures.
 /// </summary>
 internal static class GrpcAssert

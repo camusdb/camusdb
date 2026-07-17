@@ -19,6 +19,8 @@ CamusDB.Grpc.Client.Tests/bin
 CamusDB.Grpc.Client.Tests/obj
 CamusDB.Grpc.Client/bin
 CamusDB.Grpc.Client/obj
+CamusDB.Grpc.Contracts/bin
+CamusDB.Grpc.Contracts/obj
 CamusDB.Core\SQLParser.Language.analyzer.lst
 CamusDB.Core\sqlParser.Language.grammar.lst
 BenchmarkDotNet.Artifacts/

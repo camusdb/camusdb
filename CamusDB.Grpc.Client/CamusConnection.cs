@@ -23,11 +23,16 @@ public sealed class CamusConnection : IAsyncDisposable
     private readonly CamusSql.CamusSqlClient? unaryClient;
     private readonly GrpcChannel? ownedChannel;
 
-    /// <summary>Connects to <paramref name="address"/> (e.g. <c>https://host:port</c>).</summary>
+    /// <summary>
+    /// Connects to <paramref name="address"/> (e.g. <c>https://host:port</c>, or <c>http://…</c> for
+    /// plaintext h2c in dev). The channel's TLS trust policy and keep-alive tuning come from
+    /// <paramref name="options"/>; the pool multiplexes several long-lived <c>BatchExecute</c> streams
+    /// over it.
+    /// </summary>
     public static CamusConnection Connect(string address, CamusGrpcOptions? options = null)
     {
         options ??= new CamusGrpcOptions();
-        GrpcChannel channel = GrpcChannel.ForAddress(address);
+        GrpcChannel channel = ChannelFactory.Create(address, options);
         CamusSql.CamusSqlClient client = new(channel);
         GrpcBatcher batcher = new(options, id => new GrpcBatchTransport(id, client));
         return new CamusConnection(batcher, client, channel);

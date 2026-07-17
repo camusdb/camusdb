@@ -29,19 +29,12 @@
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj">
       <GlobalPropertiesToRemove></GlobalPropertiesToRemove>
     </ProjectReference>
+    <ProjectReference Include="..\CamusDB.Grpc.Contracts\CamusDB.Grpc.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CommandLineParser" Version="2.9.1" />
     <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
-    <PackageReference Include="Grpc.Tools" Version="2.67.0">
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-  </ItemGroup>
-
-  <ItemGroup>
-    <Protobuf Include="Protos\camus_sql.proto" GrpcServices="Server" />
   </ItemGroup>
 
   <ItemGroup>

@@ -34,4 +34,36 @@ public sealed class CamusGrpcOptions
     /// deadline (an op can then wait forever on a wedged stream). Mirrors Kahuna's operation timeout.
     /// </summary>
     public TimeSpan OperationTimeout { get; set; } = TimeSpan.Zero;
+
+    // ─── Transport (TLS + keep-alive) ─────────────────────────────────────────
+
+    /// <summary>
+    /// Accept any server certificate without chain validation. <b>Dev only</b> — disables TLS trust, so
+    /// never enable it against a real deployment. Ignored when
+    /// <see cref="TrustedServerCertificateThumbprints"/> is used (pinning takes precedence is not the
+    /// rule: insecure wins if set, so do not set both). Mirrors Kahuna's insecure toggle.
+    /// </summary>
+    public bool AllowInsecureCertificateValidation { get; set; }
+
+    /// <summary>
+    /// SHA-256 certificate thumbprints (hex) to pin the server certificate to. When non-empty (and
+    /// <see cref="AllowInsecureCertificateValidation"/> is false), the server cert is accepted only if its
+    /// SHA-256 hash matches one of these; the OS chain is bypassed. Empty = standard OS chain validation.
+    /// </summary>
+    public IList<string> TrustedServerCertificateThumbprints { get; } = new List<string>();
+
+    /// <summary>TCP connect timeout for a new channel connection.</summary>
+    public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>HTTP/2 keep-alive ping delay — keeps long-lived batch streams from being idled out.</summary>
+    public TimeSpan KeepAlivePingDelay { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long to wait for a keep-alive ping ack before treating the connection as dead.</summary>
+    public TimeSpan KeepAlivePingTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Let the handler open more than one HTTP/2 connection so many concurrent batch streams (and the
+    /// pool) aren't all funneled onto a single connection's stream limit. On by default.
+    /// </summary>
+    public bool EnableMultipleHttp2Connections { get; set; } = true;
 }

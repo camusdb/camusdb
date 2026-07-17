@@ -6,7 +6,7 @@ language binding. If you are writing a driver, an ORM/EF-Core-style provider, or
 in any language, this is the reference.
 
 The single source of truth for message shapes is the Protobuf definition at
-[`CamusDB/Protos/camus_sql.proto`](../CamusDB/Protos/camus_sql.proto). This document explains the
+[`CamusDB.Grpc.Contracts/Protos/camus_sql.proto`](../CamusDB.Grpc.Contracts/Protos/camus_sql.proto). This document explains the
 **semantics** the `.proto` cannot express: encoding rules, ordering guarantees, transaction and
 causal-token threading, the error/retry model, and the duplex batching handshake. Where the two ever
 disagree, the `.proto` wins — but the behavioral rules here are mandatory and are enforced
@@ -453,7 +453,9 @@ Use this as an acceptance list when building a client:
 
 ## 10. Related documents
 
-- Message shapes (source of truth): [`CamusDB/Protos/camus_sql.proto`](../CamusDB/Protos/camus_sql.proto)
+- The ready-made **.NET client** for this protocol: [grpc-dotnet-client.md](grpc-dotnet-client.md)
+  (`CamusDB.Grpc.Client`). Use it if you're on .NET rather than implementing the wire contract yourself.
+- Message shapes (source of truth): [`CamusDB.Grpc.Contracts/Protos/camus_sql.proto`](../CamusDB.Grpc.Contracts/Protos/camus_sql.proto)
 - Data types & the compact-raw encoding: [data-types.md](data-types.md)
 - Isolation, locking, and transaction modes: [transactions-locking-and-isolation.md](transactions-locking-and-isolation.md)
 - The retry contract the error model mirrors: [serializable-retry-contract.md](serializable-retry-contract.md)

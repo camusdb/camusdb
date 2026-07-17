@@ -9,22 +9,21 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Client stubs generated from the same contract the server compiles with GrpcServices="Server". -->
-    <Protobuf Include="..\CamusDB\Protos\camus_sql.proto" GrpcServices="Client" Link="Protos\camus_sql.proto" />
+    <!-- Shared contract types (messages + client stub) come from CamusDB.Grpc.Contracts so the client
+         and the server host reference one set of CamusDB.Grpc.* types. -->
+    <ProjectReference Include="..\CamusDB.Grpc.Contracts\CamusDB.Grpc.Contracts.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Google.Protobuf" Version="3.29.6" />
     <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
-    <PackageReference Include="Grpc.Tools" Version="2.67.0">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
   </ItemGroup>
 
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>CamusDB.Grpc.Client.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>CamusDB.Tests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 
