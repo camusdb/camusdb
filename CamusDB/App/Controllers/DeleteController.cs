@@ -32,10 +32,7 @@ public sealed class DeleteController : CommandsController
     {
         try
         {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            DeleteRequest? request = JsonSerializer.Deserialize<DeleteRequest>(body, jsonOptions);
+            DeleteRequest? request = await JsonSerializer.DeserializeAsync<DeleteRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 

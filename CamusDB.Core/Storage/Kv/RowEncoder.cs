@@ -427,7 +427,7 @@ public static class RowEncoder
                 if (!visible) continue;
                 if (!decodeAll && !requiredColumns!.Contains(current.Name)) continue;
 
-                values[ord] = current.DefaultValue ?? new(ColumnType.Null, 0L);
+                values[ord] = current.DefaultValue ?? ColumnValue.Null;
             }
         }
 
@@ -503,7 +503,7 @@ public static class RowEncoder
                 if (!decodeAll && !requiredColumns!.Contains(current.Name))
                     continue;
 
-                result[current.Name] = current.DefaultValue ?? new(ColumnType.Null, 0L);
+                result[current.Name] = current.DefaultValue ?? ColumnValue.Null;
             }
         }
 
@@ -563,7 +563,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeId =>
                         new(ColumnType.Id, Serializator.ReadObjectId(data, ref pointer).ToString()),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, ""),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -576,7 +576,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeInteger64 =>
                         new(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -591,7 +591,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeString32 =>
                         new(ColumnType.String, Serializator.ReadString(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -604,7 +604,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeDouble =>
                         new(ColumnType.Float64, Serializator.ReadDouble(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -615,9 +615,9 @@ public static class RowEncoder
                 return t switch
                 {
                     SerializatorTypes.TypeBool =>
-                        new(ColumnType.Bool, Serializator.ReadBool(data, ref pointer)),
+                        ColumnValue.FromBool(Serializator.ReadBool(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -630,7 +630,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeFloat =>
                         new(ColumnType.Float32, (double)Serializator.ReadFloat(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -643,7 +643,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeDate =>
                         new(ColumnType.Date, Serializator.ReadInt64(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -656,7 +656,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeDateTime =>
                         new(ColumnType.DateTime, Serializator.ReadInt64(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -669,7 +669,7 @@ public static class RowEncoder
                     SerializatorTypes.TypeBytes =>
                         new(Serializator.ReadBytesPayload(data, ref pointer)),
                     SerializatorTypes.TypeNull =>
-                        new(ColumnType.Null, 0L),
+                        ColumnValue.Null,
                     _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
                 };
             }
@@ -683,7 +683,7 @@ public static class RowEncoder
                     return new ColumnValue(ColumnType.Uuid, high, low);
                 }
                 if (t == SerializatorTypes.TypeNull)
-                    return new(ColumnType.Null, 0L);
+                    return ColumnValue.Null;
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
             }
 
@@ -691,7 +691,7 @@ public static class RowEncoder
             {
                 int t = Serializator.ReadType(data, ref pointer);
                 if (t == SerializatorTypes.TypeNull)
-                    return new(ColumnType.Null, 0L);
+                    return ColumnValue.Null;
                 if (t != SerializatorTypes.TypeArray32)
                     throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
 
@@ -736,7 +736,7 @@ public static class RowEncoder
             {
                 int t = Serializator.ReadType(data, ref pointer);
                 if (t is SerializatorTypes.TypeString8 or SerializatorTypes.TypeString16 or SerializatorTypes.TypeString32)
-                    Serializator.ReadString(data, ref pointer);
+                    Serializator.SkipLengthPrefixedPayload(data, ref pointer);
                 else if (t != SerializatorTypes.TypeNull)
                     throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
                 break;
@@ -794,7 +794,7 @@ public static class RowEncoder
             {
                 int t = Serializator.ReadType(data, ref pointer);
                 if (t == SerializatorTypes.TypeBytes)
-                    Serializator.ReadBytesPayload(data, ref pointer);
+                    Serializator.SkipLengthPrefixedPayload(data, ref pointer);
                 else if (t != SerializatorTypes.TypeNull)
                     throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
                 break;
@@ -913,7 +913,7 @@ public static class RowEncoder
             ColumnType.Integer64 => new(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
             ColumnType.Float32   => new(ColumnType.Float32,   (double)Serializator.ReadFloat(data, ref pointer)),
             ColumnType.Float64   => new(ColumnType.Float64,   Serializator.ReadDouble(data, ref pointer)),
-            ColumnType.Bool      => new(ColumnType.Bool,      Serializator.ReadBool(data, ref pointer)),
+            ColumnType.Bool      => ColumnValue.FromBool(Serializator.ReadBool(data, ref pointer)),
             ColumnType.String    => new(ColumnType.String,    Serializator.ReadString(data, ref pointer)),
             ColumnType.Bytes     => new(Serializator.ReadBytesPayload(data, ref pointer)),
             ColumnType.Uuid      => ReadUuidElement(data, ref pointer),
@@ -954,10 +954,10 @@ public static class RowEncoder
             case SerializatorTypes.TypeString8:
             case SerializatorTypes.TypeString16:
             case SerializatorTypes.TypeString32:
-                Serializator.ReadString(data, ref pointer);
+                Serializator.SkipLengthPrefixedPayload(data, ref pointer);
                 break;
             case SerializatorTypes.TypeBytes:
-                Serializator.ReadBytesPayload(data, ref pointer);
+                Serializator.SkipLengthPrefixedPayload(data, ref pointer);
                 break;
             case SerializatorTypes.TypeUuid:
                 pointer += SerializatorTypeSizes.TypeUuid;

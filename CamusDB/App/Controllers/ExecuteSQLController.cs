@@ -50,12 +50,7 @@ public sealed class ExecuteSQLController : CommandsController
         {
             //Stopwatch stopwatch = Stopwatch.StartNew();
 
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            //Log.LogRequestBody(logger, body);
-
-            ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
@@ -64,7 +59,7 @@ public sealed class ExecuteSQLController : CommandsController
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
-            Console.WriteLine("sql: {0}", sql.Replace("\n", " "));
+            Log.LogExecutingSql(logger, sql);
 
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
@@ -190,16 +185,11 @@ public sealed class ExecuteSQLController : CommandsController
     {
         try
         {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            //Log.LogRequestBody(logger, body);
-
-            ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
-            Console.WriteLine("sql: {0}", request.Sql?.Replace("\n", " ") ?? "");
+            Log.LogExecutingSql(logger, request.Sql ?? "");
 
             (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2) = ParseRequestLevelMode(request);
 

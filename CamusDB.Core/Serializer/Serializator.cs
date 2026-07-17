@@ -181,6 +181,22 @@ public sealed class Serializator
         return ReadByteArray(buffer, length, ref pointer);
     }
 
+    /// <summary>
+    /// Advances <paramref name="pointer"/> past a 4-byte length-prefixed payload (a String or Bytes
+    /// value) without decoding or copying it. Used when a column is projected out of a row: the value
+    /// is discarded, so materializing a managed string or a fresh byte[] only to throw it away is pure
+    /// allocation waste. Validates the length so a corrupt frame fails loudly rather than moving the
+    /// cursor out of range or backwards.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void SkipLengthPrefixedPayload(ReadOnlySpan<byte> buffer, ref int pointer)
+    {
+        int length = ReadInt32(buffer, ref pointer);
+        if (length < 0 || (long)pointer + length > buffer.Length)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Invalid length-prefixed payload length {length}");
+        pointer += length;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteObjectId(byte[] buffer, ObjectIdValue id, ref int pointer)
     {

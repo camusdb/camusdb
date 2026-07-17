@@ -85,51 +85,18 @@ public sealed class ObjectId
         return false;
     }
 
-    private static bool TryParseHexString(string s, out byte[] bytes)
-    {
-        bytes = Array.Empty<byte>();
-
-        if (s == null)
-            return false;
-
-        byte[] buffer = new byte[(s.Length + 1) / 2];
-
-        int i = 0;
-        int j = 0;
-
-        if ((s.Length % 2) == 1) // if s has an odd length assume an implied leading "0"
-        {
-            if (!TryParseHexChar(s[i++], out int y))
-                return false;
-
-            buffer[j++] = (byte)y;
-        }
-
-        while (i < s.Length)
-        {
-            if (!TryParseHexChar(s[i++], out int x))
-                return false;
-
-            if (!TryParseHexChar(s[i++], out int y))
-                return false;
-
-            buffer[j++] = (byte)((x << 4) | y);
-        }
-
-        bytes = buffer;
-        return true;
-    }
-
+    /// <summary>
+    /// Parses a 24-character lowercase-hex id from a <see cref="string"/>. Delegates to the
+    /// <see cref="ReadOnlySpan{Char}"/> overload so no intermediate <c>byte[]</c> is allocated; every
+    /// caller passes a canonical 24-char id (row ids, index start offsets, and CAST which validates
+    /// length first). Non-24-char input throws <see cref="FormatException"/>, which CAST already handles.
+    /// </summary>
     public static ObjectIdValue ToValue(string s)
     {
-        if (!TryParseHexString(s, out byte[] bytes))
+        if (s is null)
             throw new FormatException("String should contain only hexadecimal digits.");
 
-        int a = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
-        int b = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
-        int c = (bytes[8] << 24) | (bytes[9] << 16) | (bytes[10] << 8) | bytes[11];
-
-        return new(a, b, c);
+        return ToValue(s.AsSpan());
     }
 
     /// <summary>
@@ -156,6 +123,36 @@ public sealed class ObjectId
         for (int i = 0; i < 8; i++)
         {
             if (!TryParseHexChar(s[offset + i], out int nibble))
+                return false;
+            result = (result << 4) | nibble;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Parses the 24-byte ASCII lowercase-hex row-id form stored in unique-index values directly to an
+    /// <see cref="ObjectIdValue"/>, without materializing an intermediate <see cref="string"/> via
+    /// <c>Encoding.UTF8.GetString</c>. Each byte is one ASCII hex digit. Use this on the unique-index
+    /// scan/probe paths in <see cref="CamusDB.Core.Storage.Kv.KvTableStore"/>.
+    /// </summary>
+    public static ObjectIdValue ToValue(ReadOnlySpan<byte> asciiHex)
+    {
+        if (asciiHex.Length != 24)
+            throw new FormatException("String should contain only hexadecimal digits.");
+
+        if (!TryParseHex8(asciiHex, 0, out int a) || !TryParseHex8(asciiHex, 8, out int b) || !TryParseHex8(asciiHex, 16, out int c))
+            throw new FormatException("String should contain only hexadecimal digits.");
+
+        return new(a, b, c);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryParseHex8(ReadOnlySpan<byte> s, int offset, out int result)
+    {
+        result = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            if (!TryParseHexChar((char)s[offset + i], out int nibble))
                 return false;
             result = (result << 4) | nibble;
         }

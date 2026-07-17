@@ -32,10 +32,7 @@ public sealed class QueryController : CommandsController
     {
         try
         {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            QueryRequest? request = JsonSerializer.Deserialize<QueryRequest>(body, jsonOptions);
+            QueryRequest? request = await JsonSerializer.DeserializeAsync<QueryRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
@@ -138,10 +135,7 @@ public sealed class QueryController : CommandsController
     {
         try
         {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            QueryByIdRequest? request = JsonSerializer.Deserialize<QueryByIdRequest>(body, jsonOptions);
+            QueryByIdRequest? request = await JsonSerializer.DeserializeAsync<QueryByIdRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new Exception("QueryById request is not valid");
 

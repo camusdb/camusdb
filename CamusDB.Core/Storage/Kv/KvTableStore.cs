@@ -181,7 +181,7 @@ public sealed class KvTableStore
     /// Used by the dependency collector to record per-row point dependencies without exposing
     /// the internal key-prefix fields.
     /// </summary>
-    public string RowPointKey(ObjectIdValue rowId) => rowKeyPrefix + rowId.ToString();
+    public string RowPointKey(ObjectIdValue rowId) => BuildRowKey(rowId);
 
     /// <summary>
     /// Exposes the underlying <see cref="IKahuna"/> instance for use by the strict-validation
@@ -1018,7 +1018,7 @@ public sealed class KvTableStore
 
         (BranchKvKind idxKind, byte[]? idxPayload) = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
         if (idxKind == BranchKvKind.Tombstone) return null;   // tombstone at this level
-        if (idxPayload is not null) return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
+        if (idxPayload is not null) return ObjectId.ToValue(idxPayload);
 
         // Miss at level-0: walk ancestry.
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
@@ -1027,7 +1027,7 @@ public sealed class KvTableStore
             string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
             (idxKind, idxPayload) = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
             if (idxKind == BranchKvKind.Tombstone) return null;
-            if (idxPayload is not null) return ObjectId.ToValue(Encoding.UTF8.GetString(idxPayload));
+            if (idxPayload is not null) return ObjectId.ToValue(idxPayload);
         }
 
         return null;
@@ -1126,7 +1126,7 @@ public sealed class KvTableStore
                         continue;
 
                     encodedKey = suffix.ToString();
-                    rowId = ObjectId.ToValue(Encoding.UTF8.GetString(scanPayload));
+                    rowId = ObjectId.ToValue(scanPayload);
                 }
                 else
                 {
@@ -1234,7 +1234,7 @@ public sealed class KvTableStore
                                 if (payload is not null)
                                 {
                                     encKey = suffix;
-                                    rowId = ObjectId.ToValue(Encoding.UTF8.GetString(payload));
+                                    rowId = ObjectId.ToValue(payload);
                                 }
                             }
                             else if (suffix.Length >= RowIdHexLength)
@@ -2675,9 +2675,22 @@ public sealed class KvTableStore
             ? cached
             : indexBucketPrefixCache.GetOrAdd(indexId, static (id, prefix) => $"{prefix}:i:{id}", tableKeyPrefix);
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    // Composes "{bucket}/{encodedKey}" straight into the final string's buffer — one allocation, no
+    // intermediate KeyEncoder.Encode(...) string interpolated into a second string. `bucket` is the
+    // cached "{dbId}:{tableId}:i:{indexId}" prefix (== "{tableKeyPrefix}:i:{indexId}").
     private string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)
-        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key, DirectionsOf(indexId))}";
+    {
+        string bucket = BuildIndexBucketPrefix(indexId);
+        OrderType[]? directions = DirectionsOf(indexId);
+        int encodedLen = KeyEncoder.Measure(key, directions);
+        return string.Create(bucket.Length + 1 + encodedLen, (bucket, key, directions), static (span, state) =>
+        {
+            state.bucket.CopyTo(span);
+            span[state.bucket.Length] = '/';
+            int pos = state.bucket.Length + 1;
+            KeyEncoder.Write(span, ref pos, state.key, state.directions);
+        });
+    }
 
     // Read-path variant: returns false when the key cannot be encoded (an invalid Id value that no
     // stored row can equal), so a point lookup treats it as a miss instead of throwing.
@@ -2694,10 +2707,22 @@ public sealed class KvTableStore
     }
 
     // Non-unique: rowIdHex appended directly (no separator) so the last slash in the full
-    // key is always the one after {indexId}, keeping the routing hash stable.
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    // key is always the one after {indexId}, keeping the routing hash stable. Composed straight into
+    // the final buffer — one allocation, no encoded-key string and no rowId.ToString() temporary.
     private string BuildNonUniqueIndexKey(string indexId, CompositeColumnValue key, ObjectIdValue rowId)
-        => $"{tableKeyPrefix}:i:{indexId}/{KeyEncoder.Encode(key, DirectionsOf(indexId))}{rowId}";
+    {
+        string bucket = BuildIndexBucketPrefix(indexId);
+        OrderType[]? directions = DirectionsOf(indexId);
+        int encodedLen = KeyEncoder.Measure(key, directions);
+        return string.Create(bucket.Length + 1 + encodedLen + 24, (bucket, key, directions, rowId), static (span, state) =>
+        {
+            state.bucket.CopyTo(span);
+            span[state.bucket.Length] = '/';
+            int pos = state.bucket.Length + 1;
+            KeyEncoder.Write(span, ref pos, state.key, state.directions);
+            ObjectId.WriteHex(span[pos..], state.rowId.a, state.rowId.b, state.rowId.c);
+        });
+    }
 
     // Formats a human-readable "table.index" key name for duplicate-key errors.
     // Resolves the immutable KvId to the mutable display name via the table-open-time registry.

@@ -124,10 +124,35 @@ public static class KeyEncoder
         return string.Create(length, (composite, directions), static (span, state) =>
         {
             int pos = 0;
-            ColumnValue[] values = state.composite.Values;
-            for (int i = 0; i < values.Length; i++)
-                WriteValue(span, ref pos, values[i], DirectionAt(state.directions, i));
+            Write(span, ref pos, state.composite, state.directions);
         });
+    }
+
+    /// <summary>
+    /// Number of UTF-16 code units <see cref="Write"/> will emit for <paramref name="composite"/>.
+    /// Exposed so a caller composing a larger key (bucket prefix + encoded key + row-id suffix) can
+    /// size one final <c>string.Create</c> buffer and write the encoded key straight into it, instead
+    /// of interpolating an already-allocated <see cref="Encode"/> result into a second string.
+    /// <paramref name="directions"/> does not affect length (descending keeps each field's width).
+    /// </summary>
+    public static int Measure(CompositeColumnValue composite, OrderType[]? directions = null)
+    {
+        ArgumentNullException.ThrowIfNull(composite);
+        return MeasureComposite(composite);
+    }
+
+    /// <summary>
+    /// Writes the order-preserving encoding of <paramref name="composite"/> into <paramref name="dest"/>
+    /// starting at <paramref name="pos"/>, advancing <paramref name="pos"/> past the written region.
+    /// <paramref name="dest"/> must have at least <see cref="Measure"/> code units free from
+    /// <paramref name="pos"/>. This is the shared core of <see cref="Encode"/>; callers that build a
+    /// composite key can invoke it directly to avoid an intermediate encoded-key string.
+    /// </summary>
+    public static void Write(Span<char> dest, ref int pos, CompositeColumnValue composite, OrderType[]? directions)
+    {
+        ColumnValue[] values = composite.Values;
+        for (int i = 0; i < values.Length; i++)
+            WriteValue(dest, ref pos, values[i], DirectionAt(directions, i));
     }
 
     /// <summary>
@@ -511,7 +536,7 @@ public static class KeyEncoder
             bool isNull = descending ? marker == PresentMarker : marker == NullMarker;
             if (isNull)
             {
-                values[i] = new ColumnValue(ColumnType.Null, false);
+                values[i] = ColumnValue.Null;
                 continue;
             }
 
@@ -580,34 +605,44 @@ public static class KeyEncoder
                 case ColumnType.Bytes:
                 {
                     RejectDescendingTerminatedType(descending, types[i]);
-                    List<byte> bytes = new();
+
+                    // First locate the field terminator ("<lead><tail>") so the output array is sized
+                    // exactly (no growing List<byte> + ToArray). Content is two hex chars per byte, and
+                    // the terminator lead (0x0000) is below every hex digit, so it can only appear at a
+                    // group boundary — the same positions the original per-group loop inspected.
+                    int scan = pos;
                     while (true)
                     {
-                        if (pos >= key.Length)
+                        if (scan >= key.Length)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unterminated bytes field at field {i}");
 
-                        if (key[pos] == FieldTerminatorLead)
-                        {
-                            pos++;
-                            if (pos >= key.Length || key[pos] != FieldTerminatorTail)
-                                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Malformed bytes terminator at field {i}");
-                            pos++;
+                        if (key[scan] == FieldTerminatorLead)
                             break;
-                        }
 
-                        if (pos + 2 > key.Length)
+                        if (scan + 2 > key.Length)
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated hex byte at field {i}");
 
-                        bytes.Add(byte.Parse(key.AsSpan(pos, 2), System.Globalization.NumberStyles.HexNumber));
-                        pos += 2;
+                        scan += 2;
                     }
-                    values[i] = new ColumnValue(bytes.ToArray());
+
+                    int hexLen = scan - pos; // even by construction (each step consumes a 2-char group)
+                    byte[] decoded = new byte[hexLen / 2];
+                    for (int b = 0; b < decoded.Length; b++)
+                        decoded[b] = byte.Parse(key.AsSpan(pos + (b * 2), 2), System.Globalization.NumberStyles.HexNumber);
+
+                    // Consume the two-char terminator.
+                    pos = scan + 1;
+                    if (pos >= key.Length || key[pos] != FieldTerminatorTail)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Malformed bytes terminator at field {i}");
+                    pos++;
+
+                    values[i] = new ColumnValue(decoded);
                     break;
                 }
 
                 case ColumnType.Bool:
                     // Ascending: '1'==true. Descending inverts so '0'==true.
-                    values[i] = new ColumnValue(ColumnType.Bool, descending ? key[pos++] == '0' : key[pos++] == '1');
+                    values[i] = ColumnValue.FromBool(descending ? key[pos++] == '0' : key[pos++] == '1');
                     break;
 
                 case ColumnType.Uuid:

@@ -32,10 +32,7 @@ public sealed class UpdateController : CommandsController
     {
         try
         {
-            using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
-
-            UpdateRequest? request = JsonSerializer.Deserialize<UpdateRequest>(body, jsonOptions);
+            UpdateRequest? request = await JsonSerializer.DeserializeAsync<UpdateRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Update request is not valid");
 
