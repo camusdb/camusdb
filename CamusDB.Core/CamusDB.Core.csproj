@@ -74,10 +74,10 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.7.2" />
-    <PackageReference Include="Kahuna.Shared" Version="0.7.2" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
-    <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
+    <PackageReference Include="Kahuna.Core" Version="0.7.3" />
+    <PackageReference Include="Kahuna.Shared" Version="0.7.3" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <!-- System.Linq.Async removed: .NET 10 includes IAsyncEnumerable LINQ built-in -->
