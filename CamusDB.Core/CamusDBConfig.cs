@@ -459,6 +459,19 @@ public static class CamusDBConfig
     public static int SpillMergeFanIn = 16;
 
     /// <summary>
+    /// Upper bound on a single spill-run record's declared payload length, checked before the
+    /// reader allocates or rents a buffer for it. A spill file is trusted engine output, but the
+    /// frame-length prefix is still read straight off disk, so a corrupt or truncated file could
+    /// otherwise name an absurd length and drive an <see cref="OutOfMemoryException"/> or a huge
+    /// pool rent. A length that is negative or exceeds this cap is rejected as
+    /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> instead. Generous by default so it
+    /// never trips on a legitimately wide row (large Bytes/Array columns).
+    ///
+    /// Default: <c>256 MiB</c>.
+    /// </summary>
+    public static int SpillMaxFrameBytes = 256 * 1024 * 1024;
+
+    /// <summary>
     /// <b>Test-only override.</b> When non-null, replaces <see cref="SpillThresholdRows"/> with
     /// this value for every operator, forcing spill on tiny inputs so the spill code path runs
     /// deterministically in unit tests without large data sets. Has no production use.
@@ -495,7 +508,7 @@ public static class CamusDBConfig
     /// <summary>
     /// Default maximum length (in UTF-16 <c>string.Length</c> characters) for a <c>String</c>
     /// column declared without an explicit <c>string(N)</c> bound.
-    /// Applied at write-validation time (T7); stored as <c>null</c> in the schema metadata.
+    /// Enforced when a row value is validated on write; stored as <c>null</c> in the schema metadata.
     /// Value: 2 621 440 characters (~5 MB in the worst-case UTF-16 encoding).
     /// </summary>
     public const int DefaultStringMaxLength = 2_621_440;
@@ -503,7 +516,7 @@ public static class CamusDBConfig
     /// <summary>
     /// Default maximum payload length (in bytes) for a <c>Bytes</c> column declared without
     /// an explicit bound.
-    /// Applied at write-validation time (T7); stored as <c>null</c> in the schema metadata.
+    /// Enforced when a row value is validated on write; stored as <c>null</c> in the schema metadata.
     /// Value: 10 485 760 bytes (10 MB).
     /// </summary>
     public const int DefaultBytesMaxLength = 10_485_760;

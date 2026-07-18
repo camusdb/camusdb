@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using System.Buffers.Binary;
 using System.IO;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -35,6 +36,14 @@ internal sealed class SpillRunReader : IAsyncDisposable
     private readonly FileStream _stream;
 
     private readonly byte[] _lenBuf = new byte[4];
+
+    // One growable pooled buffer reused across records: each payload is read into the active
+    // prefix and decoded synchronously before the next AdvanceAsync overwrites it. Grown (and the
+    // old buffer returned) only when a record is larger than the current capacity, so steady-state
+    // reading allocates no per-record array. Returned to the pool on dispose. Safe to reuse because
+    // SpillRowCodec copies every string/byte value out into owned ColumnValue storage on decode, so
+    // a decoded row never references this buffer.
+    private byte[] _payloadBuffer = [];
 
     private QueryResultRow _current;
 
@@ -130,9 +139,16 @@ internal sealed class SpillRunReader : IAsyncDisposable
                 throw new InvalidDataException("SpillRunReader: truncated frame-length header");
 
             int payloadLen = BinaryPrimitives.ReadInt32LittleEndian(_lenBuf);
-            byte[] payload = new byte[payloadLen];
-            await _stream.ReadExactlyAsync(payload, ct).ConfigureAwait(false);
+            if (payloadLen < 0 || payloadLen > CamusDBConfig.SpillMaxFrameBytes)
+                throw new InvalidDataException(
+                    $"SpillRunReader: invalid frame length {payloadLen} (max {CamusDBConfig.SpillMaxFrameBytes})");
 
+            EnsurePayloadCapacity(payloadLen);
+            await _stream.ReadExactlyAsync(_payloadBuffer.AsMemory(0, payloadLen), ct).ConfigureAwait(false);
+
+            // Decode from the active prefix; SpillRowCodec copies values out so nothing keeps a
+            // reference into _payloadBuffer once decode returns and the next Advance may reuse it.
+            ReadOnlySpan<byte> payload = _payloadBuffer.AsSpan(0, payloadLen);
             if (_layout is not null)
             {
                 QueryRow qr = SpillRowCodec.DecodeValueOnlyPayload(payload, _layout);
@@ -156,6 +172,29 @@ internal sealed class SpillRunReader : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Grows the reusable payload buffer to hold at least <paramref name="required"/> bytes, renting a
+    /// larger array from the pool and returning the previous one. A no-op while the current buffer
+    /// already fits, which is the steady state once the buffer has grown to the run's widest record.
+    /// </summary>
+    private void EnsurePayloadCapacity(int required)
+    {
+        if (_payloadBuffer.Length >= required)
+            return;
+
+        if (_payloadBuffer.Length > 0)
+            ArrayPool<byte>.Shared.Return(_payloadBuffer);
+        _payloadBuffer = ArrayPool<byte>.Shared.Rent(required);
+    }
+
     /// <inheritdoc/>
-    public ValueTask DisposeAsync() => _stream.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        if (_payloadBuffer.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_payloadBuffer);
+            _payloadBuffer = [];
+        }
+        await _stream.DisposeAsync().ConfigureAwait(false);
+    }
 }

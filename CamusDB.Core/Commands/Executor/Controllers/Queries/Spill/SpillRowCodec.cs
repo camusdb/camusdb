@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using System.IO;
 using System.Text;
 using System.Buffers.Binary;
@@ -39,15 +40,30 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// Column ordering is preserved on decode (insertion order of the source dictionary is maintained).
 /// Callers that depend on positional column order must not rely on dictionary enumeration order from
 /// other sources.
+///
+/// <para>
+/// <b>Allocation:</b> the stream-writing encoders serialize each record into a stack buffer (small
+/// frames) or a pooled <see cref="ArrayPool{T}"/> buffer (large frames) and write it synchronously,
+/// so steady-state spill writing allocates no per-row frame array. The wire format is byte-identical
+/// to the earlier per-row-<c>new byte[]</c> implementation — spill files remain compatible.
+/// </para>
 /// </summary>
 public static class SpillRowCodec
 {
+    /// <summary>
+    /// Frames at or below this size are serialized on the stack; larger frames rent from
+    /// <see cref="ArrayPool{T}"/>. Kept a small compile-time constant so the <c>stackalloc</c> can
+    /// never be driven past a safe bound by a wide row — the pool covers everything above it.
+    /// </summary>
+    private const int StackFrameThreshold = 512;
+
     // ──────────────────────────────────────────────────────────────────────────
     // Encode
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Encodes <paramref name="row"/> as a framed record: <c>[int32 payloadLen][payload]</c>.
+    /// Allocates the returned array; the hot path is <see cref="EncodeToStream"/>, which does not.
     /// </summary>
     public static byte[] Encode(QueryResultRow row)
     {
@@ -61,11 +77,32 @@ public static class SpillRowCodec
         return frame;
     }
 
-    /// <summary>Appends the framed record to <paramref name="stream"/>.</summary>
+    /// <summary>
+    /// Appends the framed record to <paramref name="stream"/> without allocating a per-row frame
+    /// array: the frame is built in a stack buffer (small rows) or a pooled buffer (large rows) and
+    /// written synchronously.
+    /// </summary>
     public static void EncodeToStream(Stream stream, QueryResultRow row)
     {
-        byte[] frame = Encode(row);
-        stream.Write(frame, 0, frame.Length);
+        int payloadSize = MeasurePayload(row);
+        int total = 4 + payloadSize;
+
+        byte[]? rented = null;
+        Span<byte> frame = total <= StackFrameThreshold
+            ? stackalloc byte[total]
+            : (rented = ArrayPool<byte>.Shared.Rent(total)).AsSpan(0, total);
+        try
+        {
+            int pos = 0;
+            WriteInt32(frame, payloadSize, ref pos);
+            WritePayload(frame, row, ref pos);
+            stream.Write(frame);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -94,11 +131,14 @@ public static class SpillRowCodec
     }
 
     /// <summary>
-    /// Decodes a row from a pre-read payload byte array (no leading frame-length prefix).
+    /// Decodes a row from a pre-read payload span (no leading frame-length prefix).
     /// Used by <see cref="SpillRunReader"/>, which strips the 4-byte length header from
-    /// the stream separately before reading exactly that many bytes.
+    /// the stream separately and reads exactly that many bytes into a reusable buffer — so the
+    /// span may cover only a prefix of a larger backing array. Strings and byte arrays are copied
+    /// out into owned <see cref="ColumnValue"/> storage, so the decoded row keeps no reference into
+    /// <paramref name="payload"/> and the caller may immediately reuse the buffer.
     /// </summary>
-    public static QueryResultRow DecodePayload(byte[] payload)
+    public static QueryResultRow DecodePayload(ReadOnlySpan<byte> payload)
     {
         int offset = 0;
         return ReadPayload(payload, ref offset);
@@ -118,7 +158,7 @@ public static class SpillRowCodec
     // Payload write
     // ──────────────────────────────────────────────────────────────────────────
 
-    private static void WritePayload(byte[] buf, QueryResultRow row, ref int pos)
+    private static void WritePayload(Span<byte> buf, QueryResultRow row, ref int pos)
     {
         WriteRowId(buf, row.RowId, ref pos);
 
@@ -127,23 +167,19 @@ public static class SpillRowCodec
 
         foreach (KeyValuePair<string, ColumnValue> kv in columns)
         {
-            byte[] nameBytes = Encoding.UTF8.GetBytes(kv.Key);
-            WriteInt32(buf, nameBytes.Length, ref pos);
-            Buffer.BlockCopy(nameBytes, 0, buf, pos, nameBytes.Length);
-            pos += nameBytes.Length;
-
+            WriteStringUtf8(buf, kv.Key, ref pos);
             WriteColumnValue(buf, kv.Value, ref pos);
         }
     }
 
-    private static void WriteRowId(byte[] buf, ObjectIdValue id, ref int pos)
+    private static void WriteRowId(Span<byte> buf, ObjectIdValue id, ref int pos)
     {
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), id.a); pos += 4;
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), id.b); pos += 4;
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), id.c); pos += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(buf[pos..], id.a); pos += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(buf[pos..], id.b); pos += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(buf[pos..], id.c); pos += 4;
     }
 
-    private static void WriteColumnValue(byte[] buf, ColumnValue cv, ref int pos)
+    private static void WriteColumnValue(Span<byte> buf, ColumnValue cv, ref int pos)
     {
         buf[pos++] = (byte)cv.Type;
 
@@ -159,17 +195,17 @@ public static class SpillRowCodec
             case ColumnType.Integer64:
             case ColumnType.Date:
             case ColumnType.DateTime:
-                BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), cv.LongValue);
+                BinaryPrimitives.WriteInt64LittleEndian(buf[pos..], cv.LongValue);
                 pos += 8;
                 break;
 
             case ColumnType.Float64:
-                BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(pos), cv.FloatValue);
+                BinaryPrimitives.WriteDoubleLittleEndian(buf[pos..], cv.FloatValue);
                 pos += 8;
                 break;
 
             case ColumnType.Float32:
-                BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(pos), (float)cv.FloatValue);
+                BinaryPrimitives.WriteSingleLittleEndian(buf[pos..], (float)cv.FloatValue);
                 pos += 4;
                 break;
 
@@ -185,7 +221,7 @@ public static class SpillRowCodec
             {
                 byte[] bytes = cv.BytesValue ?? [];
                 WriteInt32(buf, bytes.Length, ref pos);
-                Buffer.BlockCopy(bytes, 0, buf, pos, bytes.Length);
+                bytes.CopyTo(buf[pos..]);
                 pos += bytes.Length;
                 break;
             }
@@ -205,7 +241,7 @@ public static class SpillRowCodec
         }
     }
 
-    private static void WriteArrayElement(byte[] buf, ColumnType elementType, ColumnValue el, ref int pos)
+    private static void WriteArrayElement(Span<byte> buf, ColumnType elementType, ColumnValue el, ref int pos)
     {
         if (el.Type == ColumnType.Null)
         {
@@ -224,17 +260,17 @@ public static class SpillRowCodec
             case ColumnType.Integer64:
             case ColumnType.Date:
             case ColumnType.DateTime:
-                BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(pos), el.LongValue);
+                BinaryPrimitives.WriteInt64LittleEndian(buf[pos..], el.LongValue);
                 pos += 8;
                 break;
 
             case ColumnType.Float64:
-                BinaryPrimitives.WriteDoubleLittleEndian(buf.AsSpan(pos), el.FloatValue);
+                BinaryPrimitives.WriteDoubleLittleEndian(buf[pos..], el.FloatValue);
                 pos += 8;
                 break;
 
             case ColumnType.Float32:
-                BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(pos), (float)el.FloatValue);
+                BinaryPrimitives.WriteSingleLittleEndian(buf[pos..], (float)el.FloatValue);
                 pos += 4;
                 break;
 
@@ -250,7 +286,7 @@ public static class SpillRowCodec
             {
                 byte[] bytes = el.BytesValue ?? [];
                 WriteInt32(buf, bytes.Length, ref pos);
-                Buffer.BlockCopy(bytes, 0, buf, pos, bytes.Length);
+                bytes.CopyTo(buf[pos..]);
                 pos += bytes.Length;
                 break;
             }
@@ -260,17 +296,17 @@ public static class SpillRowCodec
         }
     }
 
-    private static void WriteStringUtf8(byte[] buf, string s, ref int pos)
+    private static void WriteStringUtf8(Span<byte> buf, string s, ref int pos)
     {
         int byteCount = Encoding.UTF8.GetByteCount(s);
         WriteInt32(buf, byteCount, ref pos);
-        Encoding.UTF8.GetBytes(s, buf.AsSpan(pos));
+        Encoding.UTF8.GetBytes(s, buf[pos..]);
         pos += byteCount;
     }
 
-    private static void WriteInt32(byte[] buf, int value, ref int pos)
+    private static void WriteInt32(Span<byte> buf, int value, ref int pos)
     {
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(pos), value);
+        BinaryPrimitives.WriteInt32LittleEndian(buf[pos..], value);
         pos += 4;
     }
 
@@ -278,7 +314,7 @@ public static class SpillRowCodec
     // Payload read
     // ──────────────────────────────────────────────────────────────────────────
 
-    private static QueryResultRow ReadPayload(byte[] data, ref int pos)
+    private static QueryResultRow ReadPayload(ReadOnlySpan<byte> data, ref int pos)
     {
         ObjectIdValue rowId = ReadRowId(data, ref pos);
         int count = ReadInt32(data, ref pos);
@@ -286,10 +322,7 @@ public static class SpillRowCodec
         var row = new Dictionary<string, ColumnValue>(count, StringComparer.Ordinal);
         for (int i = 0; i < count; i++)
         {
-            int nameLen = ReadInt32(data, ref pos);
-            string name = Encoding.UTF8.GetString(data, pos, nameLen);
-            pos += nameLen;
-
+            string name = ReadStringUtf8(data, ref pos);
             ColumnValue cv = ReadColumnValue(data, ref pos);
             row[name] = cv;
         }
@@ -297,15 +330,15 @@ public static class SpillRowCodec
         return new QueryResultRow(rowId, row);
     }
 
-    private static ObjectIdValue ReadRowId(byte[] data, ref int pos)
+    private static ObjectIdValue ReadRowId(ReadOnlySpan<byte> data, ref int pos)
     {
-        int a = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(pos)); pos += 4;
-        int b = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(pos)); pos += 4;
-        int c = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(pos)); pos += 4;
+        int a = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]); pos += 4;
+        int b = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]); pos += 4;
+        int c = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]); pos += 4;
         return new ObjectIdValue(a, b, c);
     }
 
-    private static ColumnValue ReadColumnValue(byte[] data, ref int pos)
+    private static ColumnValue ReadColumnValue(ReadOnlySpan<byte> data, ref int pos)
     {
         ColumnType type = (ColumnType)data[pos++];
 
@@ -319,31 +352,31 @@ public static class SpillRowCodec
 
             case ColumnType.Integer64:
             {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(pos)); pos += 8;
+                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.Integer64, v);
             }
 
             case ColumnType.Date:
             {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(pos)); pos += 8;
+                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.Date, v);
             }
 
             case ColumnType.DateTime:
             {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(pos)); pos += 8;
+                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.DateTime, v);
             }
 
             case ColumnType.Float64:
             {
-                double v = BinaryPrimitives.ReadDoubleLittleEndian(data.AsSpan(pos)); pos += 8;
+                double v = BinaryPrimitives.ReadDoubleLittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.Float64, v);
             }
 
             case ColumnType.Float32:
             {
-                float v = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(pos)); pos += 4;
+                float v = BinaryPrimitives.ReadSingleLittleEndian(data[pos..]); pos += 4;
                 return new ColumnValue(ColumnType.Float32, (double)v);
             }
 
@@ -357,7 +390,7 @@ public static class SpillRowCodec
             {
                 int len = ReadInt32(data, ref pos);
                 byte[] bytes = new byte[len];
-                Buffer.BlockCopy(data, pos, bytes, 0, len);
+                data.Slice(pos, len).CopyTo(bytes);
                 pos += len;
                 return new ColumnValue(bytes);
             }
@@ -377,7 +410,7 @@ public static class SpillRowCodec
         }
     }
 
-    private static ColumnValue ReadArrayElement(ColumnType elementType, byte[] data, ref int pos)
+    private static ColumnValue ReadArrayElement(ColumnType elementType, ReadOnlySpan<byte> data, ref int pos)
     {
         byte isNonNull = data[pos++];
         if (isNonNull == 0)
@@ -390,31 +423,31 @@ public static class SpillRowCodec
 
             case ColumnType.Integer64:
             {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(pos)); pos += 8;
+                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.Integer64, v);
             }
 
             case ColumnType.Date:
             {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(pos)); pos += 8;
+                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.Date, v);
             }
 
             case ColumnType.DateTime:
             {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(pos)); pos += 8;
+                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.DateTime, v);
             }
 
             case ColumnType.Float64:
             {
-                double v = BinaryPrimitives.ReadDoubleLittleEndian(data.AsSpan(pos)); pos += 8;
+                double v = BinaryPrimitives.ReadDoubleLittleEndian(data[pos..]); pos += 8;
                 return new ColumnValue(ColumnType.Float64, v);
             }
 
             case ColumnType.Float32:
             {
-                float v = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(pos)); pos += 4;
+                float v = BinaryPrimitives.ReadSingleLittleEndian(data[pos..]); pos += 4;
                 return new ColumnValue(ColumnType.Float32, (double)v);
             }
 
@@ -428,7 +461,7 @@ public static class SpillRowCodec
             {
                 int len = ReadInt32(data, ref pos);
                 byte[] bytes = new byte[len];
-                Buffer.BlockCopy(data, pos, bytes, 0, len);
+                data.Slice(pos, len).CopyTo(bytes);
                 pos += len;
                 return new ColumnValue(bytes);
             }
@@ -438,17 +471,17 @@ public static class SpillRowCodec
         }
     }
 
-    private static string ReadStringUtf8(byte[] data, ref int pos)
+    private static string ReadStringUtf8(ReadOnlySpan<byte> data, ref int pos)
     {
         int len = ReadInt32(data, ref pos);
-        string s = Encoding.UTF8.GetString(data, pos, len);
+        string s = Encoding.UTF8.GetString(data.Slice(pos, len));
         pos += len;
         return s;
     }
 
-    private static int ReadInt32(byte[] data, ref int pos)
+    private static int ReadInt32(ReadOnlySpan<byte> data, ref int pos)
     {
-        int v = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(pos));
+        int v = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]);
         pos += 4;
         return v;
     }
@@ -463,7 +496,8 @@ public static class SpillRowCodec
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Appends a value-only framed record to <paramref name="stream"/>.
+    /// Appends a value-only framed record to <paramref name="stream"/>, without a per-row frame
+    /// array (stack buffer for small rows, pooled buffer for large ones).
     /// Encodes only the RowId and column values (in layout ordinal order) — column names are
     /// omitted because the <see cref="RowLayout"/> is carried alongside the run path and passed
     /// to <see cref="DecodeValueOnlyPayload"/> at read time.
@@ -471,24 +505,36 @@ public static class SpillRowCodec
     public static void EncodeValueOnlyToStream(Stream stream, QueryRow row)
     {
         int payloadSize = MeasureValueOnlyPayload(row);
-        byte[] frame = new byte[4 + payloadSize];
-        int pos = 0;
+        int total = 4 + payloadSize;
 
-        WriteInt32(frame, payloadSize, ref pos);
-        WriteRowId(frame, row.RowId, ref pos);
-        for (int i = 0; i < row.Values.Length; i++)
-            WriteColumnValue(frame, row.Values[i], ref pos);
-
-        stream.Write(frame, 0, frame.Length);
+        byte[]? rented = null;
+        Span<byte> frame = total <= StackFrameThreshold
+            ? stackalloc byte[total]
+            : (rented = ArrayPool<byte>.Shared.Rent(total)).AsSpan(0, total);
+        try
+        {
+            int pos = 0;
+            WriteInt32(frame, payloadSize, ref pos);
+            WriteRowId(frame, row.RowId, ref pos);
+            for (int i = 0; i < row.Values.Length; i++)
+                WriteColumnValue(frame, row.Values[i], ref pos);
+            stream.Write(frame);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     /// <summary>
     /// Decodes a value-only payload (produced by <see cref="EncodeValueOnlyToStream"/>) using
     /// the supplied <paramref name="layout"/> to reconstruct column names and ordinal positions.
     /// Returns a <see cref="QueryRow"/> that shares <paramref name="layout"/> with every other
-    /// row in the same run.
+    /// row in the same run. Strings and byte arrays are copied out, so the row keeps no reference
+    /// into <paramref name="payload"/> and the caller may immediately reuse the buffer.
     /// </summary>
-    public static QueryRow DecodeValueOnlyPayload(byte[] payload, RowLayout layout)
+    public static QueryRow DecodeValueOnlyPayload(ReadOnlySpan<byte> payload, RowLayout layout)
     {
         int pos = 0;
         ObjectIdValue rowId = ReadRowId(payload, ref pos);
