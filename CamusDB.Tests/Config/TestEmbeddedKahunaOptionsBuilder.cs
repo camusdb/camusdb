@@ -41,9 +41,9 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(built.Host, Is.EqualTo(expected.Host));
         Assert.That(built.Port, Is.EqualTo(expected.Port));
         Assert.That(built.InitialPartitions, Is.EqualTo(expected.InitialPartitions));
-        Assert.That(built.Storage, Is.EqualTo("sqlite"));
+        Assert.That(built.Storage, Is.EqualTo("rocksdb"));
         Assert.That(built.StorageRevision, Is.EqualTo("v1"));
-        Assert.That(built.WalStorage, Is.EqualTo("sqlite"));
+        Assert.That(built.WalStorage, Is.EqualTo("rocksdb"));
         Assert.That(built.WalRevision, Is.EqualTo("v1"));
         Assert.That(built.StartElectionTimeout, Is.EqualTo(2000));
         Assert.That(built.EndElectionTimeout, Is.EqualTo(4000));

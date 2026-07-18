@@ -84,19 +84,19 @@ internal static partial class Log
 
     // DML
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Row with rowid {RowId} deleted")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Row with rowid {RowId} deleted")]
     public static partial void LogRowDeleted(ILogger logger, ObjectIdValue rowId);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Deleted {Rows} rows, Time taken: {Time}")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Deleted {Rows} rows, Time taken: {Time}")]
     public static partial void LogRowsDeleted(ILogger logger, int rows, TimeSpan time);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Inserted {Rows} rows, Time taken: {Time}")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Inserted {Rows} rows, Time taken: {Time}")]
     public static partial void LogRowsInserted(ILogger logger, int rows, TimeSpan time);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Row with rowid {RowId} updated")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Row with rowid {RowId} updated")]
     public static partial void LogRowUpdated(ILogger logger, ObjectIdValue rowId);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Updated {Rows} rows, Time taken: {Time}")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Updated {Rows} rows, Time taken: {Time}")]
     public static partial void LogRowsUpdated(ILogger logger, int rows, TimeSpan time);
 
     // DDL

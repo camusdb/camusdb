@@ -288,8 +288,8 @@ internal sealed class DatabaseDropper
             // failing key cannot spin the loop forever (the startup drop resume is the backstop).
             dryRounds = progressed ? 0 : dryRounds + 1;
 
-            if (logger.IsEnabled(LogLevel.Information))
-                logger.LogInformation("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", batch.Count, bucket, id);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", batch.Count, bucket, id);
         }
     }
 }
