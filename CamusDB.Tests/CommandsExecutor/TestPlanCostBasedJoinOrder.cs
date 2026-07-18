@@ -48,6 +48,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   avoids the 10 000-row events full scan that the heuristic must pay up-front).
 /// </summary>
 [TestFixture]
+// Mutates the process-wide static CamusDBConfig.CostBasedJoinOrderEnabled. Under the assembly's
+// ParallelScope.Fixtures this would race any concurrent fixture that plans a join and reads that flag
+// (e.g. TestJoinQueryPlanner), flipping join order mid-plan. NonParallelizable isolates the toggle.
+[NonParallelizable]
 public sealed class TestPlanCostBasedJoinOrder : BaseTest
 {
     // SQL used across multiple tests — events declared first (heuristic keeps it outer).

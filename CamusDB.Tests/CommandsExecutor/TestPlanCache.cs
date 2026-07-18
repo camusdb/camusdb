@@ -37,6 +37,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// CommandExecutor.PlanCache (internal, visible to tests via InternalsVisibleTo).
 /// </summary>
 [TestFixture]
+// Toggles the process-wide static CamusDBConfig.PlanCacheEnabled in SetUp/TearDown. Under the
+// assembly's ParallelScope.Fixtures this would race any concurrent fixture that plans a query and
+// reads that flag; NonParallelizable isolates the toggle.
+[NonParallelizable]
 public sealed class TestPlanCache : BaseTest
 {
     // Enable the cache for every test in this fixture; restore the default (false) on teardown
