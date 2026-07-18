@@ -1482,7 +1482,7 @@ internal sealed class QueryJoinExecutor
     /// </summary>
     internal static int PartitionIndex(ColumnValue[] keyValues, int partitionCount, int seed)
     {
-        uint h = (uint)CompositeColumnValueComparer.Instance.GetHashCode(new CompositeColumnValue(keyValues));
+        uint h = (uint)CompositeColumnValueComparer.Instance.GetHashCode(keyValues.AsSpan());
         h ^= (uint)seed * 0x9E3779B1u;   // fold level seed in with a multiplier
         h *= 0x85EBCA6Bu; h ^= h >> 13;  // murmur-style bit-mixing finalizer
         h *= 0xC2B2AE35u; h ^= h >> 16;
@@ -1714,14 +1714,12 @@ internal sealed class QueryJoinExecutor
             ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
             if (probeKeyVals is null) continue;
 
-            CompositeColumnValue probeKey = new(probeKeyVals);
-
             await foreach (QueryResultRow buildRow in ReadSpillFileAsync(buildFile, ct).ConfigureAwait(false))
             {
                 ColumnValue[]? buildKeyVals = ExtractMergeKey(buildRow.Row, buildKeyColumns);
                 if (buildKeyVals is null) continue;
 
-                if (!CompositeColumnValueComparer.Instance.Equals(probeKey, new CompositeColumnValue(buildKeyVals)))
+                if (!CompositeColumnValueComparer.Instance.Equals(probeKeyVals.AsSpan(), buildKeyVals.AsSpan()))
                     continue;
 
                 IReadOnlyDictionary<string, ColumnValue> leftQ  = joinNode.BuildSide == HashJoinBuildSide.Right ? probeRow.Row : buildRow.Row;
@@ -1824,12 +1822,22 @@ internal sealed class QueryJoinExecutor
         {
             if (x is null && y is null) return true;
             if (x is null || y is null) return false;
-            if (x.Values.Length != y.Values.Length) return false;
+            return Equals(x.Values, y.Values);
+        }
 
-            for (int i = 0; i < x.Values.Length; i++)
+        /// <summary>
+        /// Span-based key equality — lets callers compare join keys without wrapping either operand in a
+        /// throwaway <see cref="CompositeColumnValue"/>. Identical semantics to the object overload
+        /// (type match plus <see cref="ColumnValue.CompareTo"/> == 0 per position).
+        /// </summary>
+        public bool Equals(ReadOnlySpan<ColumnValue> x, ReadOnlySpan<ColumnValue> y)
+        {
+            if (x.Length != y.Length) return false;
+
+            for (int i = 0; i < x.Length; i++)
             {
-                ColumnValue a = x.Values[i];
-                ColumnValue b = y.Values[i];
+                ColumnValue a = x[i];
+                ColumnValue b = y[i];
 
                 if (a.Type != b.Type) return false;
                 if (a.CompareTo(b) != 0) return false;
@@ -1838,11 +1846,18 @@ internal sealed class QueryJoinExecutor
             return true;
         }
 
-        public int GetHashCode(CompositeColumnValue obj)
+        public int GetHashCode(CompositeColumnValue obj) => GetHashCode(obj.Values);
+
+        /// <summary>
+        /// Span-based key hash — lets callers (partition routing, probe) hash a just-extracted key array
+        /// without allocating a <see cref="CompositeColumnValue"/> wrapper. Byte-identical mixing to the
+        /// object overload, so a span-hashed row routes/probes the same as a materialized key.
+        /// </summary>
+        public int GetHashCode(ReadOnlySpan<ColumnValue> values)
         {
             HashCode h = new();
 
-            foreach (ColumnValue v in obj.Values)
+            foreach (ColumnValue v in values)
             {
                 h.Add((int)v.Type);
 

@@ -191,11 +191,8 @@ internal sealed class RowInserter
         {
             ObjectIdValue rowId = ObjectIdGenerator.Generate();
 
-            KvTableStore.RowWrite write = new()
-            {
-                RowId = rowId,
-                RowData = RowEncoder.EncodeStorageValue(table.Schema, values, rowId)
-            };
+            // Built only once the first index entry exists, so a no-index table allocates no per-row list.
+            List<KvTableStore.IndexWrite>? indexEntries = null;
 
             foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
             {
@@ -212,16 +209,21 @@ internal sealed class RowInserter
                         continue;
 
                     CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
-                    write.IndexEntries.Add(new(index.KvId, uniqueKeyValue, Unique: true));
+                    (indexEntries ??= new()).Add(new(index.KvId, uniqueKeyValue, Unique: true));
                 }
                 else if (index.Type == IndexType.Multi)
                 {
                     CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                    write.IndexEntries.Add(new(index.KvId, multiKeyValue, Unique: false));
+                    (indexEntries ??= new()).Add(new(index.KvId, multiKeyValue, Unique: false));
                 }
             }
 
-            chunk.Add(write);
+            chunk.Add(new KvTableStore.RowWrite
+            {
+                RowId = rowId,
+                RowData = RowEncoder.EncodeStorageValue(table.Schema, values, rowId),
+                IndexEntries = indexEntries,
+            });
 
             if (chunk.Count >= chunkSize)
             {

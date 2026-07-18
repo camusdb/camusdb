@@ -136,40 +136,66 @@ internal sealed class RowDeleter
         KvTransaction tx = state.Ticket.TxnState;
 
         // Drain RowsToDelete in bounded chunks so a DELETE over a huge matched set does not
-        // hold an O(matched) RowDelete list on the heap between scan and the Kahuna round-trip.
-        // The chunk size is tied to SpillEffectiveThreshold so force-spill tests drive both
-        // the row-buffer spill and the mutation batch with one knob.
+        // hold an O(matched) list on the heap between scan and the Kahuna round-trip. The chunk
+        // size is tied to SpillEffectiveThreshold so force-spill tests drive both the row-buffer
+        // spill and the mutation batch with one knob. RowsToDelete is already sealed (the full
+        // match set is materialized before any delete), so chunked draining preserves the
+        // Halloween barrier.
         int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
-        List<KvTableStore.RowDelete> batch = new(Math.Min(chunkSize, 64));
+        List<ObjectIdValue> chunk = new(Math.Min(chunkSize, 64));
 
         await foreach (QueryResultRow row in state.RowsToDelete.EnumerateAsync().ConfigureAwait(false))
         {
-            ObjectIdValue rowId = row.RowId;
-            Dictionary<string, ColumnValue> writableRow = await LoadWritableRow(state.Database, table, tx, rowId).ConfigureAwait(false);
+            chunk.Add(row.RowId);
 
-            KvTableStore.RowDelete rowDelete = new() { RowId = rowId };
-            CollectIndexDeletes(table, rowId, writableRow, rowDelete);
-            batch.Add(rowDelete);
-
-            if (batch.Count >= chunkSize)
+            if (chunk.Count >= chunkSize)
             {
-                await FlushDeleteBatch(table, tx, batch, state).ConfigureAwait(false);
-                batch.Clear();
+                await FlushDeleteChunk(table, tx, chunk, state).ConfigureAwait(false);
+                chunk.Clear();
             }
         }
 
-        if (batch.Count > 0)
-            await FlushDeleteBatch(table, tx, batch, state).ConfigureAwait(false);
+        if (chunk.Count > 0)
+            await FlushDeleteChunk(table, tx, chunk, state).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
 
-    private async Task FlushDeleteBatch(
+    /// <summary>
+    /// Reads the raw bytes for one chunk of matched row ids in a single batch round-trip, decodes each
+    /// to determine its index entries, and deletes the rows and their index entries in one batch.
+    /// The read uses <see cref="KvTableStore.GetRowsBatchLockedForMutation"/> so a Serializable+RW
+    /// delete holds the same shared point locks a per-row <c>GetRow</c> would — without them an
+    /// index-scan-located delete could read a row lock-free and miss a concurrent modify-commit,
+    /// deleting a stale index entry and orphaning the concurrently-written one.
+    /// </summary>
+    private async Task FlushDeleteChunk(
         TableDescriptor table,
         KvTransaction tx,
-        List<KvTableStore.RowDelete> batch,
+        List<ObjectIdValue> chunk,
         DeleteFluxState state)
     {
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, chunk).ConfigureAwait(false);
+
+        List<KvTableStore.RowDelete> batch = new(chunk.Count);
+        for (int i = 0; i < chunk.Count; i++)
+        {
+            ObjectIdValue rowId = chunk[i];
+            ReadOnlyMemory<byte>? data = rawRows[i];
+            if (data is null || data.Value.Length == 0)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before delete");
+
+            Dictionary<string, ColumnValue> writableRow = await RowEncoder.DecodeWritableAsync(
+                table.Schema, tx.TransactionId, rowId, data.Value,
+                visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+
+            batch.Add(new KvTableStore.RowDelete
+            {
+                RowId = rowId,
+                IndexEntries = CollectIndexDeletes(table, rowId, writableRow),
+            });
+        }
+
         if (_stats is not null && batch.Count > _stats.DeleteBatchMaxChunkSeen)
             _stats.DeleteBatchMaxChunkSeen = batch.Count;
 
@@ -180,32 +206,19 @@ internal sealed class RowDeleter
             Log.LogRowDeleted(logger, row.RowId);
     }
 
-    private static async Task<Dictionary<string, ColumnValue>> LoadWritableRow(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        KvTransaction tx,
-        ObjectIdValue rowId
-    )
-    {
-        ReadOnlyMemory<byte>? data = await table.Store.GetRow(tx, rowId).ConfigureAwait(false);
-        if (data is null || data.Value.Length == 0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before delete");
-
-        return await RowEncoder.DecodeWritableAsync(
-            table.Schema,
-            tx.TransactionId,
-            rowId,
-            data.Value,
-            visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
-    }
-
-    private static void CollectIndexDeletes(
+    /// <summary>
+    /// Collects the secondary-index entries to delete for a row, or <see langword="null"/> when the
+    /// table has no writable index entry applicable to it. The list is built only once the first entry
+    /// exists so a no-index (or all-NULL-key) delete allocates no per-row collection.
+    /// </summary>
+    private static IReadOnlyList<KvTableStore.IndexDelete>? CollectIndexDeletes(
         TableDescriptor table,
         ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> row,
-        KvTableStore.RowDelete rowDelete
+        Dictionary<string, ColumnValue> row
     )
     {
+        List<KvTableStore.IndexDelete>? entries = null;
+
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
             TableIndexSchema index = kv.Value;
@@ -221,14 +234,16 @@ internal sealed class RowDeleter
                     continue;
 
                 CompositeColumnValue key = GetColumnValue(row, index.Columns);
-                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: true));
+                (entries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: true));
             }
             else if (index.Type == IndexType.Multi)
             {
                 CompositeColumnValue key = GetColumnValue(row, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                rowDelete.IndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: false));
+                (entries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: false));
             }
         }
+
+        return entries;
     }
 
     private async Task<int> DeleteInternal(FluxMachine<DeleteFluxSteps, DeleteFluxState> machine, DeleteFluxState state)

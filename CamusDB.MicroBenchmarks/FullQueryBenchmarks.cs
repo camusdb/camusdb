@@ -209,6 +209,57 @@ public class FullQueryBenchmarks
         return count;
     }
 
+    [Benchmark(Description = "scan: GROUP BY value (high group count, ~one row per group)")]
+    public async Task<int> ScanGroupedAggregateHighCardinality()
+    {
+        // 'value' is unique, so this produces one group per input row — the worst case for the
+        // per-row group-key path: the span-probe against the group table allocates no key wrapper/array
+        // per probe, only on new-group insert.
+        KvTransaction tx = await _db.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(tx, _dbName,
+            "SELECT value, COUNT(*) FROM bench GROUP BY value",
+            parameters: null);
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await _executor.ExecuteSQLQuery(ticket);
+        int count = 0;
+        await foreach (QueryResultRow _ in cursor) count++;
+        await _db.Transactions.CommitAsync(tx);
+        return count;
+    }
+
+    [Benchmark(Description = "scan: SELECT DISTINCT category (low cardinality, 10 distinct)")]
+    public async Task<int> DistinctLowCardinality()
+    {
+        // Heavy duplication (10 distinct over RowCount rows): every row after the first 10 is a
+        // hash-set hit. The layout-aware comparer probes the existing QueryRow by resolved ordinals,
+        // allocating no per-row key object, name sort, or tuple array on that hit path.
+        KvTransaction tx = await _db.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(tx, _dbName,
+            "SELECT DISTINCT category FROM bench",
+            parameters: null);
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await _executor.ExecuteSQLQuery(ticket);
+        int count = 0;
+        await foreach (QueryResultRow _ in cursor) count++;
+        await _db.Transactions.CommitAsync(tx);
+        return count;
+    }
+
+    [Benchmark(Description = "scan: SELECT DISTINCT value (high cardinality, all distinct)")]
+    public async Task<int> DistinctHighCardinality()
+    {
+        KvTransaction tx = await _db.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(tx, _dbName,
+            "SELECT DISTINCT value FROM bench",
+            parameters: null);
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await _executor.ExecuteSQLQuery(ticket);
+        int count = 0;
+        await foreach (QueryResultRow _ in cursor) count++;
+        await _db.Transactions.CommitAsync(tx);
+        return count;
+    }
+
     [Benchmark(Description = "scan: WHERE name LIKE 'prefix%' (LIKE prefix)")]
     public async Task<int> ScanLikePrefix()
     {

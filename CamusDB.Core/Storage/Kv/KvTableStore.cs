@@ -762,6 +762,55 @@ public sealed class KvTableStore
     }
 
     /// <summary>
+    /// Batch point-read for a mutation (UPDATE/DELETE) write phase: identical to
+    /// <see cref="GetRowsBatch"/> but, for a Serializable read-write transaction, first acquires the
+    /// same shared point locks that a per-row <see cref="GetRow"/> would take on every row key, held
+    /// until commit.
+    ///
+    /// <para>
+    /// This is the lock-acquiring batch read the plain <see cref="GetRowsBatch"/> deliberately is not.
+    /// A write phase that reads a row lock-free and only exclusively locks it later cannot detect a
+    /// concurrent transaction that modified-and-committed that row in the gap: a read pinned to
+    /// <see cref="KvTransaction.ReadTimestamp"/> records no read dependency and pins no server-side MVCC
+    /// base, and the later write pins its base only after the other commit — so the stale read is used
+    /// to compute which index entries to remove, orphaning the concurrently-written ones. Holding the
+    /// shared point lock continuously from read to commit is the mechanism that forces the competing
+    /// writer to <c>MustRetry</c> instead. The exclusive row-range lock a full-table locate scan already
+    /// holds covers this, but a predicate-driven <em>index</em> locate scan only range-locks the index
+    /// sub-range, leaving the row keys uncovered — which is exactly the set this method locks.
+    /// </para>
+    ///
+    /// <para>
+    /// The acquired locks are byte-for-byte the set a sequence of per-row <see cref="GetRow"/> calls
+    /// would take (including whole-bucket escalation past
+    /// <see cref="CamusDBConfig.LockEscalationThreshold"/>); only the reads are batched into one round
+    /// trip. The subsequent exclusive batch write (<see cref="DeleteRowsBatch"/> /
+    /// <see cref="UpdateRowsBatch"/>) then upgrades/covers these same keys, exactly as the per-row
+    /// <see cref="GetRow"/> path already did.
+    /// </para>
+    /// </summary>
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(
+        KvTransaction tx,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (rowIds.Count == 0)
+            return [];
+
+        // Serializable+RW acquires the shared point locks first (session must be open before locking);
+        // other transaction types skip locking, exactly as GetRow does.
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
+        if (IsSerializableReadWrite(tx))
+        {
+            for (int i = 0; i < rowIds.Count; i++)
+                await AcquireSharedPointLockAsync(tx, rowBucketPrefix, BuildRowKey(rowIds[i]), cancellationToken).ConfigureAwait(false);
+        }
+
+        return await GetRowsBatch(tx, rowIds, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Full table scan. Yields every (rowId, rowBytes) pair in ascending rowId order
     /// (ObjectId hex is time-ordered and fixed-width so natural KV order is correct).
     ///
@@ -1378,8 +1427,13 @@ public sealed class KvTableStore
     // Batched write path (mass insert)
     // -----------------------------------------------------------------------
 
-    /// <summary>A single row plus its secondary-index entries, to be written as part of a batch.</summary>
-    public sealed class RowWrite
+    /// <summary>
+    /// A single row plus its secondary-index entries, to be written as part of a batch.
+    /// A <see langword="readonly struct"/> so the per-row descriptor lives in the batch list's backing
+    /// array rather than as its own heap object; <see cref="IndexEntries"/> is null (not an empty list)
+    /// for a no-index write, so such writes allocate no per-row index collection.
+    /// </summary>
+    public readonly struct RowWrite
     {
         public required ObjectIdValue RowId { get; init; }
 
@@ -1390,7 +1444,13 @@ public sealed class KvTableStore
         /// a re-enveloped copy.
         /// </summary>
         public required byte[] RowData { get; init; }
-        public List<IndexWrite> IndexEntries { get; } = [];
+
+        /// <summary>
+        /// The row's secondary-index entries, or <see langword="null"/> when the table has no writable
+        /// index applicable to this row. Built by the producer only once the first entry exists and then
+        /// never mutated (this is a value type — mutating a copied struct's list would be a bug).
+        /// </summary>
+        public IReadOnlyList<IndexWrite>? IndexEntries { get; init; }
     }
 
     /// <summary>One secondary-index entry for a row in a batch write.</summary>
@@ -1421,8 +1481,10 @@ public sealed class KvTableStore
         // Collect lock keys and — for root databases — the batch write items in one pass.
         // Branch databases require per-item writes for unique entries (see branch phase below),
         // so their write items are built during the write phase, not here.
-        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = [];
-        List<KahunaSetKeyValueRequestItem> setItems = [];   // root only
+        // Pre-size to the row-count floor: every row contributes at least its own row key (plus any
+        // index entries), so this avoids the first few list regrowths for the common no-/few-index case.
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = new(rows.Count);
+        List<KahunaSetKeyValueRequestItem> setItems = new(rows.Count);   // root only
         Dictionary<string, bool> uniqueByKey = new();       // root only
         HashSet<string> seenUnique = [];                    // within-batch duplicate guard (both paths)
 
@@ -1438,7 +1500,7 @@ public sealed class KvTableStore
                 setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
             }
 
-            foreach (IndexWrite ix in row.IndexEntries)
+            foreach (IndexWrite ix in row.IndexEntries ?? [])
             {
                 string kvKey = ix.Unique
                     ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
@@ -1484,7 +1546,7 @@ public sealed class KvTableStore
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
-                foreach (IndexWrite ix in row.IndexEntries)
+                foreach (IndexWrite ix in row.IndexEntries ?? [])
                 {
                     string kvKey = ix.Unique
                         ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
@@ -1703,7 +1765,7 @@ public sealed class KvTableStore
     /// are intentionally omitted so the batch skips needless delete+put round-trips and avoids
     /// the branch tombstone-replace correctness trap (see <see cref="UpdateRowsBatch"/>).
     /// </summary>
-    public sealed class RowUpdate
+    public readonly struct RowUpdate
     {
         public required ObjectIdValue RowId { get; init; }
 
@@ -1713,11 +1775,17 @@ public sealed class KvTableStore
         /// </summary>
         public required byte[] NewRowData { get; init; }
 
-        /// <summary>Old secondary-index entries to remove (only for changed keys).</summary>
-        public List<IndexDelete> OldIndexEntries { get; } = [];
+        /// <summary>
+        /// Old secondary-index entries to remove (only for changed keys), or <see langword="null"/>
+        /// when no indexed value changed. Built lazily so an unchanged-index update allocates no list.
+        /// </summary>
+        public IReadOnlyList<IndexDelete>? OldIndexEntries { get; init; }
 
-        /// <summary>New secondary-index entries to put (only for changed keys).</summary>
-        public List<IndexWrite> NewIndexEntries { get; } = [];
+        /// <summary>
+        /// New secondary-index entries to put (only for changed keys), or <see langword="null"/> when
+        /// no indexed value changed. Built lazily so an unchanged-index update allocates no list.
+        /// </summary>
+        public IReadOnlyList<IndexWrite>? NewIndexEntries { get; init; }
     }
 
     /// <summary>
@@ -1758,9 +1826,10 @@ public sealed class KvTableStore
         // Collect lock keys (deduplicated), delete items (old index entries for root),
         // set items (row blob + new index entries for root), and the within-batch
         // unique-new-key guard.
+        // Pre-size to the row-count floor: every row contributes at least its own row-blob key.
         HashSet<string> seenLockKeys = new(StringComparer.Ordinal);
-        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = [];
-        List<KahunaSetKeyValueRequestItem> setItems = [];          // row + new index
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = new(rows.Count);
+        List<KahunaSetKeyValueRequestItem> setItems = new(rows.Count);          // row + new index
         List<KahunaDeleteKeyValueRequestItem> deleteItems = [];    // old index (root only)
         Dictionary<string, bool> uniqueByKey = new();             // root only
         HashSet<string> seenUniqueNew = [];                        // within-batch new unique guard
@@ -1783,7 +1852,7 @@ public sealed class KvTableStore
                 setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
             }
 
-            foreach (IndexDelete old in row.OldIndexEntries)
+            foreach (IndexDelete old in row.OldIndexEntries ?? [])
             {
                 string kvKey = old.Unique
                     ? BuildUniqueIndexKey(old.IndexId, old.Key)
@@ -1794,7 +1863,7 @@ public sealed class KvTableStore
                     deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Durability = KeyValueDurability.Persistent });
             }
 
-            foreach (IndexWrite newIx in row.NewIndexEntries)
+            foreach (IndexWrite newIx in row.NewIndexEntries ?? [])
             {
                 string kvKey = newIx.Unique
                     ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
@@ -1840,7 +1909,7 @@ public sealed class KvTableStore
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
-                foreach (IndexDelete old in row.OldIndexEntries)
+                foreach (IndexDelete old in row.OldIndexEntries ?? [])
                 {
                     string kvKey = old.Unique
                         ? BuildUniqueIndexKey(old.IndexId, old.Key)
@@ -1849,7 +1918,7 @@ public sealed class KvTableStore
                     batchByKey[kvKey] = false;
                 }
 
-                foreach (IndexWrite newIx in row.NewIndexEntries)
+                foreach (IndexWrite newIx in row.NewIndexEntries ?? [])
                 {
                     string kvKey = newIx.Unique
                         ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
@@ -1895,11 +1964,20 @@ public sealed class KvTableStore
     // Batched delete path (mass delete / drop index / drop table)
     // -----------------------------------------------------------------------
 
-    /// <summary>A single row plus its secondary-index entries, to be deleted as part of a batch.</summary>
-    public sealed class RowDelete
+    /// <summary>
+    /// A single row plus its secondary-index entries, to be deleted as part of a batch.
+    /// A <see langword="readonly struct"/>; <see cref="IndexEntries"/> is null (not an empty list) for a
+    /// no-index delete, so such deletes allocate no per-row index collection.
+    /// </summary>
+    public readonly struct RowDelete
     {
         public required ObjectIdValue RowId { get; init; }
-        public List<IndexDelete> IndexEntries { get; } = [];
+
+        /// <summary>
+        /// The row's secondary-index entries to remove, or <see langword="null"/> when the table has no
+        /// writable index applicable to this row. Built lazily; never mutated after construction.
+        /// </summary>
+        public IReadOnlyList<IndexDelete>? IndexEntries { get; init; }
     }
 
     /// <summary>One secondary-index entry for a row in a batch delete.</summary>
@@ -1929,7 +2007,7 @@ public sealed class KvTableStore
         {
             keys.Add(BuildRowKey(row.RowId));
 
-            foreach (IndexDelete ix in row.IndexEntries)
+            foreach (IndexDelete ix in row.IndexEntries ?? [])
             {
                 keys.Add(ix.Unique
                     ? BuildUniqueIndexKey(ix.IndexId, ix.Key)

@@ -377,9 +377,14 @@ public sealed class RowUpdater
         List<QueryResultRow> chunkRows,
         UpdateFluxState state)
     {
-        // Batch-load raw row bytes for the whole chunk in one Kahuna round-trip.
-        List<ObjectIdValue> rowIds = chunkRows.Select(r => r.RowId).ToList();
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatch(tx, rowIds).ConfigureAwait(false);
+        // Batch-load raw row bytes for the whole chunk in one Kahuna round-trip. Uses the
+        // lock-acquiring batch read so a Serializable+RW update holds the same shared point locks on the
+        // read rows that a per-row GetRow would — without them, an index-scan-located update could read a
+        // row lock-free and miss a concurrent commit, deleting a stale index entry.
+        List<ObjectIdValue> rowIds = new(chunkRows.Count);
+        for (int i = 0; i < chunkRows.Count; i++)
+            rowIds.Add(chunkRows[i].RowId);
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds).ConfigureAwait(false);
 
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
 
@@ -404,9 +409,17 @@ public sealed class RowUpdater
 
             byte[] newData = RowEncoder.EncodeStorageValue(table.Schema, newRow, rowId);
 
-            KvTableStore.RowUpdate rowUpdate = new() { RowId = rowId, NewRowData = newData };
-            CollectIndexUpdates(table, rowId, oldRow, newRow, rowUpdate);
-            batch.Add(rowUpdate);
+            (IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries,
+             IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
+                CollectIndexUpdates(table, rowId, oldRow, newRow);
+
+            batch.Add(new KvTableStore.RowUpdate
+            {
+                RowId = rowId,
+                NewRowData = newData,
+                OldIndexEntries = oldIndexEntries,
+                NewIndexEntries = newIndexEntries,
+            });
         }
 
         await table.Store.UpdateRowsBatch(tx, batch).ConfigureAwait(false);
@@ -417,13 +430,22 @@ public sealed class RowUpdater
             Log.LogRowUpdated(logger, row.RowId);
     }
 
-    private static void CollectIndexUpdates(
-        TableDescriptor table,
-        ObjectIdValue rowId,
-        Dictionary<string, ColumnValue> oldRow,
-        Dictionary<string, ColumnValue> newRow,
-        KvTableStore.RowUpdate rowUpdate)
+    /// <summary>
+    /// Collects the old (to remove) and new (to put) secondary-index entries for a row, including only
+    /// entries whose indexed columns actually changed. Either list is <see langword="null"/> when it has
+    /// no entries, and each is built only once its first entry exists — so an unchanged-index update (the
+    /// common case) allocates no per-row index lists.
+    /// </summary>
+    private static (IReadOnlyList<KvTableStore.IndexDelete>? Old, IReadOnlyList<KvTableStore.IndexWrite>? New)
+        CollectIndexUpdates(
+            TableDescriptor table,
+            ObjectIdValue rowId,
+            Dictionary<string, ColumnValue> oldRow,
+            Dictionary<string, ColumnValue> newRow)
     {
+        List<KvTableStore.IndexDelete>? oldEntries = null;
+        List<KvTableStore.IndexWrite>? newEntries = null;
+
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
             TableIndexSchema index = kv.Value;
@@ -453,10 +475,10 @@ public sealed class RowUpdater
                     continue;
 
                 if (oldHasKey)
-                    rowUpdate.OldIndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, oldKey!, rowId, Unique: true));
+                    (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey!, rowId, Unique: true));
 
                 if (newHasKey)
-                    rowUpdate.NewIndexEntries.Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true));
+                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true));
             }
             else if (index.Type == IndexType.Multi)
             {
@@ -469,10 +491,12 @@ public sealed class RowUpdater
                 if (oldKey.CompareTo(newKey) == 0)
                     continue;
 
-                rowUpdate.OldIndexEntries.Add(new KvTableStore.IndexDelete(index.KvId, oldKey, rowId, Unique: false));
-                rowUpdate.NewIndexEntries.Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false));
+                (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey, rowId, Unique: false));
+                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false));
             }
         }
+
+        return (oldEntries, newEntries);
     }
 
     private async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)

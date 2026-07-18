@@ -76,13 +76,15 @@ internal sealed class QueryAggregator
         {
             GroupKeyBuilder keyBuilder = new();
             Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+            var groupLookup = groups.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+            ColumnValue[] keyScratch = new ColumnValue[groupBy.Count];
             await foreach (QueryResultRow resultRow in dataCursor.WithCancellation(ct).ConfigureAwait(false))
             {
-                CompositeColumnValue groupKey = keyBuilder.Build(groupBy, resultRow.Row, ticket);
-                if (!groups.TryGetValue(groupKey, out GroupAccumulator? accumulator))
+                ReadOnlySpan<ColumnValue> groupKey = keyBuilder.BuildInto(groupBy, resultRow.Row, ticket, keyScratch);
+                if (!groupLookup.TryGetValue(groupKey, out GroupAccumulator? accumulator))
                 {
                     accumulator = new GroupAccumulator(projections);
-                    groups.Add(groupKey, accumulator);
+                    groupLookup[groupKey] = accumulator;
                 }
                 accumulator.AddRow(resultRow.Row, ticket);
             }
@@ -179,6 +181,7 @@ internal sealed class QueryAggregator
         try
         {
             GroupKeyBuilder writeBuilder = new();
+            ColumnValue[] writeScratch = new ColumnValue[groupBy.Count];
             await foreach (QueryResultRow row in dataCursor.WithCancellation(ct).ConfigureAwait(false))
             {
                 if (scope is null)
@@ -193,13 +196,13 @@ internal sealed class QueryAggregator
                             paths[i] = scope.OpenWriter(out writers[i]);
 
                         foreach (QueryResultRow buffered in buffer)
-                            WriteToGroupPartition(buffered, groupBy, ticket, K, writers, writeBuilder);
+                            WriteToGroupPartition(buffered, groupBy, ticket, K, writers, writeBuilder, writeScratch);
                         buffer.Clear();
                     }
                 }
                 else
                 {
-                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, writeBuilder);
+                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, writeBuilder, writeScratch);
                 }
             }
 
@@ -208,13 +211,15 @@ internal sealed class QueryAggregator
                 // All rows fit in the buffer — aggregate in-memory.
                 GroupKeyBuilder memBuilder = new();
                 Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+                var memLookup = groups.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+                ColumnValue[] memScratch = new ColumnValue[groupBy.Count];
                 foreach (QueryResultRow row in buffer)
                 {
-                    CompositeColumnValue key = memBuilder.Build(groupBy, row.Row, ticket);
-                    if (!groups.TryGetValue(key, out GroupAccumulator? acc))
+                    ReadOnlySpan<ColumnValue> key = memBuilder.BuildInto(groupBy, row.Row, ticket, memScratch);
+                    if (!memLookup.TryGetValue(key, out GroupAccumulator? acc))
                     {
                         acc = new GroupAccumulator(projections);
-                        groups.Add(key, acc);
+                        memLookup[key] = acc;
                     }
                     acc.AddRow(row.Row, ticket);
                 }
@@ -254,9 +259,10 @@ internal sealed class QueryAggregator
         int K,
         FileStream[] writers,
         GroupKeyBuilder builder,
+        ColumnValue[] scratch,
         int seed = 0)
     {
-        CompositeColumnValue key = builder.Build(groupBy, row.Row, ticket);
+        ReadOnlySpan<ColumnValue> key = builder.BuildInto(groupBy, row.Row, ticket, scratch);
         int p = GroupPartitionIndex(key, K, seed);
         SpillRowCodec.EncodeToStream(writers[p], row);
     }
@@ -271,8 +277,20 @@ internal sealed class QueryAggregator
     /// different sub-partitions.
     /// </summary>
     internal static int GroupPartitionIndex(CompositeColumnValue key, int K, int seed = 0)
+        => PartitionFromHash(GroupKeyComparer.Instance.GetHashCode(key), K, seed);
+
+    /// <summary>
+    /// Span overload of <see cref="GroupPartitionIndex(CompositeColumnValue,int,int)"/>. Routes a
+    /// just-computed key span to its partition bucket without allocating a <see cref="CompositeColumnValue"/>.
+    /// Uses the same hash and finalizer as the object form, so a row routes identically whether the
+    /// key is a span or a materialized composite.
+    /// </summary>
+    internal static int GroupPartitionIndex(ReadOnlySpan<ColumnValue> key, int K, int seed = 0)
+        => PartitionFromHash(GroupKeyComparer.Instance.GetHashCode(key), K, seed);
+
+    private static int PartitionFromHash(int hashCode, int K, int seed)
     {
-        uint h = (uint)GroupKeyComparer.Instance.GetHashCode(key);
+        uint h = (uint)hashCode;
         h ^= (uint)seed * 0x9E3779B9u;
         h *= 0x85EBCA6Bu; h ^= h >> 13;
         h *= 0xC2B2AE35u; h ^= h >> 16;
@@ -319,6 +337,8 @@ internal sealed class QueryAggregator
 
         GroupKeyBuilder partitionBuilder = new();
         Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+        var partitionLookup = groups.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+        ColumnValue[] partitionScratch = new ColumnValue[groupBy.Count];
         bool overflow = false;
 
         await using (reader)
@@ -326,8 +346,8 @@ internal sealed class QueryAggregator
             do
             {
                 QueryResultRow row = reader.Current;
-                CompositeColumnValue key = partitionBuilder.Build(groupBy, row.Row, ticket);
-                if (!groups.TryGetValue(key, out GroupAccumulator? acc))
+                ReadOnlySpan<ColumnValue> key = partitionBuilder.BuildInto(groupBy, row.Row, ticket, partitionScratch);
+                if (!partitionLookup.TryGetValue(key, out GroupAccumulator? acc))
                 {
                     // A new distinct group: check threshold before adding. Beyond the recursion
                     // depth cap we accept unbounded growth here because the dictionary is bounded
@@ -338,7 +358,7 @@ internal sealed class QueryAggregator
                         break;
                     }
                     acc = new GroupAccumulator(projections);
-                    groups.Add(key, acc);
+                    partitionLookup[key] = acc;
                 }
                 acc.AddRow(row.Row, ticket);
             }
@@ -369,11 +389,12 @@ internal sealed class QueryAggregator
         if (rdr2 is not null)
         {
             GroupKeyBuilder rePartitionBuilder = new();
+            ColumnValue[] rePartitionScratch = new ColumnValue[groupBy.Count];
             await using (rdr2)
             {
                 do
                 {
-                    WriteToGroupPartition(rdr2.Current, groupBy, ticket, K, subWriters, rePartitionBuilder, newSeed);
+                    WriteToGroupPartition(rdr2.Current, groupBy, ticket, K, subWriters, rePartitionBuilder, rePartitionScratch, newSeed);
                 }
                 while (await rdr2.AdvanceAsync(ct).ConfigureAwait(false));
             }
@@ -405,13 +426,22 @@ internal sealed class QueryAggregator
         private int[]? _ordinals;
         private RowLayout? _resolvedLayout;
 
-        internal CompositeColumnValue Build(
+        /// <summary>
+        /// Resolves the group-key values for one row into the caller-owned <paramref name="scratch"/>
+        /// buffer and returns them as a <see cref="ReadOnlySpan{T}"/> view — no per-row key array or
+        /// <see cref="CompositeColumnValue"/> wrapper is allocated. The caller probes the group table
+        /// with this span (via <c>Dictionary.GetAlternateLookup</c>) and only materializes an owned
+        /// <see cref="CompositeColumnValue"/> when a <b>new</b> group is inserted. <paramref name="scratch"/>
+        /// must be at least <c>groupBy.Count</c> long and is reused across rows, so the returned span is
+        /// only valid until the next call — never store it in the group table (the alternate comparer's
+        /// <c>Create</c> copies it on insert).
+        /// </summary>
+        internal ReadOnlySpan<ColumnValue> BuildInto(
             IReadOnlyList<NodeAst> groupBy,
             IReadOnlyDictionary<string, ColumnValue> row,
-            QueryTicket ticket)
+            QueryTicket ticket,
+            ColumnValue[] scratch)
         {
-            ColumnValue[] values = new ColumnValue[groupBy.Count];
-
             if (row is QueryRow qr)
             {
                 // Lazy ordinal resolution from the first QueryRow's layout.
@@ -427,22 +457,38 @@ internal sealed class QueryAggregator
                     for (int i = 0; i < groupBy.Count; i++)
                     {
                         int ord = _ordinals[i];
-                        values[i] = ord >= 0
+                        scratch[i] = ord >= 0
                             ? qr.Values[ord]
                             : SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
                     }
-                    return new CompositeColumnValue(values);
+                    return scratch.AsSpan(0, groupBy.Count);
                 }
 
                 // Layout mismatch — degrade to per-row EvalExpr.
                 for (int i = 0; i < groupBy.Count; i++)
-                    values[i] = SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
-                return new CompositeColumnValue(values);
+                    scratch[i] = SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
+                return scratch.AsSpan(0, groupBy.Count);
             }
 
             // Non-QueryRow (e.g. spill-decoded plain dictionary) — always use EvalExpr.
             for (int i = 0; i < groupBy.Count; i++)
-                values[i] = SqlExecutor.EvalExpr(groupBy[i], row, ticket.Parameters, ticket.RowNameResolver);
+                scratch[i] = SqlExecutor.EvalExpr(groupBy[i], row, ticket.Parameters, ticket.RowNameResolver);
+            return scratch.AsSpan(0, groupBy.Count);
+        }
+
+        /// <summary>
+        /// Materializes an owned <see cref="CompositeColumnValue"/> group key. Used by the streaming
+        /// (sorted-input, adjacent-groups) path, which is an async iterator and therefore cannot hold a
+        /// <see cref="ReadOnlySpan{T}"/> across its <c>yield</c>; its memory is O(1) regardless, so the
+        /// per-row wrapper here is not the hash-probe garbage <see cref="BuildInto"/> removes.
+        /// </summary>
+        internal CompositeColumnValue Build(
+            IReadOnlyList<NodeAst> groupBy,
+            IReadOnlyDictionary<string, ColumnValue> row,
+            QueryTicket ticket)
+        {
+            ColumnValue[] values = new ColumnValue[groupBy.Count];
+            BuildInto(groupBy, row, ticket, values);
             return new CompositeColumnValue(values);
         }
 
@@ -1122,7 +1168,17 @@ internal sealed class QueryAggregator
         }
     }
 
-    private sealed class GroupKeyComparer : IEqualityComparer<CompositeColumnValue>
+    /// <summary>
+    /// Equality/hash for GROUP BY keys. Implements the span alternate
+    /// (<see cref="IAlternateEqualityComparer{TAlternate,T}"/>) so the group table can be probed with a
+    /// <see cref="ReadOnlySpan{T}"/> of just-computed key values — no per-row <see cref="CompositeColumnValue"/>
+    /// is allocated on a probe. An owned key is materialized only when a new group is inserted, via
+    /// <see cref="Create"/>. The span hash and equality mirror the object forms exactly (same field
+    /// mixing; equality via <see cref="ColumnValue.CompareTo"/>), so a span probe and a stored key agree.
+    /// </summary>
+    private sealed class GroupKeyComparer
+        : IEqualityComparer<CompositeColumnValue>,
+          IAlternateEqualityComparer<ReadOnlySpan<ColumnValue>, CompositeColumnValue>
     {
         public static GroupKeyComparer Instance { get; } = new();
 
@@ -1137,12 +1193,35 @@ internal sealed class QueryAggregator
             return x.CompareTo(y) == 0;
         }
 
-        public int GetHashCode(CompositeColumnValue obj)
+        public int GetHashCode(CompositeColumnValue obj) => HashValues(obj.Values);
+
+        // ── Span alternate: probe the group table without allocating a composite key ──
+
+        /// <summary>Materializes an owned key from the probe span. Called only on new-group insert.</summary>
+        public CompositeColumnValue Create(ReadOnlySpan<ColumnValue> alternate) =>
+            new(alternate.ToArray());
+
+        public bool Equals(ReadOnlySpan<ColumnValue> alternate, CompositeColumnValue other)
+        {
+            ColumnValue[] values = other.Values;
+            if (alternate.Length != values.Length)
+                return false;
+
+            for (int i = 0; i < alternate.Length; i++)
+                if (alternate[i].CompareTo(values[i]) != 0)
+                    return false;
+
+            return true;
+        }
+
+        public int GetHashCode(ReadOnlySpan<ColumnValue> alternate) => HashValues(alternate);
+
+        private static int HashValues(ReadOnlySpan<ColumnValue> values)
         {
             HashCode hash = new();
-            hash.Add(obj.Values.Length);
+            hash.Add(values.Length);
 
-            foreach (ColumnValue value in obj.Values)
+            foreach (ColumnValue value in values)
             {
                 hash.Add(value.Type);
                 hash.Add(value.StrValue);

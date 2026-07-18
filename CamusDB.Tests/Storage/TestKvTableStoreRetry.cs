@@ -530,8 +530,8 @@ public sealed class TestKvTableStoreRetry
         {
             RowId = rowId,
             RowData = BranchKvCodec.EncodeValue(rowData),
+            IndexEntries = [new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true)],
         };
-        row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
 
         // Fault predicate: the first call faults the NON-index keys (the row key "{tableId}:r/…")
         // and SETs the unique index key. The retry must resend only the row key; if it also resent
@@ -591,8 +591,7 @@ public sealed class TestKvTableStoreRetry
         CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 77L)]);
         const string IndexId = "idx_setid_unique";
 
-        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = BranchKvCodec.EncodeValue(rowData) };
-        row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
+        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = BranchKvCodec.EncodeValue(rowData), IndexEntries = [new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true)] };
 
         stub.InjectSetManyFaults = 1; // whole batch MustRetry once, nothing written; retry resends unchanged
 
@@ -629,8 +628,7 @@ public sealed class TestKvTableStoreRetry
         CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 88L)]);
         const string IndexId = "idx_shrink_unique";
 
-        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = BranchKvCodec.EncodeValue([4, 5]) };
-        row.IndexEntries.Add(new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true));
+        KvTableStore.RowWrite row = new() { RowId = rowId, RowData = BranchKvCodec.EncodeValue([4, 5]), IndexEntries = [new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true)] };
 
         // First call SETs the unique index key and faults only the row key; the retry carries just the
         // row key (a smaller batch), which must trigger a fresh operation id.

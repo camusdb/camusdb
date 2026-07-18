@@ -147,10 +147,10 @@ public sealed class TestTransactionMutationLimit
             RowId = rowId1,
             RowData = BranchKvCodec.EncodeValue([1]),
             IndexEntries =
-            {
+            [
                 new KvTableStore.IndexWrite("idx_a", key1a, Unique: false),
                 new KvTableStore.IndexWrite("idx_b", key1b, Unique: false),
-            }
+            ]
         }]);
 
         Assert.AreEqual(3, tx.MutationCount, "1 row + 2 index entries = 3 mutations");
@@ -166,10 +166,10 @@ public sealed class TestTransactionMutationLimit
                 RowId = rowId2,
                 RowData = BranchKvCodec.EncodeValue([2]),
                 IndexEntries =
-                {
+                [
                     new KvTableStore.IndexWrite("idx_a", key2a, Unique: false),
                     new KvTableStore.IndexWrite("idx_b", key2b, Unique: false),
-                }
+                ]
             }]));
 
         Assert.AreEqual(CamusDBErrorCodes.TransactionMutationLimitExceeded, ex?.Code);
