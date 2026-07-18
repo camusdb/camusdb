@@ -368,13 +368,26 @@ internal static class DerivedTableSchemaBuilder
         return ColumnType.String;
     }
 
+    /// <summary>
+    /// Resolves the declared <see cref="ColumnType"/> for an identifier projection. <paramref name="lookupKey"/>
+    /// is the resolver's authoritative row-key form: the bare column name for a single-source query, and the
+    /// <c>alias.column</c> qualified form for any join (see <see cref="QueryRowNameResolver.UsesQualifiedRowKeys"/>).
+    /// The physical-source match must therefore compare against <em>both</em> the bare name and the
+    /// alias-qualified name — comparing only the bare <c>column.Name</c> makes every join-projected column fall
+    /// through to <see cref="ColumnType.String"/>, which silently mis-declares non-self-describing wire forms
+    /// (uuid, bytes) and breaks type-driven client decoding even though the row payload is correct.
+    /// </summary>
     private static ColumnType ResolveColumnType(BoundSelectQuery innerBound, string lookupKey, string originalIdentifier)
     {
         foreach (BoundTableSource source in innerBound.Sources)
         {
             foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
             {
-                if (column.Name == lookupKey && SchemaElementStateRules.IsReadable(column))
+                if (!SchemaElementStateRules.IsReadable(column))
+                    continue;
+
+                if (lookupKey == column.Name ||
+                    lookupKey == QueryRowNameResolver.FormatQualifiedKey(source.Alias, column.Name))
                     return column.Type;
             }
         }
