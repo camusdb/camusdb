@@ -456,9 +456,11 @@ internal sealed class QuerySorter
                 for (int i = 0; i < orderBy.Count; i++)
                 {
                     int ord = _ordinals[i];
-                    ColumnValue leftValue  = ord >= 0 ? qrL.Values[ord] : GetSortValue(left,  orderBy[i].ColumnName);
-                    ColumnValue rightValue = ord >= 0 ? qrR.Values[ord] : GetSortValue(right, orderBy[i].ColumnName);
-                    int cmp = leftValue.CompareTo(rightValue);
+                    // In-layout keys compare slot-native (no ColumnValue materialized when both rows are
+                    // slot-backed); computed keys (ord < 0) fall back to the dictionary-resolved value.
+                    int cmp = ord >= 0
+                        ? qrL.CompareCellTo(ord, qrR, ord)
+                        : GetSortValue(left, orderBy[i].ColumnName).CompareTo(GetSortValue(right, orderBy[i].ColumnName));
                     if (cmp == 0) continue;
                     return orderBy[i].Type == OrderType.Ascending ? cmp : -cmp;
                 }

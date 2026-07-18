@@ -88,8 +88,8 @@ internal sealed class QueryDistincter
                 for (int i = 0; i < sortedOrdinals.Length; i++)
                 {
                     int ord = sortedOrdinals[i];
-                    ColumnValue cv = ord >= 0 ? qrCurr.Values[ord] : ((IReadOnlyDictionary<string, ColumnValue>)qrCurr)[sortedNames![i]];
-                    ColumnValue lv = ord >= 0 ? lastQr.Values[ord]  : ((IReadOnlyDictionary<string, ColumnValue>)lastQr)[sortedNames![i]];
+                    ColumnValue cv = ord >= 0 ? qrCurr.GetColumnValue(ord) : ((IReadOnlyDictionary<string, ColumnValue>)qrCurr)[sortedNames![i]];
+                    ColumnValue lv = ord >= 0 ? lastQr.GetColumnValue(ord)  : ((IReadOnlyDictionary<string, ColumnValue>)lastQr)[sortedNames![i]];
                     if (!DistinctValuesEqual(cv, lv)) { equal = false; break; }
                 }
             }
@@ -138,9 +138,10 @@ internal sealed class QueryDistincter
     /// <see cref="DistinctValuesEqual"/>, so streaming dedup correctly deduplicates them.
     ///
     /// <para>Column names are hoisted on the first call and reused for subsequent comparisons.
-    /// When the first row is a <see cref="QueryRow"/>, ordinals into
-    /// <see cref="QueryRow.Values"/> are resolved once and used for all subsequent comparisons,
-    /// replacing per-row dictionary lookups with direct array access.</para>
+    /// When the first row is a <see cref="QueryRow"/>, key ordinals are resolved once and every
+    /// subsequent comparison reads each key cell by ordinal via
+    /// <see cref="QueryRow.GetColumnValue(int)"/> — per-cell, so a slot-backed row materializes only
+    /// its distinct-key columns, not the whole row.</para>
     /// </summary>
     private sealed class DistinctRowComparer : IComparer<QueryResultRow>
     {
@@ -171,8 +172,8 @@ internal sealed class QueryDistincter
                 for (int i = 0; i < _sortedOrdinals.Length; i++)
                 {
                     int ord = _sortedOrdinals[i];
-                    ColumnValue xv = ord >= 0 ? qrX.Values[ord] : (((IReadOnlyDictionary<string, ColumnValue>)qrX).TryGetValue(_sortedNames[i], out ColumnValue? xf) ? xf : ColumnValue.Null);
-                    ColumnValue yv = ord >= 0 ? qrY.Values[ord] : (((IReadOnlyDictionary<string, ColumnValue>)qrY).TryGetValue(_sortedNames[i], out ColumnValue? yf) ? yf : ColumnValue.Null);
+                    ColumnValue xv = ord >= 0 ? qrX.GetColumnValue(ord) : (((IReadOnlyDictionary<string, ColumnValue>)qrX).TryGetValue(_sortedNames[i], out ColumnValue? xf) ? xf : ColumnValue.Null);
+                    ColumnValue yv = ord >= 0 ? qrY.GetColumnValue(ord) : (((IReadOnlyDictionary<string, ColumnValue>)qrY).TryGetValue(_sortedNames[i], out ColumnValue? yf) ? yf : ColumnValue.Null);
 
                     if (xv.Type == ColumnType.Null && yv.Type == ColumnType.Null) continue;
                     if (xv.Type == ColumnType.Null) return -1;
@@ -250,8 +251,8 @@ internal sealed class QueryDistincter
     /// Deduplicates output rows for <c>SELECT DISTINCT</c> without building a per-row key object.
     /// The canonical sorted-name→ordinal mapping is resolved <b>once</b> from the first
     /// <see cref="QueryRow"/>'s fixed <see cref="RowLayout"/>; thereafter same-layout rows hash and
-    /// compare directly against <see cref="QueryRow.Values"/> by ordinal — no per-row name sort,
-    /// tuple array, or key allocation.
+    /// compare each key cell by ordinal via <see cref="QueryRow.GetColumnValue(int)"/> (per-cell) — no
+    /// per-row name sort, tuple array, or key allocation, and no whole-row materialization.
     /// <para>
     /// Rows whose layout differs from the resolved one (a dictionary-backed row, or a different
     /// schema version) fall back to a per-row canonical computation that compares column <b>names</b>
@@ -279,7 +280,7 @@ internal sealed class QueryDistincter
                 for (int i = 0; i < _sortedOrdinals.Length; i++)
                 {
                     int ord = _sortedOrdinals[i];
-                    ColumnValue v = ord >= 0 ? qr.Values[ord] : ColumnValue.Null;
+                    ColumnValue v = ord >= 0 ? qr.GetColumnValue(ord) : ColumnValue.Null;
                     hash.Add(_sortedNames![i], StringComparer.Ordinal);
                     hash.Add(DistinctValueHash(v));
                 }
@@ -307,8 +308,8 @@ internal sealed class QueryDistincter
                 for (int i = 0; i < _sortedOrdinals.Length; i++)
                 {
                     int ord = _sortedOrdinals[i];
-                    ColumnValue xv = ord >= 0 ? qx.Values[ord] : ColumnValue.Null;
-                    ColumnValue yv = ord >= 0 ? qy.Values[ord] : ColumnValue.Null;
+                    ColumnValue xv = ord >= 0 ? qx.GetColumnValue(ord) : ColumnValue.Null;
+                    ColumnValue yv = ord >= 0 ? qy.GetColumnValue(ord) : ColumnValue.Null;
                     if (!DistinctValuesEqual(xv, yv))
                         return false;
                 }
@@ -359,7 +360,7 @@ internal sealed class QueryDistincter
                 for (int i = 0; i < names.Length; i++)
                 {
                     int ord = qr.Layout.IndexOf(names[i]);
-                    values[i] = ord >= 0 ? qr.Values[ord] : ColumnValue.Null;
+                    values[i] = ord >= 0 ? qr.GetColumnValue(ord) : ColumnValue.Null;
                 }
                 return (names, values);
             }

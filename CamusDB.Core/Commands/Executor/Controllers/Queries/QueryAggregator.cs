@@ -457,8 +457,10 @@ internal sealed class QueryAggregator
                     for (int i = 0; i < groupBy.Count; i++)
                     {
                         int ord = _ordinals[i];
+                        // Per-cell (GetColumnValue), not whole-row Values: only the group-key columns of
+                        // a slot-backed row materialize, never the aggregated or unreferenced columns.
                         scratch[i] = ord >= 0
-                            ? qr.Values[ord]
+                            ? qr.GetColumnValue(ord)
                             : SqlExecutor.EvalExpr(groupBy[i], qr, ticket.Parameters, ticket.RowNameResolver);
                     }
                     return scratch.AsSpan(0, groupBy.Count);

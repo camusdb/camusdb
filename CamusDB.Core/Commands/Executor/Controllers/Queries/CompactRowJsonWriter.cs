@@ -59,11 +59,12 @@ public static class CompactRowJsonWriter
                     ordinals[i] = queryRow.Layout.IndexOf(schema[i].Name);
             }
 
-            ColumnValue[] values = queryRow.Values;
+            // Per-cell access (not queryRow.Values): a slot-backed row materializes only the projected
+            // cells it is asked for, never the whole row.
             for (int i = 0; i < schema.Count; i++)
             {
                 int ord = ordinals![i];
-                WriteValue(writer, ord >= 0 ? values[ord] : null);
+                WriteValue(writer, ord >= 0 ? queryRow.GetColumnValue(ord) : null);
             }
         }
         else

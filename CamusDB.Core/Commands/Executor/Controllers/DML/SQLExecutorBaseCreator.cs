@@ -159,14 +159,17 @@ internal abstract class SQLExecutorBaseCreator
                     string lookupKey = rowNameResolver?.ResolveRowLookupKey(expr.yytext!) ?? expr.yytext!;
 
                     // Ordinal fast path: when the caller supplies a QueryRow directly, bypass the
-                    // IReadOnlyDictionary adapter and read Values[ordinal] without virtual dispatch.
+                    // IReadOnlyDictionary adapter and read the cell by ordinal without virtual dispatch.
+                    // Uses GetColumnValue (per-cell), not Values, so evaluating a predicate against a
+                    // slot-backed row materializes only the columns the expression references — a row
+                    // rejected by a WHERE clause never materializes its projection cells.
                     // Falls through to the dictionary path for any key not found in the layout
                     // (e.g. a parameter alias or a column absent from this row's schema version).
                     if (queryRow is not null)
                     {
                         int ordinal = queryRow.Layout.IndexOf(lookupKey);
                         if (ordinal >= 0)
-                            return queryRow.Values[ordinal];
+                            return queryRow.GetColumnValue(ordinal);
                     }
 
                     if (row.TryGetValue(lookupKey, out ColumnValue? columnValue))

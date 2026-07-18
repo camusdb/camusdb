@@ -459,6 +459,26 @@ public static class CamusDBConfig
     public static int SpillMergeFanIn = 16;
 
     /// <summary>
+    /// When set, the query decode path produces slot-backed <c>QueryRow</c> rows — one
+    /// <c>ValueSlot[]</c> per row and zero per-cell <c>ColumnValue</c> objects, materialized lazily on
+    /// access — so a filtered-out row never allocates a <c>ColumnValue</c> for its projection cells.
+    /// The eager <c>ColumnValue[]</c> path (the default) decodes each cell to a <c>ColumnValue</c> up
+    /// front. Both paths are value-identical.
+    ///
+    /// <para>
+    /// <b>Default is <c>false</c></b>, and deliberately so: benchmarks show the slot path is a
+    /// selectivity-dependent trade, not a universal win. It allocates ~18% less on a highly selective
+    /// scan (most rows filtered before their projection cells are read), but ~13% more on a
+    /// non-selective scan and ~26% more on <c>SELECT *</c>, because when most cells are read the
+    /// wider slot array plus the lazy materialization cache are pure overhead. Since selectivity is not
+    /// known at decode time, enabling it globally would regress common queries. It stays off until the
+    /// operators consume slots directly (so slots flow without materializing every cell); flip it on
+    /// only for a workload measured to be selective. See BENCH-RESULTS.md → "Slot-backed decode (A/B)".
+    /// </para>
+    /// </summary>
+    public static bool SlotBackedDecode = false;
+
+    /// <summary>
     /// Upper bound on a single spill-run record's declared payload length, checked before the
     /// reader allocates or rents a buffer for it. A spill file is trusted engine output, but the
     /// frame-length prefix is still read straight off disk, so a corrupt or truncated file could

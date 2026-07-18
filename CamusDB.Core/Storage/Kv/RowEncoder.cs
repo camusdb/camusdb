@@ -472,8 +472,45 @@ public static class RowEncoder
     /// Executes a prebuilt <see cref="RowDecodePlan"/> against one row's bytes. Fully synchronous — the
     /// per-column loop does only a read-or-skip on the precomputed step, with no visibility checks,
     /// required-set lookups, layout index lookups, or current-column searches.
+    ///
+    /// <para>
+    /// Produces a slot-backed <see cref="QueryRow"/> when <see cref="CamusDBConfig.SlotBackedDecode"/>
+    /// is set (the default): one <c>ValueSlot[]</c> allocation and zero per-cell <see cref="ColumnValue"/>
+    /// objects, with cells materialized lazily on access. The flag falls back to the eager
+    /// <see cref="ColumnValue"/><c>[]</c> path — a kill switch and the A/B baseline for the slot work.
+    /// Both paths are value-identical.
+    /// </para>
     /// </summary>
     private static QueryRow ExecuteDecodePlan(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId)
+    {
+        if (!CamusDBConfig.SlotBackedDecode)
+            return ExecuteDecodePlanEager(plan, data, ref pointer, rowId);
+
+        ValueSlot[] values = new ValueSlot[plan.Layout.Count];
+
+        ColumnDecodeStep[] steps = plan.Steps;
+        for (int i = 0; i < steps.Length; i++)
+        {
+            ColumnDecodeStep step = steps[i];
+            if (step.OutputOrdinal >= 0)
+                values[step.OutputOrdinal] = ReadValueSlot(step.Type, data, ref pointer);
+            else
+                SkipColumnValue(step.Type, data, ref pointer);
+        }
+
+        (int Ordinal, ColumnValue Value)[] injected = plan.InjectedDefaults;
+        for (int i = 0; i < injected.Length; i++)
+            values[injected[i].Ordinal] = ValueSlot.FromColumnValue(injected[i].Value);
+
+        return QueryRow.FromSlots(rowId, plan.Layout, values);
+    }
+
+    /// <summary>
+    /// Eager fallback for <see cref="ExecuteDecodePlan"/>: decodes each cell straight into a
+    /// <see cref="ColumnValue"/> as the pipeline did before slot-backed rows. Kept as the kill-switch
+    /// path (<see cref="CamusDBConfig.SlotBackedDecode"/> == false) and the A/B baseline.
+    /// </summary>
+    private static QueryRow ExecuteDecodePlanEager(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId)
     {
         ColumnValue[] values = new ColumnValue[plan.Layout.Count];
 
@@ -813,6 +850,158 @@ public static class RowEncoder
                     elements.Add(ReadArrayElement(elementType, data, ref pointer));
                 return ColumnValue.FromArray(elementType, elements);
             }
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);
+        }
+    }
+
+    /// <summary>
+    /// Reads one stored column value directly into a <see cref="ValueSlot"/> — the slot counterpart of
+    /// <see cref="ReadColumnValue"/>, producing no per-cell <see cref="ColumnValue"/> object for scalars,
+    /// strings, bytes, ids, or UUIDs. Arrays (uncommon) delegate to <see cref="ReadColumnValue"/> and
+    /// pack the result, since a slot array wraps <see cref="ValueSlot"/> elements anyway. Byte-for-byte
+    /// consumes the same bytes as <see cref="ReadColumnValue"/> for the same input.
+    /// </summary>
+    private static ValueSlot ReadValueSlot(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
+    {
+        switch (columnType)
+        {
+            case ColumnType.Id:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeId =>
+                        ValueSlot.FromId(Serializator.ReadObjectId(data, ref pointer).ToString()),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Integer64:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeInteger64 =>
+                        ValueSlot.FromLong(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.String:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeString8 or
+                    SerializatorTypes.TypeString16 or
+                    SerializatorTypes.TypeString32 =>
+                        ValueSlot.FromString(Serializator.ReadString(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Float64:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeDouble =>
+                        ValueSlot.FromDouble(ColumnType.Float64, Serializator.ReadDouble(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Bool:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeBool =>
+                        ValueSlot.FromBool(Serializator.ReadBool(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Float32:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeFloat =>
+                        ValueSlot.FromDouble(ColumnType.Float32, (double)Serializator.ReadFloat(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Date:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeDate =>
+                        ValueSlot.FromLong(ColumnType.Date, Serializator.ReadInt64(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.DateTime:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeDateTime =>
+                        ValueSlot.FromLong(ColumnType.DateTime, Serializator.ReadInt64(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Bytes:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeBytes =>
+                        ValueSlot.FromBytes(Serializator.ReadBytesPayload(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ValueSlot.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
+            case ColumnType.Uuid:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeUuid)
+                {
+                    (long high, long low) = Serializator.ReadUuid(data, ref pointer);
+                    return ValueSlot.FromUuid(high, low);
+                }
+                if (t == SerializatorTypes.TypeNull)
+                    return ValueSlot.Null;
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+            }
+
+            case ColumnType.Array:
+                // Uncommon; decode to a ColumnValue then pack (a slot array wraps ValueSlot elements).
+                return ValueSlot.FromColumnValue(ReadColumnValue(columnType, data, ref pointer));
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);

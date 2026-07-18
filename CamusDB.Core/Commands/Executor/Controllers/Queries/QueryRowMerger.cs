@@ -74,7 +74,9 @@ internal static class QueryRowMerger
     /// </para>
     /// </summary>
     public static QueryRow QualifyRowAsQueryRow(QueryRow source, RowLayout qualifiedLayout) =>
-        new(source.RowId, qualifiedLayout, source.Values);
+        // WithLayout preserves the slot backing (no whole-row materialization) when the source is a
+        // freshly decoded scan row; requalifying only changes column names, not values.
+        source.WithLayout(qualifiedLayout);
 
     /// <summary>
     /// Precomputes a mapping from each key in <paramref name="rightRow"/> — exactly as
