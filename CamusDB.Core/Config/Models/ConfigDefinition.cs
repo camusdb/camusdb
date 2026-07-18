@@ -149,9 +149,9 @@ public class ConfigDefinition
     /// <summary>
     /// When <c>true</c>, binds a dedicated client-facing gRPC HTTP/2 port (<see cref="GrpcPort"/>)
     /// and registers the <c>CamusSql</c> and <c>CamusRows</c> services plus gRPC reflection.
-    /// Defaults to <c>false</c> — the operator must consciously expose the gRPC endpoint.
+    /// Defaults to <c>true</c> — the operator must consciously disable the gRPC endpoint.
     /// </summary>
-    public bool GrpcEnabled { get; set; } = false;
+    public bool GrpcEnabled { get; set; } = true;
 
     /// <summary>
     /// Port for the client-facing gRPC listener (HTTP/2 only). Ignored when

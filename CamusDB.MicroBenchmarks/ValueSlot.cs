@@ -14,7 +14,12 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.MicroBenchmarks;
 
 /// <summary>
-/// PROTOTYPE, benchmark-only. A compact value representation that packs every scalar column value
+/// PROTOTYPE, benchmark-only — the original spike. The production type now lives in Core as
+/// <c>CamusDB.Core.CommandsExecutor.Models.ValueSlot</c> (internal). This copy is retained only so the
+/// spike stays reproducible; it differs deliberately by packing <c>Id</c> inline (the decode upper
+/// bound), whereas the Core type stores <c>Id</c> as a string for safe boundary round-tripping.
+///
+/// A compact value representation that packs every scalar column value
 /// into inline fields so a decoded row is a single <c>ValueSlot[]</c> allocation with zero per-cell
 /// heap objects — the candidate replacement the hot-path allocation spec parks as a gated spike
 /// (do not adopt without the end-to-end benchmark clearing). It is deliberately NOT a drop-in swap

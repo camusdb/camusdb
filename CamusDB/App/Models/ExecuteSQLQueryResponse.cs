@@ -38,9 +38,10 @@ public sealed class ExecuteSQLQueryResponse
     /// Positional rows: <c>Rows[r][c]</c> is the compact-raw value for <c>Columns[c]</c> in row
     /// <c>r</c>. Values are JSON-native (number/string/bool/null) for scalar types; Bytes is
     /// base64; Date/DateTime are raw <see cref="DateTime.Ticks"/>; Uuid is <c>[high, low]</c>;
-    /// Array is a JSON array of element values.
+    /// Array is a JSON array of element values. Serialized straight from the buffered result rows
+    /// (see <see cref="PositionalRowSet"/>) — no intermediate boxed object graph.
     /// </summary>
-    public List<object?[]> Rows { get; set; } = [];
+    public PositionalRowSet Rows { get; set; } = PositionalRowSet.Empty;
 
     public string? Code { get; set; }
 
@@ -79,7 +80,7 @@ public sealed class ExecuteSQLQueryResponse
     /// <summary>Logical cache family name from the query hint. Non-null when the cache path was entered.</summary>
     public string? CacheName { get; set; }
 
-    public ExecuteSQLQueryResponse(string status, int total, List<ColumnSchemaDto> columns, List<object?[]> rows)
+    public ExecuteSQLQueryResponse(string status, int total, List<ColumnSchemaDto> columns, PositionalRowSet rows)
     {
         Status = status;
         Total = total;
