@@ -105,9 +105,23 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             IfExists = ticket.IfExists,
+            Force = ticket.Force,
         };
 
         return await PostAsync(leader, "drop-table", request, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken cancellationToken)
+    {
+        ForwardRelinkTableRequest request = new()
+        {
+            OperationId = operationId,
+            DatabaseName = ticket.DatabaseName,
+            NewTableName = ticket.NewTableName,
+            OrphanTableId = ticket.OrphanTableId,
+        };
+
+        return await PostAsync(leader, "relink-table", request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken)

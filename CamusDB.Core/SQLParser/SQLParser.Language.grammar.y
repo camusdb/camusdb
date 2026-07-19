@@ -30,7 +30,7 @@
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-%token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT
+%token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
 
 %%
 
@@ -247,24 +247,30 @@ set_transaction_stmt
       }
     ;
 
-create_table_stmt : TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null, null); }
+create_table_stmt : TCREATE TTABLE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateTableRelink, $3.n, $6.n, null, null, null, null, null, null); }
+                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null, null); }
                   | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, null, null, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $10.n, null, null, null, null, null); }
                   ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
+                | TDROP TTABLE any_identifier TFORCE { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, "force"); }
                 | TDROP TTABLE TIF TEXISTS any_identifier { $$.n = new(NodeType.DropTableIfExists, $5.n, null, null, null, null, null, null, null); }
+                | TDROP TTABLE TIF TEXISTS any_identifier TFORCE { $$.n = new(NodeType.DropTableIfExists, $5.n, null, null, null, null, null, null, "force"); }
                 ;
 
-create_database_stmt : TCREATE TDATABASE any_identifier { $$.n = new(NodeType.CreateDatabase, $3.n, null, null, null, null, null, null, null); }
+create_database_stmt : TCREATE TDATABASE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateDatabaseRelink, $3.n, $6.n, null, null, null, null, null, null); }
+                     | TCREATE TDATABASE any_identifier { $$.n = new(NodeType.CreateDatabase, $3.n, null, null, null, null, null, null, null); }
                      | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier { $$.n = new(NodeType.CreateDatabaseIfNotExists, $6.n, null, null, null, null, null, null, null); }
                      | TCREATE TDATABASE any_identifier TBRANCH TFROM any_identifier { $$.n = new(NodeType.CreateDatabaseBranch, $3.n, $6.n, null, null, null, null, null, null); }
                      | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier TBRANCH TFROM any_identifier { $$.n = new(NodeType.CreateDatabaseBranchIfNotExists, $6.n, $9.n, null, null, null, null, null, null); }
                      ;
 
 drop_database_stmt : TDROP TDATABASE any_identifier { $$.n = new(NodeType.DropDatabase, $3.n, null, null, null, null, null, null, null); }
+                   | TDROP TDATABASE any_identifier TFORCE { $$.n = new(NodeType.DropDatabase, $3.n, null, null, null, null, null, null, "force"); }
                    | TDROP TDATABASE TIF TEXISTS any_identifier { $$.n = new(NodeType.DropDatabaseIfExists, $5.n, null, null, null, null, null, null, null); }
+                   | TDROP TDATABASE TIF TEXISTS any_identifier TFORCE { $$.n = new(NodeType.DropDatabaseIfExists, $5.n, null, null, null, null, null, null, "force"); }
 				;
 
 rename_database_stmt : TRENAME TDATABASE any_identifier TTO any_identifier { $$.n = new(NodeType.RenameDatabase, $3.n, $5.n, null, null, null, null, null, null); }
@@ -315,6 +321,8 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TBRANCHES TFROM any_identifier { $$.n = new(NodeType.ShowBranches, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TANCESTORS TFROM any_identifier { $$.n = new(NodeType.ShowAncestors, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TORPHAN TTABLES { $$.n = new(NodeType.ShowOrphanTables, null, null, null, null, null, null, null, null); }
+          | TSHOW TORPHAN TDATABASES { $$.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
           ;
 
 analyze_stmt : TANALYZE any_identifier

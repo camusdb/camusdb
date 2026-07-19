@@ -29,11 +29,13 @@ internal sealed class ExecuteSQLValidator : ValidatorBase
             bool serverLevel = ast.nodeType is
                 NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
                 NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
+                NodeType.CreateDatabaseRelink or
                 NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
                 NodeType.RenameDatabase or
                 NodeType.ShowDatabases or
                 NodeType.ShowBranches or
-                NodeType.ShowAncestors;
+                NodeType.ShowAncestors or
+                NodeType.ShowOrphanDatabases;
 
             if (!serverLevel)
                 throw new CamusDBException(

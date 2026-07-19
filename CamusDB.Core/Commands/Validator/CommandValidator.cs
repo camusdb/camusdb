@@ -30,6 +30,10 @@ public sealed class CommandValidator
 
     private readonly CloseDatabaseValidator closeDatabaseValidator = new();
 
+    private readonly RelinkDatabaseValidator relinkDatabaseValidator = new();
+
+    private readonly RelinkTableValidator relinkTableValidator = new();
+
     public void Validate(CreateDatabaseTicket ticket)
     {
         createDatabaseValidator.Validate(ticket);
@@ -38,6 +42,16 @@ public sealed class CommandValidator
     public void Validate(DropDatabaseTicket ticket)
     {
         dropDatabaseValidator.Validate(ticket);
+    }
+
+    public void Validate(RelinkDatabaseTicket ticket)
+    {
+        relinkDatabaseValidator.Validate(ticket);
+    }
+
+    public void Validate(RelinkTableTicket ticket)
+    {
+        relinkTableValidator.Validate(ticket);
     }
 
     public void Validate(CreateTableTicket ticket)

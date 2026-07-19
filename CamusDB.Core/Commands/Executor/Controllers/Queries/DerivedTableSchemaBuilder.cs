@@ -77,6 +77,22 @@ internal static class DerivedTableSchemaBuilder
         new("fork_timestamp", ColumnType.String),
     ];
 
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowOrphanDatabasesSchema =
+    [
+        new("id",          ColumnType.String),
+        new("former_name", ColumnType.String),
+        new("dropped_at",  ColumnType.String),
+        new("expires_at",  ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowOrphanTablesSchema =
+    [
+        new("id",          ColumnType.String),
+        new("former_name", ColumnType.String),
+        new("dropped_at",  ColumnType.String),
+        new("expires_at",  ColumnType.String),
+    ];
+
     // -------------------------------------------------------------------------
     // Build — derives schema from a bound SELECT query.
     // ExprAllFields (*) is expanded to all readable columns from every source.

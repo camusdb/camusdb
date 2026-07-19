@@ -105,6 +105,37 @@ public sealed class SchemaColumnPayload
 public sealed class SchemaDropTablePayload
 {
     public string TableName { get; set; } = "";
+
+    /// <summary>
+    /// When <c>true</c> the table is being dropped deferred (recoverable): the schema-checkpoint that
+    /// deletes the per-table meta key also writes the table's orphan record in the <em>same</em>
+    /// transaction, so the detach and the recovery record commit atomically. When <c>false</c> (default,
+    /// and for old replayed entries) the drop is immediate and no orphan record is written.
+    /// </summary>
+    public bool Deferred { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.RelinkTable"/>: enough to rebuild an orphaned table identically
+/// under a new name — its preserved id, real schema <see cref="Version"/>, column ids, index
+/// definitions, and check constraints. Distinct from <see cref="SchemaCreateTablePayload"/> because
+/// the apply preserves the version and configures a lazy history loader rather than starting at
+/// version 0 with a synthetic history.
+/// </summary>
+public sealed class SchemaRelinkTablePayload
+{
+    public string? TableId { get; set; }
+
+    public string TableName { get; set; } = "";
+
+    /// <summary>The table's schema version at drop time, preserved so post-<c>ALTER</c> rows decode.</summary>
+    public int Version { get; set; }
+
+    public SchemaColumnPayload[] Columns { get; set; } = [];
+
+    public TableIndexSchema[]? Indexes { get; set; }
+
+    public CheckConstraintSchema[]? CheckConstraints { get; set; }
 }
 
 public sealed class SchemaIndexPayload

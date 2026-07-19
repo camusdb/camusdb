@@ -71,6 +71,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TableDoesntExist    => StatusCode.NotFound,
         CamusDBErrorCodes.IndexDoesntExist    => StatusCode.NotFound,
         CamusDBErrorCodes.UnknownKey          => StatusCode.NotFound,
+        CamusDBErrorCodes.OrphanNotFound      => StatusCode.NotFound,
 
         // Already exists
         CamusDBErrorCodes.DuplicateUniqueKeyValue => StatusCode.AlreadyExists,

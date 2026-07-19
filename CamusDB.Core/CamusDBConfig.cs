@@ -63,6 +63,24 @@ public static class CamusDBConfig
     public static int KeyspacePurgeBatchSize = 512;
 
     /// <summary>
+    /// Retention window, in milliseconds, for orphaned (deferred-dropped) root databases and tables:
+    /// after <c>now - DroppedAt</c> exceeds this, the garbage collector may physically reclaim the
+    /// orphan; until then it stays recoverable via <c>CREATE ... RELINK TO</c>. Independent of the
+    /// Kahuna PITR/WAL window (which is unrelated to physical row keys). A value <c>&lt;= 0</c> disables
+    /// automatic reclamation — orphans are kept until an explicit <c>DROP ... FORCE</c> / manual purge.
+    /// Default is 7 days. Surfaced as <c>expires_at</c> by <c>SHOW ORPHAN DATABASES/TABLES</c>.
+    /// </summary>
+    public static long OrphanRetentionMs = 7L * 24 * 60 * 60 * 1000;
+
+    /// <summary>
+    /// Interval, in milliseconds, of the background <c>OrphanReclaimer</c> sweep that physically
+    /// reclaims orphaned databases/tables past <see cref="OrphanRetentionMs"/>. The sweep runs on a
+    /// single elected node (registry-partition leader). A value <c>&lt;= 0</c> disables the loop
+    /// entirely (used by tests that drive a sweep manually). Default is 5 minutes.
+    /// </summary>
+    public static int OrphanReclaimIntervalMs = 5 * 60 * 1000;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of the Kahuna snapshot-floor hold a branch database
     /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
     /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The

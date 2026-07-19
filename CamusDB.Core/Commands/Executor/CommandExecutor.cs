@@ -59,6 +59,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly Task? snapshotRenewerStart;
     private SnapshotHoldRenewer? snapshotHoldRenewer;
 
+    // Leader-owned loop that physically reclaims deferred-dropped databases/tables past their retention
+    // window. Started alongside the renewer; disposed on teardown.
+    private OrphanReclaimer? orphanReclaimer;
+
     private readonly TableOpener tableOpener;
 
     private readonly TableCreator tableCreator;
@@ -214,12 +218,50 @@ public sealed class CommandExecutor : IAsyncDisposable
         renewer.Start();
         snapshotHoldRenewer = renewer;
 
-        // On startup, find any branch ids that were allocated and partially written (metadata
-        // copied) but never registered — left by a crash between CopyMetaForBranchAsync and
-        // RegisterAsync during a previous branch-creation attempt. Purge their namespaces so
-        // wasted KV space is reclaimed.  Errors are logged and swallowed; orphan cleanup is
-        // advisory and must not block normal startup.
-        _ = ScrubOrphanBranchNamespacesAsync(node, registry);
+        // Run startup recovery to COMPLETION before the reclaimer starts. The scrubber clears this
+        // node's prior-run stale drop-intent markers (epoch-scoped, so it can never touch a marker this
+        // run created) and resumes prior-run interrupted keyspace purges under a freshly-reacquired
+        // fence. Doing it first means the reclaimer's loop/immediate-sweep never races the stale-marker
+        // cleanup. Errors are logged and swallowed; recovery is advisory and must not block startup.
+        await ScrubOrphanBranchNamespacesAsync(node, registry).ConfigureAwait(false);
+
+        // Physically reclaim deferred-dropped databases/tables past their retention window, on the
+        // elected node. Kick one immediate sweep so orphans already expired during downtime are cleaned
+        // promptly rather than waiting a full interval.
+        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, CamusDBConfig.OrphanReclaimIntervalMs);
+        reclaimer.Start();
+        orphanReclaimer = reclaimer;
+        _ = ReclaimExpiredOrphansOnStartupAsync(reclaimer);
+    }
+
+    /// <summary>
+    /// Test-only seam: forces one orphan-reclamation sweep after the deferred renewer/reclaimer start
+    /// completes, and returns the number of orphans reclaimed. Lets a test drive the GC deterministically
+    /// (with a tiny <see cref="CamusDBConfig.OrphanRetentionMs"/>) instead of waiting for the timer.
+    /// </summary>
+    internal async Task<int> RunOrphanReclaimForTestsAsync()
+    {
+        if (snapshotRenewerStart is not null)
+            await snapshotRenewerStart.ConfigureAwait(false);
+        return orphanReclaimer is null ? 0 : await orphanReclaimer.ReclaimDueAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs one orphan-reclamation sweep at startup so databases/tables whose retention window elapsed
+    /// while the node was down (and any purge interrupted by a crash) are reclaimed promptly instead of
+    /// waiting a full <see cref="CamusDBConfig.OrphanReclaimIntervalMs"/>. Best-effort and gated by
+    /// leader election inside the reclaimer; failures are logged and swallowed so startup never blocks.
+    /// </summary>
+    private async Task ReclaimExpiredOrphansOnStartupAsync(OrphanReclaimer reclaimer)
+    {
+        try
+        {
+            await reclaimer.ReclaimDueAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Startup orphan reclamation sweep failed");
+        }
     }
 
     /// <summary>
@@ -298,22 +340,52 @@ public sealed class CommandExecutor : IAsyncDisposable
             if (intentsCleared > 0 && logger.IsEnabled(LogLevel.Information))
                 logger.LogInformation("Cleared {Count} stale drop-intent marker(s) on startup", intentsCleared);
 
-            // Resume any DROP DATABASE this node started but did not finish before a crash. The
-            // keyspace purge is per-key and non-transactional, so an interrupted drop can leave
-            // orphaned row/index/stats data with no other reclaim. Owner-scoped markers mean we only
-            // resume our own drops; a marker whose id is still registered means the crash preceded
-            // UnregisterAsync (nothing was purged) so we just clear the stale marker.
+            // Resume any DROP DATABASE this node started but did not finish before a crash (prior-epoch
+            // dropping markers only — LoadOwnDroppingIdsAsync excludes this run's live markers). The
+            // keyspace purge is per-key and non-transactional, so an interrupted drop can leave orphaned
+            // row/index/stats data with no other reclaim. Each resume takes the id's fence and rechecks
+            // AUTHORITATIVE registry state under it (not the local cache) so a concurrent relink/GC of the
+            // same id can never interleave with the resumed purge.
             foreach (string droppingId in await registry.LoadOwnDroppingIdsAsync().ConfigureAwait(false))
             {
                 try
                 {
-                    if (registry.GetById(droppingId) is null)
+                    // Authoritative: if the id is still registered (live), the crash preceded
+                    // UnregisterAsync — nothing was purged — so just clear the stale marker.
+                    if (await registry.TryResolveNameByIdAsync(droppingId).ConfigureAwait(false) is not null)
                     {
+                        await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Fence the id for the resumed purge. If we cannot take it, another operation holds
+                    // it (a relink/GC on this or another node); leave the marker for a later resume.
+                    if (!await registry.AcquireDropIntentAsync(droppingId).ConfigureAwait(false))
+                        continue;
+
+                    try
+                    {
+                        // Re-check liveness under the fence before destroying anything.
+                        if (await registry.TryResolveNameByIdAsync(droppingId).ConfigureAwait(false) is not null)
+                        {
+                            await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                            continue;
+                        }
+
                         if (logger.IsEnabled(LogLevel.Information))
                             logger.LogInformation("Resuming interrupted DROP DATABASE keyspace purge for id {DbId} on startup", droppingId);
-                        await databaseDroper.PurgeKeyspaceByIdAsync(node.Kahuna, droppingId, null).ConfigureAwait(false);
+
+                        // Clear the marker only if the resumed purge verifiably completed; otherwise
+                        // leave it so the NEXT startup resumes again (never abandon leaked keys).
+                        if (await databaseDroper.PurgeKeyspaceByIdAsync(node.Kahuna, droppingId, null).ConfigureAwait(false))
+                            await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                        else
+                            logger.LogWarning("Resumed purge for id {DbId} is still incomplete; leaving marker for the next startup", droppingId);
                     }
-                    await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                    finally
+                    {
+                        await registry.ReleaseDropIntentAsync(droppingId).ConfigureAwait(false);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -695,6 +767,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                 ticket.DatabaseName);
         }
 
+        // A root database dropped without FORCE is retained as a recoverable orphan: its keyspace is
+        // kept on disk and the id becomes relinkable until the garbage collector reclaims it after the
+        // retention window. Branch databases (and any FORCE drop) take the immediate-purge path — a
+        // branch's recovery would require holding its parent's snapshot floor for the whole window, so
+        // deferred drop is out of scope for branches.
+        bool deferred = !ticket.Force && entry.Ancestors.Count == 0;
+
         // Single outer try/finally ensures the intent marker is released on every exit path:
         // successful drop, failed descendant check, or error during Drop/hold-release.
         try
@@ -712,10 +791,28 @@ public sealed class CommandExecutor : IAsyncDisposable
                         CamusDBErrorCodes.DatabaseHasLiveDescendants,
                         $"Database '{ticket.DatabaseName}' cannot be dropped because it has live branch descendants. Drop all descendant branches first.");
 
-                // Mark the drop in progress before unregistering so a crash during the (non-atomic,
-                // per-key) keyspace purge below can be resumed at startup. The marker is owner-scoped
-                // and cleared only after the purge fully completes.
-                await registry.MarkDroppingAsync(entry.Id).ConfigureAwait(false);
+                if (deferred)
+                {
+                    // Write the orphan record BEFORE unregistering so a crash between the two leaves the
+                    // database still live (stale record, harmless) rather than data stranded with no
+                    // recovery path. DroppedAt is minted from the HLC so the GC's eligibility decision is
+                    // consistent across nodes.
+                    HLCTimestamp droppedAt = sharedNode!.Raft.HybridLogicalClock
+                        .SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
+                    await registry.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+                    {
+                        Id = entry.Id,
+                        FormerName = entry.Name,
+                        DroppedAt = droppedAt,
+                    }).ConfigureAwait(false);
+                }
+                else
+                {
+                    // Mark the drop in progress before unregistering so a crash during the (non-atomic,
+                    // per-key) keyspace purge below can be resumed at startup. The marker is owner-scoped
+                    // and cleared only after the purge fully completes.
+                    await registry.MarkDroppingAsync(entry.Id).ConfigureAwait(false);
+                }
 
                 // Unregister first: once the registry KV entry is deleted and the in-memory cache
                 // cleared, any concurrent Open(name) gets DatabaseDoesntExist immediately — the name
@@ -730,27 +827,42 @@ public sealed class CommandExecutor : IAsyncDisposable
                     targetDescriptor.SchemaDdlSemaphore.Release();
             }
 
-            await databaseDroper.Drop(entry.Id).ConfigureAwait(false);
+            // Deferred drop closes the database but leaves its keyspace intact for recovery.
+            bool purged = await databaseDroper.Drop(entry.Id, purge: !deferred).ConfigureAwait(false);
 
-            // Release the snapshot-floor hold this branch owned on its immediate parent so the
-            // parent's pinned MVCC history can be reclaimed. Best-effort.
-            if (!string.IsNullOrEmpty(entry.ImmediateParentHoldId) && sharedNode is not null)
+            if (!deferred)
             {
-                try
+                // Release the snapshot-floor hold this branch owned on its immediate parent so the
+                // parent's pinned MVCC history can be reclaimed. Best-effort.
+                if (!string.IsNullOrEmpty(entry.ImmediateParentHoldId) && sharedNode is not null)
                 {
-                    await sharedNode.Kahuna
-                        .LocateAndReleaseSnapshotHold(entry.ImmediateParentHoldId, CancellationToken.None)
-                        .ConfigureAwait(false);
+                    try
+                    {
+                        await sharedNode.Kahuna
+                            .LocateAndReleaseSnapshotHold(entry.ImmediateParentHoldId, CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Failed to release snapshot hold {HoldId} for dropped branch '{Database}'", entry.ImmediateParentHoldId, ticket.DatabaseName);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to release snapshot hold {HoldId} for dropped branch '{Database}'", entry.ImmediateParentHoldId, ticket.DatabaseName);
-                }
-            }
 
-            // Purge completed: clear the drop-in-progress marker. Left in place only if a step above
-            // threw (crash/failure), so the startup scrub resumes the interrupted purge.
-            await registry.ClearDroppingAsync(entry.Id).ConfigureAwait(false);
+                // Clear the drop-in-progress marker ONLY if the purge verifiably completed. If it did
+                // not (a delete/scan failure), leave the marker so the startup resume finishes the purge
+                // — clearing it now would abandon leaked row/index/meta keys with no reclaim.
+                if (purged)
+                    await registry.ClearDroppingAsync(entry.Id).ConfigureAwait(false);
+                else
+                    logger.LogWarning(
+                        "DROP DATABASE FORCE for '{Database}' (id={Id}) did not fully purge; leaving drop-in-progress marker for startup resume",
+                        ticket.DatabaseName, entry.Id);
+
+                // A FORCE drop destroys the keyspace for good, so any stale orphan record for this id
+                // (left by a crashed relink) must go too — otherwise the id stays "relinkable" to an
+                // empty/partial keyspace.
+                await registry.DeleteDatabaseOrphanAsync(entry.Id).ConfigureAwait(false);
+            }
 
             // Evict every cache entry for this database. The descriptor may no longer be available
             // after the drop, so use the entry id directly rather than targetDescriptor?.Cache.
@@ -764,6 +876,76 @@ public sealed class CommandExecutor : IAsyncDisposable
             // caught by a re-read of the now-unregistered source.
             if (dropIntentAcquired)
                 await registry.ReleaseDropIntentAsync(entry.Id).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Recovers an orphaned (deferred-dropped) root database: re-attaches <see cref="RelinkDatabaseTicket.NewName"/>
+    /// to the orphan's preserved id and opens it against the retained keyspace. The orphan's id, rows,
+    /// indexes, and schema are all still on disk, so the reopened database is immediately populated.
+    ///
+    /// <para>Serialized against a concurrent GC purge (and another relink) of the same id via the same
+    /// per-id drop-intent fence the GC takes. Ordering is register-then-delete-orphan so a crash between
+    /// them leaves the database live with a stale orphan record (the GC skips ids that are registered)
+    /// rather than data stranded with no name.</para>
+    /// </summary>
+    public async Task<DatabaseDescriptor> RelinkDatabase(RelinkDatabaseTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        // Fence the id so a concurrent GC purge or a second relink cannot race this recovery. All the
+        // authoritative state decisions below happen under this fence.
+        bool fenced = await registry.AcquireDropIntentAsync(ticket.OrphanId).ConfigureAwait(false);
+        if (!fenced)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"A concurrent operation on orphan id '{ticket.OrphanId}' is in progress; retry later");
+
+        try
+        {
+            // Idempotency by id (not just by name): if the id is already live — a relink that committed
+            // its registration but crashed before deleting the orphan record — do not mint a second
+            // alias. Re-check authoritatively (cross-node) under the fence.
+            string? existingName = await registry.TryResolveNameByIdAsync(ticket.OrphanId).ConfigureAwait(false);
+            if (existingName is not null)
+            {
+                // Already relinked. If under the requested name, finish idempotently (clean any stale
+                // orphan record and return the live database); otherwise it is a conflicting second name.
+                // Registered names are stored lower-cased by the registry; compare on the same footing.
+                if (!string.Equals(existingName, ticket.NewName.ToLowerInvariant(), StringComparison.Ordinal))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseAlreadyExists,
+                        $"Database id '{ticket.OrphanId}' is already live under name '{existingName}'");
+
+                await registry.DeleteDatabaseOrphanAsync(ticket.OrphanId).ConfigureAwait(false);
+                return await databaseOpener.Open(existingName).ConfigureAwait(false);
+            }
+
+            // The target name must be free (cache + live-KV check for cross-node visibility).
+            if (await registry.TryResolveEntryAsync(ticket.NewName).ConfigureAwait(false) is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseAlreadyExists,
+                    $"Database '{ticket.NewName}' already exists");
+
+            OrphanDatabaseRecord? orphan = await registry.TryGetDatabaseOrphanAsync(ticket.OrphanId).ConfigureAwait(false);
+            if (orphan is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.OrphanNotFound,
+                    $"No orphaned database with id '{ticket.OrphanId}' is available to relink (never dropped, or already reclaimed)");
+
+            // Re-register the name to the preserved id; the keyspace is already on disk.
+            await registry.RegisterAsync(ticket.NewName, orphan.Id).ConfigureAwait(false);
+
+            // The database is live again — remove the orphan record so the GC leaves it alone.
+            await registry.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
+
+            return await databaseOpener.Open(ticket.NewName).ConfigureAwait(false);
+        }
+        finally
+        {
+            await registry.ReleaseDropIntentAsync(ticket.OrphanId).ConfigureAwait(false);
         }
     }
 
@@ -1433,6 +1615,103 @@ public sealed class CommandExecutor : IAsyncDisposable
         ).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Recovers an orphaned (deferred-dropped) table by reattaching it to the schema under a new name,
+    /// reusing its preserved id and retained row/index data. Like other table DDL it forwards to the
+    /// schema leader in cluster mode. Fails with <see cref="CamusDBErrorCodes.OrphanNotFound"/> if no
+    /// orphan record exists for the id, or <see cref="CamusDBErrorCodes.TableAlreadyExists"/> if the new
+    /// name is taken.
+    /// </summary>
+    public async Task<bool> RelinkTable(RelinkTableTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+
+        bool? forwarded = await TryForwardRelinkTableAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return forwarded.Value;
+
+        // Fence this table id against a concurrent GC reclamation (and a second relink). The reclaimer
+        // takes the same per-table drop-intent key before purging, so the two never interleave. All the
+        // state decisions below happen under this fence.
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        string fenceId = DatabaseRegistry.TableFenceId(database.Id, ticket.OrphanTableId);
+        bool fenced = await registry.AcquireDropIntentAsync(fenceId).ConfigureAwait(false);
+        if (!fenced)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"A concurrent operation on orphan table id '{ticket.OrphanTableId}' is in progress; retry later");
+
+        try
+        {
+            // Idempotency by id: if a live table already has this id — a relink that committed its apply
+            // but crashed before deleting the orphan record — don't reattach a second alias.
+            TableSchema? liveWithId = null;
+            foreach (TableSchema t in database.Schema.Tables.Values)
+                if (string.Equals(t.Id, ticket.OrphanTableId, StringComparison.Ordinal)) { liveWithId = t; break; }
+
+            if (liveWithId is not null)
+            {
+                if (!string.Equals(liveWithId.Name, ticket.NewTableName, StringComparison.Ordinal))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TableAlreadyExists,
+                        $"Table id '{ticket.OrphanTableId}' is already live under name '{liveWithId.Name}'");
+
+                // Already relinked to this exact name — finish idempotently by cleaning any stale record.
+                await DeleteTableOrphanRecordAsync(database, ticket.OrphanTableId).ConfigureAwait(false);
+                return true;
+            }
+
+            if (catalogs.TableExists(database, ticket.NewTableName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TableAlreadyExists,
+                    $"Table '{ticket.NewTableName}' already exists");
+
+            OrphanTableRecord? orphan = await catalogs.TryGetTableOrphanAsync(database, ticket.OrphanTableId).ConfigureAwait(false);
+            if (orphan is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.OrphanNotFound,
+                    $"No orphaned table with id '{ticket.OrphanTableId}' is available to relink in database '{ticket.DatabaseName}'");
+
+            // Relink adds a live table, so it counts against the per-database table limit like CREATE.
+            int maxTables = CamusDBConfig.MaxTablesPerDatabase;
+            if (maxTables > 0 && database.Schema.Tables.Count >= maxTables)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SchemaLimitExceeded,
+                    $"Database '{ticket.DatabaseName}' would exceed the maximum of {maxTables} tables per database");
+
+            await ExecuteDdlInTransaction(database,
+                tx => catalogs.RelinkTable(database, orphan, ticket.NewTableName, tx),
+                postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, orphan.TableId)
+            ).ConfigureAwait(false);
+        }
+        finally
+        {
+            await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+        }
+
+        return true;
+    }
+
+    /// <summary>Deletes a stale table orphan record in its own committed transaction (idempotent cleanup).</summary>
+    private async Task DeleteTableOrphanRecordAsync(DatabaseDescriptor database, string tableId)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await catalogs.DeleteTableOrphanAsync(database, tableId, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
     public async Task<bool> RenameTable(RenameTableTicket ticket)
     {
         validator.Validate(ticket);
@@ -1506,6 +1785,15 @@ public sealed class CommandExecutor : IAsyncDisposable
             database,
             (leader, opId, ct) => schemaDdlForwarder!.ForwardRenameTableAsync(leader, ticket, opId, ct),
             () => ForwardedRenameTableApplied(database, ticket)
+        ).ConfigureAwait(false);
+    }
+
+    private async Task<bool?> TryForwardRelinkTableAsync(DatabaseDescriptor database, RelinkTableTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardRelinkTableAsync(leader, ticket, opId, ct),
+            () => ForwardedRelinkTableApplied(database, ticket)
         ).ConfigureAwait(false);
     }
 
@@ -1665,6 +1953,11 @@ public sealed class CommandExecutor : IAsyncDisposable
             && !database.Schema.Tables.ContainsKey(ticket.TableName);
     }
 
+    private static bool ForwardedRelinkTableApplied(DatabaseDescriptor database, RelinkTableTicket ticket)
+    {
+        return database.Schema.Tables.ContainsKey(ticket.NewTableName);
+    }
+
     private static bool ForwardedAlterConstraintApplied(DatabaseDescriptor database, AlterConstraintTicket ticket)
     {
         if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? ts))
@@ -1738,11 +2031,20 @@ public sealed class CommandExecutor : IAsyncDisposable
             return new ExecuteDDLSQLResult(created, true);
         }
 
+        if (ast.nodeType is NodeType.CreateDatabaseRelink)
+        {
+            string dbName = ast.leftAst!.yytext!;
+            string orphanId = Controllers.DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst!.yytext!);
+            DatabaseDescriptor relinked = await RelinkDatabase(new RelinkDatabaseTicket(dbName, orphanId)).ConfigureAwait(false);
+            return new ExecuteDDLSQLResult(relinked, true);
+        }
+
         if (ast.nodeType is NodeType.DropDatabase or NodeType.DropDatabaseIfExists)
         {
             string dbName = ast.leftAst!.yytext!;
             bool ifExists = ast.nodeType == NodeType.DropDatabaseIfExists;
-            await DropDatabase(new DropDatabaseTicket(dbName, ifExists)).ConfigureAwait(false);
+            bool force = ast.yytext == "force";
+            await DropDatabase(new DropDatabaseTicket(dbName, ifExists, force)).ConfigureAwait(false);
             return default;
         }
 
@@ -1779,6 +2081,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                         bool ok = await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket, tx, sqlTableId).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     }).ConfigureAwait(false);
+                }
+
+            case NodeType.CreateTableRelink:
+                {
+                    RelinkTableTicket relinkTicket = new(
+                        ticket.DatabaseName,
+                        ast.leftAst!.yytext!,
+                        Controllers.DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst!.yytext!));
+
+                    // Delegate to the executor method so fencing, forwarding, and orphan-load live in one place.
+                    bool relinked = await RelinkTable(relinkTicket).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, relinked);
                 }
 
             case NodeType.AlterTableAddColumn:
@@ -2076,7 +2390,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             string targetName = ast.leftAst!.yytext!;
             bool ifExists = ast.nodeType == NodeType.DropDatabaseIfExists;
-            await DropDatabase(new DropDatabaseTicket(targetName, ifExists)).ConfigureAwait(false);
+            bool force = ast.yytext == "force";
+            await DropDatabase(new DropDatabaseTicket(targetName, ifExists, force)).ConfigureAwait(false);
             return default;
         }
 
@@ -2239,6 +2554,16 @@ public sealed class CommandExecutor : IAsyncDisposable
             return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern));
         }
 
+        // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.
+        if (ast.nodeType == NodeType.ShowOrphanDatabases)
+        {
+            DatabaseRegistry reg = await registryTask.ConfigureAwait(false);
+            List<OrphanDatabaseRecord> orphans = await reg.LoadDatabaseOrphansAsync().ConfigureAwait(false);
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowOrphanDatabasesSchema;
+            return (null!, schemaQuerier.ShowOrphanDatabases(orphans));
+        }
+
         // SHOW BRANCHES and SHOW ANCESTORS operate on the registry directly.
         if (ast.nodeType is NodeType.ShowBranches or NodeType.ShowAncestors)
         {
@@ -2355,6 +2680,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowTablesSchema;
                     string? tablePattern = UnquoteLikePattern(ast.leftAst?.yytext);
                     return (database, schemaQuerier.ShowTables(database, tablePattern));
+                }
+
+            case NodeType.ShowOrphanTables:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowOrphanTablesSchema;
+                    return (database, schemaQuerier.ShowOrphanTables(database));
                 }
 
             case NodeType.ShowColumns:
@@ -2714,6 +3046,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         if (snapshotHoldRenewer is not null)
             await snapshotHoldRenewer.DisposeAsync().ConfigureAwait(false);
+
+        if (orphanReclaimer is not null)
+            await orphanReclaimer.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

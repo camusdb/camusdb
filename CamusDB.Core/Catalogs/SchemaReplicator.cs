@@ -154,7 +154,7 @@ public sealed class SchemaReplicator
             // proposer persists the checkpoint after the replication round-trip returns —
             // see CatalogsManager.ReplicateAndWaitLocalApplyAsync. The committed schema log
             // remains the source of truth; the KV checkpoint is a load-time optimization.
-            TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+            TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
             InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
 
             Log.LogSchemaChangeApplied(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
@@ -319,7 +319,7 @@ public sealed class SchemaReplicator
                 );
             }
 
-            CatalogsManager.ApplySchemaDelta(database.Schema, entry);
+            CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 

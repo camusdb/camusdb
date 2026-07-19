@@ -51,6 +51,8 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(DatabaseBranchAncestor))]
 [JsonSerializable(typeof(List<DatabaseBranchAncestor>))]
 [JsonSerializable(typeof(DatabaseRegistryEntry))]
+[JsonSerializable(typeof(OrphanDatabaseRecord))]
+[JsonSerializable(typeof(OrphanTableRecord))]
 [JsonSerializable(typeof(TableStatistics))]
 [JsonSerializable(typeof(ScalarBound))]
 [JsonSerializable(typeof(ColumnMinMax))]

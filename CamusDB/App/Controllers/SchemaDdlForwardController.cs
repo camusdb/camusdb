@@ -355,10 +355,67 @@ public sealed class SchemaDdlForwardController : CommandsController
             DropTableTicket ticket = new(
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
-                ifExists: req.IfExists
+                ifExists: req.IfExists,
+                force: req.Force
             );
 
             bool result = await executor.DropTable(ticket).ConfigureAwait(false);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+    }
+
+    [HttpPost]
+    [Route("/internal/schema-ddl/relink-table")]
+    public async Task<JsonResult> ForwardRelinkTable()
+    {
+        ForwardRelinkTableRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<ForwardRelinkTableRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("ForwardRelinkTable request is null");
+
+            if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
+
+        try
+        {
+            RelinkTableTicket ticket = new(
+                databaseName: req.DatabaseName,
+                newTableName: req.NewTableName,
+                orphanTableId: req.OrphanTableId
+            );
+
+            bool result = await executor.RelinkTable(ticket).ConfigureAwait(false);
             SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
             opCache?.SetAndComplete(req.OperationId, response);
             return new JsonResult(response);

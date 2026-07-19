@@ -137,6 +137,13 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string TransactionFinalizeUnresolved = "CADB0509";
 
+    /// <summary>
+    /// A <c>RELINK</c> or orphan-purge target id has no orphan record: the database/table was never
+    /// dropped under that id, or its orphan was already reclaimed by the garbage collector (retention
+    /// window elapsed). A permanent caller mistake — maps to HTTP 404.
+    /// </summary>
+    public const string OrphanNotFound = "CADB0510";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -148,6 +155,9 @@ public static class CamusDBErrorCodes
     {
         TransactionMutationLimitExceeded => 400,
         CheckConstraintViolation => 400,
+        OrphanNotFound => 404,
+        DatabaseAlreadyExists => 409,
+        TableAlreadyExists => 409,
         _ => 500
     };
 }

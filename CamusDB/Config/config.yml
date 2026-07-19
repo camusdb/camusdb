@@ -86,6 +86,16 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # sql_parser_cache_max_entries: 2048
 # sql_parser_cache_sweep_seconds: 60
 
+# ── Recoverable drops (deferred DROP + orphan reclamation) ────────────────────
+# A non-FORCE DROP DATABASE/TABLE (root only) retains the object's data as a recoverable orphan,
+# recoverable via CREATE ... RELINK TO '<id>' (see SHOW ORPHAN DATABASES / SHOW ORPHAN TABLES),
+# until the background garbage collector reclaims it.
+# orphan_retention_ms: how long an orphan stays recoverable before the GC may physically delete it;
+#   <= 0 keeps orphans until an explicit DROP ... FORCE / manual purge. Default: 604800000 (7 days).
+# orphan_reclaim_interval_ms: GC sweep interval; <= 0 disables the loop. Default: 300000 (5 min).
+# orphan_retention_ms: 604800000
+# orphan_reclaim_interval_ms: 300000
+
 # ── Spill-to-disk ─────────────────────────────────────────────────────────────
 # When spill_enabled is false (default), all blocking operators (sort, GROUP BY, DISTINCT,
 # hash join, derived-table materialization, DELETE/UPDATE row buffers) keep their existing

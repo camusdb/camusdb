@@ -132,7 +132,9 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
         List<string> rowsBefore = await ScanKeysAsync(sharedKahuna, rowBucket, $"{rowBucket}/");
         Assert.IsNotEmpty(rowsBefore, $"Expected {rowBucket}/ row keys before drop");
 
-        await executor.DropDatabase(new DropDatabaseTicket(dbname));
+        // FORCE: this test asserts the full immediate keyspace purge; a non-FORCE drop now retains
+        // the keyspace as a recoverable orphan and defers reclamation to the GC.
+        await executor.DropDatabase(new DropDatabaseTicket(dbname, ifExists: false, force: true));
 
         // Post-drop: scan using the same kahuna reference (the shared node is not disposed).
 

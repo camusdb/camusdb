@@ -94,6 +94,15 @@ public sealed class ForwardDropTableRequest
     public string DatabaseName { get; set; } = "";
     public string TableName { get; set; } = "";
     public bool IfExists { get; set; }
+    public bool Force { get; set; }
+}
+
+public sealed class ForwardRelinkTableRequest
+{
+    public string OperationId { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public string NewTableName { get; set; } = "";
+    public string OrphanTableId { get; set; } = "";
 }
 
 public sealed class ForwardAlterConstraintRequest

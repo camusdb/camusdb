@@ -84,6 +84,9 @@ public static class ConfigResolver
         CamusDBConfig.SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries;
         CamusDBConfig.SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds;
 
+        CamusDBConfig.OrphanRetentionMs = config.OrphanRetentionMs;
+        CamusDBConfig.OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs;
+
         CamusDBConfig.DefaultIsolationLevel = config.ParseDefaultIsolationLevel();
         CamusDBConfig.DefaultTransactionLocking = config.ParseDefaultTransactionLocking();
         CamusDBConfig.RangeLockExpiresMs = config.RangeLockExpiresMs;

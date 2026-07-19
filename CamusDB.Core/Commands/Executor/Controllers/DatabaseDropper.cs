@@ -26,6 +26,9 @@ internal sealed class DatabaseDropper
     // scan miss of a just-committed entry (delete is idempotent, so re-scanning is safe).
     private const int MaxPurgeScanRounds = 3;
 
+    // Bounded retries for a single key delete that returns a retryable (non-terminal) status.
+    private const int MaxDeleteRetries = 10;
+
     private readonly DatabaseDescriptors databaseDescriptors;
 
     private readonly ILogger<ICamusDB> logger;
@@ -36,10 +39,70 @@ internal sealed class DatabaseDropper
         this.logger = logger;
     }
 
-    public async Task Drop(string id)
+    /// <summary>
+    /// Deletes one key and <b>verifies the outcome</b>: returns <c>true</c> only on a terminal
+    /// <see cref="KeyValueResponseType.Deleted"/> / <see cref="KeyValueResponseType.DoesNotExist"/>,
+    /// retrying retryable statuses (<c>MustRetry</c> / <c>WaitingForReplication</c>) with bounded
+    /// backoff. Any other status, an exhausted retry, or an exception returns <c>false</c> so the caller
+    /// treats the enclosing purge as <em>incomplete</em> and keeps the recovery markers in place.
+    /// </summary>
+    private async Task<bool> DeleteExactVerifiedAsync(IKahuna kahuna, string key, CancellationToken ct)
+    {
+        int retries = 0;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            KeyValueResponseType type;
+            try
+            {
+                (type, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
+                    HLCTimestamp.Zero, key, KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to delete key '{Key}' during purge", key);
+                return false;
+            }
+
+            if (type is KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist)
+                return true;
+
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+                && ++retries < MaxDeleteRetries)
+            {
+                await Task.Delay(retries * 10, ct).ConfigureAwait(false);
+                continue;
+            }
+
+            logger.LogWarning("Delete of key '{Key}' returned {Type}; purge treated as incomplete", key, type);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Closes database <paramref name="id"/>: evicts its descriptor, drains in-flight operations, and
+    /// (when <paramref name="purge"/> is <c>true</c>) physically deletes its entire keyspace.
+    ///
+    /// <para>A deferred (non-<c>FORCE</c>) <c>DROP DATABASE</c> of a root database passes
+    /// <paramref name="purge"/> <c>= false</c>: the database is closed but every row/index/meta key is
+    /// left on disk so <c>CREATE DATABASE ... RELINK TO {id}</c> can recover it, or the garbage
+    /// collector can reclaim it after the retention window. The caller has already written the orphan
+    /// record and unregistered the name.</para>
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> if the keyspace was fully and verifiably purged (or <paramref name="purge"/> was
+    /// <c>false</c>, i.e. nothing to purge). <c>false</c> means the purge was incomplete — the caller
+    /// must <b>not</b> clear the drop-in-progress marker so a later startup/GC pass resumes it.
+    /// </returns>
+    public async Task<bool> Drop(string id, bool purge = true)
     {
         if (!databaseDescriptors.Descriptors.TryRemove(id, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
-            return;
+            return true;
 
         DatabaseDescriptor databaseDescriptor;
         try
@@ -50,7 +113,7 @@ internal sealed class DatabaseDropper
         {
             // The cached lazy is faulted (e.g. LoadDatabase threw during a prior Open attempt).
             // The name is already unregistered by the caller before Drop is invoked — nothing more to do.
-            return;
+            return true;
         }
 
         // Signal all new AddRef calls to fail immediately with DatabaseDoesntExist.
@@ -81,17 +144,24 @@ internal sealed class DatabaseDropper
         //   {id}:{tableId}:i:{indexId}   → {id}:{tableId}:i:{indexId}/     — index data for every index (Task 4 prefix)
         //
         //   Schema-log entries in the Raft WAL are append-only and cannot be removed.
-        await PurgeClusterKeyspaceAsync(databaseDescriptor, id).ConfigureAwait(false);
+        //
+        // On a deferred drop (purge == false) the keyspace is intentionally left intact for recovery;
+        // the descriptor is still evicted and disposed so the database is closed on this node.
+        bool purged = true;
+        if (purge)
+            purged = await PurgeClusterKeyspaceAsync(databaseDescriptor, id).ConfigureAwait(false);
 
         databaseDescriptor.Dispose();
         Log.LogDatabaseDropped(logger, databaseDescriptor.Name);
+        return purged;
     }
 
     /// <summary>
     /// Deletes all KV entries belonging to <paramref name="descriptor"/>'s database, using the
-    /// descriptor's live schema as a safety net over the persisted keyspace catalog.
+    /// descriptor's live schema as a safety net over the persisted keyspace catalog. Returns whether the
+    /// purge verifiably completed.
     /// </summary>
-    private Task PurgeClusterKeyspaceAsync(DatabaseDescriptor descriptor, string id)
+    private Task<bool> PurgeClusterKeyspaceAsync(DatabaseDescriptor descriptor, string id)
         => PurgeKeyspaceByIdAsync(descriptor.Kahuna.Kahuna, id, [.. descriptor.Schema.Tables.Values]);
 
     /// <summary>
@@ -110,7 +180,7 @@ internal sealed class DatabaseDropper
     /// standalone autocommit operation (HLCTimestamp.Zero). Errors are logged and skipped so a partial
     /// failure never wedges the drop.
     /// </summary>
-    internal async Task PurgeKeyspaceByIdAsync(IKahuna kahuna, string id, IReadOnlyList<TableSchema>? safetyNetTables)
+    internal async Task<bool> PurgeKeyspaceByIdAsync(IKahuna kahuna, string id, IReadOnlyList<TableSchema>? safetyNetTables, CancellationToken ct = default)
     {
         string metaBucket = $"{id}/meta";
         string metaKeyPrefix = $"{id}/meta";
@@ -190,27 +260,85 @@ internal sealed class DatabaseDropper
             }
         }
 
+        // Track verified completion across every phase — the caller only clears the drop-in-progress
+        // marker (and, for a table, the recovery record) when this is true.
+        bool complete = true;
+
         // Phase C: purge rows and index entries.
         foreach ((string bucket, string keyPrefix) in rowIndexPrefixes)
-            await PurgeBucketAsync(kahuna, id, bucket, keyPrefix).ConfigureAwait(false);
+            complete &= await PurgeBucketAsync(kahuna, id, bucket, keyPrefix, ct).ConfigureAwait(false);
 
         // Phase D: delete exact stats keys (no '/' suffix so unreachable by bucket scan).
         foreach (string key in exactKeys)
-        {
-            try
-            {
-                await kahuna.LocateAndTryDeleteKeyValue(
-                    HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to delete stats key '{Key}' while purging database (id={Id})", key, id);
-            }
-        }
+            complete &= await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false);
 
         // Phase E: delete the meta namespace LAST (catalog included) so it survived for every resume.
-        await PurgeBucketAsync(kahuna, id, metaBucket, metaKeyPrefix).ConfigureAwait(false);
+        complete &= await PurgeBucketAsync(kahuna, id, metaBucket, metaKeyPrefix, ct).ConfigureAwait(false);
+
+        return complete;
+    }
+
+    /// <summary>
+    /// Physically reclaims a single orphaned table's keyspace: its row bucket, every index bucket named
+    /// in the persisted keyspace catalog (so historically-dropped indexes are covered), its exact stats
+    /// key, the keyspace-catalog key, the per-table meta key, and finally its orphan record. Driven by
+    /// <c>(dbId, tableId)</c> alone so it is idempotent and resumable — every delete is an autocommit
+    /// no-op if already gone. The orphan record is deleted <b>last</b> so a crash mid-purge leaves the
+    /// record for the next reclamation pass to finish.
+    ///
+    /// <para>The caller (the reclaimer / manual purge) is responsible for having confirmed, under the
+    /// table fence, that the table is not live (its per-table meta key is absent) before purging — this
+    /// method does not re-check.</para>
+    /// </summary>
+    internal async Task<bool> PurgeTableKeyspaceAsync(IKahuna kahuna, string dbId, string tableId, CancellationToken ct = default)
+    {
+        string catalogKey = $"{dbId}/meta/keyspace:{tableId}";
+
+        // Collect index ids from the keyspace catalog (grow-only; survives DROP TABLE). A failed read
+        // means index buckets may be missed, so it counts against completion.
+        List<string> indexIds = [];
+        bool catalogRead = false;
+        try
+        {
+            (KeyValueResponseType catType, ReadOnlyKeyValueEntry? catEntry) = await kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+
+            if (catType == KeyValueResponseType.Get && catEntry?.Value is { Length: > 0 })
+                indexIds = [.. MetaJsonSerializer.Deserialize(catEntry.Value, MetaJsonContext.Default.StringArray)];
+
+            catalogRead = catType is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to read keyspace catalog for orphan table {TableId} in database {Id}", tableId, dbId);
+        }
+
+        // Purge row + index buckets, and delete the stats/catalog/meta keys — all verified. The orphan
+        // record is NOT touched here; it is the recovery marker and is deleted only if everything else
+        // is confirmed gone, so an incomplete purge leaves the record for a later sweep to finish.
+        bool complete = catalogRead;
+        complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/", ct).ConfigureAwait(false);
+        foreach (string indexId in indexIds)
+            complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{tableId}:i:{indexId}", $"{dbId}:{tableId}:i:{indexId}/", ct).ConfigureAwait(false);
+
+        foreach (string key in new[]
+        {
+            $"{dbId}:stats:{tableId}",
+            catalogKey,
+            $"{dbId}/meta/table:{tableId}",
+        })
+            complete &= await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false);
+
+        // Only remove the recovery record once all data is verified gone.
+        if (!complete)
+            return false;
+
+        return await DeleteExactVerifiedAsync(kahuna, $"{dbId}/meta/orphan:{tableId}", ct).ConfigureAwait(false);
     }
 
     // Test-only: counts the number of delete batches the purge has issued, so a test with a low
@@ -231,20 +359,22 @@ internal sealed class DatabaseDropper
     /// batch that deletes nothing (persistent delete errors) counts as no-progress so the loop can't
     /// spin. Each delete is an idempotent autocommit operation.
     /// </summary>
-    private async Task PurgeBucketAsync(IKahuna kahuna, string id, string bucket, string keyPrefix)
+    private async Task<bool> PurgeBucketAsync(IKahuna kahuna, string id, string bucket, string keyPrefix, CancellationToken ct)
     {
         int batchSize = CamusDBConfig.KeyspacePurgeBatchSize;
         if (batchSize < 1) batchSize = 1;
 
-        int dryRounds = 0;
-        while (dryRounds < MaxPurgeScanRounds)
+        int failStreak = 0;
+        while (true)
         {
+            ct.ThrowIfCancellationRequested();
+
             List<string> batch = [];
             try
             {
                 await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
                     HLCTimestamp.Zero, bucket, null, true, null, true, batchSize,
-                    HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).ConfigureAwait(false))
                 {
                     if (!key.StartsWith(keyPrefix, StringComparison.Ordinal))
                         continue;
@@ -254,42 +384,42 @@ internal sealed class DatabaseDropper
                         break; // bound memory; the next iteration re-scans for the remainder
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Failed to scan bucket '{Bucket}' while purging database (id={Id})", bucket, id);
-                break;
+                return false; // scan failed → cannot prove the bucket is empty
             }
 
+            // Empty scan → the bucket is verified drained.
             if (batch.Count == 0)
-            {
-                dryRounds++;
-                continue;
-            }
+                return true;
 
             PurgeBatchesForTesting++;
 
-            bool progressed = false;
+            int deleted = 0;
             foreach (string key in batch)
+                if (await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false))
+                    deleted++;
+
+            if (deleted == batch.Count)
             {
-                try
-                {
-                    await kahuna.LocateAndTryDeleteKeyValue(
-                        HLCTimestamp.Zero, key, KeyValueDurability.Persistent, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    progressed = true;
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to delete key '{Key}' while purging database (id={Id})", key, id);
-                }
+                failStreak = 0; // real progress; re-scan for the remainder
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", batch.Count, bucket, id);
+                continue;
             }
 
-            // Reset only on real progress; an all-failed batch counts as a dry round so a persistently
-            // failing key cannot spin the loop forever (the startup drop resume is the backstop).
-            dryRounds = progressed ? 0 : dryRounds + 1;
+            // Some keys were not confirmed deleted. Bound the retries so a persistently failing key
+            // does not spin forever; give up and report the bucket as not-yet-empty (the recovery
+            // markers stay in place and a later sweep / startup resume retries).
+            if (++failStreak >= MaxPurgeScanRounds)
+                return false;
 
-            if (logger.IsEnabled(LogLevel.Debug))
-                logger.LogDebug("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", batch.Count, bucket, id);
+            await Task.Delay(failStreak * 20, ct).ConfigureAwait(false);
         }
     }
 }

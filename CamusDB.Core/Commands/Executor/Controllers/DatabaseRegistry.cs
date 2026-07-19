@@ -444,6 +444,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{name}' is already registered");
 
+            // One id maps to at most one live name. Reject registering an id that is already live under
+            // a different name — the guard that stops a stale-orphan relink from minting a second alias
+            // for one physical keyspace. (Fresh CREATE always allocates an unregistered id; only relink
+            // passes a reused id, and it checks authoritative state under the fence before calling here.)
+            if (byId.TryGetValue(id, out DatabaseRegistryEntry? existingById) && existingById.Name != name)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseAlreadyExists,
+                    $"Database id '{id}' is already registered under name '{existingById.Name}'");
+
             DatabaseRegistryEntry entry = new()
             {
                 Id = id,
@@ -627,9 +636,35 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     private string DropIntentKey(string dbId) => $"{keyPrefix}dbregistry/drop-intent:{dbId}";
 
-    // Value stamped into a node's own lifecycle markers (drop-intent, dropping) so startup recovery
-    // can distinguish its own crash remnants from a marker a *different* live node currently holds.
-    private byte[] LocalOwnerValue => System.Text.Encoding.UTF8.GetBytes(localNodeId.ToString());
+    // A token minted once per DatabaseRegistry instance (i.e. once per process start). It is stamped
+    // into every lifecycle marker this run writes so startup recovery can tell a marker THIS run created
+    // (current epoch — a live, in-flight operation) from one left by a PRIOR run that crashed (a
+    // different epoch — a genuine remnant). Without it, a startup scrub that clears "own" markers could
+    // delete a marker the concurrently-started reclaimer or an incoming relink just acquired.
+    private readonly string startupEpoch = Guid.NewGuid().ToString("N");
+
+    // Value stamped into a node's own lifecycle markers (drop-intent, dropping): "{nodeId}:{epoch}".
+    // The node-id distinguishes this node's markers from a *different* live node's; the epoch
+    // distinguishes this run's live markers from a prior run's crash remnants.
+    private byte[] LocalOwnerValue => System.Text.Encoding.UTF8.GetBytes($"{localNodeId}:{startupEpoch}");
+
+    /// <summary>
+    /// True if <paramref name="value"/> is a marker owned by <em>this</em> node but written by a
+    /// <em>prior</em> run (a crash remnant): the node-id matches but the epoch differs (or is absent, as
+    /// in a pre-epoch marker — always treated as prior-run). A marker from the current run (matching
+    /// epoch) returns false, so startup recovery never touches a live, in-flight operation's marker.
+    /// </summary>
+    private bool IsOwnStaleMarker(byte[]? value)
+    {
+        if (value is null)
+            return false;
+
+        string s = System.Text.Encoding.UTF8.GetString(value);
+        int colon = s.LastIndexOf(':');
+        string nodePart = colon >= 0 ? s[..colon] : s;
+        string epochPart = colon >= 0 ? s[(colon + 1)..] : "";
+        return nodePart == localNodeId.ToString() && epochPart != startupEpoch;
+    }
 
     /// <summary>
     /// Atomically sets a persistent drop-in-progress marker for <paramref name="dbId"/> using
@@ -747,7 +782,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     public async Task<List<string>> LoadOwnDroppingIdsAsync()
     {
         string droppingPrefix = $"{keyPrefix}dbregistry/dropping:";
-        byte[] ownerValue = LocalOwnerValue;
         List<string> ids = [];
 
         KvTransaction tx = await transactions.BeginAsync(
@@ -768,7 +802,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 if (!key.StartsWith(droppingPrefix, StringComparison.Ordinal))
                     continue;
 
-                if (kve.Value is not null && kve.Value.AsSpan().SequenceEqual(ownerValue))
+                if (IsOwnStaleMarker(kve.Value))
                     ids.Add(key[droppingPrefix.Length..]);
             }
         }
@@ -800,7 +834,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     public async Task<int> ClearOwnStaleDropIntentsAsync()
     {
         string intentPrefix = $"{keyPrefix}dbregistry/drop-intent:";
-        byte[] ownerValue = LocalOwnerValue;
         List<string> keys = [];
 
         KvTransaction tx = await transactions.BeginAsync(
@@ -822,7 +855,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                     continue;
 
                 // Only reclaim markers this node owns; leave another live node's fence untouched.
-                if (kve.Value is not null && kve.Value.AsSpan().SequenceEqual(ownerValue))
+                if (IsOwnStaleMarker(kve.Value))
                     keys.Add(key);
             }
         }
@@ -964,6 +997,151 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         }
 
         return orphans;
+    }
+
+    // -----------------------------------------------------------------------
+    // Orphan database records (deferred drop / relink / GC reclamation)
+    // -----------------------------------------------------------------------
+
+    // A non-FORCE DROP DATABASE of a root database does not purge its keyspace; it unregisters the
+    // name and writes an orphan record so the id + data remain recoverable via
+    // CREATE DATABASE ... RELINK TO {id} until the garbage collector reclaims them after the
+    // retention window. Records are KV-only (no in-memory cache): SHOW ORPHAN DATABASES and the GC
+    // scan them on demand, which keeps orphan state out of the schema-replication path.
+    //
+    // Keys: _system/dbregistry/orphan:{dbId}  (value is a serialized OrphanDatabaseRecord)
+
+    private string OrphanKeyPrefix => $"{keyPrefix}dbregistry/orphan:";
+    private string OrphanKey(string dbId) => $"{OrphanKeyPrefix}{dbId}";
+
+    /// <summary>
+    /// Composite drop-intent fence id for a table orphan (<c>{dbId}:{tableId}</c>), used with
+    /// <see cref="AcquireDropIntentAsync"/>. Both <c>CREATE TABLE ... RELINK</c> and the orphan
+    /// reclaimer take this key so a relink and a GC purge of the same table id never interleave. It
+    /// cannot collide with a database fence id: a bare database id contains no colon.
+    /// </summary>
+    public static string TableFenceId(string dbId, string tableId) => $"{dbId}:{tableId}";
+
+    /// <summary>
+    /// Persists an orphan record for a deferred-dropped database. Written <em>before</em>
+    /// <see cref="UnregisterAsync"/> so a crash between the two leaves the database still live (stale
+    /// record, harmless) rather than data stranded with no recovery path. Idempotent: a repeated drop
+    /// simply refreshes the record (and its <see cref="OrphanDatabaseRecord.DroppedAt"/>).
+    /// </summary>
+    public async Task WriteDatabaseOrphanAsync(OrphanDatabaseRecord record)
+    {
+        byte[] value = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.OrphanDatabaseRecord);
+        string key = OrphanKey(record.Id);
+        KeyValueResponseType type;
+        int retries = 0;
+
+        do
+        {
+            if (retries > 0)
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+
+            (type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, value, null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++retries < MaxRetries);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to write orphan record for database id '{record.Id}': {type}");
+    }
+
+    /// <summary>
+    /// Reads the orphan record for <paramref name="dbId"/>, or <c>null</c> if none exists (never
+    /// dropped as an orphan, or already reclaimed). Used by relink and by the GC to re-check the
+    /// record still exists before acting.
+    /// </summary>
+    public async Task<OrphanDatabaseRecord?> TryGetDatabaseOrphanAsync(string dbId)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, OrphanKey(dbId), -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Get || entry?.Value is null)
+            return null;
+
+        return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.OrphanDatabaseRecord);
+    }
+
+    /// <summary>
+    /// Removes the orphan record for <paramref name="dbId"/>. Called on relink (recovery) and after a
+    /// GC purge completes. Best-effort: a failure is swallowed; a stranded record is re-evaluated on the
+    /// next GC pass and blocks nothing (the id is already unregistered).
+    /// </summary>
+    public async Task DeleteDatabaseOrphanAsync(string dbId)
+    {
+        try
+        {
+            await kahuna.LocateAndTryDeleteKeyValue(
+                HLCTimestamp.Zero, OrphanKey(dbId),
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Scans the registry bucket and returns every orphaned-database record. Backing store for
+    /// <c>SHOW ORPHAN DATABASES</c> and the GC reclamation sweep.
+    /// </summary>
+    public async Task<List<OrphanDatabaseRecord>> LoadDatabaseOrphansAsync()
+    {
+        string orphanPrefix = OrphanKeyPrefix;
+        List<OrphanDatabaseRecord> orphans = [];
+
+        KvTransaction tx = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                RegistryBucket,
+                null, true,
+                null, true,
+                1000,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(orphanPrefix, StringComparison.Ordinal) || kve.Value is null)
+                    continue;
+
+                orphans.Add(MetaJsonSerializer.Deserialize(kve.Value, MetaJsonContext.Default.OrphanDatabaseRecord));
+            }
+        }
+        finally
+        {
+            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        return orphans;
+    }
+
+    /// <summary>
+    /// Authoritatively resolves the live registered name for a database <paramref name="id"/> by
+    /// scanning persistent KV (not the local cache), or <c>null</c> if the id is not currently
+    /// registered. Used by relink to decide, under the fence, whether an id is already live (and thus
+    /// whether this is an idempotent retry, a conflicting second alias, or a fresh recovery) — a
+    /// decision that must reflect registrations made on other cluster nodes.
+    /// </summary>
+    public async Task<string?> TryResolveNameByIdAsync(string id)
+    {
+        foreach (DatabaseRegistryEntry entry in await ScanAllEntriesAsync().ConfigureAwait(false))
+        {
+            if (string.Equals(entry.Id, id, StringComparison.Ordinal))
+                return entry.Name;
+        }
+        return null;
     }
 
     /// <summary>

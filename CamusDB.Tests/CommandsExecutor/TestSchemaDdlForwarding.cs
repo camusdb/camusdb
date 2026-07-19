@@ -543,6 +543,9 @@ public sealed class TestSchemaDdlForwarding
         public Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken cancellationToken)
             => Task.FromResult<bool?>(false);
 
+        public Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken cancellationToken)
+            => Task.FromResult<bool?>(false);
+
         public Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken)
             => Task.FromResult<bool?>(false);
 

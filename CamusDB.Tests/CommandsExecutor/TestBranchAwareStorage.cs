@@ -1517,8 +1517,13 @@ internal sealed class TestBranchAwareStorage : BaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code,
             "stale drop-intent must block a subsequent drop attempt");
 
-        // Run the production startup scrubber (internal — InternalsVisibleTo is set).
-        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+        // Run the production startup scrubber on a FRESH registry instance — it carries a new startup
+        // epoch, standing in for this node after a restart. The stale intent (written by the prior
+        // instance's epoch) is then a prior-run remnant the scrub reclaims; a marker from the current
+        // run would be protected as a live fence.
+        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!);
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, afterRestart);
+        await afterRestart.DisposeAsync();
 
         // After the scrub, the drop-intent must be gone so DropDatabase can proceed.
         await executor.DropDatabase(new DropDatabaseTicket(rootName));
@@ -1605,8 +1610,12 @@ internal sealed class TestBranchAwareStorage : BaseTest
         Assert.AreEqual(2, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "crash simulated before purge — rows still present");
         Assert.IsNull(sharedRegistry.Get(dbName), "db unregistered by the simulated crash point");
 
-        // Startup scrub must resume the interrupted purge.
-        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+        // Startup scrub on a FRESH registry (new epoch = post-restart) must resume the interrupted
+        // purge: the dropping marker was written by the prior instance's epoch, so it is a genuine
+        // crash remnant this run reclaims.
+        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!);
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, afterRestart);
+        await afterRestart.DisposeAsync();
 
         Assert.AreEqual(0, await CountKeysUnder(kahuna, rowBucket, rowPrefix),
             "resumed purge must delete the leftover row keyspace");
@@ -1647,7 +1656,9 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
             Assert.AreEqual(5, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "sanity: five rows present");
 
-            await executor.DropDatabase(new DropDatabaseTicket(dbName));
+            // FORCE: this test exercises the immediate keyspace purge and its batch paging; a non-FORCE
+            // drop now retains the keyspace as a recoverable orphan and defers reclamation to the GC.
+            await executor.DropDatabase(new DropDatabaseTicket(dbName, ifExists: false, force: true));
 
             // Fully purged.
             Assert.AreEqual(0, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "row overlay must be fully purged");
@@ -1683,7 +1694,8 @@ internal sealed class TestBranchAwareStorage : BaseTest
                 await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
             await InsertRow(dbName, db, executor, "INSERT INTO t (id, v) VALUES (gen_id(), \"a\")");
 
-            await executor.DropDatabase(new DropDatabaseTicket(dbName));
+            // FORCE: the catalog-driven purge only runs on an immediate drop; a non-FORCE drop defers.
+            await executor.DropDatabase(new DropDatabaseTicket(dbName, ifExists: false, force: true));
 
             // A single-scan collection would run exactly one round; the multi-round guard runs a
             // confirming round after the first complete scan.

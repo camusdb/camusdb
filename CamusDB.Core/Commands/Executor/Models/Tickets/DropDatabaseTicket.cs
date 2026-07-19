@@ -14,9 +14,19 @@ public readonly struct DropDatabaseTicket
 
     public bool IfExists { get; }
 
-    public DropDatabaseTicket(string name, bool ifExists = false)
+    /// <summary>
+    /// When <c>true</c> (SQL <c>DROP DATABASE ... FORCE</c>), the database's keyspace is physically
+    /// purged immediately and no orphan record is written — the pre-deferred-drop behavior, and the
+    /// only way to reclaim without waiting for the retention window. When <c>false</c> (default), a
+    /// root database is retained as a recoverable orphan; branch databases are always purged
+    /// immediately regardless of this flag.
+    /// </summary>
+    public bool Force { get; }
+
+    public DropDatabaseTicket(string name, bool ifExists = false, bool force = false)
     {
         DatabaseName = name;
         IfExists = ifExists;
+        Force = force;
     }
 }

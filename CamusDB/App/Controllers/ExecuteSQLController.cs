@@ -65,7 +65,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
-            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors)
+            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
+                              or NodeType.ShowOrphanDatabases)
             {
                 QuerySchemaHolder schemaHolder = new();
                 ExecuteSQLTicket ticket = new(
@@ -309,6 +310,7 @@ public sealed class ExecuteSQLController : CommandsController
                 bool isDbManagement = ast.nodeType is
                     NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
                     NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
+                    NodeType.CreateDatabaseRelink or
                     NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
                     NodeType.RenameDatabase;
 
@@ -351,7 +353,10 @@ public sealed class ExecuteSQLController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new ExecuteDDLSQLResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new ExecuteDDLSQLResponse("failed", e.Code, e.Message))
+            {
+                StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code)
+            };
         }
         catch (Exception e)
         {

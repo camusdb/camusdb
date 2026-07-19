@@ -37,44 +37,67 @@ internal sealed class TableDropper
         KvTransaction tx
     )
     {
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
-        {
-            AlterIndexTicket alterIndexTicket = new(
-                databaseName: ticket.DatabaseName,
-                tableName: ticket.TableName,
-                indexName: index.Key,
-                columns: Array.Empty<ColumnIndexInfo>(),
-                operation: index.Key == CamusDBConfig.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
-            );
+        string tableId = table.Id;
 
-            await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
-        }
+        // A table in a root database dropped without FORCE is retained as a recoverable orphan: its
+        // rows, index entries, and schema-history keys are left on disk and the table id becomes
+        // relinkable until the garbage collector reclaims it after the retention window. Tables in
+        // branch databases (and any FORCE drop) take the immediate path — their rows live in ancestor
+        // COW overlays whose recovery is out of scope.
+        bool deferred = !ticket.Force && database.Ancestors.Count == 0;
 
-        // On a branch database the table's inherited rows live in ancestor keyspaces and are already
-        // unreachable once the schema no longer references this table — no tombstones are needed.
-        // Only the branch-local overlay entries (if any) need to be physically removed.
-        // On a root database every row is in the local keyspace and must be logically deleted so
-        // active transactions see a correct row count and the DML delete path fires correctly.
-        if (database.Ancestors.Count > 0)
+        if (deferred)
         {
-            await table.Store.PurgeLocalRowOverlayAsync(tx).ConfigureAwait(false);
+            // Retention only: indexes and rows are intentionally NOT dropped so their KV data survives
+            // for recovery. The orphan record is written by the replicated drop's checkpoint (in the
+            // same transaction that deletes the per-table meta key), not here — see
+            // CatalogsManager.PersistDroppedTableAsync — so the detach and the recovery record commit
+            // atomically even if this outer DDL transaction later fails.
         }
         else
         {
-            DeleteTicket deleteTicket = new(
-                txnState: tx,
-                databaseName: ticket.DatabaseName,
-                tableName: ticket.TableName,
-                where: null,
-                filters: null
-            );
+            foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+            {
+                AlterIndexTicket alterIndexTicket = new(
+                    databaseName: ticket.DatabaseName,
+                    tableName: ticket.TableName,
+                    indexName: index.Key,
+                    columns: Array.Empty<ColumnIndexInfo>(),
+                    operation: index.Key == CamusDBConfig.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
+                );
 
-            await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+                await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
+            }
+
+            // On a branch database the table's inherited rows live in ancestor keyspaces and are already
+            // unreachable once the schema no longer references this table — no tombstones are needed.
+            // Only the branch-local overlay entries (if any) need to be physically removed.
+            // On a root database every row is in the local keyspace and must be logically deleted so
+            // active transactions see a correct row count and the DML delete path fires correctly.
+            if (database.Ancestors.Count > 0)
+            {
+                await table.Store.PurgeLocalRowOverlayAsync(tx).ConfigureAwait(false);
+            }
+            else
+            {
+                DeleteTicket deleteTicket = new(
+                    txnState: tx,
+                    databaseName: ticket.DatabaseName,
+                    tableName: ticket.TableName,
+                    where: null,
+                    filters: null
+                );
+
+                await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+            }
+
+            // A FORCE (or branch) drop destroys the keyspace for good, so any stale orphan record for
+            // this id (left by a crashed relink) must go too — otherwise the destroyed id stays
+            // "relinkable" to an empty/partial keyspace.
+            await catalogs.DeleteTableOrphanAsync(database, tableId, tx).ConfigureAwait(false);
         }
 
-        string tableId = table.Id;
-
-        TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx).ConfigureAwait(false);
+        TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx, deferred).ConfigureAwait(false);
         Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
         // In cluster mode delete all persisted coordinator job records for this table so a

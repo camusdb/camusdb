@@ -64,8 +64,15 @@ public sealed class CatalogsManager
     public Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
         => AlterTableReplicatedAsync(database, ticket, tx);
 
-    public Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx)
-        => DropTableReplicatedAsync(database, tableName, tx);
+    /// <summary>
+    /// Removes a table from the live schema via a replicated <see cref="SchemaOp.DropTable"/> delta.
+    /// When <paramref name="deferred"/> is <c>true</c> the drop is recoverable: the schema checkpoint
+    /// that deletes the per-table meta key also writes the table's orphan record in the same
+    /// transaction (see <see cref="PersistDroppedTableAsync"/>), so a crash can never detach the table
+    /// without leaving a recovery record. The caller must have already retained the row/index data.
+    /// </summary>
+    public Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx, bool deferred = false)
+        => DropTableReplicatedAsync(database, tableName, tx, deferred);
 
     /// <summary>
     /// Allows querying the current schema of a table object.
@@ -101,7 +108,7 @@ public sealed class CatalogsManager
         try
         {
             entry = CreateTableEntry(database, ticket, tx, tableId);
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -120,7 +127,7 @@ public sealed class CatalogsManager
         try
         {
             entry = AlterTableEntry(database, ticket, tx);
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -131,15 +138,15 @@ public sealed class CatalogsManager
         return GetTableSchema(database, ticket.TableName);
     }
 
-    private async Task<TableSchema?> DropTableReplicatedAsync(DatabaseDescriptor database, string tableName, KvTransaction tx)
+    private async Task<TableSchema?> DropTableReplicatedAsync(DatabaseDescriptor database, string tableName, KvTransaction tx, bool deferred)
     {
         SchemaChangeLogEntry entry;
 
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = DropTableEntry(database, tableName, tx);
-            ValidateSchemaDelta(database.Schema, entry);
+            entry = DropTableEntry(database, tableName, tx, deferred);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -148,6 +155,115 @@ public sealed class CatalogsManager
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return null;
+    }
+
+    /// <summary>
+    /// Reattaches an orphaned (deferred-dropped) table to the live schema under <paramref name="newName"/>,
+    /// reusing its preserved id so it reads its retained rows and index entries. Modeled as a dedicated
+    /// <see cref="SchemaOp.RelinkTable"/> delta rebuilt from the orphan's captured schema — preserving the
+    /// original table id, column ids, index definitions, check constraints, <b>and schema version</b> — so
+    /// every node reconstructs an identical table and rows written under the drop-time version decode
+    /// correctly. The apply configures a lazy schema-history loader against the retained
+    /// <c>{dbId}/meta/history:{tableId}:*</c> keys, so rows written under earlier pre-<c>ALTER</c> versions
+    /// also decode (immediately and after reopen). The orphan record is removed in the caller's DDL
+    /// transaction after the reattach is applied.
+    ///
+    /// <para><b>Ordering:</b> reattach-then-delete-orphan, mirroring database relink. A crash after the
+    /// reattach but before the orphan-record delete commits leaves a live table with a stale orphan
+    /// record; the garbage collector skips orphan records whose table exists in the live schema.</para>
+    /// </summary>
+    public async Task<TableSchema> RelinkTable(DatabaseDescriptor database, OrphanTableRecord orphan, string newName, KvTransaction tx)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = RelinkTableEntry(database, orphan, newName, tx);
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+
+        TableSchema reattached = GetTableSchema(database, newName);
+
+        // Restore the system-schema table object and persist it in the DDL transaction, mirroring
+        // TableCreator (deferred drop removed it). Without this the live schema has the table but the
+        // system schema does not, an asymmetry with the create/drop paths.
+        RegisterTableSystemObject(database, reattached);
+        await PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
+
+        // The table is live again — drop the orphan record so the GC leaves the reattached data alone.
+        await DeleteTableOrphanAsync(database, orphan.TableId, tx).ConfigureAwait(false);
+
+        return reattached;
+    }
+
+    /// <summary>
+    /// Adds (or re-adds) the system-schema table object for <paramref name="tableSchema"/>, keyed by its
+    /// immutable id. Shared by table creation and relink so both keep <c>SystemSchema.Tables</c> in sync
+    /// with the live schema. In-memory only; the caller persists via <see cref="PersistSystemMetaAsync"/>.
+    /// </summary>
+    public void RegisterTableSystemObject(DatabaseDescriptor database, TableSchema tableSchema)
+    {
+        database.SystemSchemaSemaphore.Wait();
+        try
+        {
+            database.SystemSchema.Tables.TryAdd(
+                tableSchema.Id ?? "",
+                new DatabaseTableObject(
+                    type: DatabaseObjectType.Table,
+                    id: tableSchema.Id ?? "",
+                    name: tableSchema.Name!,
+                    startOffset: ""));
+        }
+        finally
+        {
+            database.SystemSchemaSemaphore.Release();
+        }
+    }
+
+    private static SchemaChangeLogEntry RelinkTableEntry(DatabaseDescriptor database, OrphanTableRecord orphan, string newName, KvTransaction tx)
+    {
+        TableSchema src = orphan.Schema;
+
+        SchemaColumnPayload[] columns = [.. (src.Columns ?? []).Select(c => new SchemaColumnPayload
+        {
+            Id = c.Id,
+            Name = c.Name,
+            Type = c.Type,
+            NotNull = c.NotNull,
+            DefaultValue = c.DefaultValue,
+            DefaultFunction = c.DefaultFunction,
+            State = c.State,
+            MaxLength = c.MaxLength,
+            ArrayElementType = c.ArrayElementType,
+            NotNullConstraintName = c.NotNullConstraintName,
+        })];
+
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.RelinkTable,
+            Payload = Serializator.Serialize(new SchemaRelinkTablePayload
+            {
+                // Preserve the original id so the reattached table's store reads the retained rows/indexes.
+                TableId = orphan.TableId,
+                TableName = newName,
+                // Preserve the schema version so rows keep decoding under the version they were written.
+                Version = src.Version,
+                Columns = columns,
+                Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes] : null,
+                CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
+            })
+        };
     }
 
     private static SchemaChangeLogEntry CreateTableEntry(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx, string tableId)
@@ -352,7 +468,7 @@ public sealed class CatalogsManager
         try
         {
             entry = RenameTableEntry(database, ticket, tx);
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -394,7 +510,7 @@ public sealed class CatalogsManager
                 })
             };
 
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -405,7 +521,7 @@ public sealed class CatalogsManager
         return true;
     }
 
-    private static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx)
+    private static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx, bool deferred)
     {
         return new()
         {
@@ -414,7 +530,7 @@ public sealed class CatalogsManager
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropTable,
-            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = tableName })
+            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = tableName, Deferred = deferred })
         };
     }
 
@@ -489,7 +605,7 @@ public sealed class CatalogsManager
                     }
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -532,7 +648,7 @@ public sealed class CatalogsManager
                     ElementKind = elementKind,
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -581,7 +697,7 @@ public sealed class CatalogsManager
                     )
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -618,7 +734,7 @@ public sealed class CatalogsManager
                     IndexName = indexName
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -799,7 +915,7 @@ public sealed class CatalogsManager
                     ReferencedColumns = referencedColumns
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -839,7 +955,7 @@ public sealed class CatalogsManager
                     ReferencedColumns = []
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -924,7 +1040,18 @@ public sealed class CatalogsManager
             if (entry.Op == SchemaOp.DropTable)
             {
                 if (droppedTableId is not null)
-                    await PersistDroppedTableAsync(database, droppedTableId, entry.ToVersion, tx).ConfigureAwait(false);
+                {
+                    SchemaDropTablePayload dropPayload = DecodePayload<SchemaDropTablePayload>(entry);
+                    // A deferred drop co-commits the orphan record with the meta-key delete in THIS
+                    // checkpoint transaction, so the detach can never be durable without the recovery
+                    // record. FormerName + DroppedAt come from the replicated entry so they are identical
+                    // regardless of which node persists.
+                    await PersistDroppedTableAsync(
+                        database, droppedTableId, entry.ToVersion, tx,
+                        deferred: dropPayload.Deferred,
+                        formerName: dropPayload.TableName,
+                        droppedAt: entry.Ts).ConfigureAwait(false);
+                }
             }
             else
             {
@@ -945,6 +1072,7 @@ public sealed class CatalogsManager
     private static string GetEntryTableName(SchemaChangeLogEntry entry) => entry.Op switch
     {
         SchemaOp.CreateTable => DecodePayload<SchemaCreateTablePayload>(entry).TableName,
+        SchemaOp.RelinkTable => DecodePayload<SchemaRelinkTablePayload>(entry).TableName,
         SchemaOp.AddColumn or SchemaOp.DropColumn => DecodePayload<SchemaAlterColumnPayload>(entry).TableName,
         SchemaOp.SetElementState => DecodePayload<SchemaElementStatePayload>(entry).TableName,
         SchemaOp.DropTable => DecodePayload<SchemaDropTablePayload>(entry).TableName,
@@ -985,10 +1113,11 @@ public sealed class CatalogsManager
         );
     }
 
-    private static void ValidateSchemaDelta(Schema schema, SchemaChangeLogEntry entry)
+    private static void ValidateSchemaDelta(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
-        Schema clone = SchemaReplicator.CloneSchema(schema);
-        ApplySchemaDelta(clone, entry);
+        // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema.
+        Schema clone = SchemaReplicator.CloneSchema(database.Schema);
+        ApplySchemaDelta(clone, database, entry);
     }
 
     private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
@@ -996,6 +1125,7 @@ public sealed class CatalogsManager
         return entry.Op switch
         {
             SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.RelinkTable => schema.Tables.ContainsKey(DecodePayload<SchemaRelinkTablePayload>(entry).TableName),
             SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
@@ -1061,11 +1191,34 @@ public sealed class CatalogsManager
             : column?.State == payload.State;
     }
 
+    /// <summary>
+    /// Applies <paramref name="entry"/> to <paramref name="schema"/> without a database context. Valid
+    /// for every op except <see cref="SchemaOp.RelinkTable"/>, which needs a database to configure the
+    /// reattached table's history loader. Used by unit tests that exercise the pure apply logic on a bare
+    /// schema.
+    /// </summary>
     public static TableSchema? ApplySchemaDelta(Schema schema, SchemaChangeLogEntry entry)
+    {
+        if (entry.Op == SchemaOp.RelinkTable)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "RelinkTable requires a database context to apply; use the 3-argument overload.");
+
+        return ApplySchemaDelta(schema, database: null!, entry);
+    }
+
+    /// <summary>
+    /// Applies <paramref name="entry"/> to <paramref name="schema"/> (which is either the live
+    /// <c>database.Schema</c> for a real apply, or a throwaway clone for dry-run validation).
+    /// <paramref name="database"/> is used only by <see cref="SchemaOp.RelinkTable"/> to configure the
+    /// reattached table's lazy history loader; it must not be treated as the mutation target.
+    /// </summary>
+    public static TableSchema? ApplySchemaDelta(Schema schema, DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
         TableSchema? tableSchema = entry.Op switch
         {
             SchemaOp.CreateTable => ApplyCreateTable(schema, DecodePayload<SchemaCreateTablePayload>(entry)),
+            SchemaOp.RelinkTable => ApplyRelinkTable(schema, database, DecodePayload<SchemaRelinkTablePayload>(entry)),
             SchemaOp.DropTable => ApplyDropTable(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
             SchemaOp.DropColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
@@ -1100,6 +1253,18 @@ public sealed class CatalogsManager
     {
         if (schema.Tables.ContainsKey(payload.TableName))
             throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
+
+        // One table id maps to at most one live name. A relink reuses the orphan's id; reject if that id
+        // is already live under another name so a stale-orphan relink cannot mint a second alias for one
+        // physical keyspace. (A fresh CREATE always allocates an unregistered id, so this never fires.)
+        if (!string.IsNullOrWhiteSpace(payload.TableId))
+        {
+            foreach (TableSchema live in schema.Tables.Values)
+                if (string.Equals(live.Id, payload.TableId, StringComparison.Ordinal))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TableAlreadyExists,
+                        $"Table id '{payload.TableId}' is already live under name '{live.Name}'");
+        }
 
         TableSchema tableSchema = new()
         {
@@ -1150,6 +1315,75 @@ public sealed class CatalogsManager
             tableSchema.CheckConstraints = [.. payload.CheckConstraints];
             ParseCheckConstraintAsts(tableSchema);
         }
+
+        schema.Tables.Add(payload.TableName, tableSchema);
+
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Reattaches an orphaned table to the live schema, preserving its original id, column ids, index
+    /// definitions, check constraints, and — critically — its real schema <see cref="TableSchema.Version"/>.
+    /// Unlike <see cref="ApplyCreateTable"/> it does <b>not</b> synthesize a version-0 history (which
+    /// would both mislabel post-<c>ALTER</c> rows and overwrite the retained version-0 history key);
+    /// instead it leaves <see cref="TableSchema.SchemaHistory"/> null and configures the lazy loader that
+    /// reads the retained on-disk history keys, exactly like a table loaded from disk. Runs on every node
+    /// (proposer + followers) through the replicated apply, so all reconstruct an identical table.
+    /// </summary>
+    private static TableSchema ApplyRelinkTable(Schema schema, DatabaseDescriptor database, SchemaRelinkTablePayload payload)
+    {
+        if (schema.Tables.ContainsKey(payload.TableName))
+            throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
+
+        // One table id maps to at most one live name — reject a stale-orphan relink that would alias.
+        if (!string.IsNullOrWhiteSpace(payload.TableId))
+        {
+            foreach (TableSchema live in schema.Tables.Values)
+                if (string.Equals(live.Id, payload.TableId, StringComparison.Ordinal))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TableAlreadyExists,
+                        $"Table id '{payload.TableId}' is already live under name '{live.Name}'");
+        }
+
+        TableSchema tableSchema = new()
+        {
+            Id = string.IsNullOrWhiteSpace(payload.TableId) ? ObjectIdGenerator.Generate().ToString() : payload.TableId,
+            Version = payload.Version,   // preserve the real version so rows decode against the right layout
+            Name = payload.TableName,
+            Columns = new(payload.Columns.Length),
+            SchemaHistory = null,        // lazy-loaded from the retained {dbId}/meta/history:{tableId}:* keys
+        };
+
+        foreach (SchemaColumnPayload column in payload.Columns)
+        {
+            tableSchema.Columns.Add(
+                new TableColumnSchema(
+                    id: string.IsNullOrWhiteSpace(column.Id) ? ObjectIdGenerator.Generate().ToString() : column.Id,
+                    name: column.Name,
+                    type: column.Type,
+                    notNull: column.NotNull,
+                    defaultValue: column.DefaultValue,
+                    state: column.State,
+                    maxLength: column.MaxLength,
+                    arrayElementType: column.ArrayElementType,
+                    defaultFunction: column.DefaultFunction,
+                    notNullConstraintName: column.NotNullConstraintName
+                )
+            );
+        }
+
+        if (payload.Indexes is { Length: > 0 })
+            tableSchema.Indexes = [.. payload.Indexes];
+
+        if (payload.CheckConstraints is { Length: > 0 })
+        {
+            tableSchema.CheckConstraints = [.. payload.CheckConstraints];
+            ParseCheckConstraintAsts(tableSchema);
+        }
+
+        // Configure the lazy history loader (as for a disk-loaded table) so rows written under versions
+        // older than the current one decode against their retained on-disk history layout.
+        ConfigureSchemaHistoryLoader(database, tableSchema);
 
         schema.Tables.Add(payload.TableName, tableSchema);
 
@@ -1304,7 +1538,7 @@ public sealed class CatalogsManager
                     ConstraintName = constraintName
                 })
             };
-            ValidateSchemaDelta(database.Schema, entry);
+            ValidateSchemaDelta(database, entry);
         }
         finally
         {
@@ -1793,7 +2027,20 @@ public sealed class CatalogsManager
     public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
         => await PersistDroppedTableAsync(database, tableId, database.Schema.SchemaVersion, tx).ConfigureAwait(false);
 
-    public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx)
+    public Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx)
+        => PersistDroppedTableAsync(database, tableId, schemaVersion, tx, deferred: false, formerName: "", droppedAt: default);
+
+    /// <summary>
+    /// Persists the checkpoint side of a <c>DROP TABLE</c>: bumps the schema version and deletes the
+    /// per-table meta key. When <paramref name="deferred"/> is <c>true</c> it <b>also</b> writes the
+    /// table's orphan record in the same transaction — reading the table's current persisted schema
+    /// (still present at this point) to capture it — so the detach and the recovery record are one
+    /// atomic commit. Idempotent on replay: if the meta key is already gone the orphan was already
+    /// written and this is a no-op for that key.
+    /// </summary>
+    public async Task PersistDroppedTableAsync(
+        DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx,
+        bool deferred, string formerName, HLCTimestamp droppedAt)
     {
         // See PersistSchemaTableAsync above.
         System.Diagnostics.Debug.Assert(
@@ -1803,9 +2050,99 @@ public sealed class CatalogsManager
         IKahuna kahuna = database.Kahuna.Kahuna;
 
         byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
-
         await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+
+        if (deferred)
+        {
+            // Capture the table's persisted schema before deleting it, and write the orphan record in the
+            // same transaction so a crash can never leave the table detached without a recovery record.
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? tableEntry) = await kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, TableKey(database.Id, tableId), -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+            if (getType == KeyValueResponseType.Get && tableEntry?.Value is { Length: > 0 })
+            {
+                TableSchema captured = MetaJsonSerializer.Deserialize(tableEntry.Value, MetaJsonContext.Default.TableSchema);
+                byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
+                {
+                    TableId = tableId,
+                    FormerName = formerName,
+                    DroppedAt = droppedAt,
+                    Schema = captured,
+                }, MetaJsonContext.Default.OrphanTableRecord);
+
+                await WriteMetaKey(kahuna, tx, OrphanKey(database.Id, tableId), orphanBytes).ConfigureAwait(false);
+            }
+            // else: meta key already gone (idempotent replay) — the orphan record was written on the
+            // original checkpoint; nothing more to do.
+        }
+        else
+        {
+            // Immediate (FORCE) drop destroys the keyspace for good. Remove any stale orphan record for
+            // this id so the destroyed table can never be relinked to an empty/partial keyspace.
+            await DeleteMetaKey(kahuna, tx, OrphanKey(database.Id, tableId)).ConfigureAwait(false);
+        }
+
         await DeleteMetaKey(kahuna, tx, TableKey(database.Id, tableId)).ConfigureAwait(false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Orphan table records (deferred drop / relink / GC reclamation)
+    // -----------------------------------------------------------------------
+
+    private static string OrphanKeyPrefix(string dbId) => $"{dbId}/meta/orphan:";
+    private static string OrphanKey(string dbId, string tableId) => $"{OrphanKeyPrefix(dbId)}{tableId}";
+
+    /// <summary>
+    /// Deletes a table orphan record within <paramref name="tx"/>. Called on relink (the table is being
+    /// reattached) and by the GC after the table's data has been purged.
+    /// </summary>
+    public async Task DeleteTableOrphanAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        await DeleteMetaKey(kahuna, tx, OrphanKey(database.Id, tableId)).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads the orphan record for <paramref name="tableId"/>, or <c>null</c> if none exists. Lock-free
+    /// point read (zero-identity snapshot); used by relink and the GC to confirm the record before acting.
+    /// </summary>
+    public async Task<OrphanTableRecord?> TryGetTableOrphanAsync(DatabaseDescriptor database, string tableId)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, OrphanKey(database.Id, tableId), -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Get || entry?.Value is null)
+            return null;
+
+        return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.OrphanTableRecord);
+    }
+
+    /// <summary>
+    /// Scans the database meta bucket and returns every orphaned-table record. Backing store for
+    /// <c>SHOW ORPHAN TABLES</c> and the GC reclamation sweep.
+    /// </summary>
+    public async Task<List<OrphanTableRecord>> LoadTableOrphansAsync(DatabaseDescriptor database)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string metaBucket = $"{database.Id}/meta";
+        string orphanPrefix = OrphanKeyPrefix(database.Id);
+        List<OrphanTableRecord> orphans = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        {
+            if (!key.StartsWith(orphanPrefix, StringComparison.Ordinal) || entry.Value is null)
+                continue;
+
+            orphans.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.OrphanTableRecord));
+        }
+
+        return orphans;
     }
 
     /// <summary>
@@ -2146,14 +2483,14 @@ public sealed class CatalogsManager
         return tables;
     }
 
-    private void ConfigureSchemaHistoryLoader(DatabaseDescriptor database, TableSchema table)
+    private static void ConfigureSchemaHistoryLoader(DatabaseDescriptor database, TableSchema table)
     {
         string tableId = table.Id ?? "";
         table.SchemaHistoryLoader = (txId, version) =>
             new ValueTask<TableSchemaHistory?>(LoadSchemaHistoryEntryAsync(database, tableId, txId, version));
     }
 
-    private async Task<TableSchemaHistory?> LoadSchemaHistoryEntryAsync(DatabaseDescriptor database, string tableId, HLCTimestamp txId, int version)
+    private static async Task<TableSchemaHistory?> LoadSchemaHistoryEntryAsync(DatabaseDescriptor database, string tableId, HLCTimestamp txId, int version)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
 

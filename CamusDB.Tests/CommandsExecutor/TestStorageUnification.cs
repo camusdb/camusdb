@@ -189,8 +189,9 @@ internal sealed class TestStorageUnification : BaseTest
             await db.Transactions.CommitAsync(tx);
         }
 
-        // Drop the database.
-        await executor.DropDatabase(new DropDatabaseTicket(dbname));
+        // Drop the database with FORCE to exercise the immediate keyspace purge (a non-FORCE drop now
+        // retains the keyspace as a recoverable orphan and defers reclamation to the GC).
+        await executor.DropDatabase(new DropDatabaseTicket(dbname, ifExists: false, force: true));
 
         // After drop, no keys should remain under "{dbId}:" in Kahuna.
         IKahuna kahuna = TestNode!.Kahuna;

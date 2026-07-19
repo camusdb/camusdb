@@ -25,7 +25,8 @@ internal sealed class SQLExecutorDropTableCreator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Invalid drop table AST");
 
         string tableName = ast.leftAst!.yytext!;
-        
-        return new(ticket.DatabaseName, tableName, ast.nodeType == NodeType.DropTableIfExists);
+        bool force = ast.yytext == "force";
+
+        return new(ticket.DatabaseName, tableName, ast.nodeType == NodeType.DropTableIfExists, force);
     }
 }

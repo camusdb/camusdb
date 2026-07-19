@@ -150,7 +150,8 @@ internal sealed class TestKeyspaceCatalogPurge : BaseTest
         Assert.AreEqual(1, await CountKeysUnder(kahuna, rowBucket, rowBucket + "/"),
             "Sanity: the injected orphan row must be present before DROP DATABASE");
 
-        await executor.DropDatabase(new DropDatabaseTicket(dbname));
+        // FORCE: exercise the immediate keyspace purge (a non-FORCE drop now defers to the GC).
+        await executor.DropDatabase(new DropDatabaseTicket(dbname, ifExists: false, force: true));
 
         Assert.AreEqual(0, await CountKeysUnder(kahuna, rowBucket, rowBucket + "/"),
             "DROP DATABASE must purge orphan rows under a previously dropped table via the keyspace catalog");
@@ -191,7 +192,8 @@ internal sealed class TestKeyspaceCatalogPurge : BaseTest
         Assert.AreEqual(1, await CountKeysUnder(kahuna, indexBucket, indexBucket + "/"),
             "Sanity: the injected orphan index entry must be present before DROP DATABASE");
 
-        await executor.DropDatabase(new DropDatabaseTicket(dbname));
+        // FORCE: exercise the immediate keyspace purge (a non-FORCE drop now defers to the GC).
+        await executor.DropDatabase(new DropDatabaseTicket(dbname, ifExists: false, force: true));
 
         Assert.AreEqual(0, await CountKeysUnder(kahuna, indexBucket, indexBucket + "/"),
             "DROP DATABASE must purge orphan entries under a previously dropped index via the keyspace catalog");

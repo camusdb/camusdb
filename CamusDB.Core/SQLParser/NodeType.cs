@@ -85,6 +85,8 @@ public enum NodeType
     SortDesc,
     CreateTable,
     CreateTableIfNotExists,
+    /// <summary>Recover a dropped table's data under a new name by re-linking to its orphan id (<c>CREATE TABLE x RELINK TO '&lt;id&gt;'</c>).</summary>
+    CreateTableRelink,
     CreateTableItem,
     CreateTableItemList,
     CreateTableFieldConstraintList,
@@ -170,10 +172,16 @@ public enum NodeType
     ShowDatabases,
     ShowBranches,
     ShowAncestors,
+    /// <summary>List tables dropped-but-recoverable in the current database (<c>SHOW ORPHAN TABLES</c>).</summary>
+    ShowOrphanTables,
+    /// <summary>List root databases dropped-but-recoverable (<c>SHOW ORPHAN DATABASES</c>); resolved from the registry with no open database.</summary>
+    ShowOrphanDatabases,
     CreateDatabase,
     CreateDatabaseIfNotExists,
     CreateDatabaseBranch,
     CreateDatabaseBranchIfNotExists,
+    /// <summary>Recover a dropped root database's data under a new name by re-linking to its orphan id (<c>CREATE DATABASE x RELINK TO '&lt;id&gt;'</c>).</summary>
+    CreateDatabaseRelink,
     DropDatabase,
     DropDatabaseIfExists,
     RenameDatabase,

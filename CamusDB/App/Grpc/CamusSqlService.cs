@@ -82,7 +82,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             QueryStreamSink sink = new(responseStream);
 
             // SHOW DATABASES / BRANCHES / ANCESTORS need no db context or transaction.
-            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors)
+            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
@@ -307,6 +307,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             bool isDbManagement = ast.nodeType is
                 NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
                 NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
+                NodeType.CreateDatabaseRelink or
                 NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
                 NodeType.RenameDatabase;
 
@@ -562,7 +563,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         NodeAst ast = SQLParserProcessor.Parse(sql);
         HLCTimestamp commitToken = default;
 
-        if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors)
+        if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
         {
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: request.Database, sql: sql,

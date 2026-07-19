@@ -88,6 +88,21 @@ public class ConfigDefinition
     public int SqlParserCacheSweepSeconds { get; set; } = 60;
 
     /// <summary>
+    /// Retention window, in milliseconds, for orphaned (deferred-dropped) databases/tables before the
+    /// garbage collector may physically reclaim them. <c>&lt;= 0</c> keeps orphans until an explicit
+    /// FORCE drop / manual purge. Maps to <c>CamusDBConfig.OrphanRetentionMs</c> (yml
+    /// <c>orphan_retention_ms</c>). Default 7 days.
+    /// </summary>
+    public long OrphanRetentionMs { get; set; } = 7L * 24 * 60 * 60 * 1000;
+
+    /// <summary>
+    /// Interval, in milliseconds, of the background orphan-reclamation sweep. <c>&lt;= 0</c> disables
+    /// the loop. Maps to <c>CamusDBConfig.OrphanReclaimIntervalMs</c> (yml
+    /// <c>orphan_reclaim_interval_ms</c>). Default 5 minutes.
+    /// </summary>
+    public int OrphanReclaimIntervalMs { get; set; } = 5 * 60 * 1000;
+
+    /// <summary>
     /// Enables cost-based access-path selection in the query planner.
     /// When <c>true</c>, the planner costs all viable index steps and picks the cheapest.
     /// When <c>false</c> (default), the rule-based (score-based) path is used unchanged.

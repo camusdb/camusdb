@@ -50,6 +50,9 @@ TDefault 		(D|d)(E|e)(F|f)(A|a)(U|u)(L|l)(T|t)
 TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
 TDrop 		    (D|d)(R|r)(O|o)(P|p)
+TForce 		    (F|f)(O|o)(R|r)(C|c)(E|e)
+TRelink 		(R|r)(E|e)(L|l)(I|i)(N|n)(K|k)
+TOrphan 		(O|o)(R|r)(P|p)(H|h)(A|a)(N|n)
 TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
 TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
 TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
@@ -259,6 +262,9 @@ TDot            \.
 {TWAdd} { return (int)Token.TWADD; }
 
 {TDrop} { return (int)Token.TDROP; }
+{TForce} { return (int)Token.TFORCE; }
+{TRelink} { return (int)Token.TRELINK; }
+{TOrphan} { return (int)Token.TORPHAN; }
 
 {TColumn} { return (int)Token.TCOLUMN; }
 

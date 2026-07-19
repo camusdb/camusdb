@@ -300,6 +300,56 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Lists root databases that were dropped but retained as recoverable orphans. Backing data comes
+    /// from the registry (scanned by the caller, since <see cref="SchemaQuerier"/> has no registry
+    /// handle), mirroring <see cref="ShowDatabases"/>. Each row is the orphan's id (to feed
+    /// <c>CREATE DATABASE ... RELINK TO</c>), its former name, drop time, and reclamation deadline.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowOrphanDatabases(IReadOnlyList<OrphanDatabaseRecord> orphans)
+    {
+        await Task.CompletedTask;
+
+        foreach (OrphanDatabaseRecord orphan in orphans)
+            yield return OrphanRow(orphan.Id, orphan.FormerName, orphan.DroppedAt);
+    }
+
+    /// <summary>
+    /// Lists tables in <paramref name="database"/> that were dropped but retained as recoverable
+    /// orphans (scanned from the per-database meta namespace). Each row is the orphan's table id (to
+    /// feed <c>CREATE TABLE ... RELINK TO</c>), its former name, drop time, and reclamation deadline.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowOrphanTables(DatabaseDescriptor database)
+    {
+        foreach (OrphanTableRecord orphan in await catalogs.LoadTableOrphansAsync(database).ConfigureAwait(false))
+            yield return OrphanRow(orphan.TableId, orphan.FormerName, orphan.DroppedAt);
+    }
+
+    /// <summary>
+    /// Builds one <c>SHOW ORPHAN …</c> row. Timestamps are rendered as UTC ISO-8601
+    /// (<c>yyyy-MM-ddTHH:mm:ss.fffZ</c>) from the HLC's physical component (Unix epoch milliseconds).
+    /// <c>expires_at</c> is the advisory reclamation deadline (<c>DroppedAt + OrphanRetentionMs</c>), or
+    /// the literal <c>"never"</c> when automatic reclamation is disabled
+    /// (<see cref="CamusDBConfig.OrphanRetentionMs"/> &lt;= 0).
+    /// </summary>
+    private static QueryResultRow OrphanRow(string id, string formerName, HLCTimestamp droppedAt)
+    {
+        long retentionMs = CamusDBConfig.OrphanRetentionMs;
+        string expiresAt = retentionMs > 0 ? IsoFromUnixMs(droppedAt.L + retentionMs) : "never";
+
+        return new QueryResultRow(default, new Dictionary<string, ColumnValue>()
+        {
+            { "id",          new ColumnValue(ColumnType.String, id) },
+            { "former_name", new ColumnValue(ColumnType.String, formerName) },
+            { "dropped_at",  new ColumnValue(ColumnType.String, IsoFromUnixMs(droppedAt.L)) },
+            { "expires_at",  new ColumnValue(ColumnType.String, expiresAt) },
+        });
+    }
+
+    /// <summary>Formats Unix-epoch milliseconds (the HLC physical component) as UTC ISO-8601 with millisecond precision.</summary>
+    private static string IsoFromUnixMs(long unixMs) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(unixMs).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+
+    /// <summary>
     /// SQL LIKE pattern match: '%' matches any sequence, '_' matches any single character.
     /// Matching is case-sensitive (standard SQL semantics).
     /// </summary>

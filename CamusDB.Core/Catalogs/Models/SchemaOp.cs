@@ -78,5 +78,15 @@ public enum SchemaOp
     /// DROP NOT NULL. Does not bump <c>TableSchema.Version</c> — the NOT NULL flag is
     /// enforced at write time, not encoded in row bytes.
     /// </summary>
-    SetColumnNotNull = 12
+    SetColumnNotNull = 12,
+
+    /// <summary>
+    /// Reattach a deferred-dropped (orphaned) table to the live schema under a new name
+    /// (payload: <c>SchemaRelinkTablePayload</c>). Unlike <see cref="CreateTable"/>, it preserves the
+    /// table's original id, column ids, index definitions, check constraints, <b>and schema version</b>,
+    /// and sets a lazy schema-history loader instead of synthesizing a version-0 history — so rows
+    /// written under the table's real (post-<c>ALTER</c>) versions still decode against the retained
+    /// on-disk history keys. The reattached table reads its retained rows/indexes.
+    /// </summary>
+    RelinkTable = 13
 }
