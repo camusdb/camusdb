@@ -52,7 +52,7 @@ public class TestGrpcRowsService : BaseTest
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
         rowsService = new(serviceExecutor, coordinator, logger);
-        sqlService   = new(serviceExecutor, coordinator, logger);
+        sqlService   = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance);
     }
 
     [TearDown]

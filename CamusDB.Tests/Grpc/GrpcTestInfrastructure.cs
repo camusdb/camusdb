@@ -15,9 +15,24 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 using Grpc.Core;
+using Microsoft.Extensions.Hosting;
 using CamusDB.Grpc;
 
 namespace CamusDB.Tests.Grpc;
+
+/// <summary>
+/// No-op <see cref="IHostApplicationLifetime"/> for unit-level gRPC tests that construct the service
+/// directly without a host. Its shutdown tokens never fire, so linking against them is inert — the
+/// tests exercise normal streaming; the real server links these to end long-lived streams on shutdown.
+/// </summary>
+internal sealed class TestHostApplicationLifetime : IHostApplicationLifetime
+{
+    public static readonly TestHostApplicationLifetime Instance = new();
+    public CancellationToken ApplicationStarted => CancellationToken.None;
+    public CancellationToken ApplicationStopping => CancellationToken.None;
+    public CancellationToken ApplicationStopped => CancellationToken.None;
+    public void StopApplication() { }
+}
 
 /// <summary>
 /// Minimal <see cref="ServerCallContext"/> stub for unit-level tests that invoke

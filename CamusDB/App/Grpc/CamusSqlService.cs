@@ -8,6 +8,7 @@
 
 using System.Collections.Concurrent;
 using Grpc.Core;
+using Microsoft.Extensions.Hosting;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -49,15 +50,18 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private readonly CommandExecutor executor;
     private readonly HttpTransactionCoordinator transactions;
     private readonly ILogger<ICamusDB> logger;
+    private readonly IHostApplicationLifetime appLifetime;
 
     public CamusSqlService(
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
-        ILogger<ICamusDB> logger)
+        ILogger<ICamusDB> logger,
+        IHostApplicationLifetime appLifetime)
     {
         this.executor     = executor;
         this.transactions = transactions;
         this.logger       = logger;
+        this.appLifetime  = appLifetime;
     }
 
     // ─── ExecuteQuery (server-streaming) ─────────────────────────────────────
@@ -392,7 +396,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         IServerStreamWriter<BatchExecuteResponse> responseStream,
         ServerCallContext context)
     {
-        CancellationToken ct = context.CancellationToken;
+        // BatchExecute is a long-lived duplex stream that a multiplexing client keeps open across many
+        // operations, blocking below in ReadAllAsync between requests. context.CancellationToken only
+        // fires on CLIENT disconnect, so on a graceful SERVER shutdown Kestrel would otherwise wait for
+        // this "active" streaming call the full host ShutdownTimeout (~30s). Link the host's
+        // ApplicationStopping token so shutdown ends the read loop promptly; the finally block still rolls
+        // back any transaction left open on the stream.
+        using CancellationTokenSource shutdownLinked =
+            CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, appLifetime.ApplicationStopping);
+        CancellationToken ct = shutdownLinked.Token;
         SemaphoreSlim writeLock = new(1, 1);
         int maxInFlight = Math.Max(1, CamusDBConfig.GrpcBatchMaxInFlight);
         SemaphoreSlim inFlight = new(maxInFlight, maxInFlight);

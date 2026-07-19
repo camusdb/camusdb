@@ -2729,16 +2729,22 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.Explain:
             case NodeType.ExplainPhysical:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ExplainSchema;
                     return (database, explainExecutor.ExplainQuery(database, ast.leftAst!, ticket, "physical"));
                 }
 
             case NodeType.ExplainLogical:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ExplainSchema;
                     return (database, explainExecutor.ExplainQuery(database, ast.leftAst!, ticket, "logical"));
                 }
 
             case NodeType.ExplainAnalyze:
                 {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ExplainAnalyzeSchema;
                     return (database, explainExecutor.ExplainAnalyzeQuery(database, ast.leftAst!, ticket));
                 }
 

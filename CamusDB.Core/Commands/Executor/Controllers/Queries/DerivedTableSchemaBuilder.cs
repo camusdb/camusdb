@@ -93,6 +93,35 @@ internal static class DerivedTableSchemaBuilder
         new("expires_at",  ColumnType.String),
     ];
 
+    // EXPLAIN / EXPLAIN (LOGICAL|PHYSICAL): one row per plan node. Column order and names/types must
+    // match the dictionary keys emitted by ExplainExecutor.ExplainQuery so the positional response
+    // resolves each cell by name. Trailing rows (plan-info, cache) omit the metric columns; the
+    // positional writer maps a missing key to null, so a shorter row is fine.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ExplainSchema =
+    [
+        new("stage",          ColumnType.String),
+        new("node",           ColumnType.String),
+        new("detail",         ColumnType.String),
+        new("estimated_rows", ColumnType.Integer64),
+        new("estimated_cost", ColumnType.Float64),
+    ];
+
+    // EXPLAIN (ANALYZE): the plain EXPLAIN schema plus the measured runtime columns emitted by
+    // ExplainExecutor.ExplainAnalyzeQuery.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ExplainAnalyzeSchema =
+    [
+        new("stage",           ColumnType.String),
+        new("node",            ColumnType.String),
+        new("detail",          ColumnType.String),
+        new("estimated_rows",  ColumnType.Integer64),
+        new("estimated_cost",  ColumnType.Float64),
+        new("actual_rows",     ColumnType.Integer64),
+        new("rows_read",       ColumnType.Integer64),
+        new("actual_time_ms",  ColumnType.Float64),
+        new("kv_lookups",      ColumnType.Integer64),
+        new("kv_scan_entries", ColumnType.Integer64),
+    ];
+
     // -------------------------------------------------------------------------
     // Build — derives schema from a bound SELECT query.
     // ExprAllFields (*) is expanded to all readable columns from every source.

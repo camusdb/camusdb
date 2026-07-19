@@ -342,4 +342,61 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
         Assert.AreEqual(1, rows.Count);
         Assert.AreEqual(dbname, rows[0].Row["database"].StrValue);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EXPLAIN — the column schema must be populated, otherwise the positional JSON
+    // response renders empty headers and empty cells (rows present, no columns).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task Explain_PopulatesPlanColumnSchema()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction ddlTx = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddlTx, dbname,
+            "CREATE TABLE orders (id INT64 NOT NULL, total FLOAT64, PRIMARY KEY (id))", null));
+        await database.Transactions.CommitAsync(ddlTx);
+
+        (IReadOnlyList<DerivedColumnSchema> schema, List<QueryResultRow> rows) =
+            await ExecQuery(executor, database, dbname, "EXPLAIN SELECT * FROM orders");
+
+        string[] expectedNames = ["stage", "node", "detail", "estimated_rows", "estimated_cost"];
+        Assert.AreEqual(expectedNames.Length, schema.Count, "EXPLAIN must expose its plan column schema");
+        for (int i = 0; i < expectedNames.Length; i++)
+            Assert.AreEqual(expectedNames[i], schema[i].Name, $"schema[{i}].Name");
+
+        Assert.IsTrue(rows.Count >= 1, "EXPLAIN must return at least one plan row");
+        // Every plan row must resolve positionally against the schema — the regression rendered
+        // all-empty rows because the schema was absent.
+        object?[] encoded = CompactRowEncoder.EncodeRow(rows[0].Row, schema);
+        Assert.AreEqual(schema.Count, encoded.Length);
+        Assert.IsNotNull(encoded[0], "stage cell must not be null");
+        Assert.IsNotNull(encoded[1], "node cell must not be null");
+    }
+
+    [Test]
+    public async Task ExplainAnalyze_PopulatesRuntimeColumnSchema()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction ddlTx = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddlTx, dbname,
+            "CREATE TABLE orders (id INT64 NOT NULL, total FLOAT64, PRIMARY KEY (id))", null));
+        await database.Transactions.CommitAsync(ddlTx);
+
+        (IReadOnlyList<DerivedColumnSchema> schema, List<QueryResultRow> rows) =
+            await ExecQuery(executor, database, dbname, "EXPLAIN (ANALYZE) SELECT * FROM orders");
+
+        string[] expectedNames =
+        [
+            "stage", "node", "detail", "estimated_rows", "estimated_cost",
+            "actual_rows", "rows_read", "actual_time_ms", "kv_lookups", "kv_scan_entries",
+        ];
+        Assert.AreEqual(expectedNames.Length, schema.Count, "EXPLAIN (ANALYZE) must expose its runtime column schema");
+        for (int i = 0; i < expectedNames.Length; i++)
+            Assert.AreEqual(expectedNames[i], schema[i].Name, $"schema[{i}].Name");
+
+        Assert.IsTrue(rows.Count >= 1);
+    }
 }
