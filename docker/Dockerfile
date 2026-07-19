@@ -19,6 +19,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 EXPOSE 5095
+EXPOSE 5096
 EXPOSE 7070
 EXPOSE 7141
 

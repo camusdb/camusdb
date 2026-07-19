@@ -16,6 +16,7 @@ services:
     container_name: camus1
     ports:
       - "5095:5095"
+      - "6095:5096"
       - "7141:7141"
       - "7070:7070"
     volumes:
@@ -39,6 +40,7 @@ services:
     container_name: camus2
     ports:
       - "5096:5095"
+      - "6096:5096"
       - "7142:7141"
       - "7072:7072"
     volumes:
@@ -62,6 +64,7 @@ services:
     container_name: camus3
     ports:
       - "5097:5095"
+      - "6097:5096"
       - "7143:7141"
       - "7074:7074"
     volumes:

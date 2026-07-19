@@ -1,6 +1,6 @@
 CamusDB
 =======
-CamusDB is an open-source NewSQL distributed database written in C# on .NET 10. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes a JSON/HTTP API. The project is alpha-quality — APIs and storage formats may change between versions.
+CamusDB is an open-source NewSQL distributed database written in C# on .NET 10. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes both a JSON/HTTP API and a gRPC API. The project is alpha-quality — APIs and storage formats may change between versions.
 
 **This is an alpha project. Do not use it in production.**
 
@@ -25,7 +25,8 @@ Features
 - **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
-- **HTTP API** — all database operations are accessible over a JSON/HTTP endpoint.
+- **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
+- **Recovering dropped objects** — `DROP DATABASE`/`DROP TABLE` defer physical deletion: the object is unlinked (orphaned) rather than immediately erased, so it can be recovered while its data still exists by relinking under a new name (`CREATE DATABASE new RELINK TO '<id>'`, `CREATE TABLE new RELINK TO '<id>'`). List recoverable objects with `SHOW ORPHAN DATABASES` / `SHOW ORPHAN TABLES`; a background reclaimer garbage-collects orphans once their retention window elapses.
 - **Multi-platform** — runs on any platform supported by .NET 10.
 
 Column Types
@@ -89,6 +90,19 @@ EXPLAIN (ANALYZE) SELECT role, COUNT(*) FROM app_users GROUP BY role;
 
 `SELECT DISTINCT` is row-level distinct. Aggregate-level distinct such as `COUNT(DISTINCT code)` is not supported yet.
 
+Running with Docker
+-------------------
+A single node can be started from the published image, mapping the JSON/REST and gRPC ports and
+persisting data in a named volume:
+
+```bash
+docker run --rm \
+        -p 5095:5095 \
+        -p 5096:5096 \
+        -v camus-data:/data \
+        --name camusdb camusdb/camusdb:latest
+```
+
 Running a cluster
 -----------------
 A three-node cluster can be started with Docker Compose:
@@ -99,11 +113,11 @@ docker compose -f docker/local.yml up --build
 
 This starts three nodes on a private bridge network:
 
-| Node   | HTTP API          | Raft port |
-|--------|-------------------|-----------|
-| camus1 | localhost:5095    | 7070      |
-| camus2 | localhost:5096    | 7072      |
-| camus3 | localhost:5097    | 7074      |
+| Node   | JSON/REST API     | gRPC API          | Raft port |
+|--------|-------------------|-------------------|-----------|
+| camus1 | localhost:5095    | localhost:6095    | 7070      |
+| camus2 | localhost:5096    | localhost:6096    | 7072      |
+| camus3 | localhost:5097    | localhost:6097    | 7074      |
 
 To run a single node without Docker:
 
