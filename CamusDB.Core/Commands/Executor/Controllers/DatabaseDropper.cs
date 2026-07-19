@@ -140,8 +140,8 @@ internal sealed class DatabaseDropper
         // Purged namespaces (scan bucket → stored key prefix):
         //   {id}/meta                    → {id}/                           — meta keys (system, version, schemas, history, coordinator jobs)
         //   {id}:                        → {id}:                           — statistics keys ({id}:stats:{tableId})
-        //   {id}:{tableId}:r             → {id}:{tableId}:r/               — row data for every table (Task 4 prefix)
-        //   {id}:{tableId}:i:{indexId}   → {id}:{tableId}:i:{indexId}/     — index data for every index (Task 4 prefix)
+        //   {id}:{tableId}:r             → {id}:{tableId}:r/               — row data for every table
+        //   {id}:{tableId}:i:{indexId}   → {id}:{tableId}:i:{indexId}/     — index data for every index
         //
         //   Schema-log entries in the Raft WAL are append-only and cannot be removed.
         //

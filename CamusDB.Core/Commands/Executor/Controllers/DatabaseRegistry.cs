@@ -54,6 +54,17 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private readonly ConcurrentDictionary<string, DatabaseRegistryEntry> byName = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DatabaseRegistryEntry> byId = new(StringComparer.Ordinal);
 
+    // Cross-node cache-coherence stamp. The in-memory caches above are loaded once at OpenAsync and
+    // lazily backfilled, so without this a name dropped/renamed on ANOTHER node stays resolvable here from
+    // a stale cache hit — a namespace split-brain that, with deferred drop, lets this node read/mutate a
+    // detached-but-retained keyspace. Every mutation (Register/Unregister/Rename) advances a shared,
+    // Raft-replicated monotonic generation sequence; a cache HIT is trusted only while this node's
+    // last-loaded generation still matches the authoritative one, otherwise the cache is revalidated
+    // against KV before resolving. `loadedGeneration` is the generation this node's cache reflects; it is
+    // read lock-free on the hit path (a stale read only forces a redundant, harmless revalidation).
+    private long loadedGeneration;
+    private string GenerationSequenceKey => $"{keyPrefix}dbregistry/generation";
+
     private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "_system",
@@ -61,6 +72,18 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     };
 
     private const int MaxRetries = 10;
+
+    // A drop-intent fence carries a bounded lease (its KV key's native expiry, CamusDBConfig.FenceLeaseMs).
+    // If the owner crashes without releasing it, the lease lapses and any node can then re-acquire — a
+    // dead owner can no longer block relink/GC of an id forever. A live owner keeps the fence by renewing
+    // the lease in the background (below) for as long as it holds it, so an operation that legitimately
+    // outlives one lease period (e.g. a large keyspace purge) never has the fence stolen mid-flight.
+
+    // Background lease renewers for fences this node currently holds, keyed by fence id (a database id or
+    // a composite table-fence id). A renewer re-stamps the lease with a compare-and-set on this node's
+    // owner value, so it renews only while this node still owns the fence and stops the moment the fence
+    // is lost. Populated by AcquireDropIntentAsync, torn down by ReleaseDropIntentAsync / DisposeAsync.
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> fenceRenewers = new(StringComparer.Ordinal);
 
     // Database names are normalised to lowercase at the registry boundary so that the
     // storage key, the in-memory cache, and the filesystem path are all consistent.
@@ -158,6 +181,136 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     // -----------------------------------------------------------------------
+    // Cross-node cache-coherence generation stamp
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Reads the authoritative registry generation (the current value of the shared generation sequence)
+    /// without advancing it. Returns 0 when the sequence does not exist yet (no mutation has occurred).
+    /// A cache hit compares this against <c>loadedGeneration</c> to decide whether the local cache is
+    /// still current.
+    /// </summary>
+    private async Task<long> ReadGenerationAsync()
+    {
+        (SequenceResponseType type, ReadOnlySequenceEntry? entry) = await kahuna.LocateAndGetSequence(
+            GenerationSequenceKey, SequenceDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        return type == SequenceResponseType.Success && entry is not null ? entry.CurrentValue : 0;
+    }
+
+    /// <summary>
+    /// Advances the shared registry generation so every other node's next cache hit revalidates against
+    /// KV. Called after a mutation (Register/Unregister/Rename) has durably committed, so the generation
+    /// only moves once the change is visible. Best-effort: if the bump fails the mutation is already
+    /// committed and must not be undone — coherence for that one change degrades to "observed on the next
+    /// mutation or restart" rather than immediately, which is logged. Returns the new generation (or the
+    /// current local value on failure) so the mutating node can adopt it and avoid revalidating itself.
+    /// </summary>
+    private async Task<long> BumpGenerationAsync()
+    {
+        (SequenceResponseType createType, _) = await kahuna.LocateAndCreateSequence(
+            GenerationSequenceKey, initialValue: 0, increment: 1, maxValue: null,
+            SequenceDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (createType is SequenceResponseType.Success or SequenceResponseType.AlreadyExists)
+        {
+            SequenceResponseType nextType;
+            SequenceAllocation allocation = default;
+            int retries = 0;
+            do
+            {
+                if (retries > 0)
+                    await Task.Delay(retries * 10).ConfigureAwait(false);
+
+                (nextType, allocation) = await kahuna.LocateAndNextSequenceValue(
+                    GenerationSequenceKey, null, SequenceDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+            }
+            while (nextType == SequenceResponseType.MustRetry && ++retries < MaxRetries);
+
+            if (nextType == SequenceResponseType.Success)
+                return allocation.Start;
+        }
+
+        return Volatile.Read(ref loadedGeneration);
+    }
+
+    /// <summary>
+    /// Marks the local cache as reflecting generation <paramref name="generation"/>. Called by a mutating
+    /// path after it has both updated the in-memory cache in place and bumped the generation, so this node
+    /// does not needlessly revalidate against its own just-applied change.
+    /// </summary>
+    private void AdoptGeneration(long generation)
+    {
+        // Only move forward — a concurrent revalidation may already have adopted a higher generation.
+        long current = Volatile.Read(ref loadedGeneration);
+        if (generation > current)
+            Volatile.Write(ref loadedGeneration, generation);
+    }
+
+    /// <summary>
+    /// Revalidates the in-memory caches against KV when a cache hit is found to be stale (the authoritative
+    /// generation has moved past <c>loadedGeneration</c>). Reconciles in place — upserting present entries
+    /// and removing names that have vanished from KV (dropped/renamed away on another node) — rather than
+    /// clearing first, so a concurrent lock-free reader never observes a transiently empty cache. Serialized
+    /// under <see cref="writeSem"/> so it cannot interleave with a mutation's cache update, with a
+    /// double-check so concurrent hits collapse to a single reload.
+    /// </summary>
+    private async Task RevalidateFromKvAsync(long authoritativeGeneration)
+    {
+        await writeSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (Volatile.Read(ref loadedGeneration) >= authoritativeGeneration)
+                return; // another hit already reloaded to at least this generation
+
+            HashSet<string> present = new(StringComparer.Ordinal);
+
+            KvTransaction tx = KvTransaction.CreateReadOnly();
+            string namePrefix = NameKeyPrefix;
+
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                tx.TransactionId, RegistryBucket, null, true, null, true, 1000,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || entry.Value is null)
+                    continue;
+
+                DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
+                    entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+                present.Add(loaded.Name);
+                byName[loaded.Name] = loaded;
+                byId[loaded.Id] = loaded;
+            }
+
+            // Evict names that no longer exist in KV. Remove the id mapping only if it still points at the
+            // evicted entry — a rename re-points byId[id] at the NEW name, which the upsert above already
+            // wrote, so the id must not be dropped along with the old name.
+            foreach (string name in byName.Keys.ToList())
+            {
+                if (present.Contains(name))
+                    continue;
+
+                if (byName.TryRemove(name, out DatabaseRegistryEntry? removed)
+                    && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
+                    && currentById.Name == name)
+                {
+                    byId.TryRemove(removed.Id, out _);
+                }
+            }
+
+            Volatile.Write(ref loadedGeneration, authoritativeGeneration);
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Factory
     // -----------------------------------------------------------------------
 
@@ -219,6 +372,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             try
             {
                 await LoadOnceAsync().ConfigureAwait(false);
+                // Start coherent with the current generation so the first cache hit does not needlessly
+                // revalidate. Best-effort: on failure loadedGeneration stays 0 and the first hit revalidates.
+                Volatile.Write(ref loadedGeneration, await ReadGenerationAsync().ConfigureAwait(false));
                 return;
             }
             catch (RaftException) when (sw.ElapsedMilliseconds < maxWaitMs)
@@ -293,7 +449,21 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         name = Normalize(name);
 
         if (byName.TryGetValue(name, out DatabaseRegistryEntry? cached))
-            return cached;
+        {
+            // A cache hit is authoritative only while this node's cache is at the current generation.
+            // If a mutation (possibly on another node) has advanced the generation since we last loaded,
+            // the hit may be stale — revalidate against KV before trusting it, then re-resolve from the
+            // reconciled cache (the name may now be gone, or repointed to a new id).
+            long authGen = await ReadGenerationAsync().ConfigureAwait(false);
+            if (authGen == Volatile.Read(ref loadedGeneration))
+                return cached;
+
+            await RevalidateFromKvAsync(authGen).ConfigureAwait(false);
+
+            if (byName.TryGetValue(name, out DatabaseRegistryEntry? revalidated))
+                return revalidated;
+            return null; // the name was dropped/renamed away on another node
+        }
 
         // Cache miss — try a live point-read from the persistent KV store.
         KvTransaction tx = await transactions.BeginAsync(
@@ -491,6 +661,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             byName[name] = entry;
             byId[id] = entry;
+
+            // Advance the shared generation so other nodes revalidate their caches and observe this new
+            // name; adopt it locally so this node does not revalidate against its own just-applied change.
+            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
             return entry;
         }
         finally
@@ -529,6 +703,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             byName.TryRemove(name, out _);
             byId.TryRemove(entry.Id, out _);
+
+            // Advance the shared generation so other nodes drop their now-stale cache hit for this name.
+            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
         }
         finally
         {
@@ -609,6 +786,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             byName.TryRemove(oldName, out _);
             byName[newName] = updated;
             byId[existing.Id] = updated;
+
+            // Advance the shared generation so other nodes stop resolving the old name and pick up the new.
+            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
         }
         finally
         {
@@ -667,20 +847,104 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     /// <summary>
-    /// Atomically sets a persistent drop-in-progress marker for <paramref name="dbId"/> using
-    /// <c>SetIfNotExists</c>. Returns <c>true</c> if the marker was written (the caller now owns
-    /// the drop fence); returns <c>false</c> if another concurrent drop already holds the fence.
-    /// The marker value is the owning node's id so startup recovery can safely reclaim only its own
-    /// stale markers. The caller must call <see cref="ReleaseDropIntentAsync"/> on every exit path so
-    /// the marker does not strand and block future drops.
+    /// Atomically acquires the drop-intent fence for <paramref name="dbId"/> with a bounded lease
+    /// (<see cref="CamusDBConfig.FenceLeaseMs"/>) via <c>SetIfNotExists</c>. Returns <c>true</c> if this node now owns
+    /// the fence; <c>false</c> if another node's <em>live</em> (non-expired) lease already holds it.
+    ///
+    /// <para><b>Lease.</b> The marker's KV key carries a native expiry, so a holder that crashes without
+    /// releasing frees the fence automatically once the lease lapses — a dead owner can no longer block
+    /// relink/GC of the id forever (the failure this fixes). On success a background renewer keeps the
+    /// lease alive for as long as this node holds the fence, so a long operation (a large keyspace purge)
+    /// is never interrupted by a competing acquire. The marker value is <c>{nodeId}:{epoch}</c> so
+    /// startup recovery reclaims only this node's own prior-run remnants.</para>
+    ///
+    /// <para><b>Transient vs. genuine contention.</b> Only a real <c>SetIfNotExists</c> conflict
+    /// (<c>NotSet</c> — a live lease is present) reports the fence as held; transient replication/retry
+    /// statuses (<c>MustRetry</c>/<c>WaitingForReplication</c>) are retried with bounded backoff rather
+    /// than mistaken for contention.</para>
+    ///
+    /// <para>The caller must call <see cref="ReleaseDropIntentAsync"/> on every exit path so the renewer
+    /// stops and the fence frees immediately rather than only when its lease lapses.</para>
     /// </summary>
     public async Task<bool> AcquireDropIntentAsync(string dbId)
     {
-        (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-            HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, null, -1,
-            KeyValueFlags.SetIfNotExists, 0, KeyValueDurability.Persistent, CancellationToken.None
-        ).ConfigureAwait(false);
-        return type == KeyValueResponseType.Set;
+        int retries = 0;
+        while (true)
+        {
+            (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, null, -1,
+                KeyValueFlags.SetIfNotExists, CamusDBConfig.FenceLeaseMs, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+
+            if (type == KeyValueResponseType.Set)
+            {
+                StartFenceRenewer(dbId);
+                return true;
+            }
+
+            // NotSet = a live, non-expired lease genuinely holds the fence. A crashed owner's lease would
+            // already have lapsed and this Set would have succeeded, so NotSet is real contention.
+            if (type == KeyValueResponseType.NotSet)
+                return false;
+
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+                && ++retries < MaxRetries)
+            {
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+                continue;
+            }
+
+            // Any other status (or exhausted retries) is treated as "not acquired" — the caller leaves the
+            // work for a later pass rather than proceeding without the fence.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Starts (or replaces) the background lease renewer for a fence this node just acquired. The renewer
+    /// re-stamps the lease every <see cref="CamusDBConfig.FenceLeaseRenewIntervalMs"/> with a compare-and-set on this node's
+    /// owner value, so it renews only while this node still owns the fence and self-terminates the moment
+    /// the fence is lost (e.g. the lease lapsed during a stall and another node took it) or released.
+    /// </summary>
+    private void StartFenceRenewer(string dbId)
+    {
+        CancellationTokenSource cts = new();
+        // Replace any prior renewer for this id (should not exist while we hold the fence, but be safe).
+        if (fenceRenewers.TryRemove(dbId, out CancellationTokenSource? old))
+        {
+            try { old.Cancel(); } catch { }
+            old.Dispose();
+        }
+        fenceRenewers[dbId] = cts;
+        _ = RenewFenceLoopAsync(dbId, cts.Token);
+    }
+
+    private async Task RenewFenceLoopAsync(string dbId, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(CamusDBConfig.FenceLeaseRenewIntervalMs, ct).ConfigureAwait(false);
+
+                // SetIfEqualToValue: renew (refresh the expiry) only if the stored value is still THIS
+                // node's owner value. If the lease lapsed and another node re-acquired, the compare fails
+                // (NotSet) and we stop renewing — we no longer own the fence and must not overwrite it.
+                (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, LocalOwnerValue, -1,
+                    KeyValueFlags.SetIfEqualToValue, CamusDBConfig.FenceLeaseMs, KeyValueDurability.Persistent, ct
+                ).ConfigureAwait(false);
+
+                if (type is KeyValueResponseType.Set
+                    or KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                    continue; // renewed, or a transient status — try again next tick
+
+                // NotSet (lost the fence) or any hard error: stop renewing.
+                return;
+            }
+        }
+        catch (OperationCanceledException) { /* released — normal */ }
+        catch { /* best-effort renewal; a missed renewal only shortens the lease */ }
     }
 
     /// <summary>
@@ -699,13 +963,20 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     /// <summary>
-    /// Removes the drop-intent marker for <paramref name="dbId"/>. Called after
-    /// <see cref="DropDatabase"/> completes (whether it succeeded or failed the descendant check).
-    /// Best-effort: a failure is logged and swallowed; a stranded marker blocks future drops of
-    /// the same id until the marker is manually cleared or the process restarts.
+    /// Releases the drop-intent fence for <paramref name="dbId"/>: stops its background lease renewer and
+    /// removes the marker. Called after the fenced operation completes on every exit path.
+    /// Best-effort on the delete: if the delete fails the marker is left, but its bounded lease means it
+    /// frees automatically once the lease lapses rather than stranding forever (the pre-lease behavior).
     /// </summary>
     public async Task ReleaseDropIntentAsync(string dbId)
     {
+        // Stop renewing first so the renewer cannot refresh the lease after we delete the marker.
+        if (fenceRenewers.TryRemove(dbId, out CancellationTokenSource? cts))
+        {
+            try { await cts.CancelAsync().ConfigureAwait(false); } catch { }
+            cts.Dispose();
+        }
+
         try
         {
             await kahuna.LocateAndTryDeleteKeyValue(
@@ -1331,6 +1602,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Stop every background fence-lease renewer this node still holds. Their leases then lapse on
+        // their own, freeing the fences for another node without leaving a live renewer rooted here.
+        foreach (KeyValuePair<string, CancellationTokenSource> kv in fenceRenewers)
+        {
+            try { await kv.Value.CancelAsync().ConfigureAwait(false); } catch { }
+            kv.Value.Dispose();
+        }
+        fenceRenewers.Clear();
+
         // Roll back any transaction still active on the system store while the node is alive so the
         // coordinator releases their working set, then dispose the transactions manager to release the
         // system Kahuna node it references — an undisposed manager roots that node, leaking a whole node

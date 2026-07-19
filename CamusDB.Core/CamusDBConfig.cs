@@ -81,6 +81,24 @@ public static class CamusDBConfig
     public static int OrphanReclaimIntervalMs = 5 * 60 * 1000;
 
     /// <summary>
+    /// Lease duration, in milliseconds, of a database-registry drop-intent fence (the mutex taken by
+    /// <c>DROP</c>/<c>RELINK</c>/the orphan GC per database id and per table). The fence's KV key carries
+    /// this as a native expiry: a holder that crashes without releasing frees the fence once the lease
+    /// lapses, so a dead owner can no longer block relink/GC of an id indefinitely. A live holder renews
+    /// the lease in the background every <see cref="FenceLeaseRenewIntervalMs"/> for as long as it holds
+    /// the fence, so a long operation (a large keyspace purge) is never interrupted. Keep it comfortably
+    /// longer than a typical fenced operation and longer than the renew interval. Default is 30 seconds.
+    /// </summary>
+    public static int FenceLeaseMs = 30_000;
+
+    /// <summary>
+    /// How often, in milliseconds, a fence holder renews its drop-intent lease
+    /// (see <see cref="FenceLeaseMs"/>). Must be well under the lease so replication lag or a delayed
+    /// tick cannot let a still-live holder's lease lapse. Default is a third of the lease.
+    /// </summary>
+    public static int FenceLeaseRenewIntervalMs = 10_000;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of the Kahuna snapshot-floor hold a branch database
     /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
     /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The

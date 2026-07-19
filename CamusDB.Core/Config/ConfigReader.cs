@@ -77,6 +77,8 @@ public class ConfigReader
         "query_result_cache_singleflight_wait_ms",
         "query_result_cache_strict_validation_max_keys",
         "query_result_cache_sweep_interval_ms",
+        "orphan_retention_ms",
+        "orphan_reclaim_interval_ms",
         "kahuna",
     };
 
