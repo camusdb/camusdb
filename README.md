@@ -1,6 +1,6 @@
 CamusDB
 =======
-CamusDB is an open-source NewSQL distributed database written in C# on .NET 10. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes both a JSON/HTTP API and a gRPC API. The project is alpha-quality — APIs and storage formats may change between versions.
+CamusDB is an open-source NewSQL distributed database. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes both a JSON/HTTP API and a gRPC API. The project is alpha-quality, APIs and storage formats may change between versions.
 
 **This is an alpha project. Do not use it in production.**
 
