@@ -26,6 +26,7 @@ CamusDB.Core\sqlParser.Language.grammar.lst
 BenchmarkDotNet.Artifacts/
 .vs/
 .idea/
+.DS_Store
 specs/
 bench/node_modules/
 CamusDB/Data/
