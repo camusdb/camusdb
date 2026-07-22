@@ -173,6 +173,7 @@ public sealed class TestStatisticsManager : BaseTest
                 new("name", "=", new ColumnValue(ColumnType.String, "Solo"))
             }
         ));
+        await database.Transactions.CommitAsync(del1);
 
         // Delete again — nothing left; delta = 0, count stays 0.
         KvTransaction del2 = await database.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
@@ -186,6 +187,7 @@ public sealed class TestStatisticsManager : BaseTest
                 new("name", "=", new ColumnValue(ColumnType.String, "Solo"))
             }
         ));
+        await database.Transactions.CommitAsync(del2);
 
         await Task.Delay(50);
 
