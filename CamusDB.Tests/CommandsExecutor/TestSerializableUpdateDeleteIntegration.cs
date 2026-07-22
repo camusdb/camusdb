@@ -189,11 +189,12 @@ public sealed class TestSerializableUpdateDeleteIntegration : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 3. ReadCommitted UPDATE does NOT hold exclusive predicate lock:
-    //    concurrent Serializable+RW reader succeeds
+    // 3. ReadCommitted UPDATE does NOT hold an exclusive predicate lock:
+    //    a concurrent Serializable+RW reader of an untouched row succeeds
     //
     // IsSerializableReadWrite(tx) is false for ReadCommitted → AcquireRowRangeLockAsync
-    // returns early without acquiring the Exclusive lock.
+    // returns early without acquiring the Exclusive lock. The updater still owns point intents
+    // for rows it changes, so the reader must target a disjoint row.
     // -----------------------------------------------------------------------
 
     [Test]
@@ -201,30 +202,65 @@ public sealed class TestSerializableUpdateDeleteIntegration : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids) = await SetupTable();
 
-        // ReadCommitted UPDATE: no exclusive range lock acquired.
+        // ReadCommitted UPDATE locates via a full table scan but changes only value=0. It must not
+        // retain an exclusive predicate lock over the full row range after the locate phase.
         KvTransaction updater = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
+        try
+        {
+            UpdateTicket updateTicket = new(
+                txnState:    updater,
+                databaseName: dbname,
+                tableName:   "items",
+                plainValues: new() { { "value", new(ColumnType.Integer64, 99L) } },
+                exprValues:  null,
+                where:       null,
+                filters:     new() { new("value", "=", new(ColumnType.Integer64, 0L)) },
+                parameters:  null
+            );
+            UpdateResult result = await executor.Update(updateTicket);
+            Assert.AreEqual(1, result.UpdatedRows, "Pre-check: only value=0 must be updated");
 
-        UpdateTicket updateTicket = new(
-            txnState:    updater,
-            databaseName: dbname,
-            tableName:   "items",
-            plainValues: new() { { "value", new(ColumnType.Integer64, 99L) } },
-            exprValues:  null,
-            where:       null,
-            filters:     null,
-            parameters:  null
-        );
-        await executor.Update(updateTicket);
+            // A point lookup of a different row must coexist. If the updater had incorrectly
+            // retained an exclusive whole-row-range predicate lock, this Serializable reader's
+            // shared point lock would conflict even though the row itself is untouched.
+            KvTransaction reader = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+            try
+            {
+                QueryTicket queryTicket = new(
+                    txnState:     reader,
+                    databaseName: dbname,
+                    tableName:    "items",
+                    index:        null,
+                    projection:   null,
+                    where:        null,
+                    filters:      new() { new("id", "=", new(ColumnType.Id, ids[1])) },
+                    orderBy:      null,
+                    limit:        null,
+                    offset:       null,
+                    parameters:   null
+                );
+                (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(queryTicket);
+                List<QueryResultRow> rows = await cursor.ToListAsync();
 
-        // Concurrent Serializable+RW reader must be able to scan the table.
-        KvTransaction reader = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-        Assert.DoesNotThrowAsync(() => RunQuery(dbname, executor, reader),
-            "Serializable+RW SELECT must not be blocked by a ReadCommitted updater (no exclusive range lock)");
+                Assert.AreEqual(1, rows.Count,
+                    "Serializable point lookup of an untouched row must not be blocked by a ReadCommitted updater");
+                Assert.AreEqual(ids[1], rows[0].Row["id"].StrValue);
 
-        await database.Transactions.CommitAsync(reader);
-        await database.Transactions.CommitAsync(updater);
+                await database.Transactions.CommitAsync(reader);
+            }
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(reader);
+            }
+
+            await database.Transactions.CommitAsync(updater);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(updater);
+        }
     }
 
     // -----------------------------------------------------------------------
