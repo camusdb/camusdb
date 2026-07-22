@@ -712,9 +712,18 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
 
         // Second insert with the SAME primary key (separate transaction) — must be rejected.
         KvTransaction tx2 = await database.Transactions.BeginAsync();
-        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.ExecuteNonSQLQuery(new(tx2, dbname, sql, null)));
-        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code);
+        try
+        {
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await executor.ExecuteNonSQLQuery(new(tx2, dbname, sql, null)));
+            Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code);
+        }
+        finally
+        {
+            // A rejected write still owns its registered lock set until the caller finalizes the
+            // transaction. Release it before the verification transaction scans the same table.
+            await database.Transactions.RollbackIfNotCompletedAsync(tx2);
+        }
 
         // And the table must still contain exactly one row.
         KvTransaction tx3 = await database.Transactions.BeginAsync();
