@@ -142,9 +142,18 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
         await database.Transactions.CommitAsync(tx1);
 
         KvTransaction tx2 = await database.Transactions.BeginAsync();
-        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.ExecuteNonSQLQuery(new(tx2, dbname, sql, null)));
-        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code);
+        try
+        {
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await executor.ExecuteNonSQLQuery(new(tx2, dbname, sql, null)));
+            Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code);
+        }
+        finally
+        {
+            // Duplicate detection happens after the multi-partition write set is registered.
+            // Release those locks before CountAll opens its verification transaction.
+            await database.Transactions.RollbackIfNotCompletedAsync(tx2);
+        }
 
         int total = await CountAll(dbname, database, executor);
         Assert.AreEqual(1, total, $"Expected 1 row after duplicate insert attempt, found {total}");
