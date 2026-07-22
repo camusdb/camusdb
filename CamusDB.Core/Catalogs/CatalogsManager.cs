@@ -1962,6 +1962,22 @@ public sealed class CatalogsManager
     private static string CoordinatorKey(string dbId, string tableId, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableId}~{elementName}";
 
     /// <summary>
+    /// Returns the exclusive ordinal upper bound for every key beginning with <paramref name="prefix"/>.
+    /// Incrementing the last available UTF-16 code unit keeps a prefix scan inside its logical subrange
+    /// even when several key families share one Kahuna routing bucket.
+    /// </summary>
+    private static string? PrefixUpperBound(string prefix)
+    {
+        for (int i = prefix.Length - 1; i >= 0; i--)
+        {
+            if (prefix[i] < char.MaxValue)
+                return string.Concat(prefix.AsSpan(0, i), ((char)(prefix[i] + 1)).ToString());
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Returns the meta key that stores the grow-only set of all index ids ever allocated for
     /// <paramref name="tableId"/>. The catalog is written on every schema persist so that
     /// DROP DATABASE can discover and purge overlay entries for indexes that were dropped
@@ -2249,60 +2265,39 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
-    /// Deletes all persisted coordinator jobs belonging to <paramref name="tableId"/>. Called
-    /// by the DROP TABLE path so orphaned job records do not survive the table they were created
-    /// for, preventing stale jobs from being resumed against a new table with the same name.
-    /// Because keys are anchored on the immutable table id, this prefix matches all and only
-    /// the dropped table's jobs regardless of whether the table name is reused.
+    /// Deletes all persisted coordinator jobs belonging to <paramref name="tableId"/> inside the
+    /// caller's DDL transaction. Reusing <paramref name="tx"/> is required because DROP TABLE already
+    /// owns metadata write intents in the same bucket; a nested transaction's snapshot scan would wait
+    /// for those intents while the outer transaction waits for the scan, creating a self-deadlock.
+    /// Keeping discovery and deletion in one transaction also makes the cleanup atomic with the drop.
     /// </summary>
-    public async Task DeleteCoordinatorJobsForTableAsync(DatabaseDescriptor database, string tableId)
+    public async Task DeleteCoordinatorJobsForTableAsync(
+        DatabaseDescriptor database,
+        string tableId,
+        KvTransaction tx)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
-        string keyPrefix = CoordinatorKeyPrefix(database.Id);
-        string tableJobPrefix = $"{keyPrefix}{tableId}~";
+        string tableJobPrefix = $"{CoordinatorKeyPrefix(database.Id)}{tableId}~";
+        string? tableJobPrefixEnd = PrefixUpperBound(tableJobPrefix);
 
         List<string> keysToDelete = [];
 
-        KvTransaction scanTx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            MetaBucketPrefix(database.Id),
+            tableJobPrefix, true,
+            tableJobPrefixEnd, false,
+            128,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None).ConfigureAwait(false))
         {
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                scanTx.TransactionId,
-                MetaBucketPrefix(database.Id),
-                null, true,
-                null, true,
-                128,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None).ConfigureAwait(false))
-            {
-                if (key.StartsWith(tableJobPrefix, StringComparison.Ordinal) && entry.Value is not null)
-                    keysToDelete.Add(key);
-            }
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(scanTx).ConfigureAwait(false);
+            if (key.StartsWith(tableJobPrefix, StringComparison.Ordinal) && entry.Value is not null)
+                keysToDelete.Add(key);
         }
 
-        if (keysToDelete.Count == 0)
-            return;
-
-        KvTransaction deleteTx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            foreach (string key in keysToDelete)
-                await DeleteMetaKey(kahuna, deleteTx, key).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(deleteTx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(deleteTx).ConfigureAwait(false);
-        }
+        foreach (string key in keysToDelete)
+            await DeleteMetaKey(kahuna, tx, key).ConfigureAwait(false);
     }
 
     public async Task<List<PersistedCoordinatorJob>> LoadCoordinatorJobsAsync(DatabaseDescriptor database)

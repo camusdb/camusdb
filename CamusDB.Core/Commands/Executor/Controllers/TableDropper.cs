@@ -90,11 +90,6 @@ internal sealed class TableDropper
 
                 await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
             }
-
-            // A FORCE (or branch) drop destroys the keyspace for good, so any stale orphan record for
-            // this id (left by a crashed relink) must go too — otherwise the destroyed id stays
-            // "relinkable" to an empty/partial keyspace.
-            await catalogs.DeleteTableOrphanAsync(database, tableId, tx).ConfigureAwait(false);
         }
 
         TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx, deferred).ConfigureAwait(false);
@@ -115,7 +110,7 @@ internal sealed class TableDropper
         // the aliasing hazard.
         try
         {
-            await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId).ConfigureAwait(false);
+            await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId, tx).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
