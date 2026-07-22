@@ -37,7 +37,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Dimensions covered:
 ///   - unique vs non-unique secondary indexes
 ///   - NULL values in the indexed column
-///   - snapshot isolation (uncommitted writes not visible to a covering scan)
+///   - read-committed intent visibility and pinned snapshot isolation
 ///   - UPDATE and DELETE visibility (covering scan reflects mutations committed before the scan)
 ///   - batch fetch correctness (multi-page paging via a temporarily small IndexScanFetchBatchSize)
 /// </summary>
@@ -163,9 +163,10 @@ public class TestQueryScannerCoveringParity : BaseTest
         CommandExecutor executor,
         DatabaseDescriptor database,
         string dbname,
-        string sql)
+        string sql,
+        CamusIsolationLevel? isolationLevel = null)
     {
-        KvTransaction txn = await database.Transactions.BeginAsync();
+        KvTransaction txn = await database.Transactions.BeginAsync(isolationLevel);
         ExecuteSQLTicket ticket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
         List<QueryResultRow> rows = await cursor.ToListAsync();
@@ -361,49 +362,86 @@ public class TestQueryScannerCoveringParity : BaseTest
         Assert.AreEqual(0L, rowsRead!.Value, "covering path must read zero primary rows");
     }
 
-    // ── Parity: snapshot isolation ────────────────────────────────────────────
+    // ── Parity: read-committed visibility ─────────────────────────────────────
 
     [Test]
     public async Task CoveredScan_DoesNotSeeUncommittedRow()
     {
-        // A covering scan started before another transaction commits must not see the
-        // uncommitted row. After commit, a new scan must see it. This validates that the
-        // covering path reads the index at the transaction's snapshot, not latest-committed.
+        // A read-committed covering scan must not expose a foreign uncommitted intent. Kahuna's
+        // paged range scan may wait for that intent's outcome to preserve its page snapshot, so
+        // the scan and rollback must run concurrently rather than waiting on each other.
         //
         // year = 999 is far outside 1–50, so 0 or 1 row out of 51 → highly selective.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
             await SetupWithYearIndex(rowCount: 50);
 
-        // Begin txn1 but do not commit — inserts year=999.
+        string rowId = ObjectIdGenerator.Generate().ToString();
+
+        // Begin txn1 but do not commit — insert year=999, start the covering scan, then resolve
+        // the foreign intent as aborted. The scan must return the previously committed view.
         KvTransaction txn1 = await database.Transactions.BeginAsync();
-        await executor.Insert(new InsertTicket(
-            txnState: txn1,
-            databaseName: dbname,
-            tableName: "robots",
-            values: new()
-            {
-                new()
+        List<QueryResultRow> uncommittedView;
+        try
+        {
+            await executor.Insert(new InsertTicket(
+                txnState: txn1,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
                 {
-                    { "id",      new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "name",    new(ColumnType.String, "future-robot") },
-                    { "year",    new(ColumnType.Integer64, 999L) },
-                    { "enabled", new(ColumnType.Bool, true) },
+                    new()
+                    {
+                        { "id",      new(ColumnType.Id, rowId) },
+                        { "name",    new(ColumnType.String, "future-robot") },
+                        { "year",    new(ColumnType.Integer64, 999L) },
+                        { "enabled", new(ColumnType.Bool, true) },
+                    }
                 }
-            }
-        ));
+            ));
 
-        // txn2: covering scan started after txn1 inserts but before it commits.
-        List<QueryResultRow> beforeCommit = await RunSql(executor, database, dbname,
-            "SELECT year FROM robots WHERE year = 999");
+            Task<List<QueryResultRow>> scanTask = RunSql(executor, database, dbname,
+                "SELECT year FROM robots WHERE year = 999",
+                CamusIsolationLevel.ReadCommitted);
+            await database.Transactions.RollbackIfNotCompletedAsync(txn1);
+            uncommittedView = await scanTask;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(txn1);
+        }
 
-        // Commit txn1, then re-scan in txn3.
-        await database.Transactions.CommitAsync(txn1);
+        // Commit the same logical row in a fresh transaction, then re-scan.
+        KvTransaction committedTxn = await database.Transactions.BeginAsync();
+        try
+        {
+            await executor.Insert(new InsertTicket(
+                txnState: committedTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",      new(ColumnType.Id, rowId) },
+                        { "name",    new(ColumnType.String, "future-robot") },
+                        { "year",    new(ColumnType.Integer64, 999L) },
+                        { "enabled", new(ColumnType.Bool, true) },
+                    }
+                }
+            ));
+            await database.Transactions.CommitAsync(committedTxn);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(committedTxn);
+        }
 
         List<QueryResultRow> afterCommit = await RunSql(executor, database, dbname,
-            "SELECT year FROM robots WHERE year = 999");
+            "SELECT year FROM robots WHERE year = 999",
+            CamusIsolationLevel.ReadCommitted);
 
-        Assert.AreEqual(0, beforeCommit.Count,
-            "covering scan must not see an uncommitted row (snapshot isolation)");
+        Assert.AreEqual(0, uncommittedView.Count,
+            "read-committed covering scan must not see an uncommitted row");
         Assert.AreEqual(1, afterCommit.Count,
             "covering scan must see the row after its transaction commits");
         Assert.AreEqual(999L, afterCommit[0].Row["year"].LongValue,
