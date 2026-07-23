@@ -493,6 +493,13 @@ public sealed class KvTableStore
     /// (<c>[null,null)</c>) is acquired instead. All subsequent reads on the same bucket skip the
     /// per-point RPC — the whole-bucket lock already covers them. Old per-point entries are kept in
     /// tracking and released at commit.</para>
+    ///
+    /// <para><b>Already covered:</b> a transaction that reads the same key more than once (a very
+    /// common shape — read a row, re-read it later in the same statement or transaction) needs no
+    /// second acquire. The first one is held to commit under strict two-phase locking, so every
+    /// later read is already protected and re-asserting it only spends a round trip. An Exclusive
+    /// singleton counts as covering too, since it is strictly stronger than the Shared lock wanted
+    /// here.</para>
     /// </summary>
     private Task AcquireSharedPointLockAsync(
         KvTransaction tx,
@@ -502,6 +509,10 @@ public sealed class KvTableStore
     {
         // Whole-bucket lock already covers this point — no new RPC needed.
         if (tx.HasWholeBucketLock(bucketPrefix))
+            return Task.CompletedTask;
+
+        // Already holding this exact point (Shared, or Exclusive after a write) — likewise covered.
+        if (tx.HasPointLock(bucketPrefix, key))
             return Task.CompletedTask;
 
         // Past the threshold: promote to a single whole-bucket Shared lock.
@@ -531,21 +542,16 @@ public sealed class KvTableStore
         => AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken, RangeLockMode.Exclusive);
 
     /// <summary>
-    /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton shared point lock
+    /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton <b>Shared</b> point lock
     /// <c>[key, key]</c> for the given <paramref name="bucketPrefix"/>. Used by write paths
     /// to detect the read-then-write pattern and trigger the S→X upgrade.
+    ///
+    /// <para>The mode is part of the test on purpose: a key this transaction has already promoted
+    /// to Exclusive (an earlier write in the same transaction) needs no second upgrade, and asking
+    /// for one only spends a round trip re-asserting a lock it holds.</para>
     /// </summary>
     private static bool HasSharedPointLock(KvTransaction tx, string bucketPrefix, string key)
-    {
-        foreach (RangeLockBounds bounds in tx.GetAcquiredRangeLocks())
-        {
-            if (bounds.Prefix == bucketPrefix
-                && bounds.StartKey == key && bounds.StartInclusive
-                && bounds.EndKey   == key && bounds.EndInclusive)
-                return true;
-        }
-        return false;
-    }
+        => tx.HasPointLock(bucketPrefix, key, RangeLockMode.Shared);
 
     private static async Task<KeyValueResponseType> RetryOnMustRetry(
         Func<Task<KeyValueResponseType>> fn,

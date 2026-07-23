@@ -42,7 +42,8 @@ public enum KvTransactionStatus
 /// The bounds of a Kahuna key-range lock held by a transaction, retained purely as
 /// <b>in-transaction coverage state</b>: the local index that lets a later read skip re-acquiring a
 /// point lock already covered by a whole-bucket lock (<see cref="KvTransaction.HasWholeBucketLock"/>)
-/// and lets the escalation heuristic count per-bucket point locks
+/// or by the same point acquired earlier (<see cref="KvTransaction.HasPointLock"/>), and lets the
+/// escalation heuristic count per-bucket point locks
 /// (<see cref="KvTransaction.CountPointLocksForBucket"/>). It is <b>not</b> finalization state — the
 /// coordinator owns and releases the folded range lock on commit/rollback (and renews its TTL while the
 /// session is live), so this list is never replayed at finalize.
@@ -211,13 +212,16 @@ public sealed class KvTransaction
     /// coordinator session to fold into, and a fixed <see cref="ReadTimestamp"/> snapshot carries no
     /// live read dependency).
     ///
-    /// <para><b>Not yet consumed by the read path.</b> This is the gate the scan/point-read helpers
-    /// will consult to decide whether to pass a coordinator key + operation id. Read folding is
-    /// blocked until Kahuna's streaming scan and batch-read entry points accept those registration
-    /// parameters (the point-read API already does; the dominant scan/batch paths do not). Until
-    /// then reads never fold, so optimistic transactions detect write-write conflicts (writes fold)
-    /// but not read-write / write-skew conflicts. Wiring this on without full scan coverage would be
-    /// misleading, since a scanned-then-modified row would go undetected.</para>
+    /// <para><b>Consumed by every read path</b> — point reads, batch reads, and both scan families
+    /// pass the coordinator key when this is set, so an optimistic transaction detects read-write
+    /// and write-skew conflicts as well as write-write ones.</para>
+    ///
+    /// <para><b>What folding does not cover.</b> Two gaps make the retained predicate locks
+    /// load-bearing rather than redundant, so neither may be dropped on the strength of this flag:
+    /// folding records only the keys actually observed, never the absence of keys, so it cannot
+    /// detect a phantom inserted into a scanned range; and the coordinator excludes a key from
+    /// read-set validation once the same transaction also writes it, so on a read-then-write key the
+    /// read→write window is guarded solely by the shared point lock and its S→X upgrade.</para>
     /// </summary>
     public bool FoldReads =>
         TransactionId != HLCTimestamp.Zero &&
@@ -467,9 +471,16 @@ public sealed class KvTransaction
     /// <summary>
     /// Records that a Kahuna key-range lock was acquired for this transaction (key-range routed
     /// spaces). Tracked only as in-transaction coverage state for
-    /// <see cref="HasWholeBucketLock"/> / <see cref="CountPointLocksForBucket"/>; the coordinator owns
+    /// <see cref="HasWholeBucketLock"/> / <see cref="HasPointLock"/> /
+    /// <see cref="CountPointLocksForBucket"/>; the coordinator owns
     /// the folded lock and releases it at finalize, so this is never replayed at commit/rollback.
     /// Idempotent.
+    ///
+    /// <para>An Exclusive acquire over bounds already held as Shared <b>replaces</b> the Shared
+    /// entry rather than joining it. Kahuna promotes such a lock in place, so the server holds one
+    /// lock, not two; keeping both would misreport coverage — the write path would see a Shared
+    /// entry still present and re-issue the upgrade on every subsequent write to that key, and the
+    /// escalation heuristic would count one key twice.</para>
     /// </summary>
     public void TrackRangeLock(
         string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
@@ -478,6 +489,11 @@ public sealed class KvTransaction
         lock (trackSync)
         {
             acquiredRangeLocks ??= [];
+
+            if (mode == RangeLockMode.Exclusive)
+                acquiredRangeLocks.Remove(
+                    new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, RangeLockMode.Shared));
+
             acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
         }
     }
@@ -500,6 +516,38 @@ public sealed class KvTransaction
                     return true;
             }
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if the transaction already holds a singleton point lock <c>[key,key]</c>
+    /// on <paramref name="prefix"/>. With <paramref name="mode"/> null any mode matches, which is
+    /// what a read path wants: an Exclusive singleton covers a shared read of the same key, so
+    /// re-acquiring would only spend a round trip to re-assert a lock the transaction already owns.
+    /// Pass a specific mode when the caller cares which one it holds — the write path asks for
+    /// Shared so it upgrades a read lock exactly once and skips the upgrade when it has already
+    /// promoted the key to Exclusive.
+    ///
+    /// <para>Both lookups are O(1) against the tracking set and allocate nothing, because this runs
+    /// on every point read. Skipping a re-acquire never shortens a lease: the coordinator renews
+    /// every range lock it holds for the life of the session, so the lock's TTL does not depend on
+    /// the client re-asserting it.</para>
+    /// </summary>
+    public bool HasPointLock(string prefix, string key, RangeLockMode? mode = null)
+    {
+        lock (trackSync)
+        {
+            if (acquiredRangeLocks is null)
+                return false;
+
+            if (mode is not null)
+                return acquiredRangeLocks.Contains(
+                    new RangeLockBounds(prefix, key, true, key, true, KeyValueDurability.Persistent, mode.Value));
+
+            return acquiredRangeLocks.Contains(
+                       new RangeLockBounds(prefix, key, true, key, true, KeyValueDurability.Persistent, RangeLockMode.Shared))
+                || acquiredRangeLocks.Contains(
+                       new RangeLockBounds(prefix, key, true, key, true, KeyValueDurability.Persistent, RangeLockMode.Exclusive));
         }
     }
 

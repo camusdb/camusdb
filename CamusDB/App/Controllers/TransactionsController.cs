@@ -131,9 +131,12 @@ public sealed class TransactionsController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
-            KvTransaction txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
-
-            await transactions.RollbackAsync(txnState).ConfigureAwait(false);
+            // Idempotent by design: a transaction whose statement already failed was rolled back and
+            // untracked by the handler that caught the error, and the reaper does the same to an
+            // abandoned one. The client sending its own rollback afterwards is correct behavior, and
+            // the transaction is in exactly the state it asked for, so report success rather than
+            // "Unknown transaction".
+            await transactions.RollbackByIdAsync(request.TxnIdPT, request.TxnIdCounter).ConfigureAwait(false);
 
             return new JsonResult(new CommitTransactionResponse("ok"));
         }

@@ -767,8 +767,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         if (request.TxnHandle is not { TxnIdPt: > 0 } handle)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ROLLBACK batch op requires a txn_handle");
 
-        KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
-        await transactions.RollbackAsync(txnState, ct).ConfigureAwait(false);
+        // Idempotent: a statement earlier in this chain may have failed and already rolled the
+        // transaction back, which is precisely when a client sends ROLLBACK. The handle is dropped
+        // either way so teardown does not try again.
+        await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, ct).ConfigureAwait(false);
         startedHandles.TryRemove($"{handle.TxnIdPt}:{handle.TxnIdCounter}", out _);
 
         await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
@@ -840,12 +842,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             return reply;
         });
 
-    /// <summary>Rolls back an explicit transaction identified by its <see cref="TxnHandle"/>.</summary>
+    /// <summary>
+    /// Rolls back an explicit transaction identified by its <see cref="TxnHandle"/>. Idempotent: a
+    /// handle that is no longer tracked — because a failed statement or the idle reaper already
+    /// rolled it back — succeeds as a no-op, since the requested end state has been reached.
+    /// </summary>
     public override Task<RollbackReply> RollbackTransaction(TxnHandle request, ServerCallContext context)
         => InvokeAsync(async () =>
         {
-            KvTransaction txnState = transactions.GetState(request.TxnIdPt, (uint)request.TxnIdCounter);
-            await transactions.RollbackAsync(txnState).ConfigureAwait(false);
+            await transactions.RollbackByIdAsync(request.TxnIdPt, (uint)request.TxnIdCounter).ConfigureAwait(false);
             return new RollbackReply();
         });
 

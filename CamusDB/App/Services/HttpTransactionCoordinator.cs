@@ -320,6 +320,52 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
+    /// Rolls back the transaction identified by its client id, treating an id that is no longer
+    /// tracked as a successful no-op and returning <see langword="false"/> for it.
+    ///
+    /// <para>This is the idempotent entry point for a client-issued ROLLBACK. A statement that
+    /// fails inside an explicit transaction is already rolled back and untracked by the request
+    /// handler that caught it, and the abandoned-transaction reaper does the same for an idle
+    /// transaction — so a client that then sends its own rollback (the correct thing for it to do
+    /// after an error) would otherwise get "Unknown transaction" for a transaction that is, in
+    /// fact, rolled back. Rollback is defined by its end state, and that end state has been
+    /// reached, so this reports success instead of an error.</para>
+    ///
+    /// <para>A finalize that is still <em>in flight</em> for the same id is rejected with
+    /// <see cref="CamusDBErrorCodes.TransactionAlreadyCompleted"/> rather than being reported as a
+    /// no-op: it may be a commit, whose outcome is the opposite of what the caller asked for, and
+    /// its result is not yet known. Once that finalize completes the entry is gone, so a rollback
+    /// arriving afterwards takes the no-op path — a client that raced its own commit against its
+    /// own rollback cannot be told which one won, and never could.</para>
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> when this call performed the rollback; <see langword="false"/> when
+    /// the transaction was already finalized and no longer tracked.
+    /// </returns>
+    public async Task<bool> RollbackByIdAsync(long txnIdPT, uint txnIdCounter, CancellationToken cancellationToken = default)
+    {
+        if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
+            return false;
+
+        if (!entry.TryBeginFinalize())
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                "A commit or rollback is already in progress for this transaction");
+
+        try
+        {
+            await entry.Manager.RollbackAsync(entry.Transaction, cancellationToken).ConfigureAwait(false);
+            Unregister(entry.Transaction);
+            return true;
+        }
+        catch
+        {
+            entry.EndFinalize();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Best-effort rollback used by DML cleanup paths. If another commit/rollback already owns the
     /// finalize claim this no-ops rather than throwing — the owning finalize is authoritative and
     /// this cleanup must never race it or mask the real outcome.

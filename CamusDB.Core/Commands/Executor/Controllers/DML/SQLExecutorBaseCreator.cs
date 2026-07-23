@@ -96,6 +96,74 @@ internal abstract class SQLExecutorBaseCreator
         type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
 
     /// <summary>
+    /// Applies <c>+ - * /</c> to two numeric operands using SQL-style numeric promotion: the wider
+    /// operand type wins, so <c>Integer64 op Integer64</c> is the only combination that stays integral
+    /// (and division there truncates), any <see cref="ColumnType.Float64"/> operand promotes both sides
+    /// to double, and a <see cref="ColumnType.Float32"/> operand mixed with Integer64 yields Float32.
+    /// Float32 results are rounded through <c>float</c> before being carried in the double-backed
+    /// <see cref="ColumnValue.FloatValue"/>, so a Float32 expression never reports precision the type
+    /// cannot hold. Non-numeric operands are rejected rather than silently coerced — mixed-type
+    /// comparison lives in <see cref="CompareValues"/>, which has different (ordering) semantics.
+    /// Division by a zero of any type raises an error instead of yielding IEEE infinity/NaN.
+    /// </summary>
+    private static ColumnValue EvalArithmetic(NodeType op, ColumnValue left, ColumnValue right)
+    {
+        if (!IsNumeric(left.Type) || !IsNumeric(right.Type))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"No matching signature for operator {ArithmeticSymbol(op)} for argument types: {left.Type}, {right.Type}"
+            );
+
+        if (left.Type == ColumnType.Integer64 && right.Type == ColumnType.Integer64)
+        {
+            long l = left.LongValue, r = right.LongValue;
+
+            if (op == NodeType.ExprDiv && r == 0)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+
+            long integerResult = op switch
+            {
+                NodeType.ExprAdd => l + r,
+                NodeType.ExprSub => l - r,
+                NodeType.ExprMult => l * r,
+                _ => l / r
+            };
+
+            return new ColumnValue(ColumnType.Integer64, integerResult);
+        }
+
+        // A Float64 operand forces double precision; otherwise a Float32 operand (possibly against an
+        // Integer64) keeps the narrower single-precision result type.
+        ColumnType resultType = left.Type == ColumnType.Float64 || right.Type == ColumnType.Float64
+            ? ColumnType.Float64
+            : ColumnType.Float32;
+
+        double dl = left.Type == ColumnType.Integer64 ? left.LongValue : left.FloatValue;
+        double dr = right.Type == ColumnType.Integer64 ? right.LongValue : right.FloatValue;
+
+        if (op == NodeType.ExprDiv && dr == 0.0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+
+        double result = op switch
+        {
+            NodeType.ExprAdd => dl + dr,
+            NodeType.ExprSub => dl - dr,
+            NodeType.ExprMult => dl * dr,
+            _ => dl / dr
+        };
+
+        return new ColumnValue(resultType, resultType == ColumnType.Float32 ? (float)result : result);
+    }
+
+    private static string ArithmeticSymbol(NodeType op) => op switch
+    {
+        NodeType.ExprAdd => "+",
+        NodeType.ExprSub => "-",
+        NodeType.ExprMult => "*",
+        _ => "/"
+    };
+
+    /// <summary>
     /// Decodes a string-literal token (<see cref="NodeType.String"/> <c>yytext</c>) into its value:
     /// strips the outer quote and collapses a doubled quote of the same kind to a single one
     /// (<c>''</c> → <c>'</c> inside a single-quoted string, <c>""</c> → <c>"</c> inside a double-quoted
@@ -288,71 +356,14 @@ internal abstract class SQLExecutorBaseCreator
                 }
 
             case NodeType.ExprAdd:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator + for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return new ColumnValue(ColumnType.Integer64, leftValue.LongValue + rightValue.LongValue);
-                }
-
             case NodeType.ExprSub:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator - for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return new ColumnValue(ColumnType.Integer64, leftValue.LongValue - rightValue.LongValue);
-                }
-
             case NodeType.ExprMult:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    if (leftValue.Type != ColumnType.Integer64 || rightValue.Type != ColumnType.Integer64)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator * for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return new ColumnValue(ColumnType.Integer64, leftValue.LongValue * rightValue.LongValue);
-                }
-
             case NodeType.ExprDiv:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    // Float64 / Float64
-                    if (leftValue.Type == ColumnType.Float64 && rightValue.Type == ColumnType.Float64)
-                    {
-                        if (rightValue.FloatValue == 0.0)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
-                        return new ColumnValue(ColumnType.Float64, leftValue.FloatValue / rightValue.FloatValue);
-                    }
-
-                    // Integer64 / Float64 or Float64 / Integer64 — widen to Float64
-                    if ((leftValue.Type == ColumnType.Integer64 && rightValue.Type == ColumnType.Float64) ||
-                        (leftValue.Type == ColumnType.Float64 && rightValue.Type == ColumnType.Integer64))
-                    {
-                        double l = leftValue.Type == ColumnType.Integer64 ? (double)leftValue.LongValue : leftValue.FloatValue;
-                        double r = rightValue.Type == ColumnType.Integer64 ? (double)rightValue.LongValue : rightValue.FloatValue;
-                        if (r == 0.0)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
-                        return new ColumnValue(ColumnType.Float64, l / r);
-                    }
-
-                    // Integer64 / Integer64 — integer (truncating) division
-                    if (leftValue.Type == ColumnType.Integer64 && rightValue.Type == ColumnType.Integer64)
-                    {
-                        if (rightValue.LongValue == 0)
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
-                        return new ColumnValue(ColumnType.Integer64, leftValue.LongValue / rightValue.LongValue);
-                    }
-
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator / for argument types: {leftValue.Type}, {rightValue.Type}");
+                    return EvalArithmetic(expr.nodeType, leftValue, rightValue);
                 }
 
             case NodeType.ExprFuncCall:
@@ -361,8 +372,9 @@ internal abstract class SQLExecutorBaseCreator
                 // Column refs inside function arguments therefore go through the IReadOnlyDictionary
                 // adapter rather than the ordinal fast path. This is correctness-neutral (QueryRow
                 // implements the interface) but leaves a small per-argument hashing cost on the
-                // table. Passing queryRow through EvaluateExpressionDelegate would require changing
-                // its signature, which is a broader refactor deferred to RL3.2.
+                // table. Reaching the ordinal path here would mean adding queryRow to
+                // EvaluateExpressionDelegate, which changes the signature every scalar function
+                // implements — a wider refactor than the saving justifies on its own.
                 return ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver,
                     static (e, r, p, rnr) => EvalExpr(e, r, p, rnr));
 
