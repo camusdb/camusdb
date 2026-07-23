@@ -156,6 +156,22 @@ internal static class QueryAggregateExtractor
                 node.extendedTwo is null ? null : Rewrite(node.extendedTwo, aggregates),
                 null, null, null, null),
 
+            // CASE: rewrite the operand (simple CASE), the WHEN/THEN chain, and the ELSE result so an
+            // aggregate anywhere inside — e.g. CASE WHEN COUNT(*) > 0 THEN … — is extracted to a
+            // placeholder while the CASE structure around it is preserved.
+            NodeType.ExprCase => new NodeAst(
+                NodeType.ExprCase,
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
+                node.extendedOne is null ? null : Rewrite(node.extendedOne, aggregates),
+                null, null, null, null, null),
+
+            NodeType.ExprCaseWhen or NodeType.ExprCaseWhenList => new NodeAst(
+                node.nodeType,
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
+                null, null, null, null, null, null),
+
             // Leaf nodes and subqueries are returned unchanged.
             _ => node,
         };

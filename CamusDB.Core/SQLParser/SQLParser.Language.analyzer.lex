@@ -89,6 +89,11 @@ TTypeUuid       (U|u)(U|u)(I|i)(D|d)
 TTypeGuid       (G|g)(U|u)(I|i)(D|d)
 TTypeArray      (A|a)(R|r)(R|r)(A|a)(Y|y)
 TCast           (C|c)(A|a)(S|s)(T|t)
+TCase           (C|c)(A|a)(S|s)(E|e)
+TWhen           (W|w)(H|h)(E|e)(N|n)
+TThen           (T|t)(H|h)(E|e)(N|n)
+TElse           (E|e)(L|l)(S|s)(E|e)
+TEnd            (E|e)(N|n)(D|d)
 TInteger        (I|i)(N|n)(T|t)(E|e)(G|g)(E|e)(R|r)
 TDouble         (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)
 TConstraint     (C|c)(O|o)(N|n)(S|s)(T|t)(R|r)(A|a)(I|i)(N|n)(T|t)
@@ -336,6 +341,16 @@ TDot            \.
 {TTypeArray} { return (int)Token.TTYPE_ARRAY; }
 
 {TCast} { return (int)Token.TCAST; }
+
+{TCase} { return (int)Token.TCASE; }
+
+{TWhen} { return (int)Token.TWHEN; }
+
+{TThen} { return (int)Token.TTHEN; }
+
+{TElse} { return (int)Token.TELSE; }
+
+{TEnd} { return (int)Token.TEND; }
 
 {TInteger} { return (int)Token.TINTEGER; }
 

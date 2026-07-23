@@ -261,7 +261,40 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.ExprCast)
             return CastScalarFunctions.InferCastReturnType(target.rightAst!);
 
+        if (target.nodeType == NodeType.ExprCase)
+            return InferCaseType(target, innerBound, innerResolver);
+
         return ColumnType.String;
+    }
+
+    /// <summary>
+    /// A CASE has no single static type — each branch is typed per row (the engine carries a
+    /// <see cref="ColumnType"/> on every value). For the one place a static type is required — the
+    /// derived-table / client column metadata — pick a representative type from the ELSE result, else
+    /// the first WHEN's result, falling back to <see cref="ColumnType.String"/> when neither yields a
+    /// known type. This never crashes and is only a declaration hint; heterogeneous per-row values
+    /// still encode correctly because each carries its own type.
+    /// </summary>
+    private static ColumnType InferCaseType(
+        NodeAst caseNode,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        NodeAst? representative = caseNode.extendedOne; // ELSE result, if present
+
+        if (representative is null && caseNode.rightAst is not null)
+        {
+            foreach (NodeAst clause in CamusDB.Core.CommandsExecutor.Controllers.DML.SQLExecutorBaseCreator
+                         .EnumerateWhenClauses(caseNode.rightAst))
+            {
+                representative = clause.rightAst; // first WHEN's THEN result
+                break;
+            }
+        }
+
+        return representative is null
+            ? ColumnType.String
+            : InferType(representative, innerBound, innerResolver);
     }
 
     /// <summary>

@@ -136,6 +136,28 @@ internal static class QueryPostAggregateScopeValidator
 
                 return;
 
+            case NodeType.ExprCase:
+                if (expression.leftAst is not null)
+                    ValidatePostAggregateExpression(expression.leftAst, query, rowNames, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    ValidatePostAggregateExpression(expression.rightAst, query, rowNames, insideAggregate);
+
+                if (expression.extendedOne is not null)
+                    ValidatePostAggregateExpression(expression.extendedOne, query, rowNames, insideAggregate);
+
+                return;
+
+            case NodeType.ExprCaseWhen:
+            case NodeType.ExprCaseWhenList:
+                if (expression.leftAst is not null)
+                    ValidatePostAggregateExpression(expression.leftAst, query, rowNames, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    ValidatePostAggregateExpression(expression.rightAst, query, rowNames, insideAggregate);
+
+                return;
+
             case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:

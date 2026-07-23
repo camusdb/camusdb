@@ -39,6 +39,30 @@ public enum NodeType
     ExprFuncCall,
     ExprCast,
     ExprArgumentList,
+
+    /// <summary>
+    /// A <c>CASE … WHEN … THEN … [ELSE …] END</c> conditional expression. <c>leftAst</c> is the
+    /// simple-CASE operand (compared for equality against each WHEN value) or <see langword="null"/>
+    /// for a searched CASE; <c>rightAst</c> is the WHEN/THEN chain (a left-recursive
+    /// <see cref="ExprCaseWhenList"/> of <see cref="ExprCaseWhen"/> clauses); <c>extendedOne</c> is
+    /// the ELSE result, or <see langword="null"/> when omitted (no match then yields typed NULL).
+    /// </summary>
+    ExprCase,
+
+    /// <summary>
+    /// One <c>WHEN c THEN r</c> clause of an <see cref="ExprCase"/>: <c>leftAst</c> is the condition
+    /// (searched CASE) or the comparison value (simple CASE); <c>rightAst</c> is the result expression.
+    /// </summary>
+    ExprCaseWhen,
+
+    /// <summary>
+    /// Left-recursive chain of <see cref="ExprCaseWhen"/> clauses that preserves WHEN order:
+    /// <c>leftAst</c> is the chain of earlier clauses (another <see cref="ExprCaseWhenList"/> or the
+    /// first <see cref="ExprCaseWhen"/>), <c>rightAst</c> is the clause appended at this position.
+    /// The evaluator flattens it top-to-bottom so the first matching WHEN wins.
+    /// </summary>
+    ExprCaseWhenList,
+
     ExprAlias,
     ExprLike,
     ExprILike,

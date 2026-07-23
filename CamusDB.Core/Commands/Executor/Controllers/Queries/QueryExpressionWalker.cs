@@ -109,6 +109,30 @@ internal static class QueryExpressionWalker
 
                 return;
 
+            case NodeType.ExprCase:
+                // Operand (simple CASE), the WHEN/THEN chain, and the ELSE result.
+                if (expr.leftAst is not null)
+                    CollectColumnReferences(expr.leftAst, identifiers);
+
+                if (expr.rightAst is not null)
+                    CollectColumnReferences(expr.rightAst, identifiers);
+
+                if (expr.extendedOne is not null)
+                    CollectColumnReferences(expr.extendedOne, identifiers);
+
+                return;
+
+            case NodeType.ExprCaseWhen:
+            case NodeType.ExprCaseWhenList:
+                // Chain/clause nodes: leftAst and rightAst together cover every condition and result.
+                if (expr.leftAst is not null)
+                    CollectColumnReferences(expr.leftAst, identifiers);
+
+                if (expr.rightAst is not null)
+                    CollectColumnReferences(expr.rightAst, identifiers);
+
+                return;
+
             case NodeType.ExprArgumentList:
                 if (expr.leftAst is not null)
                     CollectColumnReferences(expr.leftAst, identifiers);

@@ -642,6 +642,29 @@ internal static class RequiredColumnAnalyzer
 
                 return;
 
+            case NodeType.ExprCase:
+                // Operand (simple CASE), the WHEN/THEN chain, and the ELSE result.
+                if (expression.leftAst is not null)
+                    CollectFromPostAggregateExpression(expression.leftAst, ticket, rowNames, required, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    CollectFromPostAggregateExpression(expression.rightAst, ticket, rowNames, required, insideAggregate);
+
+                if (expression.extendedOne is not null)
+                    CollectFromPostAggregateExpression(expression.extendedOne, ticket, rowNames, required, insideAggregate);
+
+                return;
+
+            case NodeType.ExprCaseWhen:
+            case NodeType.ExprCaseWhenList:
+                if (expression.leftAst is not null)
+                    CollectFromPostAggregateExpression(expression.leftAst, ticket, rowNames, required, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    CollectFromPostAggregateExpression(expression.rightAst, ticket, rowNames, required, insideAggregate);
+
+                return;
+
             case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
@@ -863,6 +886,29 @@ internal static class RequiredColumnAnalyzer
                         required,
                         insideAggregate);
                 }
+
+                return;
+
+            case NodeType.ExprCase:
+                // Operand (simple CASE), the WHEN/THEN chain, and the ELSE result.
+                if (expression.leftAst is not null)
+                    CollectFromPostAggregateExpressionForAlias(expression.leftAst, ticket, rowNames, alias, required, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    CollectFromPostAggregateExpressionForAlias(expression.rightAst, ticket, rowNames, alias, required, insideAggregate);
+
+                if (expression.extendedOne is not null)
+                    CollectFromPostAggregateExpressionForAlias(expression.extendedOne, ticket, rowNames, alias, required, insideAggregate);
+
+                return;
+
+            case NodeType.ExprCaseWhen:
+            case NodeType.ExprCaseWhenList:
+                if (expression.leftAst is not null)
+                    CollectFromPostAggregateExpressionForAlias(expression.leftAst, ticket, rowNames, alias, required, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    CollectFromPostAggregateExpressionForAlias(expression.rightAst, ticket, rowNames, alias, required, insideAggregate);
 
                 return;
 

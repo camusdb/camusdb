@@ -20,6 +20,11 @@
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
 %left TMULT TDIV
+/* IS (IS NULL / IS NOT NULL), IN, and the qualified-name dot bind tighter than any binary operator.
+   Without a precedence they produced shift/reduce warnings that gppg resolved by its default shift —
+   which is already the intended parse (a AND b IS NULL -> a AND (b IS NULL); a.b as one name). Declaring
+   their precedence makes that resolution explicit and removes the warnings without changing any parse. */
+%left TIS TIN TDOT
 
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
@@ -31,6 +36,7 @@
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
+%token TCASE TWHEN TTHEN TELSE TEND
 
 %%
 
@@ -659,6 +665,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
            | cast_expr { $$.n = $1.n; }
+           | case_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
            | is_null_expr { $$.n = $1.n; }
@@ -669,8 +676,17 @@ expr       : equals_expr { $$.n = $1.n; }
            | scalar_subquery_expr { $$.n = $1.n; }
            ;
 
+/* between_expr is declared before and_expr on purpose. `x BETWEEN a AND b AND c` has an inherent
+   reduce/reduce conflict on the trailing AND/OR between finishing the BETWEEN and reducing an inner
+   `condition AND condition`. gppg breaks a reduce/reduce tie in favour of the rule declared first, so
+   putting between_expr first makes BETWEEN win — grouping as `(x BETWEEN a AND b) AND c`, matching SQL's
+   rule that BETWEEN binds tighter than AND. (Precedence can't resolve a reduce/reduce conflict, so the
+   two warnings remain; only their resolution is fixed here.) */
+between_expr : condition TBETWEEN condition TAND condition { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
+             ;
+
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null, null); }
-          ; 
+          ;
 
 or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, null, null, null, null, null, null); }
           ;
@@ -695,9 +711,6 @@ greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = new(N
 
 less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = new(NodeType.ExprLessEqualsThan, $1.n, $3.n, null, null, null, null, null, null); }
                       ;
-
-between_expr : condition TBETWEEN condition TAND condition { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
-             ;
 
 add_expr  : condition TADD condition { $$.n = new(NodeType.ExprAdd, $1.n, $3.n, null, null, null, null, null, null); }
           ;
@@ -755,6 +768,30 @@ fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, 
 
 cast_expr : TCAST LPAREN condition TAS cast_target_type RPAREN { $$.n = new(NodeType.ExprCast, $3.n, $5.n, null, null, null, null, null, null); }
           ;
+
+/* CASE is self-delimiting (TCASE … TEND), so it needs no precedence declaration and slots into the
+ * expr alternatives beside cast_expr / fcall_expr. Two forms share the WHEN list and ELSE:
+ *   searched — TCASE <when-list> [ELSE r] TEND      (leftAst = null)
+ *   simple   — TCASE <op> <when-list> [ELSE r] TEND (leftAst = op, each WHEN compares op = value)
+ * The parser tells them apart because a condition can never begin with TWHEN. */
+case_expr : TCASE case_when_list case_else_opt TEND
+              { $$.n = new(NodeType.ExprCase, null, $2.n, $3.n, null, null, null, null, null); }
+          | TCASE condition case_when_list case_else_opt TEND
+              { $$.n = new(NodeType.ExprCase, $2.n, $3.n, $4.n, null, null, null, null, null); }
+          ;
+
+case_when_list : case_when_list case_when_clause
+                   { $$.n = new(NodeType.ExprCaseWhenList, $1.n, $2.n, null, null, null, null, null, null); }
+               | case_when_clause { $$.n = $1.n; $$.s = $1.s; }
+               ;
+
+case_when_clause : TWHEN condition TTHEN condition
+                     { $$.n = new(NodeType.ExprCaseWhen, $2.n, $4.n, null, null, null, null, null, null); }
+                 ;
+
+case_else_opt : TELSE condition { $$.n = $2.n; }
+              | { $$.n = null; }
+              ;
 
 fcall_argument_list  : fcall_argument_list TCOMMA fcall_argument_item { $$.n = new(NodeType.ExprArgumentList, $1.n, $3.n, null, null, null, null, null, null); }
                      | fcall_argument_item { $$.n = $1.n; $$.s = $1.s; }

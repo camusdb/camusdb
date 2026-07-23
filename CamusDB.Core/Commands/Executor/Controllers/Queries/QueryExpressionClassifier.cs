@@ -128,6 +128,16 @@ internal static class QueryExpressionClassifier
                         || (node.extendedOne is not null && Walk(node.extendedOne))
                         || (node.extendedTwo is not null && Walk(node.extendedTwo));
 
+                case NodeType.ExprCase:
+                    return (node.leftAst is not null && Walk(node.leftAst))
+                        || (node.rightAst is not null && Walk(node.rightAst))
+                        || (node.extendedOne is not null && Walk(node.extendedOne));
+
+                case NodeType.ExprCaseWhen:
+                case NodeType.ExprCaseWhenList:
+                    return (node.leftAst is not null && Walk(node.leftAst))
+                        || (node.rightAst is not null && Walk(node.rightAst));
+
                 // Subqueries are opaque — do not descend.
                 case NodeType.ExprScalarSubquery:
                 case NodeType.ExprInSubquery:
@@ -238,6 +248,18 @@ internal static class QueryExpressionClassifier
                     if (node.extendedTwo is not null) Walk(node.extendedTwo);
                     return;
 
+                case NodeType.ExprCase:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    if (node.rightAst is not null) Walk(node.rightAst);
+                    if (node.extendedOne is not null) Walk(node.extendedOne);
+                    return;
+
+                case NodeType.ExprCaseWhen:
+                case NodeType.ExprCaseWhenList:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    if (node.rightAst is not null) Walk(node.rightAst);
+                    return;
+
                 // Subqueries, literals, and other leaf nodes carry no free column refs.
                 default:
                     return;
@@ -319,6 +341,18 @@ internal static class QueryExpressionClassifier
                     if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
                     if (node.extendedOne is not null) ValidateNode(node.extendedOne, insideAggregate);
                     if (node.extendedTwo is not null) ValidateNode(node.extendedTwo, insideAggregate);
+                    return;
+
+                case NodeType.ExprCase:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    if (node.rightAst is not null) ValidateNode(node.rightAst, insideAggregate);
+                    if (node.extendedOne is not null) ValidateNode(node.extendedOne, insideAggregate);
+                    return;
+
+                case NodeType.ExprCaseWhen:
+                case NodeType.ExprCaseWhenList:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    if (node.rightAst is not null) ValidateNode(node.rightAst, insideAggregate);
                     return;
 
                 // Subqueries, leaf nodes, and unrecognised nodes: nothing to validate.

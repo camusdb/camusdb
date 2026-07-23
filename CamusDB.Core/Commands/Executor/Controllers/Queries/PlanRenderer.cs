@@ -361,6 +361,8 @@ public static class PlanRenderer
 
             NodeType.ExprCast => $"CAST({RenderExpr(expr.leftAst!)} AS {expr.rightAst?.yytext ?? "?"})",
 
+            NodeType.ExprCase => RenderCase(expr),
+
             NodeType.ExprInSubquery => $"{RenderExpr(expr.leftAst!)} IN (SELECT ...)",
             NodeType.ExprNotInSubquery => $"{RenderExpr(expr.leftAst!)} NOT IN (SELECT ...)",
             NodeType.ExprInMembership => $"{RenderExpr(expr.leftAst!)} IN (...)",
@@ -373,6 +375,24 @@ public static class PlanRenderer
     }
 
     // ── helpers ────────────────────────────────────────────────────────────
+
+    /// <summary>Renders a CASE for EXPLAIN: <c>CASE [op] WHEN c THEN r … [ELSE e] END</c> (human-readable).</summary>
+    private static string RenderCase(NodeAst expr)
+    {
+        StringBuilder sb = new("CASE");
+
+        if (expr.leftAst is not null)
+            sb.Append(' ').Append(RenderExpr(expr.leftAst));
+
+        foreach (NodeAst clause in CamusDB.Core.CommandsExecutor.Controllers.DML.SQLExecutorBaseCreator
+                     .EnumerateWhenClauses(expr.rightAst!))
+            sb.Append(" WHEN ").Append(RenderExpr(clause.leftAst!)).Append(" THEN ").Append(RenderExpr(clause.rightAst!));
+
+        if (expr.extendedOne is not null)
+            sb.Append(" ELSE ").Append(RenderExpr(expr.extendedOne));
+
+        return sb.Append(" END").ToString();
+    }
 
     private static string RenderCompositeKey(CompositeColumnValue key)
     {

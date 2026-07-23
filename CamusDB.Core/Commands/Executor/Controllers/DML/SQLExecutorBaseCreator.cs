@@ -384,6 +384,54 @@ internal abstract class SQLExecutorBaseCreator
                     return CastScalarFunctions.CastExpression("cast", input, expr.rightAst!);
                 }
 
+            case NodeType.ExprCase:
+                {
+                    // Simple CASE evaluates its operand once; each WHEN then tests operand = value.
+                    // Searched CASE has no operand and each WHEN is a boolean condition. Either way the
+                    // FIRST matching branch wins and later branches are never evaluated — a later branch
+                    // may reference a column only valid under a different WHEN, so evaluating it eagerly
+                    // could raise a spurious error.
+                    ColumnValue? operand = expr.leftAst is null
+                        ? null
+                        : EvalExpr(expr.leftAst, row, parameters, rowNameResolver, queryRow);
+
+                    foreach (NodeAst clause in EnumerateWhenClauses(expr.rightAst!))
+                    {
+                        bool matched;
+                        if (operand is null)
+                        {
+                            ColumnValue cond = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+                            // Only TRUE matches; FALSE and NULL/UNKNOWN skip, consistent with how the
+                            // WHERE evaluator treats a NULL predicate as non-matching.
+                            if (cond.Type == ColumnType.Null)
+                                matched = false;
+                            else if (cond.Type != ColumnType.Bool)
+                                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                                    $"No matching signature for CASE WHEN condition; expected Bool, got: {cond.Type}");
+                            else
+                                matched = cond.BoolValue;
+                        }
+                        else
+                        {
+                            ColumnValue value = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+                            // operand = value with normal equality; a NULL on either side is UNKNOWN → no match.
+                            matched = operand.Type != ColumnType.Null
+                                   && value.Type != ColumnType.Null
+                                   && CompareValues(operand, value) == 0;
+                        }
+
+                        if (matched)
+                            return EvalExpr(clause.rightAst!, row, parameters, rowNameResolver, queryRow);
+                    }
+
+                    // No WHEN matched: the ELSE result, or typed NULL when ELSE is omitted.
+                    return expr.extendedOne is null
+                        ? ColumnValue.Null
+                        : EvalExpr(expr.extendedOne, row, parameters, rowNameResolver, queryRow);
+                }
+
             case NodeType.ExprIsNull:
                 {
                     ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
@@ -481,6 +529,29 @@ internal abstract class SQLExecutorBaseCreator
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
+        }
+    }
+
+    /// <summary>
+    /// Flattens the left-recursive <see cref="NodeType.ExprCaseWhenList"/> chain that a CASE's WHEN
+    /// clauses parse into, yielding each <see cref="NodeType.ExprCaseWhen"/> in source order (top to
+    /// bottom). The list is built left-associatively — <c>((c1 c2) c3)</c> — so the leftmost clause is
+    /// the deepest node; walking the left spine first restores first-match ordering. A single-clause
+    /// CASE has no wrapper node (the grammar collapses it to the bare <see cref="NodeType.ExprCaseWhen"/>).
+    /// This is the one place WHEN ordering is defined; every site that visits CASE branches reuses it.
+    /// </summary>
+    internal static IEnumerable<NodeAst> EnumerateWhenClauses(NodeAst whenList)
+    {
+        if (whenList.nodeType == NodeType.ExprCaseWhenList)
+        {
+            foreach (NodeAst clause in EnumerateWhenClauses(whenList.leftAst!))
+                yield return clause;
+
+            yield return whenList.rightAst!;
+        }
+        else
+        {
+            yield return whenList;
         }
     }
 

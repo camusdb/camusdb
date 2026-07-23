@@ -134,6 +134,21 @@ internal static class QueryHavingWorkspace
                     || (expression.extendedTwo is not null
                         && ContainsHiddenExpression(expression.extendedTwo, ticket, outputNames, insideAggregate));
 
+            case NodeType.ExprCase:
+                return (expression.leftAst is not null
+                        && ContainsHiddenExpression(expression.leftAst, ticket, outputNames, insideAggregate))
+                    || (expression.rightAst is not null
+                        && ContainsHiddenExpression(expression.rightAst, ticket, outputNames, insideAggregate))
+                    || (expression.extendedOne is not null
+                        && ContainsHiddenExpression(expression.extendedOne, ticket, outputNames, insideAggregate));
+
+            case NodeType.ExprCaseWhen:
+            case NodeType.ExprCaseWhenList:
+                return (expression.leftAst is not null
+                        && ContainsHiddenExpression(expression.leftAst, ticket, outputNames, insideAggregate))
+                    || (expression.rightAst is not null
+                        && ContainsHiddenExpression(expression.rightAst, ticket, outputNames, insideAggregate));
+
             case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
@@ -282,6 +297,28 @@ internal static class QueryHavingWorkspace
 
                 if (expression.extendedTwo is not null)
                     CollectHiddenExpressions(expression.extendedTwo, ticket, projections, outputNames, insideAggregate);
+
+                return;
+
+            case NodeType.ExprCase:
+                if (expression.leftAst is not null)
+                    CollectHiddenExpressions(expression.leftAst, ticket, projections, outputNames, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    CollectHiddenExpressions(expression.rightAst, ticket, projections, outputNames, insideAggregate);
+
+                if (expression.extendedOne is not null)
+                    CollectHiddenExpressions(expression.extendedOne, ticket, projections, outputNames, insideAggregate);
+
+                return;
+
+            case NodeType.ExprCaseWhen:
+            case NodeType.ExprCaseWhenList:
+                if (expression.leftAst is not null)
+                    CollectHiddenExpressions(expression.leftAst, ticket, projections, outputNames, insideAggregate);
+
+                if (expression.rightAst is not null)
+                    CollectHiddenExpressions(expression.rightAst, ticket, projections, outputNames, insideAggregate);
 
                 return;
 

@@ -45,7 +45,7 @@ internal static class CheckConditionRenderer
     private static bool IsAtomic(NodeAst e) => e.nodeType is
         NodeType.Identifier or NodeType.Integer or NodeType.Float or NodeType.Bool or
         NodeType.Null or NodeType.String or NodeType.ObjectIdLiteral or
-        NodeType.ExprFuncCall or NodeType.ExprCast;
+        NodeType.ExprFuncCall or NodeType.ExprCast or NodeType.ExprCase;
 
     /// <summary>Renders <paramref name="e"/> as an operand, wrapping compound expressions in parens.</summary>
     private static void RenderOperand(StringBuilder sb, NodeAst e)
@@ -159,6 +159,35 @@ internal static class CheckConditionRenderer
                 sb.Append("CAST(");
                 RenderNode(sb, expr.leftAst!);
                 sb.Append(" AS ").Append(RenderCastType(expr.rightAst!)).Append(')');
+                return;
+
+            // ── CASE … WHEN … THEN … [ELSE …] END ───────────────────────────────
+            // Self-delimiting: the WHEN/THEN/ELSE/END keywords bound each sub-expression, so no
+            // operand needs wrapping parens for a faithful re-parse.
+            case NodeType.ExprCase:
+                sb.Append("CASE");
+                if (expr.leftAst is not null) // simple-CASE operand
+                {
+                    sb.Append(' ');
+                    RenderNode(sb, expr.leftAst);
+                }
+
+                foreach (NodeAst clause in CamusDB.Core.CommandsExecutor.Controllers.DML.SQLExecutorBaseCreator
+                             .EnumerateWhenClauses(expr.rightAst!))
+                {
+                    sb.Append(" WHEN ");
+                    RenderNode(sb, clause.leftAst!);
+                    sb.Append(" THEN ");
+                    RenderNode(sb, clause.rightAst!);
+                }
+
+                if (expr.extendedOne is not null) // ELSE result
+                {
+                    sb.Append(" ELSE ");
+                    RenderNode(sb, expr.extendedOne);
+                }
+
+                sb.Append(" END");
                 return;
 
             default:
