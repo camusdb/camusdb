@@ -91,8 +91,30 @@ builder.Logging.AddSimpleConsole(options =>
     options.SingleLine = true;
     options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
 });
-builder.Logging.AddFilter("Kahuna", LogLevel.Warning);
-builder.Logging.AddFilter("Kommander", LogLevel.Warning);
+builder.Logging.AddFilter("Kahuna", LogLevelResolver.FromEnvironment("CAMUS_LOG_LEVEL_KAHUNA") ?? LogLevel.Warning);
+builder.Logging.AddFilter("Kommander", LogLevelResolver.FromEnvironment("CAMUS_LOG_LEVEL_KOMMANDER") ?? LogLevel.Warning);
+
+// A client that disconnects or cancels mid-stream makes Kestrel abort the request stream, and the
+// gRPC handler reports that as an informational "Error reading message" / "canceled" entry with a
+// full IOException stack trace. Closing a connection is normal client behavior, not a server fault,
+// so those entries are pure noise; raising the floor to Warning drops them while keeping genuine
+// handler failures (logged at Error) visible.
+builder.Logging.AddFilter("Grpc", LogLevelResolver.FromEnvironment("CAMUS_LOG_LEVEL_GRPC") ?? LogLevel.Warning);
+
+// Everything without a more specific rule. Both calls are needed: the rule (null category) beats the
+// "Default" entry from appsettings.json because it is registered later, while the minimum level is
+// the floor consulted when no rule matches at all — setting only one of them leaves Debug/Trace
+// filtered out. Applied last so an explicit per-category variable above still wins.
+if (LogLevelResolver.FromEnvironment("CAMUS_LOG_LEVEL") is { } camusLogLevel)
+{
+    builder.Logging.SetMinimumLevel(camusLogLevel);
+    builder.Logging.AddFilter(null, camusLogLevel);
+}
+
+// Escape hatch for any category the variables above do not name, e.g.
+// CAMUS_LOG_FILTERS="Microsoft.AspNetCore=Debug,Kahuna.Server.KeyValues=Trace".
+foreach ((string category, LogLevel level) in LogLevelResolver.ParseFilters(Environment.GetEnvironmentVariable("CAMUS_LOG_FILTERS")))
+    builder.Logging.AddFilter(category, level);
 
 // Add services to the container.
 builder.Services.AddRazorPages();
