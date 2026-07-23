@@ -191,6 +191,217 @@ public sealed class ExecuteSQLController : CommandsController
         }
     }
 
+    /// <summary>
+    /// Streaming counterpart of <see cref="ExecuteSQLQuery"/>: executes a SELECT / SHOW statement and
+    /// writes the result set as newline-delimited JSON (<see cref="QueryStreamNdjsonWriter.ContentType"/>)
+    /// instead of one buffered <see cref="ExecuteSQLQueryResponse"/>. Rows are pushed to the transport as
+    /// they are pulled from the cursor, so a multi-thousand-row / multi-MB result never materializes in
+    /// server memory. This is an additive endpoint — <c>/execute-sql-query</c> keeps its exact buffered
+    /// shape, so existing clients are unaffected; only clients that opt into this route see the stream.
+    ///
+    /// <para>Because bytes can reach the wire before the autocommit transaction commits, a serializable
+    /// conflict that surfaces after streaming has started cannot be transparently retried — it is
+    /// reported through the failure trailer (see <see cref="QueryStreamNdjsonWriter"/>). Errors that
+    /// occur before the first line (parse errors, unknown database) still produce a normal JSON error
+    /// body with the correct HTTP status, since nothing has been sent yet.</para>
+    /// </summary>
+    [HttpPost]
+    [Route("/execute-sql-query-stream")]
+    public async Task ExecuteSQLQueryStream()
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        CancellationToken ct = HttpContext.RequestAborted;
+
+        ExecuteSQLRequest? request;
+        string sql;
+        NodeAst ast;
+
+        // Setup phase: anything that throws here happens before a single byte is on the wire, so it
+        // can still be reported as a normal JSON error response with the correct HTTP status code.
+        try
+        {
+            request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, ct).ConfigureAwait(false);
+            if (request == null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
+
+            sql = request.Sql ?? "";
+            ast = SQLParserProcessor.Parse(sql);
+            Log.LogExecutingSql(logger, sql);
+        }
+        catch (Exception e)
+        {
+            await WriteSetupErrorAsync(e, stopwatch).ConfigureAwait(false);
+            return;
+        }
+
+        await using Utf8JsonWriter jsonWriter = new(Response.BodyWriter, new JsonWriterOptions { SkipValidation = true });
+        QueryStreamNdjsonWriter ndjson = new(jsonWriter, Response.BodyWriter);
+
+        int total = 0;
+        Kommander.Time.HLCTimestamp causalToken = default;
+
+        try
+        {
+            // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no database
+            // context or transaction.
+            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
+                              or NodeType.ShowOrphanDatabases)
+            {
+                ExecuteSQLTicket ticket = new(
+                    txnState: null!,
+                    database: request.DatabaseName ?? "",
+                    sql: sql,
+                    parameters: request.Parameters
+                );
+                (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
+            }
+            // Explicit (caller-supplied) transaction — client owns commit/rollback and retry.
+            else if (request.TxnIdPT > 0)
+            {
+                KvTransaction txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                try
+                {
+                    ExecuteSQLTicket ticket = new(
+                        txnState: txnState,
+                        database: request.DatabaseName ?? "",
+                        sql: sql,
+                        parameters: request.Parameters
+                    );
+                    (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    throw;
+                }
+            }
+            // Autocommit: single attempt — streaming forfeits the buffered path's transparent
+            // serializable retry, because rows may already be on the wire before commit.
+            else
+            {
+                KvTransaction tx = await transactions.BeginReadOnlyAsync(
+                    request.DatabaseName ?? "", promote: true, request.CausalToken, ct).ConfigureAwait(false);
+                try
+                {
+                    ExecuteSQLTicket ticket = new(
+                        txnState: tx,
+                        database: request.DatabaseName ?? "",
+                        sql: sql,
+                        parameters: request.Parameters
+                    );
+                    (DatabaseDescriptor? db, int count) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
+                    total = count;
+                    causalToken = await transactions.CommitAsync(db!, tx, ct).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    throw;
+                }
+            }
+
+            ndjson.WriteTrailer(new QueryStreamTrailer
+            {
+                Status       = "ok",
+                Total        = total,
+                CausalToken  = causalToken.IsNull() ? null : causalToken,
+                ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds,
+            });
+            await Response.BodyWriter.FlushAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
+            if (ndjson.HeaderWritten)
+            {
+                // The 200 header (and possibly rows) is already on the wire — the status can no longer
+                // change, so report the failure in-band as the terminal trailer line.
+                (string code, string message) = ToErrorCodeMessage(e);
+                try
+                {
+                    ndjson.WriteTrailer(new QueryStreamTrailer
+                    {
+                        Status       = "failed",
+                        Total        = total,
+                        Code         = code,
+                        Message      = message,
+                        ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds,
+                    });
+                    await Response.BodyWriter.FlushAsync(ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Client already gone — nothing more we can do.
+                }
+            }
+            else
+            {
+                // Failure before the first line (e.g. unknown database/table): nothing is on the wire,
+                // so emit a normal JSON error body with the correct HTTP status.
+                await WriteSetupErrorAsync(e, stopwatch).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs the query ticket, writes the schema header, then streams each row through
+    /// <paramref name="ndjson"/>, flushing to the network periodically so memory stays bounded and the
+    /// client receives rows incrementally. Returns the resolved <see cref="DatabaseDescriptor"/> (so an
+    /// autocommit caller can commit) and the streamed row count. The header is written only after
+    /// <see cref="CommandExecutor.ExecuteSQLQuery"/> succeeds, so a setup failure leaves the response
+    /// unstarted and reportable as a clean HTTP error.
+    /// </summary>
+    private async Task<(DatabaseDescriptor? Database, int Count)> StreamQueryRowsAsync(
+        ExecuteSQLTicket ticket,
+        QueryStreamNdjsonWriter ndjson,
+        CancellationToken ct)
+    {
+        QuerySchemaHolder schemaHolder = new();
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
+
+        Response.StatusCode  = 200;
+        Response.ContentType = QueryStreamNdjsonWriter.ContentType;
+        ndjson.WriteHeader(schemaHolder.Schema);
+
+        int count = 0;
+        await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
+        {
+            ndjson.WriteRow(row, schemaHolder.Schema);
+            count++;
+
+            // Push buffered rows to the client every 128 rows: bounds server-held memory and delivers
+            // the stream incrementally instead of at completion.
+            if ((count & 0x7F) == 0)
+                await Response.BodyWriter.FlushAsync(ct).ConfigureAwait(false);
+        }
+
+        return (database, count);
+    }
+
+    /// <summary>
+    /// Writes a normal single-object JSON error response for a streaming request that failed before any
+    /// stream bytes were sent, using the same <see cref="ExecuteSQLQueryResponse"/> failure shape and
+    /// HTTP status mapping as the buffered endpoint.
+    /// </summary>
+    private async Task WriteSetupErrorAsync(Exception e, Stopwatch stopwatch)
+    {
+        logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+
+        (string code, string message) = ToErrorCodeMessage(e);
+        int status = e is CamusDBException cdb ? CamusDBErrorCodes.GetHttpStatus(cdb.Code) : 500;
+
+        Response.StatusCode  = status;
+        Response.ContentType = "application/json";
+
+        ExecuteSQLQueryResponse body = new("failed", code, message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
+        await JsonSerializer.SerializeAsync(Response.Body, body, jsonOptions).ConfigureAwait(false);
+    }
+
+    private static (string Code, string Message) ToErrorCodeMessage(Exception e)
+        => e is CamusDBException cdb ? (cdb.Code, cdb.Message) : ("CA0000", e.Message);
+
     [HttpPost]
     [Route("/execute-sql-non-query")]
     public async Task<JsonResult> ExecuteNonSQLQuery()
