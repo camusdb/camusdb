@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
+
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -19,21 +21,35 @@ internal sealed class QueryFilterer
 {
     private readonly ExistsSubqueryExecutor existsSubqueryExecutor;
 
+    // Memoizes, per predicate AST, whether evaluating it can suspend (contains a correlated EXISTS).
+    // Keyed by AST identity via a weak table so cached decisions never keep a parsed query alive.
+    private readonly ConditionalWeakTable<NodeAst, object> predicateNeedsAsyncCache = new();
+
     public QueryFilterer(ExistsSubqueryExecutor existsSubqueryExecutor)
     {
         this.existsSubqueryExecutor = existsSubqueryExecutor;
     }
 
-    internal async ValueTask<bool> MeetPlanFilterAsync(
+    /// <summary>
+    /// Evaluates a plan's execution filter against a row. Returns a <b>completed</b>
+    /// <see cref="ValueTask{T}"/> synchronously for the common case — a predicate with no correlated
+    /// EXISTS subquery evaluates through the fully synchronous <see cref="EvaluatePredicate"/>, so the
+    /// per-row hot path allocates no async state machine. Only a predicate that can suspend (a correlated
+    /// EXISTS reaches out to the KV store per row) falls through to the async path.
+    /// </summary>
+    internal ValueTask<bool> MeetPlanFilterAsync(
         QueryPlan plan,
         IReadOnlyDictionary<string, ColumnValue> row)
     {
         NodeAst? filter = plan.ExecutionFilter;
 
         if (filter is null)
-            return true;
+            return new ValueTask<bool>(true);
 
-        return await MeetWhereAsync(filter, row, plan.Ticket, plan.Database).ConfigureAwait(false);
+        if (!PredicateNeedsAsync(filter))
+            return new ValueTask<bool>(ToPredicateResult(EvaluatePredicate(filter, row, plan.Ticket)));
+
+        return MeetWhereAsyncCore(filter, row, plan.Ticket, plan.Database);
     }
 
     internal async ValueTask<bool> MeetHavingAsync(
@@ -45,7 +61,24 @@ internal sealed class QueryFilterer
         return ToPredicateResult(evaluatedExpr);
     }
 
-    internal async ValueTask<bool> MeetWhereAsync(
+    /// <summary>
+    /// Evaluates a WHERE / join predicate against a row. Synchronous (completed <see cref="ValueTask{T}"/>,
+    /// no state-machine allocation) unless the predicate contains a correlated EXISTS subquery — see
+    /// <see cref="MeetPlanFilterAsync"/>.
+    /// </summary>
+    internal ValueTask<bool> MeetWhereAsync(
+        NodeAst where,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryTicket ticket,
+        DatabaseDescriptor database)
+    {
+        if (!PredicateNeedsAsync(where))
+            return new ValueTask<bool>(ToPredicateResult(EvaluatePredicate(where, row, ticket)));
+
+        return MeetWhereAsyncCore(where, row, ticket, database);
+    }
+
+    private async ValueTask<bool> MeetWhereAsyncCore(
         NodeAst where,
         IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
@@ -54,6 +87,88 @@ internal sealed class QueryFilterer
         ColumnValue evaluatedExpr = await EvaluatePredicateAsync(where, row, ticket, database).ConfigureAwait(false);
 
         return ToPredicateResult(evaluatedExpr);
+    }
+
+    /// <summary>
+    /// True when <paramref name="predicate"/> can suspend during evaluation — i.e. it contains a
+    /// correlated EXISTS anywhere in its tree (the only node the filter evaluates asynchronously). The
+    /// result is a property of the AST, so it is memoized per predicate rather than recomputed per row.
+    /// </summary>
+    private bool PredicateNeedsAsync(NodeAst predicate)
+    {
+        if (predicateNeedsAsyncCache.TryGetValue(predicate, out object? cached))
+            return (bool)cached;
+
+        bool needsAsync = ContainsCorrelatedExists(predicate);
+        // AddOrUpdate: a benign race just recomputes and stores the same value.
+        predicateNeedsAsyncCache.AddOrUpdate(predicate, needsAsync);
+        return needsAsync;
+    }
+
+    private static bool ContainsCorrelatedExists(NodeAst node)
+    {
+        if (node.nodeType == NodeType.ExprExistsCorrelated)
+            return true;
+
+        return (node.leftAst is not null && ContainsCorrelatedExists(node.leftAst))
+            || (node.rightAst is not null && ContainsCorrelatedExists(node.rightAst))
+            || (node.extendedOne is not null && ContainsCorrelatedExists(node.extendedOne))
+            || (node.extendedTwo is not null && ContainsCorrelatedExists(node.extendedTwo))
+            || (node.extendedThree is not null && ContainsCorrelatedExists(node.extendedThree))
+            || (node.extendedFour is not null && ContainsCorrelatedExists(node.extendedFour))
+            || (node.extendedFive is not null && ContainsCorrelatedExists(node.extendedFive));
+    }
+
+    /// <summary>
+    /// Synchronous twin of <see cref="EvaluatePredicateAsync"/> for predicates that cannot suspend
+    /// (guaranteed by <see cref="PredicateNeedsAsync"/> returning false). Mirrors it exactly — AND/OR
+    /// short-circuit, prepared IN-set membership, and the ordinal-fast-path delegation to
+    /// <see cref="SqlExecutor.EvalExpr"/> — but as a plain recursive call with no async machinery.
+    /// </summary>
+    private ColumnValue EvaluatePredicate(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryTicket ticket)
+    {
+        switch (expr.nodeType)
+        {
+            case NodeType.ExprInMembership:
+            {
+                if (ticket.PreparedInSets is not null && ticket.PreparedInSets.TryGetValue(expr, out PreparedInSet? prepared))
+                {
+                    ColumnValue lhs = row is QueryRow qrIn
+                        ? SqlExecutor.EvalExpr(expr.leftAst!, qrIn, ticket.Parameters, ticket.RowNameResolver)
+                        : SqlExecutor.EvalExpr(expr.leftAst!, row, ticket.Parameters, ticket.RowNameResolver);
+                    return ColumnValue.FromBool(prepared.Contains(lhs));
+                }
+                goto default;
+            }
+
+            case NodeType.ExprAnd:
+            {
+                ColumnValue leftValue = EvaluatePredicate(expr.leftAst!, row, ticket);
+
+                if (!ToPredicateResult(leftValue))
+                    return ColumnValue.False;
+
+                return EvaluatePredicate(expr.rightAst!, row, ticket);
+            }
+
+            case NodeType.ExprOr:
+            {
+                ColumnValue leftValue = EvaluatePredicate(expr.leftAst!, row, ticket);
+
+                if (ToPredicateResult(leftValue))
+                    return ColumnValue.True;
+
+                return EvaluatePredicate(expr.rightAst!, row, ticket);
+            }
+
+            default:
+                return row is QueryRow qr
+                    ? SqlExecutor.EvalExpr(expr, qr, ticket.Parameters, ticket.RowNameResolver)
+                    : SqlExecutor.EvalExpr(expr, row, ticket.Parameters, ticket.RowNameResolver);
+        }
     }
 
     internal async IAsyncEnumerable<QueryResultRow> FilterHavingResultset(
