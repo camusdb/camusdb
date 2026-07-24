@@ -514,6 +514,25 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestSmallIntAndFloatTypeAliases()
+    {
+        // `smallint` is an alias for INT64 and `float` is an alias for FLOAT64.
+        NodeAst ast = SQLParserProcessor.Parse(
+            "CREATE TABLE t (`a` SMALLINT, `b` FLOAT)");
+
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+
+        NodeAst itemList = ast.rightAst!;
+        Assert.AreEqual(NodeType.CreateTableItemList, itemList.nodeType);
+
+        NodeAst firstItem = itemList.leftAst!;
+        NodeAst secondItem = itemList.rightAst!;
+
+        Assert.AreEqual(NodeType.TypeInteger64, firstItem.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TypeFloat64, secondItem.rightAst!.nodeType);
+    }
+
+    [Test]
     public void TestReservedWordAsColumnName_CreateTableWithConstraints()
     {
         // Full round-trip form: column named `key` with PRIMARY KEY and KEY constraints.

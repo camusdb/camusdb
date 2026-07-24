@@ -72,9 +72,11 @@ TTypeChar       (C|c)(H|h)(A|a)(R|r)
 TTypeVarchar    (V|v)(A|a)(R|r)(C|c)(H|h)(A|a)(R|r)
 TTypeText       (T|t)(E|e)(X|x)(T|t)
 TTypeInt64      (I|i)(N|n)(T|t)(6)(4)
+TTypeSmallInt   (S|s)(M|m)(A|a)(L|l)(L|l)(I|i)(N|n)(T|t)
 TTypeInt        (I|i)(N|n)(T|t)
 TTypeFloat64    (F|f)(L|l)(O|o)(A|a)(T|t)(6)(4)
 TTypeFloat32    (F|f)(L|l)(O|o)(A|a)(T|t)(3)(2)
+TTypeFloat      (F|f)(L|l)(O|o)(A|a)(T|t)
 TTypeReal       (R|r)(E|e)(A|a)(L|l)
 TTypeObjectId   (O|o)(B|b)(J|j)(E|e)(C|c)(T|t)(_)(I|i)(D|d)
 TTypeSObjectId  (O|o)(I|i)(D|d)
@@ -314,9 +316,13 @@ TDot            \.
 
 {TTypeInt} { return (int)Token.TTYPE_INT64; }
 
+{TTypeSmallInt} { return (int)Token.TTYPE_INT64; }
+
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
 
 {TTypeFloat32} { return (int)Token.TTYPE_FLOAT32; }
+
+{TTypeFloat} { return (int)Token.TTYPE_FLOAT64; }
 
 {TTypeReal} { return (int)Token.TTYPE_FLOAT32; }
 
