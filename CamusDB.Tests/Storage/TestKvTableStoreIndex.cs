@@ -167,7 +167,7 @@ public sealed class TestKvTableStoreIndex
         await CommitTransaction(node.Kahuna, tx);
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true))
         {
             scanned.Add((key, rowId));
@@ -204,7 +204,7 @@ public sealed class TestKvTableStoreIndex
         await CommitTransaction(node.Kahuna, tx);
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_cat", keyTypes, null, null, unique: false))
         {
             scanned.Add((key, rowId));
@@ -236,7 +236,7 @@ public sealed class TestKvTableStoreIndex
         CompositeColumnValue from = CV(new ColumnValue(ColumnType.Integer64, 30L));
 
         List<long> scannedAges = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue _) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue _, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, from, null, unique: true))
         {
             scannedAges.Add(key.Values[0].LongValue);
@@ -264,7 +264,7 @@ public sealed class TestKvTableStoreIndex
         CompositeColumnValue to = CV(new ColumnValue(ColumnType.Integer64, 30L));
 
         List<long> scannedAges = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue _) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue _, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, to, unique: true))
         {
             scannedAges.Add(key.Values[0].LongValue);
@@ -293,7 +293,7 @@ public sealed class TestKvTableStoreIndex
         CompositeColumnValue to   = CV(new ColumnValue(ColumnType.Integer64, 40L));
 
         List<long> scannedAges = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue _) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue _, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, from, to, unique: true))
         {
             scannedAges.Add(key.Values[0].LongValue);
@@ -311,7 +311,7 @@ public sealed class TestKvTableStoreIndex
         ColumnType[] keyTypes = [ColumnType.Integer64];
 
         List<(CompositeColumnValue, ObjectIdValue)> scanned = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true))
         {
             scanned.Add((key, rowId));
@@ -337,7 +337,7 @@ public sealed class TestKvTableStoreIndex
         await CommitTransaction(node.Kahuna, tx);
 
         List<long> scannedAges = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue _) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue _, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true, maxRows: 2))
         {
             scannedAges.Add(key.Values[0].LongValue);
@@ -364,7 +364,7 @@ public sealed class TestKvTableStoreIndex
         await CommitTransaction(node.Kahuna, tx);
 
         List<ObjectIdValue> scannedIds = [];
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: false))
         {
             scannedIds.Add(rowId);
@@ -400,7 +400,7 @@ public sealed class TestKvTableStoreIndex
         await CommitTransaction(node.Kahuna, tx2);
 
         List<ObjectIdValue> remaining = [];
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: false))
         {
             remaining.Add(rowId);
@@ -435,7 +435,7 @@ public sealed class TestKvTableStoreIndex
         await CommitTransaction(node.Kahuna, tx);
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_name_age", keyTypes, null, null, unique: true))
         {
             scanned.Add((key, rowId));
@@ -486,7 +486,7 @@ public sealed class TestKvTableStoreIndex
         KvTransaction tx2 = await BeginTransaction(node.Kahuna, "xt1-scan");
 
         List<(CompositeColumnValue key, ObjectIdValue rowId)> scanned = [];
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(tx2, "idx_cat", keyTypes, null, null, unique: false))
         {
             scanned.Add((key, rowId));

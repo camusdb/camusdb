@@ -1007,8 +1007,11 @@ public sealed class QueryPlanner
             return;
         }
 
-        // The only columns available without a primary-row fetch are those actually in the index.
+        // Columns available without a primary-row fetch: the index key columns plus any stored/payload
+        // (INCLUDE) columns materialized into the entry value.
         HashSet<string> available = new(index.Columns, StringComparer.Ordinal);
+        foreach (string includeColumn in index.IncludeColumns)
+            available.Add(includeColumn);
 
         List<string> covered = [];
         foreach (string col in required)

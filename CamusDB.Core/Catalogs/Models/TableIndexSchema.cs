@@ -65,6 +65,30 @@ public sealed class TableIndexSchema
     public OrderType[]? ColumnDirections { get; }
 
     /// <summary>
+    /// Immutable column IDs of the index's stored/payload (INCLUDE) columns, if any. These are
+    /// non-key columns materialized into every index entry's value so a covering scan can return
+    /// them without a primary-row fetch. Populated in the persisted form; null when the index has
+    /// no INCLUDE columns (the common, backward-compatible case). Never overlaps
+    /// <see cref="ColumnIds"/>. See <see cref="IncludeColumns"/> for the resolved names.
+    /// </summary>
+    public string[]? IncludeColumnIds { get; }
+
+    /// <summary>
+    /// Resolved names of the stored/payload (INCLUDE) columns, positionally aligned with
+    /// <see cref="IncludeColumnIds"/>. Empty in the persisted form; resolved at table-open time by
+    /// <c>TableOpener</c>, exactly like <see cref="Columns"/>. Empty when the index has no INCLUDE
+    /// columns.
+    /// </summary>
+    public string[] IncludeColumns { get; }
+
+    /// <summary>
+    /// True when this index carries stored/payload (INCLUDE) columns, i.e. its entry value holds
+    /// more than the row id. Drives whether the value codec appends an include tuple and whether a
+    /// covering scan can source non-key columns from the index.
+    /// </summary>
+    public bool HasIncludeColumns => IncludeColumns.Length > 0 || (IncludeColumnIds is { Length: > 0 });
+
+    /// <summary>
     /// The type of index
     /// </summary>
     public IndexType Type { get; }
@@ -111,7 +135,7 @@ public sealed class TableIndexSchema
     /// <paramref name="columnDirections"/> is positionally aligned with <paramref name="columns"/>;
     /// null means all-ascending.
     /// </summary>
-    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null)
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null)
     {
         Id = id;
         Name = name;
@@ -119,6 +143,7 @@ public sealed class TableIndexSchema
         Type = type;
         State = state;
         ColumnDirections = columnDirections;
+        IncludeColumns = includeColumns ?? [];
     }
 
     /// <summary>
@@ -131,7 +156,7 @@ public sealed class TableIndexSchema
     /// existed) means every column is ascending.
     /// </summary>
     [JsonConstructor]
-    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null)
+    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null)
     {
         Id = id;
         Name = name;
@@ -141,5 +166,7 @@ public sealed class TableIndexSchema
         State = state;
         StartOffset = startOffset;
         ColumnDirections = columnDirections;
+        IncludeColumnIds = includeColumnIds;
+        IncludeColumns = [];
     }
 }

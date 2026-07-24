@@ -626,6 +626,27 @@ internal sealed class QueryExecutor
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version);
 
+        if (plan.IndexOnly)
+        {
+            // Covering path: fetch the rowId together with the entry's stored/payload (INCLUDE) tuple
+            // in one probe. Key columns come from the lookup key; included columns from the tuple.
+            (ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)? covering =
+                await table.Store.LookupUniqueCovering(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
+
+            if (scanStats is not null)
+                scanStats.KvPointLookups++;
+
+            if (covering is null)
+                yield break;
+
+            QueryScanner.IndexOnlyLayout coveredLayout = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
+            ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(coveredLayout, lookupKey, covering.Value.includeTuple.Span);
+            QueryRow coveredRow = new(covering.Value.rowId, coveredLayout.Layout, values);
+            if (await queryFilterer.MeetPlanFilterAsync(plan, coveredRow).ConfigureAwait(false))
+                yield return new(covering.Value.rowId, coveredRow);
+            yield break;
+        }
+
         ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
 
         if (scanStats is not null)
@@ -633,18 +654,6 @@ internal sealed class QueryExecutor
 
         if (rowId is null)
             yield break;
-
-        if (plan.IndexOnly)
-        {
-            // Covering path: the lookup key already holds the index column values; synthesize
-            // the result row without fetching the primary row.
-            (RowLayout coveredLayout, int[] slotMap) = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
-            ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(slotMap, lookupKey);
-            QueryRow queryRow = new(rowId.Value, coveredLayout, values);
-            if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
-                yield return new(rowId.Value, queryRow);
-            yield break;
-        }
 
         ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
         if (data is null || data.Value.Length == 0)
@@ -713,9 +722,9 @@ internal sealed class QueryExecutor
         {
             // Covering path: every needed column is present in the decoded index key or is the
             // primary-key column. Synthesize rows directly from the scan entry; no GetRow call.
-            (RowLayout coveredLayout, int[] slotMap) = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
+            QueryScanner.IndexOnlyLayout covered = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
 
-            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId) in table.Store.ScanIndex(
+            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in table.Store.ScanIndex(
                 ticket.TxnState,
                 index.KvId,
                 keyTypes,
@@ -729,8 +738,8 @@ internal sealed class QueryExecutor
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
 
-                ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(slotMap, decodedKey);
-                QueryRow queryRow = new(rowId, coveredLayout, values);
+                ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(covered, decodedKey, includeTuple.Span);
+                QueryRow queryRow = new(rowId, covered.Layout, values);
 
                 if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                     yield return new(rowId, queryRow);
@@ -764,7 +773,7 @@ internal sealed class QueryExecutor
             }
         }
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -879,7 +888,7 @@ internal sealed class QueryExecutor
                 CompositeColumnValue toBound = upperBound ?? lookupKey;
                 bool toInclusive = upperBound is null; // inclusive only for exact-match (no successor)
 
-                await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+                await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
                     ticket.TxnState, index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,

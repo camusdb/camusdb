@@ -117,6 +117,7 @@ internal sealed class SchemaQuerier
                 { "Non_unique", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Unique ? "0" : "1") },
                 { "Key_name", new ColumnValue(ColumnType.String, index.Key) },
                 { "Columns", new ColumnValue(ColumnType.String, string.Join(",", index.Value.Columns)) },
+                { "Include", new ColumnValue(ColumnType.String, string.Join(",", index.Value.IncludeColumns)) },
                 { "Index_type", new ColumnValue(ColumnType.String, "ORDERED") }
             });
         }
@@ -158,12 +159,18 @@ internal sealed class SchemaQuerier
 
             string cols = string.Join(", ", kv.Value.Columns.Select(c => "`" + c + "`"));
 
+            // Covering indexes render their stored/payload columns as a trailing INCLUDE (...) clause,
+            // matching the CREATE INDEX syntax so SHOW CREATE TABLE round-trips through re-parse.
+            string include = kv.Value.IncludeColumns.Length > 0
+                ? " INCLUDE (" + string.Join(", ", kv.Value.IncludeColumns.Select(c => "`" + c + "`")) + ")"
+                : "";
+
             if (kv.Key == CamusDBConfig.PrimaryKeyInternalName)
                 createTableSql.Append(" PRIMARY KEY (" + cols + "),");
             else if (kv.Value.Type == IndexType.Unique)
-                createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + "),");
+                createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + ")" + include + ",");
             else
-                createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + "),");
+                createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + ")" + include + ",");
         }
 
         if (table.Schema.CheckConstraints is { Count: > 0 } checks)

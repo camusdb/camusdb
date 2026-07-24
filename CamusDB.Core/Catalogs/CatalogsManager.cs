@@ -339,6 +339,18 @@ public sealed class CatalogsManager
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown constraint: " + constraint.Type)
             };
 
+            // Combined key+include column ceiling (mirrors the standalone/cluster add path). A covering
+            // index duplicates every included value into each entry, so its column count is bounded.
+            int maxIndexColumns = CamusDBConfig.MaxIndexColumns;
+            if (maxIndexColumns > 0)
+            {
+                int totalColumns = constraint.Columns.Length + constraint.IncludeColumns.Length;
+                if (totalColumns > maxIndexColumns)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.SchemaLimitExceeded,
+                        $"Index '{constraint.Name}' spans {totalColumns} columns ({constraint.Columns.Length} key + {constraint.IncludeColumns.Length} INCLUDE), exceeding the maximum of {maxIndexColumns}");
+            }
+
             IndexColumnOrder.RejectDescendingOnUnsupportedType(
                 constraint.Columns,
                 constraint.Name,
@@ -361,6 +373,8 @@ public sealed class CatalogsManager
                 columnIds[i] = columnId;
             }
 
+            string[]? includeColumnIds = ResolveInlineIncludeColumnIds(ticket, constraint, columnIdByName);
+
             indexes.Add(new TableIndexSchema(
                 ObjectIdGenerator.Generate().ToString(),
                 constraint.Name,
@@ -368,11 +382,59 @@ public sealed class CatalogsManager
                 indexType,
                 SchemaElementState.Public,
                 startOffset: null,
-                columnDirections: IndexColumnOrder.Extract(constraint.Columns)
+                columnDirections: IndexColumnOrder.Extract(constraint.Columns),
+                includeColumnIds: includeColumnIds
             ));
         }
 
         return [.. indexes];
+    }
+
+    /// <summary>
+    /// Resolves and validates the stored/payload (INCLUDE) columns of an inline covering-index
+    /// constraint declared in CREATE TABLE: each must exist, must not duplicate another include column,
+    /// and must not also be a key column of the same index. Returns their column ids in declared order,
+    /// or null when the constraint has no INCLUDE clause. (Column public-state is not checked here
+    /// because every column in a fresh CREATE TABLE is public.)
+    /// </summary>
+    private static string[]? ResolveInlineIncludeColumnIds(
+        CreateTableTicket ticket,
+        ConstraintInfo constraint,
+        Dictionary<string, string> columnIdByName)
+    {
+        if (constraint.IncludeColumns.Length == 0)
+            return null;
+
+        HashSet<string> keyColumns = new(StringComparer.Ordinal);
+        foreach (ColumnIndexInfo keyColumn in constraint.Columns)
+            keyColumns.Add(keyColumn.Name);
+
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        string[] includeColumnIds = new string[constraint.IncludeColumns.Length];
+
+        for (int i = 0; i < constraint.IncludeColumns.Length; i++)
+        {
+            string includeName = constraint.IncludeColumns[i];
+
+            if (!seen.Add(includeName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Duplicate INCLUDE column '{includeName}' on index '{constraint.Name}'");
+
+            if (keyColumns.Contains(includeName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column '{includeName}' is already indexed as a key column of index '{constraint.Name}'");
+
+            if (!columnIdByName.TryGetValue(includeName, out string? columnId))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"INCLUDE column '{includeName}' does not exist on table '{ticket.TableName}'");
+
+            includeColumnIds[i] = columnId;
+        }
+
+        return includeColumnIds;
     }
 
     /// <summary>
@@ -693,7 +755,8 @@ public sealed class CatalogsManager
                         type: indexBuildInfo.IndexType,
                         state: initialState,
                         startOffset: null,
-                        columnDirections: indexBuildInfo.ColumnDirections
+                        columnDirections: indexBuildInfo.ColumnDirections,
+                        includeColumnIds: indexBuildInfo.IncludeColumnIds
                     )
                 })
             };
@@ -1713,7 +1776,8 @@ public sealed class CatalogsManager
             type: current.Type,
             state: current.State,
             startOffset: current.StartOffset,
-            columnDirections: current.ColumnDirections
+            columnDirections: current.ColumnDirections,
+            includeColumnIds: current.IncludeColumnIds
         );
 
         // TableSchema.Version is intentionally NOT bumped: indexes are not part of row encoding.
@@ -1883,7 +1947,8 @@ public sealed class CatalogsManager
                 current.Type,
                 payload.State,
                 current.StartOffset,
-                columnDirections: current.ColumnDirections
+                columnDirections: current.ColumnDirections,
+                includeColumnIds: current.IncludeColumnIds
             );
         }
 

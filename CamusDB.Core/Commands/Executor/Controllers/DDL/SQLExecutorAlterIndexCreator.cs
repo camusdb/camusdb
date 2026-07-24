@@ -39,7 +39,8 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 ast.rightAst!.yytext!,
                 indexColumns.ToArray(),
                 AlterIndexOperation.AddIndex,
-                ast.nodeType == NodeType.AlterTableAddIndexIfNotExists
+                ast.nodeType == NodeType.AlterTableAddIndexIfNotExists,
+                includeColumns: GetIncludeColumns(ast.extendedTwo)
             );
         }
 
@@ -54,7 +55,8 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 ast.rightAst!.yytext!,
                 indexColumns.ToArray(),
                 AlterIndexOperation.AddUniqueIndex,
-                ast.nodeType == NodeType.AlterTableAddUniqueIndexIfNotExists
+                ast.nodeType == NodeType.AlterTableAddUniqueIndexIfNotExists,
+                includeColumns: GetIncludeColumns(ast.extendedTwo)
             );
         }
 
@@ -145,5 +147,45 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
         }
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: {nodeAst.nodeType}");
+    }
+
+    /// <summary>
+    /// Walks the optional INCLUDE (...) list into a bare name array. Payload columns are unordered,
+    /// so an explicit ASC/DESC on an included column is a parse-time error (rule: INCLUDE has no
+    /// direction). Returns an empty array when the clause is absent.
+    /// </summary>
+    private static string[] GetIncludeColumns(NodeAst? nodeAst)
+    {
+        if (nodeAst is null)
+            return [];
+
+        List<string> names = new();
+        CollectIncludeColumns(nodeAst, names);
+        return names.ToArray();
+    }
+
+    private static void CollectIncludeColumns(NodeAst nodeAst, List<string> names)
+    {
+        if (nodeAst.nodeType == NodeType.IndexIdentifierList)
+        {
+            if (nodeAst.leftAst != null)
+                CollectIncludeColumns(nodeAst.leftAst, names);
+
+            if (nodeAst.rightAst != null)
+                CollectIncludeColumns(nodeAst.rightAst, names);
+
+            return;
+        }
+
+        if (nodeAst.nodeType == NodeType.Identifier)
+        {
+            names.Add(nodeAst.yytext!);
+            return;
+        }
+
+        if (nodeAst.nodeType is NodeType.IndexIdentifierAsc or NodeType.IndexIdentifierDesc)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "INCLUDE columns cannot specify ASC/DESC (payload columns are unordered)");
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid INCLUDE column list: {nodeAst.nodeType}");
     }
 }

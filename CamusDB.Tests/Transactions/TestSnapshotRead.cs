@@ -265,7 +265,7 @@ public sealed class TestSnapshotRead
         await mgr.CommitAsync(tx2);
 
         List<ObjectIdValue> scanned = [];
-        await foreach ((_, ObjectIdValue rowId) in store.ScanIndex(
+        await foreach ((_, ObjectIdValue rowId, _) in store.ScanIndex(
             roTx, IndexName, KeyTypes, null, null, unique: true))
         {
             scanned.Add(rowId);

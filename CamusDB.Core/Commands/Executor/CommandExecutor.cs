@@ -1262,7 +1262,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                             columnValues[i] = new(ColumnType.Id, rowId.ToString());
 
                         CompositeColumnValue compositeKey = new(columnValues);
-                        await table.Store.PutIndexEntry(tx, indexInfo.IndexId, compositeKey, rowId, unique, backfillMode: true).ConfigureAwait(false);
+
+                        // Materialize stored/payload (INCLUDE) values (NULL-tolerant) for a covering index.
+                        // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
+                        byte[]? includeTuple = indexInfo.IncludeColumnNames is { Length: > 0 } includeNames
+                            ? Storage.Kv.IndexIncludeValueCodec.EncodeTupleChecked(includeNames, row, indexInfo.IndexName)
+                            : null;
+
+                        await table.Store.PutIndexEntry(tx, indexInfo.IndexId, compositeKey, rowId, unique, backfillMode: true, includeTuple: includeTuple).ConfigureAwait(false);
                     }
 
                     lastRowId = rowId;
@@ -1340,11 +1347,17 @@ public sealed class CommandExecutor : IAsyncDisposable
             ticket.IndexName,
             name => table.Schema.Columns!.Find(c => c.Name == name)?.Type);
 
+        TableIndexAdder.ValidateIncludeColumns(table, ticket);
+
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIdsForIndex(table, ticket.Columns);
         string[] columnNames = ticket.Columns.Select(c => c.Name).ToArray();
+        string[]? includeColumnIds = ticket.IncludeColumns.Length > 0
+            ? GetColumnIdsForIndex(table, ticket.IncludeColumns.Select(n => new ColumnIndexInfo(n, OrderType.Ascending)).ToArray())
+            : null;
+        string[]? includeColumnNames = ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null;
 
-        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns));
+        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns), IncludeColumnIds: includeColumnIds, IncludeColumnNames: includeColumnNames);
 
         await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try

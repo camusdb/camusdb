@@ -83,6 +83,32 @@ public static class BranchKvCodec
     }
 
     /// <summary>
+    /// Composes a covering-index entry value — the 24-byte rowId prefix (as in
+    /// <see cref="EncodeIndexRowId(ObjectIdValue)"/>) followed by an opaque stored/payload
+    /// (INCLUDE) tuple — into one buffer. The rowId stays a fixed 24-byte prefix so a reader can
+    /// split rowId from tuple without a length prefix. When <paramref name="includeTuple"/> is empty
+    /// this is byte-identical to <see cref="EncodeIndexRowId(ObjectIdValue)"/>. The tuple bytes are
+    /// treated as opaque here; their layout is owned by <see cref="IndexIncludeValueCodec"/>.
+    /// </summary>
+    public static byte[] EncodeIndexRowId(ObjectIdValue rowId, ReadOnlySpan<byte> includeTuple)
+    {
+        if (includeTuple.IsEmpty)
+            return EncodeIndexRowId(rowId);
+
+        byte[] result = new byte[1 + 24 + includeTuple.Length];
+        result[0] = (byte)BranchKvKind.Value;
+        ObjectId.WriteHexAscii(result.AsSpan(1), rowId.a, rowId.b, rowId.c);
+        includeTuple.CopyTo(result.AsSpan(1 + 24));
+        return result;
+    }
+
+    /// <summary>
+    /// Number of leading payload bytes that hold the rowId in a secondary-index entry value. The
+    /// rowId is a fixed 24-byte lowercase-hex ASCII prefix; any bytes past it are the include tuple.
+    /// </summary>
+    public const int IndexRowIdPayloadLength = 24;
+
+    /// <summary>
     /// Peels the kind byte from <paramref name="data"/> and returns the remaining payload as a
     /// zero-copy <see cref="ReadOnlyMemory{T}"/> slice of the same array (<c>data.AsMemory(1)</c>) —
     /// envelope removal no longer allocates a payload-sized copy. The caller must keep

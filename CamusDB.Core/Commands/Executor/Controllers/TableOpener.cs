@@ -142,6 +142,11 @@ internal sealed class TableOpener
                 ? MapColumnsIdsToNames(tableSchema.Columns, entry.ColumnIds)
                 : (entry.Columns ?? []);
 
+            // Resolve stored/payload (INCLUDE) column ids to names the same way as key columns.
+            string[] includeColumnNames = entry.IncludeColumnIds is { Length: > 0 }
+                ? MapColumnsIdsToNames(tableSchema.Columns, entry.IncludeColumnIds)
+                : (entry.IncludeColumns.Length > 0 ? entry.IncludeColumns : []);
+
             switch (entry.Type)
             {
                 case IndexType.Unique:
@@ -152,7 +157,7 @@ internal sealed class TableOpener
                     // StartOffset are intentionally absent here; DDL and backfill read those from
                     // table.Schema.Indexes (or SystemSchema fallback), not from this descriptor.
                     tableDescriptor.Indexes[entry.Name] =
-                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections);
+                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames);
 
                     // Register display name so duplicate-key errors show the human-readable
                     // name instead of the opaque immutable KvId stored in KV keys.

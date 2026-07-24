@@ -151,7 +151,7 @@ internal sealed class SemiJoinExecutor
             ? new CompositeColumnValue(new[] { nextValue })
             : null;
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in inner.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in inner.Store.ScanIndex(
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
             false, true, false,

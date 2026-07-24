@@ -176,77 +176,123 @@ public static class RowEncoder
                 continue;
             }
 
-            switch (columnValue.Type)
-            {
-                case ColumnType.Id:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeId, ref pointer);
-                    Serializator.WriteObjectId(buffer, ObjectId.ToValue(columnValue.StrValue!), ref pointer);
-                    break;
-
-                case ColumnType.Integer64:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeInteger64, ref pointer);
-                    Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
-                    break;
-
-                case ColumnType.String:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeString32, ref pointer);
-                    Serializator.WriteString(buffer, columnValue.StrValue!, ref pointer);
-                    break;
-
-                case ColumnType.Float64:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeDouble, ref pointer);
-                    Serializator.WriteDouble(buffer, columnValue.FloatValue, ref pointer);
-                    break;
-
-                case ColumnType.Bool:
-                    Serializator.WriteBool(buffer, columnValue.BoolValue, ref pointer);
-                    break;
-
-                case ColumnType.Float32:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeFloat, ref pointer);
-                    Serializator.WriteFloat(buffer, (float)columnValue.FloatValue, ref pointer);
-                    break;
-
-                case ColumnType.Date:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeDate, ref pointer);
-                    Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
-                    break;
-
-                case ColumnType.DateTime:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeDateTime, ref pointer);
-                    Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
-                    break;
-
-                case ColumnType.Bytes:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeBytes, ref pointer);
-                    Serializator.WriteBytesPayload(buffer, columnValue.BytesValue ?? [], ref pointer);
-                    break;
-
-                case ColumnType.Uuid:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeUuid, ref pointer);
-                    Serializator.WriteUuid(buffer, columnValue.UuidHigh, columnValue.LongValue, ref pointer);
-                    break;
-
-                case ColumnType.Array:
-                {
-                    IReadOnlyList<ColumnValue> elements = columnValue.ArrayValues ?? [];
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeArray32, ref pointer);
-                    Serializator.WriteInt32(buffer, elements.Count, ref pointer);
-                    buffer[pointer++] = (byte)columnValue.ArrayElementType;
-                    foreach (ColumnValue el in elements)
-                        WriteArrayElement(buffer, el, ref pointer);
-                    break;
-                }
-
-                case ColumnType.Null:
-                    Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
-                    break;
-
-                default:
-                    throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type);
-            }
+            WriteColumnValue(buffer, columnValue, ref pointer);
         }
     }
+
+    /// <summary>
+    /// Writes a single column value in the self-describing wire form (a type marker followed by the
+    /// payload; a <c>Null</c> value writes just the <see cref="SerializatorTypes.TypeNull"/> marker).
+    /// Shared by the row encoder and the secondary-index include-tuple codec so both stay on exactly
+    /// one serialization format. Pairs with <see cref="ReadColumnValue"/> and <see cref="ColumnValueSize"/>.
+    /// </summary>
+    internal static void WriteColumnValue(byte[] buffer, ColumnValue columnValue, ref int pointer)
+    {
+        switch (columnValue.Type)
+        {
+            case ColumnType.Id:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeId, ref pointer);
+                Serializator.WriteObjectId(buffer, ObjectId.ToValue(columnValue.StrValue!), ref pointer);
+                break;
+
+            case ColumnType.Integer64:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeInteger64, ref pointer);
+                Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
+                break;
+
+            case ColumnType.String:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeString32, ref pointer);
+                Serializator.WriteString(buffer, columnValue.StrValue!, ref pointer);
+                break;
+
+            case ColumnType.Float64:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeDouble, ref pointer);
+                Serializator.WriteDouble(buffer, columnValue.FloatValue, ref pointer);
+                break;
+
+            case ColumnType.Bool:
+                Serializator.WriteBool(buffer, columnValue.BoolValue, ref pointer);
+                break;
+
+            case ColumnType.Float32:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeFloat, ref pointer);
+                Serializator.WriteFloat(buffer, (float)columnValue.FloatValue, ref pointer);
+                break;
+
+            case ColumnType.Date:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeDate, ref pointer);
+                Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
+                break;
+
+            case ColumnType.DateTime:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeDateTime, ref pointer);
+                Serializator.WriteInt64(buffer, columnValue.LongValue, ref pointer);
+                break;
+
+            case ColumnType.Bytes:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeBytes, ref pointer);
+                Serializator.WriteBytesPayload(buffer, columnValue.BytesValue ?? [], ref pointer);
+                break;
+
+            case ColumnType.Uuid:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeUuid, ref pointer);
+                Serializator.WriteUuid(buffer, columnValue.UuidHigh, columnValue.LongValue, ref pointer);
+                break;
+
+            case ColumnType.Array:
+            {
+                IReadOnlyList<ColumnValue> elements = columnValue.ArrayValues ?? [];
+                Serializator.WriteType(buffer, SerializatorTypes.TypeArray32, ref pointer);
+                Serializator.WriteInt32(buffer, elements.Count, ref pointer);
+                buffer[pointer++] = (byte)columnValue.ArrayElementType;
+                foreach (ColumnValue el in elements)
+                    WriteArrayElement(buffer, el, ref pointer);
+                break;
+            }
+
+            case ColumnType.Null:
+                Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
+                break;
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type);
+        }
+    }
+
+    /// <summary>
+    /// Byte size of a single column value written by <see cref="WriteColumnValue"/> (a <c>Null</c>
+    /// value costs one <see cref="SerializatorTypes.TypeNull"/> marker). Shared with the include-tuple
+    /// codec so buffer sizing matches the writer exactly.
+    /// </summary>
+    internal static int ColumnValueSize(ColumnValue columnValue) => columnValue.Type switch
+    {
+        ColumnType.Null =>
+            SerializatorTypeSizes.TypeNull,
+        ColumnType.Id =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeObjectId,
+        ColumnType.Integer64 =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
+        ColumnType.Float64 =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeDouble,
+        ColumnType.Float32 =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeFloat32,
+        ColumnType.String =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
+            + Encoding.Unicode.GetByteCount(columnValue.StrValue!),
+        ColumnType.Bool =>
+            SerializatorTypeSizes.TypeBool,
+        ColumnType.Date or ColumnType.DateTime =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
+        ColumnType.Bytes =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
+            + (columnValue.BytesValue?.Length ?? 0),
+        ColumnType.Uuid =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeUuid,
+        ColumnType.Array =>
+            SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + 1  // type + count + element-type byte
+            + ArrayElementsSize(columnValue.ArrayValues ?? []),
+        _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type)
+    };
 
     /// <summary>
     /// Reads the fixed row header (schema-version marker + value, rowId marker + value) from the front
@@ -714,7 +760,7 @@ public static class RowEncoder
         return null;
     }
 
-    private static ColumnValue ReadColumnValue(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
+    internal static ColumnValue ReadColumnValue(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
     {
         switch (columnType)
         {
@@ -1023,7 +1069,7 @@ public static class RowEncoder
         }
     }
 
-    private static void SkipColumnValue(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
+    internal static void SkipColumnValue(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
     {
         switch (columnType)
         {
@@ -1310,33 +1356,7 @@ public static class RowEncoder
                     $"Type {columnValue.Type} cannot be assigned to {column.Name} ({column.Type})"
                 );
 
-            length += columnValue.Type switch
-            {
-                ColumnType.Id =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeObjectId,
-                ColumnType.Integer64 =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
-                ColumnType.Float64 =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeDouble,
-                ColumnType.Float32 =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeFloat32,
-                ColumnType.String =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
-                    + Encoding.Unicode.GetByteCount(columnValue.StrValue!),
-                ColumnType.Bool =>
-                    SerializatorTypeSizes.TypeBool,
-                ColumnType.Date or ColumnType.DateTime =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
-                ColumnType.Bytes =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
-                    + (columnValue.BytesValue?.Length ?? 0),
-                ColumnType.Uuid =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeUuid,
-                ColumnType.Array =>
-                    SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + 1  // type + count + element-type byte
-                    + ArrayElementsSize(columnValue.ArrayValues ?? []),
-                _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnValue.Type)
-            };
+            length += ColumnValueSize(columnValue);
         }
 
         return length;

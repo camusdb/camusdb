@@ -106,6 +106,76 @@ internal sealed class TableIndexAdder
                     $"Column '{indexColumn.Name}' is not public on table '{table.Name}'"
                 );
         }
+
+        ValidateIncludeColumns(table, ticket);
+    }
+
+    /// <summary>
+    /// Validates the optional INCLUDE (stored/payload) column list: the combined key+include column
+    /// count must be within <see cref="CamusDBConfig.MaxIndexColumns"/>, and each included column must
+    /// exist and be public, must not duplicate another include column, and must not also be a key
+    /// column of the same index (it would be stored twice with an ambiguous covered slot). Key-column
+    /// existence/public checks already ran in <see cref="Validate"/>. Included columns are unordered
+    /// payload, so no direction/type-ordering restriction applies here. Runs on both the standalone and
+    /// the cluster add paths.
+    /// </summary>
+    /// <summary>
+    /// Enforces the combined key+include column ceiling (<see cref="CamusDBConfig.MaxIndexColumns"/>)
+    /// for a single index. A covering index duplicates each included value into every entry, so an
+    /// unbounded column count is a storage/replication amplification hazard. Disabled when the config
+    /// value is <c>&lt;= 0</c>. Shared by the standalone/cluster add paths and the inline
+    /// <c>CREATE TABLE</c> constraint builder.
+    /// </summary>
+    internal static void ValidateIndexColumnCount(string indexName, int keyColumnCount, int includeColumnCount)
+    {
+        int max = CamusDBConfig.MaxIndexColumns;
+        if (max <= 0)
+            return;
+
+        int total = keyColumnCount + includeColumnCount;
+        if (total > max)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SchemaLimitExceeded,
+                $"Index '{indexName}' spans {total} columns ({keyColumnCount} key + {includeColumnCount} INCLUDE), exceeding the maximum of {max}");
+    }
+
+    internal static void ValidateIncludeColumns(TableDescriptor table, AlterIndexTicket ticket)
+    {
+        ValidateIndexColumnCount(ticket.IndexName, ticket.Columns.Length, ticket.IncludeColumns.Length);
+
+        if (ticket.IncludeColumns.Length == 0)
+            return;
+
+        HashSet<string> keyColumns = new(StringComparer.Ordinal);
+        foreach (ColumnIndexInfo keyColumn in ticket.Columns)
+            keyColumns.Add(keyColumn.Name);
+
+        HashSet<string> seenIncludes = new(StringComparer.Ordinal);
+
+        foreach (string includeName in ticket.IncludeColumns)
+        {
+            if (!seenIncludes.Add(includeName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Duplicate INCLUDE column '{includeName}' on index '{ticket.IndexName}'");
+
+            if (keyColumns.Contains(includeName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column '{includeName}' is already indexed as a key column of index '{ticket.IndexName}'");
+
+            TableColumnSchema? tableColumn = table.Schema.Columns!.Find(c => c.Name == includeName);
+
+            if (tableColumn is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"INCLUDE column '{includeName}' does not exist on table '{table.Name}'");
+
+            if (!SchemaElementStateRules.IsReadable(tableColumn) || !SchemaElementStateRules.IsWritable(tableColumn))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"INCLUDE column '{includeName}' is not public on table '{table.Name}'");
+        }
     }
 
     private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
@@ -150,6 +220,9 @@ internal sealed class TableIndexAdder
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIds(table, ticket.Columns);
         OrderType[]? columnDirections = IndexColumnOrder.Extract(ticket.Columns);
+        string[]? includeColumnIds = ticket.IncludeColumns.Length > 0
+            ? GetColumnIdsByName(table, ticket.IncludeColumns)
+            : null;
 
         try
         {
@@ -163,7 +236,8 @@ internal sealed class TableIndexAdder
                 indexType,
                 SchemaElementState.WriteOnly,
                 startOffset: null,
-                columnDirections: columnDirections
+                columnDirections: columnDirections,
+                includeColumnIds: includeColumnIds
             ));
         }
         finally
@@ -173,7 +247,7 @@ internal sealed class TableIndexAdder
 
         table.Indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections)
+            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections, includeColumns: ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null)
         );
         table.Store.RegisterIndexName(indexId, ticket.IndexName);
         table.Store.RegisterIndexDirections(indexId, columnDirections);
@@ -235,7 +309,14 @@ internal sealed class TableIndexAdder
 
             CompositeColumnValue compositeKey = new(columnValues);
 
-            await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique).ConfigureAwait(false);
+            // Materialize the stored/payload (INCLUDE) values for a covering index. Unlike key
+            // columns, included columns may be NULL (they are payload, not part of the key).
+            // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
+            byte[]? includeTuple = ticket.IncludeColumns.Length > 0
+                ? IndexIncludeValueCodec.EncodeTupleChecked(ticket.IncludeColumns, row, ticket.IndexName)
+                : null;
+
+            await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique, includeTuple: includeTuple).ConfigureAwait(false);
             state.LastBackfilledRowId = rowId.ToString();
 
             rows++;
@@ -285,7 +366,8 @@ internal sealed class TableIndexAdder
                         old.Type,
                         SchemaElementState.Public,
                         finalOffset,
-                        columnDirections: old.ColumnDirections
+                        columnDirections: old.ColumnDirections,
+                        includeColumnIds: old.IncludeColumnIds
                     );
                     break;
                 }
@@ -298,7 +380,7 @@ internal sealed class TableIndexAdder
         }
 
         TableIndexSchema current = table.Indexes[ticket.IndexName];
-        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections);
+        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null);
 
         return FluxAction.Continue;
     }
@@ -327,6 +409,27 @@ internal sealed class TableIndexAdder
         }
 
         return columnsIds;
+    }
+
+    /// <summary>
+    /// Resolves a bare column-name list (used for INCLUDE columns) to immutable column ids, in the
+    /// same order. Throws if a name is unknown — callers must have validated existence first.
+    /// </summary>
+    private static string[] GetColumnIdsByName(TableDescriptor table, string[] columnNames)
+    {
+        string[] columnIds = new string[columnNames.Length];
+
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            TableColumnSchema? column = table.Schema.Columns!.Find(c => c.Name == columnNames[i]);
+
+            if (column is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Couldn't get column id for column '{columnNames[i]}'");
+
+            columnIds[i] = column.Id;
+        }
+
+        return columnIds;
     }
 
     private async Task<int> AlterIndexInternal(FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine, AddIndexFluxState state)

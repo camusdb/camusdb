@@ -18,7 +18,16 @@ public readonly struct AlterIndexTicket
 
     public ColumnIndexInfo[] Columns { get; }
 
-    public AlterIndexOperation Operation { get; }    
+    /// <summary>
+    /// Names of the stored/payload (INCLUDE) columns, in declared order. Empty when the statement
+    /// has no INCLUDE clause. These are materialized into every index entry's value so covering
+    /// scans can return them without a primary-row fetch; they never participate in the key,
+    /// ordering, or uniqueness (unlike <see cref="Columns"/>), hence a bare name list with no
+    /// direction.
+    /// </summary>
+    public string[] IncludeColumns { get; }
+
+    public AlterIndexOperation Operation { get; }
 
     public bool IfNotExists { get; }
 
@@ -31,7 +40,8 @@ public readonly struct AlterIndexTicket
         ColumnIndexInfo[] columns,
         AlterIndexOperation operation,
         bool ifNotExists = false,
-        string? newName = null
+        string? newName = null,
+        string[]? includeColumns = null
     )
     {
         DatabaseName = databaseName;
@@ -41,5 +51,6 @@ public readonly struct AlterIndexTicket
         Operation = operation;
         IfNotExists = ifNotExists;
         NewName = newName;
+        IncludeColumns = includeColumns ?? [];
     }
 }

@@ -392,7 +392,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
 
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
             joinNode.Index.KvId,
             keyTypes,
@@ -599,7 +599,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -661,7 +661,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordRange(table.Store.IndexKeySpace(rangeNode.Index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
             rangeNode.Index.KvId,
             keyTypes,
@@ -770,7 +770,7 @@ internal sealed class QueryJoinExecutor
                 CompositeColumnValue toBound = upperBound ?? lookupKey;
                 bool toInclusive = upperBound is null;
 
-                await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+                await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,

@@ -170,7 +170,7 @@ public sealed class TestBranchKvTombstone
         await CommitTransaction(node.Kahuna, tombTx);
 
         List<string> rows = [];
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in
             store.ScanIndex(KvTransaction.CreateReadOnly(), "idx_age", keyTypes, null, null, unique: true))
         {
             rows.Add(rowId.ToString());

@@ -139,9 +139,9 @@ internal sealed class QueryScanner
             // the scan entry — no GetRow call and no RowEncoder.DecodeAsync call.
             // No per-row point dep is recorded because no primary row was read; the range dep
             // above and the schema dep cover snapshot correctness for the index scan.
-            (RowLayout coveredLayout, int[] slotMap) = BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
+            IndexOnlyLayout covered = BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
 
-            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId) in table.Store.ScanIndex(
+            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in table.Store.ScanIndex(
                 ticket.TxnState,
                 index.KvId,
                 keyTypes,
@@ -155,8 +155,8 @@ internal sealed class QueryScanner
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
 
-                ColumnValue[] values = SynthesizeCoveredValues(slotMap, decodedKey);
-                QueryRow queryRow = new(rowId, coveredLayout, values);
+                ColumnValue[] values = SynthesizeCoveredValues(covered, decodedKey, includeTuple.Span);
+                QueryRow queryRow = new(rowId, covered.Layout, values);
 
                 if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                     yield return new QueryResultRow(rowId, queryRow);
@@ -200,7 +200,7 @@ internal sealed class QueryScanner
             }
         }
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -232,26 +232,58 @@ internal sealed class QueryScanner
     }
 
     /// <summary>
-    /// Builds the <see cref="RowLayout"/> and accompanying slot map for an index-only (covering)
-    /// scan. Column names are ordered by their position in the table schema (matching
-    /// <see cref="RowEncoder.DecodeToQueryRowAsync"/> output order) and filtered to those in
-    /// <paramref name="required"/>.
-    ///
-    /// Each <c>slotMap[i]</c> is the position of that column in <paramref name="index"/>.Columns;
-    /// the value is read from the decoded <see cref="CompositeColumnValue"/> at that position. A
-    /// covering scan is only planned when every required column is an index-key column
-    /// (<c>TryMarkIndexOnly</c> restricts the covered set to the index key), so the lookup always
-    /// succeeds — a missing column throws rather than falling back to the KV row id, since the
-    /// logical <c>id</c> column is user-supplied and need not equal the KV row key.
-    /// Called from <see cref="QueryExecutor"/> for the range-scan and unique-lookup paths.
+    /// Layout for an index-only (covering) scan, precomputed once per scan.
+    /// <list type="bullet">
+    ///   <item><see cref="SlotMap"/> — per output column, where its value comes from: a value
+    ///     <c>&gt;= 0</c> is a position into the decoded index <b>key</b>; a value <c>&lt; 0</c> is an
+    ///     INCLUDE column (its value comes from the entry-value tuple, filled by the include decode
+    ///     plan below).</item>
+    ///   <item><see cref="IncludeTypes"/> / <see cref="IncludeOutputByPosition"/> — the include decode
+    ///     plan, truncated to the last <i>projected</i> include position. For include position <c>p</c>,
+    ///     <c>IncludeOutputByPosition[p]</c> is the output index to write, or <c>-1</c> to skip that
+    ///     column entirely (it is not projected). This lets a scan decode only the included columns a
+    ///     query actually uses instead of the whole tuple.</item>
+    ///   <item><see cref="HasIncludeSlots"/> — true iff at least one output column is sourced from the
+    ///     tuple; when false the scan never touches the include payload even if the index has INCLUDE
+    ///     columns.</item>
+    /// </list>
     /// </summary>
-    internal static (RowLayout layout, int[] slotMap) BuildIndexOnlyLayout(
+    internal readonly record struct IndexOnlyLayout(
+        RowLayout Layout,
+        int[] SlotMap,
+        ColumnType[] IncludeTypes,
+        int[] IncludeOutputByPosition,
+        bool HasIncludeSlots);
+
+    private static int EncodeIncludeSlot(int includePosition) => -(includePosition + 1);
+
+    private static bool IsIncludeSlot(int slot) => slot < 0;
+
+    private static int DecodeIncludeSlot(int slot) => -slot - 1;
+
+    /// <summary>
+    /// Builds the <see cref="IndexOnlyLayout"/> for a covering scan, including the include decode plan.
+    /// Column names are ordered by their position in the table schema (matching
+    /// <see cref="RowEncoder.DecodeToQueryRowAsync"/> output order) and filtered to those in
+    /// <paramref name="required"/>. Each required column resolves to a key slot or an INCLUDE slot; a
+    /// covering scan is only planned when every required column is a key or included column
+    /// (<c>TryMarkIndexOnly</c>), so an unresolved column is an invariant violation and throws. The KV
+    /// row id is never used as a value source — the logical <c>id</c> column is user-supplied and need
+    /// not equal the KV row key. Called from <see cref="QueryExecutor"/> for the range-scan and
+    /// unique-lookup paths.
+    /// </summary>
+    internal static IndexOnlyLayout BuildIndexOnlyLayout(
         TableDescriptor table,
         IReadOnlySet<string>? required,
         TableIndexSchema index)
     {
         List<string> names = [];
         List<int> slots = [];
+
+        // Include decode plan over ALL the index's include positions; entries default to -1 (skip).
+        int[] includeOutputByPosition = new int[index.IncludeColumns.Length];
+        Array.Fill(includeOutputByPosition, -1);
+        int maxProjectedIncludePos = -1;
 
         if (table.Schema.Columns is not null)
         {
@@ -260,40 +292,102 @@ internal sealed class QueryScanner
                 if (required is not null && !required.Contains(col.Name))
                     continue;
 
+                int outputIndex = names.Count;
                 names.Add(col.Name);
 
-                // Covering is only marked when every required column is an index-key column
-                // (TryMarkIndexOnly restricts `available` to index.Columns), so this lookup
-                // always succeeds. A -1 here would mean the planner marked a plan index-only
-                // whose required set is not a subset of the index key — an invariant violation.
                 int keyPos = Array.IndexOf(index.Columns, col.Name);
-                if (keyPos < 0)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInternalOperation,
-                        $"Covering scan required column '{col.Name}' is not in index '{index.Name}' key");
-                slots.Add(keyPos);
+                if (keyPos >= 0)
+                {
+                    slots.Add(keyPos);
+                    continue;
+                }
+
+                int includePos = Array.IndexOf(index.IncludeColumns, col.Name);
+                if (includePos >= 0)
+                {
+                    slots.Add(EncodeIncludeSlot(includePos));
+                    includeOutputByPosition[includePos] = outputIndex;
+                    if (includePos > maxProjectedIncludePos)
+                        maxProjectedIncludePos = includePos;
+                    continue;
+                }
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Covering scan required column '{col.Name}' is not a key or INCLUDE column of index '{index.Name}'");
             }
         }
 
-        return (RowLayout.ForColumns(names), slots.ToArray());
+        // Truncate the include plan to the last projected position: positions beyond it are never
+        // read nor skipped (nothing after them is projected), so the tuple pass stops early. When no
+        // include column is projected the plan is empty and the tuple is never decoded at all.
+        int planLength = maxProjectedIncludePos + 1;
+        ColumnType[] includeTypes;
+        int[] planOutputs;
+        if (planLength == 0)
+        {
+            includeTypes = [];
+            planOutputs = [];
+        }
+        else
+        {
+            includeTypes = ResolveIncludeTypes(table, index, planLength);
+            planOutputs = includeOutputByPosition[..planLength];
+        }
+
+        return new IndexOnlyLayout(
+            RowLayout.ForColumns(names),
+            slots.ToArray(),
+            includeTypes,
+            planOutputs,
+            HasIncludeSlots: planLength > 0);
     }
 
     /// <summary>
-    /// Synthesizes the <see cref="ColumnValue"/> array for one covering-scan row by reading each
-    /// column straight from the decoded index key. Every <paramref name="slotMap"/> entry is a
-    /// non-negative position into <paramref name="decodedKey"/> because a covering scan is only
-    /// planned when every required column is an index-key column (see <see cref="BuildIndexOnlyLayout"/>
-    /// and <c>TryMarkIndexOnly</c>). The KV row id is deliberately not used as a value source: the
-    /// logical <c>id</c> column is user-supplied and need not equal the internal KV row key.
-    /// Called from <see cref="QueryExecutor"/> for the range-scan and unique-lookup paths.
+    /// Resolves the <see cref="ColumnType"/> of the first <paramref name="count"/> INCLUDE columns of
+    /// the index, in include order, so the entry-value tuple can be decoded/skipped position-by-position.
+    /// </summary>
+    private static ColumnType[] ResolveIncludeTypes(TableDescriptor table, TableIndexSchema index, int count)
+    {
+        ColumnType[] types = new ColumnType[count];
+        for (int i = 0; i < count; i++)
+        {
+            TableColumnSchema? col = table.Schema.Columns?.Find(c => c.Name == index.IncludeColumns[i]);
+            if (col is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"INCLUDE column '{index.IncludeColumns[i]}' of index '{index.Name}' not found in table schema");
+            types[i] = col.Type;
+        }
+        return types;
+    }
+
+    /// <summary>
+    /// Synthesizes the <see cref="ColumnValue"/> array for one covering-scan row: key-sourced output
+    /// columns are read from <paramref name="decodedKey"/>, and — only when the layout has INCLUDE slots
+    /// — the projected included columns are decoded straight from <paramref name="includeTuple"/> in a
+    /// single pass (see <see cref="IndexIncludeValueCodec.DecodeTupleInto"/>), skipping unprojected
+    /// included columns and never materializing an intermediate composite. A short/absent tuple leaves
+    /// missing projected columns as <see cref="ColumnValue.Null"/>. The KV row id is never a value source.
     /// </summary>
     internal static ColumnValue[] SynthesizeCoveredValues(
-        int[] slotMap,
-        CompositeColumnValue decodedKey)
+        in IndexOnlyLayout layout,
+        CompositeColumnValue decodedKey,
+        ReadOnlySpan<byte> includeTuple)
     {
+        int[] slotMap = layout.SlotMap;
         ColumnValue[] values = new ColumnValue[slotMap.Length];
+
         for (int i = 0; i < slotMap.Length; i++)
-            values[i] = decodedKey.Values[slotMap[i]];
+        {
+            int slot = slotMap[i];
+            if (!IsIncludeSlot(slot))
+                values[i] = decodedKey.Values[slot];
+        }
+
+        if (layout.HasIncludeSlots)
+            IndexIncludeValueCodec.DecodeTupleInto(layout.IncludeTypes, layout.IncludeOutputByPosition, values, includeTuple);
+
         return values;
     }
 

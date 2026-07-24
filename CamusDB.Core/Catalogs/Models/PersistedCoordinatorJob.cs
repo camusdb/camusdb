@@ -61,6 +61,22 @@ public sealed class PersistedCoordinatorJob
     public IndexType? IndexType { get; set; }
 
     /// <summary>
+    /// Column IDs of the index's stored/payload (INCLUDE) columns, if any. Persisted so a
+    /// leader-change resume rebuilds the same covering index (value tuple) it started. Null for
+    /// column jobs and for indexes without INCLUDE columns.
+    /// </summary>
+    public string[]? IndexIncludeColumnIds { get; set; }
+
+    /// <summary>
+    /// Per-key-column sort directions, positionally aligned with <see cref="IndexColumnIds"/>. Persisted
+    /// so a leader-change resume rebuilds the index with the same directions it started — otherwise a
+    /// resumed DESCENDING index would be replicated/registered as ascending, disagreeing with any
+    /// descending key encoding the interrupted run already wrote. Null means all-ascending (and is the
+    /// value for column jobs and for indexes created before mixed-direction support).
+    /// </summary>
+    public OrderType[]? IndexColumnDirections { get; set; }
+
+    /// <summary>
     /// Last row-id checkpoint written by the backfill pass. Non-null only when the
     /// backfill has committed at least one checkpoint batch. On resume the backfill
     /// starts scanning from this offset instead of the beginning of the table.

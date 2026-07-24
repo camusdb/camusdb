@@ -1076,7 +1076,7 @@ public sealed class KvTableStore
 
         BranchKvValue idx = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
         if (idx.Kind == BranchKvKind.Tombstone) return null;   // tombstone at this level
-        if (idx.HasPayload) return ObjectId.ToValue(idx.Payload.Span);
+        if (idx.HasPayload) return RowIdFromPayload(idx.Payload.Span);
 
         // Miss at level-0: walk ancestry.
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
@@ -1085,7 +1085,44 @@ public sealed class KvTableStore
             string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
             idx = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
             if (idx.Kind == BranchKvKind.Tombstone) return null;
-            if (idx.HasPayload) return ObjectId.ToValue(idx.Payload.Span);
+            if (idx.HasPayload) return RowIdFromPayload(idx.Payload.Span);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Point-read a unique index entry for a covering (index-only) lookup, returning both the rowId
+    /// and the stored/payload (INCLUDE) tuple bytes from the entry value. Mirrors
+    /// <see cref="LookupUnique"/> exactly for locking, snapshot, and ancestry semantics; the only
+    /// difference is that it also surfaces the include tuple so the covering read can synthesize the
+    /// payload columns without a primary-row fetch. Returns <c>null</c> when the key is absent.
+    /// </summary>
+    public async Task<(ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)?> LookupUniqueCovering(
+        KvTransaction tx,
+        string indexId,
+        CompositeColumnValue key,
+        CancellationToken cancellationToken = default)
+    {
+        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!TryBuildUniqueIndexKey(indexId, key, out string kvKey))
+            return null;
+
+        if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
+            await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
+
+        BranchKvValue idx = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
+        if (idx.Kind == BranchKvKind.Tombstone) return null;
+        if (idx.HasPayload) return (RowIdFromPayload(idx.Payload.Span), IncludeTupleFromPayload(idx.Payload));
+
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            BranchMetrics.RecordAncestorProbe();
+            string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
+            idx = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
+            if (idx.Kind == BranchKvKind.Tombstone) return null;
+            if (idx.HasPayload) return (RowIdFromPayload(idx.Payload.Span), IncludeTupleFromPayload(idx.Payload));
         }
 
         return null;
@@ -1103,7 +1140,30 @@ public sealed class KvTableStore
     /// the same consistent snapshot as <see cref="GetRow"/> and <see cref="LookupUnique"/>
     /// across all pages. Zero is passed for non-snapshot transactions (read-committed fast path).
     /// </summary>
-    public async IAsyncEnumerable<(CompositeColumnValue key, ObjectIdValue rowId)> ScanIndex(
+    /// <summary>
+    /// Extracts the stored/payload (INCLUDE) tuple from a secondary-index entry value payload. The
+    /// payload is <c>rowId (24 bytes) ‖ includeTuple</c>; anything past the fixed 24-byte rowId is the
+    /// tuple. Returns an empty span for a plain (non-covering) index whose payload is exactly the rowId.
+    /// The returned memory is a zero-copy slice of the Kahuna-owned value buffer, valid for the life of
+    /// the scan iteration.
+    /// </summary>
+    private static ReadOnlyMemory<byte> IncludeTupleFromPayload(ReadOnlyMemory<byte> payload)
+        => payload.Length > BranchKvCodec.IndexRowIdPayloadLength
+            ? payload[BranchKvCodec.IndexRowIdPayloadLength..]
+            : ReadOnlyMemory<byte>.Empty;
+
+    /// <summary>
+    /// Reads the rowId from a unique-index entry value payload. The payload is
+    /// <c>rowId (24 bytes) ‖ includeTuple</c>; the rowId is the fixed 24-byte prefix, so a covering
+    /// index whose payload also carries a tuple must slice the prefix rather than parse the whole
+    /// payload (which would fail the exact-24-byte requirement of <see cref="ObjectId.ToValue(ReadOnlySpan{byte})"/>).
+    /// </summary>
+    private static ObjectIdValue RowIdFromPayload(ReadOnlySpan<byte> payload)
+        => ObjectId.ToValue(payload.Length > BranchKvCodec.IndexRowIdPayloadLength
+            ? payload[..BranchKvCodec.IndexRowIdPayloadLength]
+            : payload);
+
+    public async IAsyncEnumerable<(CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)> ScanIndex(
         KvTransaction tx,
         string indexId,
         ColumnType[] keyTypes,
@@ -1184,7 +1244,7 @@ public sealed class KvTableStore
                         continue;
 
                     encodedKey = suffix.ToString();
-                    rowId = ObjectId.ToValue(scanDecoded.Payload.Span);
+                    rowId = RowIdFromPayload(scanDecoded.Payload.Span);
                 }
                 else
                 {
@@ -1223,7 +1283,7 @@ public sealed class KvTableStore
                 if (maxRows is not null && emitted >= maxRows.Value)
                     yield break;
 
-                yield return (decodedKey, rowId);
+                yield return (decodedKey, rowId, IncludeTupleFromPayload(scanDecoded.Payload));
                 emitted++;
             }
         }
@@ -1292,7 +1352,7 @@ public sealed class KvTableStore
                                 if (payload is not null)
                                 {
                                     encKey = suffix;
-                                    rowId = ObjectId.ToValue(payload.Value.Span);
+                                    rowId = RowIdFromPayload(payload.Value.Span);
                                 }
                             }
                             else if (suffix.Length >= RowIdHexLength)
@@ -1319,7 +1379,7 @@ public sealed class KvTableStore
 
                                 if (inRange)
                                 {
-                                    yield return (decodedKey, rowId);
+                                    yield return (decodedKey, rowId, IncludeTupleFromPayload(payload ?? default));
                                     emitted++;
 
                                     if (maxRows is not null && emitted >= maxRows.Value)
@@ -1362,13 +1422,14 @@ public sealed class KvTableStore
         ObjectIdValue rowId,
         bool unique,
         bool backfillMode = false,
+        byte[]? includeTuple = null,
         CancellationToken cancellationToken = default)
     {
         string kvKey = unique
             ? BuildUniqueIndexKey(indexId, key)
             : BuildNonUniqueIndexKey(indexId, key, rowId);
 
-        byte[] value = BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(rowId.ToString()));
+        byte[] value = BranchKvCodec.EncodeIndexRowId(rowId, includeTuple ?? default);
 
         tx.ReserveMutations(1);
 
@@ -1409,7 +1470,11 @@ public sealed class KvTableStore
                     cancellationToken
                 ).ConfigureAwait(false);
                 BranchKvValue existingDecoded = BranchKvCodec.Decode(existing?.Value);
-                string existingRowId = existingDecoded.HasPayload ? Encoding.UTF8.GetString(existingDecoded.Payload.Span) : "";
+                // The payload may carry an INCLUDE tuple after the rowId; the rowId is the fixed
+                // 24-byte prefix, so compare only that slice — never the whole payload.
+                string existingRowId = existingDecoded.HasPayload
+                    ? Encoding.UTF8.GetString(existingDecoded.Payload.Span.Slice(0, Math.Min(BranchKvCodec.IndexRowIdPayloadLength, existingDecoded.Payload.Length)))
+                    : "";
                 if (existingRowId != rowId.ToString())
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{DuplicateKeyLabel(indexId)}'");
                 // else: same rowId — idempotent re-write on resume, continue
@@ -1459,8 +1524,22 @@ public sealed class KvTableStore
         public IReadOnlyList<IndexWrite>? IndexEntries { get; init; }
     }
 
-    /// <summary>One secondary-index entry for a row in a batch write.</summary>
-    public readonly record struct IndexWrite(string IndexId, CompositeColumnValue Key, bool Unique);
+    /// <summary>
+    /// One secondary-index entry for a row in a batch write.
+    /// <para>
+    /// <see cref="IncludeTuple"/> carries the serialized stored/payload (INCLUDE) column values for a
+    /// covering index (see <see cref="IndexIncludeValueCodec"/>); it is null/empty for a plain index,
+    /// keeping the entry value byte-identical to the historical rowId-only form.
+    /// </para>
+    /// <para>
+    /// <see cref="Overwrite"/> forces the write to use <see cref="KeyValueFlags.Set"/> even for a
+    /// unique index. It is set only when an UPDATE changed an included column but not the key, so the
+    /// entry key already exists and belongs to this same row: the value must be overwritten in place,
+    /// and <c>SetIfNotExists</c> (the normal unique-insert flag) would wrongly no-op. It never bypasses
+    /// duplicate detection for a genuinely new key.
+    /// </para>
+    /// </summary>
+    public readonly record struct IndexWrite(string IndexId, CompositeColumnValue Key, bool Unique, byte[]? IncludeTuple = null, bool Overwrite = false);
 
     /// <summary>
     /// Writes many rows (and their index entries) using two Kahuna round-trips for the whole
@@ -1518,8 +1597,10 @@ public sealed class KvTableStore
 
                 if (!isBranch)
                 {
-                    uniqueByKey[kvKey] = ix.Unique;
-                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId), CompareValue = null, CompareRevision = -1, Flags = ix.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    // An include-only rewrite (Overwrite) targets an existing unique key owned by this
+                    // same row, so it must Set (overwrite), not SetIfNotExists which would no-op.
+                    uniqueByKey[kvKey] = ix.Unique && !ix.Overwrite;
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId, ix.IncludeTuple ?? default), CompareValue = null, CompareRevision = -1, Flags = (ix.Unique && !ix.Overwrite) ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 }
             }
         }
@@ -1557,10 +1638,12 @@ public sealed class KvTableStore
                     string kvKey = ix.Unique
                         ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
                         : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
-                    byte[] value = BranchKvCodec.EncodeIndexRowId(row.RowId);
+                    byte[] value = BranchKvCodec.EncodeIndexRowId(row.RowId, ix.IncludeTuple ?? default);
 
-                    if (!ix.Unique)
+                    if (!ix.Unique || ix.Overwrite)
                     {
+                        // Non-unique entries, and include-only rewrites of an existing unique key owned
+                        // by this same row, both write with a plain Set (overwrite in place).
                         batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = value, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                         batchByKey[kvKey] = false;
                     }
@@ -1882,8 +1965,10 @@ public sealed class KvTableStore
 
                 if (!isBranch)
                 {
-                    uniqueByKey[kvKey] = newIx.Unique;
-                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId), CompareValue = null, CompareRevision = -1, Flags = newIx.Unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    // Overwrite = include-only rewrite of an existing unique key owned by this row:
+                    // Set (overwrite), not SetIfNotExists which would no-op on the existing key.
+                    uniqueByKey[kvKey] = newIx.Unique && !newIx.Overwrite;
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId, newIx.IncludeTuple ?? default), CompareValue = null, CompareRevision = -1, Flags = (newIx.Unique && !newIx.Overwrite) ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 }
             }
         }
@@ -1929,10 +2014,12 @@ public sealed class KvTableStore
                     string kvKey = newIx.Unique
                         ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
                         : BuildNonUniqueIndexKey(newIx.IndexId, newIx.Key, row.RowId);
-                    byte[] value = BranchKvCodec.EncodeIndexRowId(row.RowId);
+                    byte[] value = BranchKvCodec.EncodeIndexRowId(row.RowId, newIx.IncludeTuple ?? default);
 
-                    if (!newIx.Unique)
+                    if (!newIx.Unique || newIx.Overwrite)
                     {
+                        // Non-unique, or an include-only rewrite of an existing unique key owned by this
+                        // row: plain Set (overwrite in place).
                         batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = value, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                         batchByKey[kvKey] = false;
                     }

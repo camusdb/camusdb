@@ -103,7 +103,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos]));
+            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne)));
             return;
         }
 
@@ -113,7 +113,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos]));
+            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne)));
             return;
         }
 
@@ -140,6 +140,44 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     /// </summary>
     /// <param name="ast"></param>
     /// <returns></returns>
+    /// <summary>
+    /// Walks the optional INCLUDE (...) list of an inline covering-index constraint into a bare name
+    /// array. Payload columns are unordered, so a direction on an included column is a parse-time error.
+    /// Returns an empty array when the clause is absent.
+    /// </summary>
+    private static string[] GetIncludeColumnList(NodeAst? ast)
+    {
+        if (ast is null)
+            return [];
+
+        List<string> names = [];
+        CollectIncludeNames(ast, names);
+        return [.. names];
+    }
+
+    private static void CollectIncludeNames(NodeAst ast, List<string> names)
+    {
+        if (ast.nodeType == NodeType.IndexIdentifierList)
+        {
+            if (ast.leftAst != null)
+                CollectIncludeNames(ast.leftAst, names);
+            if (ast.rightAst != null)
+                CollectIncludeNames(ast.rightAst, names);
+            return;
+        }
+
+        if (ast.nodeType == NodeType.Identifier)
+        {
+            names.Add(ast.yytext!);
+            return;
+        }
+
+        if (ast.nodeType is NodeType.IndexIdentifierAsc or NodeType.IndexIdentifierDesc)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "INCLUDE columns cannot specify ASC/DESC (payload columns are unordered)");
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid INCLUDE column list: {ast.nodeType}");
+    }
+
     private static void GetIndexColumnList(NodeAst? ast, List<ColumnIndexInfo> indexColumns)
     {
         if (ast is null)
@@ -364,7 +402,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos]));
+            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne)));
             return;
         }
 
@@ -374,7 +412,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos]));
+            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne)));
             return;
         }
 

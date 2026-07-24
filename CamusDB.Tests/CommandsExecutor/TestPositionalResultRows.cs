@@ -322,7 +322,7 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
         (IReadOnlyList<DerivedColumnSchema> schema, _) =
             await ExecQuery(executor, database, dbname, "SHOW INDEXES FROM t");
 
-        string[] expectedNames = ["Table", "Non_unique", "Key_name", "Columns", "Index_type"];
+        string[] expectedNames = ["Table", "Non_unique", "Key_name", "Columns", "Include", "Index_type"];
         Assert.AreEqual(expectedNames.Length, schema.Count);
         for (int i = 0; i < expectedNames.Length; i++)
             Assert.AreEqual(expectedNames[i], schema[i].Name, $"schema[{i}].Name");

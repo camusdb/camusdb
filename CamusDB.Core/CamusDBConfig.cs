@@ -553,6 +553,27 @@ public static class CamusDBConfig
     public static int MaxIndexesPerTable = 64;
 
     /// <summary>
+    /// Maximum number of columns a single index may span, counting <b>both</b> its key columns and its
+    /// stored/payload (<c>INCLUDE</c>) columns. Guards against a covering index that duplicates an
+    /// unbounded amount of row data into every entry value. Checked at DDL time when an index is
+    /// created (standalone <c>CREATE/ALTER INDEX</c> and inline <c>CREATE TABLE</c> constraints).
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>32</c> (matches SQL Server's key+included column ceiling).
+    /// </summary>
+    public static int MaxIndexColumns = 32;
+
+    /// <summary>
+    /// Maximum encoded byte size of an index entry's stored/payload (<c>INCLUDE</c>) tuple. Guards
+    /// against a single oversized <c>String</c>/<c>Bytes</c>/<c>Array</c> included value bloating every
+    /// index entry, its replication, and the enclosing transaction batch. Checked at write time
+    /// (INSERT/UPDATE/backfill) after the tuple is encoded and before the KV mutation is issued; a row
+    /// whose tuple exceeds this is rejected with <see cref="CamusDBErrorCodes.SchemaLimitExceeded"/>.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>4096</c> (4 KiB); tune against Kahuna's preferred value/batch sizes.
+    /// </summary>
+    public static int MaxIndexIncludeTupleBytes = 4096;
+
+    /// <summary>
     /// Maximum number of tables allowed in a single database. Checked at <c>CREATE TABLE</c>
     /// time against the database's current persisted table set. <c>CREATE TABLE IF NOT EXISTS</c>
     /// that resolves to an already-existing table is exempt — the table already counts.

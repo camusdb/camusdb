@@ -190,6 +190,17 @@ public sealed class RowUpdater
         return false;
     }
 
+    /// <summary>
+    /// Materializes the stored/payload (INCLUDE) tuple for a covering index, or <see langword="null"/>
+    /// for a plain index. Called lazily, only from a branch that emits an index entry, so an update
+    /// whose entry is skipped (key and included values unchanged) never serializes or byte-checks a
+    /// payload it would discard.
+    /// </summary>
+    private static byte[]? BuildIncludeTuple(TableIndexSchema index, Dictionary<string, ColumnValue> newRow)
+        => index.HasIncludeColumns
+            ? IndexIncludeValueCodec.EncodeTupleChecked(index.IncludeColumns, newRow, index.Name)
+            : null;
+
     private async Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
     {
         UpdateTicket ticket = state.Ticket;
@@ -453,6 +464,14 @@ public sealed class RowUpdater
             if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
                 continue;
 
+            // Stored/payload (INCLUDE) columns live in the entry value, not the key. So an update that
+            // leaves the key identical but changes an included value must still rewrite the entry value
+            // (in place, on the same key) or a covering read would return stale payload. Computing
+            // `includeChanged` only compares values (no serialization); the tuple is serialized lazily,
+            // in the branches that actually emit an entry, so an update of an unrelated column pays
+            // nothing for a covering index whose entry is skipped.
+            bool includeChanged = index.HasIncludeColumns && IncludeColumnsChanged(index, oldRow, newRow);
+
             if (index.Type == IndexType.Unique)
             {
                 // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
@@ -472,13 +491,20 @@ public sealed class RowUpdater
                 // points to the correct rowId, and the row fetch returns the branch-local value via
                 // the branch-aware read path.
                 if (oldHasKey && newHasKey && oldKey!.CompareTo(newKey!) == 0)
+                {
+                    // Key identical. Only work to do is refreshing the covered payload: overwrite the
+                    // existing entry value in place (same key, this row's rowId) — no delete, and Set
+                    // rather than SetIfNotExists (which would no-op on the already-present key).
+                    if (includeChanged)
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow), Overwrite: true));
                     continue;
+                }
 
                 if (oldHasKey)
                     (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey!, rowId, Unique: true));
 
                 if (newHasKey)
-                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true));
+                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow)));
             }
             else if (index.Type == IndexType.Multi)
             {
@@ -489,14 +515,39 @@ public sealed class RowUpdater
 
                 // Skip unchanged entries — same correctness requirement as the unique index case above.
                 if (oldKey.CompareTo(newKey) == 0)
+                {
+                    // Key (incl. rowId tie-breaker) identical: overwrite the entry value in place to
+                    // refresh the covered payload; no delete needed.
+                    if (includeChanged)
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow), Overwrite: true));
                     continue;
+                }
 
                 (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey, rowId, Unique: false));
-                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false));
+                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow)));
             }
         }
 
         return (oldEntries, newEntries);
+    }
+
+    /// <summary>
+    /// True when any of the index's stored/payload (INCLUDE) column values differs between the old and
+    /// new row (a missing/absent value compares as NULL). Drives the in-place value rewrite for an
+    /// update that leaves the key unchanged but changes covered payload.
+    /// </summary>
+    private static bool IncludeColumnsChanged(TableIndexSchema index, Dictionary<string, ColumnValue> oldRow, Dictionary<string, ColumnValue> newRow)
+    {
+        foreach (string includeColumn in index.IncludeColumns)
+        {
+            ColumnValue oldValue = oldRow.TryGetValue(includeColumn, out ColumnValue? o) ? o : ColumnValue.Null;
+            ColumnValue newValue = newRow.TryGetValue(includeColumn, out ColumnValue? n) ? n : ColumnValue.Null;
+
+            if (oldValue.CompareTo(newValue) != 0)
+                return true;
+        }
+
+        return false;
     }
 
     private async Task<int> UpdateInternal(FluxMachine<UpdateFluxSteps, UpdateFluxState> machine, UpdateFluxState state)

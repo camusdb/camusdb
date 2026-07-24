@@ -97,6 +97,7 @@ TThen           (T|t)(H|h)(E|e)(N|n)
 TElse           (E|e)(L|l)(S|s)(E|e)
 TEnd            (E|e)(N|n)(D|d)
 TInteger        (I|i)(N|n)(T|t)(E|e)(G|g)(E|e)(R|r)
+TInclude        (I|i)(N|n)(C|c)(L|l)(U|u)(D|d)(E|e)
 TDouble         (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)
 TConstraint     (C|c)(O|o)(N|n)(S|s)(T|t)(R|r)(A|a)(I|i)(N|n)(T|t)
 TCheck          (C|c)(H|h)(E|e)(C|c)(K|k)
@@ -263,6 +264,8 @@ TDot            \.
 {TIndex} { return (int)Token.TINDEX; }
 
 {TIndexes} { return (int)Token.TINDEXES; }
+
+{TInclude} { return (int)Token.TINCLUDE; }
 
 {TAlter} { return (int)Token.TALTER; }
 

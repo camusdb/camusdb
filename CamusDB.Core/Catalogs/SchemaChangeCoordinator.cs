@@ -234,6 +234,8 @@ public sealed class SchemaChangeCoordinator
         IndexId = indexBuildInfo?.IndexId,
         IndexColumnIds = indexBuildInfo?.ColumnIds,
         IndexType = indexBuildInfo?.IndexType,
+        IndexIncludeColumnIds = indexBuildInfo?.IncludeColumnIds,
+        IndexColumnDirections = indexBuildInfo?.ColumnDirections,
         Attempts = attempts,
     };
 
@@ -316,7 +318,10 @@ public sealed class SchemaChangeCoordinator
                 persisted.IndexType.HasValue)
             {
                 string[] columnNames = ResolveColumnNames(liveTable, persisted.IndexColumnIds);
-                indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value);
+                string[]? includeColumnNames = persisted.IndexIncludeColumnIds is { Length: > 0 }
+                    ? ResolveColumnNames(liveTable, persisted.IndexIncludeColumnIds)
+                    : null;
+                indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value, ColumnDirections: persisted.IndexColumnDirections, IncludeColumnIds: persisted.IndexIncludeColumnIds, IncludeColumnNames: includeColumnNames);
             }
 
             try
@@ -456,5 +461,7 @@ public sealed record IndexBuildInfo(
     string[] ColumnIds,
     string[] ColumnNames,
     IndexType IndexType,
-    OrderType[]? ColumnDirections = null
+    OrderType[]? ColumnDirections = null,
+    string[]? IncludeColumnIds = null,
+    string[]? IncludeColumnNames = null
 );

@@ -38,6 +38,14 @@ public sealed class TableColumnDropper
                     CamusDBErrorCodes.InvalidInput,
                     "Column cannot be dropped because it is part of an index"
                 );
+
+            // A covering index materializes its included columns into every entry value, so dropping
+            // one would orphan payload the index still encodes. Reject (drop/recreate the index first).
+            if (index.Value.IncludeColumns.Contains(ticket.Column.Name))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column cannot be dropped because it is an INCLUDE column of index '{index.Value.Name}'"
+                );
         }
 
         bool hasColumn = false;

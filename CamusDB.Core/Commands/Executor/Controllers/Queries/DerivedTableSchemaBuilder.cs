@@ -46,6 +46,7 @@ internal static class DerivedTableSchemaBuilder
         new("Non_unique", ColumnType.String),
         new("Key_name",   ColumnType.String),
         new("Columns",    ColumnType.String),
+        new("Include",    ColumnType.String),
         new("Index_type", ColumnType.String),
     ];
 
