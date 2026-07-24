@@ -54,7 +54,12 @@ internal sealed class QueryScanner
         // holds one entry; mixed-version scans hold a handful. The layout is identical for all
         // rows at the same stored version (requiredColumns and visibilityVersion are constant
         // for the life of a scan), so building it once and reusing it is safe.
-        RowEncoder.RowDecodeState decodeState = new();
+        // Adaptive slot-backed decode: only worth it when a residual filter rejects rows (a rejected
+        // row decodes to slots but never materializes its projection cells). With no residual filter
+        // every scanned row is consumed, so the eager path is faster. The global flag still forces slots
+        // on everywhere when set (kill-switch / benchmark baseline) — see RowDecodeState.SlotBackedDecode.
+        RowEncoder.RowDecodeState decodeState =
+            new() { SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null };
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
@@ -163,7 +168,12 @@ internal sealed class QueryScanner
         // Index order is preserved: the page is filled in scan order and batch results are
         // indexed positionally, so rows are decoded and yielded in scan order. Missing rows
         // (null bytes from the batch) preserve the warn-and-skip contract of the per-entry path.
-        RowEncoder.RowDecodeState decodeState = new();
+        // Adaptive slot-backed decode: only worth it when a residual filter rejects rows (a rejected
+        // row decodes to slots but never materializes its projection cells). With no residual filter
+        // every scanned row is consumed, so the eager path is faster. The global flag still forces slots
+        // on everywhere when set (kill-switch / benchmark baseline) — see RowDecodeState.SlotBackedDecode.
+        RowEncoder.RowDecodeState decodeState =
+            new() { SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null };
         int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
 

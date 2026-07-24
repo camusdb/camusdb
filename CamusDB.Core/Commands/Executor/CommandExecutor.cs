@@ -155,7 +155,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         else
         {
-            registryTask = DatabaseRegistry.OpenAsync(sharedNode!);
+            registryTask = DatabaseRegistry.OpenAsync(sharedNode!, isClusterMode);
             ownsRegistry = true;
         }
 

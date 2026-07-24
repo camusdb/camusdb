@@ -26,8 +26,12 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestRegistryCoherence : BaseTest
 {
+    // Cluster mode: two registries stand in for two cluster nodes, so each must run the cross-node
+    // generation revalidation on a cache hit — the very path these tests exercise. In standalone mode a
+    // hit is trusted without revalidation (there is only one registry), which is not what is under test here.
     private async Task<(DatabaseRegistry a, DatabaseRegistry b)> TwoNodesAsync()
-        => (await DatabaseRegistry.OpenAsync(TestNode!), await DatabaseRegistry.OpenAsync(TestNode!));
+        => (await DatabaseRegistry.OpenAsync(TestNode!, isClusterMode: true),
+            await DatabaseRegistry.OpenAsync(TestNode!, isClusterMode: true));
 
     /// <summary>
     /// Node B warms a cache HIT for a name, node A drops it — B must revalidate the stale hit to "gone".

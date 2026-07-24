@@ -89,6 +89,14 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
         => new(rowId, layout, slots, false);
 
     /// <summary>
+    /// True when this row is slot-backed (lazy per-cell materialization); false when eager
+    /// (<see cref="ColumnValue"/><c>[]</c>). Reflects the decode path chosen for the producing scan —
+    /// see <see cref="CamusDB.Core.Storage.Kv.RowEncoder.RowDecodeState.SlotBackedDecode"/>. Exposed for
+    /// tests and diagnostics; consumers read values through <see cref="GetColumnValue"/> regardless.
+    /// </summary>
+    internal bool IsSlotBacked => _slots is not null;
+
+    /// <summary>
     /// The cell at <paramref name="ordinal"/> as a <see cref="ColumnValue"/>. For a slot-backed row this
     /// materializes (and caches) just that cell — the per-cell path hot consumers should use so unread
     /// cells stay unmaterialized.

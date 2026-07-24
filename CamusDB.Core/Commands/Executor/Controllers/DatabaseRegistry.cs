@@ -45,6 +45,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private readonly KvTransactionsManager transactions;
     private readonly string keyPrefix;
 
+    // Cross-node cache coherence only matters when more than one node shares the persistent store. In
+    // standalone mode this process owns the single registry instance, so its in-memory cache is always
+    // authoritative — every mutation updates it in place under `writeSem`, and no other node can change
+    // KV underneath it. The generation stamp (below) exists solely to invalidate a stale cache hit after
+    // ANOTHER node mutates; with no other node it is pure overhead, so a cache hit skips the per-resolve
+    // Kahuna generation read entirely. Only set true for genuine Raft cluster nodes.
+    private readonly bool isClusterMode;
+
     // Stable local Raft node id (from configured NodeId or a hash of the node name; survives restart).
     // Stamped into every drop-intent marker this node writes so startup recovery can reclaim only its
     // own crash remnants and never delete a live drop-intent owned by another cluster node.
@@ -105,12 +113,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         IKahuna kahuna,
         KvTransactionsManager transactions,
         string keyPrefix,
-        int localNodeId)
+        int localNodeId,
+        bool isClusterMode)
     {
         this.kahuna = kahuna;
         this.transactions = transactions;
         this.keyPrefix = keyPrefix;
         this.localNodeId = localNodeId;
+        this.isClusterMode = isClusterMode;
     }
 
     // -----------------------------------------------------------------------
@@ -317,8 +327,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// <summary>
     /// Opens (or creates) the database registry against the process-level shared Kahuna node.
     /// Registry keys are namespaced under <c>_system/</c> in the shared keyspace.
+    ///
+    /// <para><paramref name="isClusterMode"/> must be <c>true</c> only for a genuine Raft cluster node
+    /// where other nodes can mutate the shared registry concurrently. In standalone mode (the default)
+    /// this process owns the single registry, so a cache hit is trusted without the per-resolve
+    /// generation round-trip — see <see cref="isClusterMode"/>.</para>
     /// </summary>
-    public static async Task<DatabaseRegistry> OpenAsync(EmbeddedKahuna sharedNode)
+    public static async Task<DatabaseRegistry> OpenAsync(EmbeddedKahuna sharedNode, bool isClusterMode = false)
     {
         ArgumentNullException.ThrowIfNull(sharedNode);
 
@@ -330,7 +345,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         };
 
         KvTransactionsManager txManager = new(sharedNode.Kahuna, mintLocalT);
-        DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/", sharedNode.Raft.GetLocalNodeId());
+        DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/", sharedNode.Raft.GetLocalNodeId(), isClusterMode);
 
         // OpenAsync is kicked off eagerly during CommandExecutor construction, which a hosted service
         // can trigger before Program.cs calls StartAsync. Wait until the shared node has elected
@@ -450,6 +465,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         if (byName.TryGetValue(name, out DatabaseRegistryEntry? cached))
         {
+            // Standalone: this process owns the only registry, so its cache is always authoritative and a
+            // hit needs no revalidation. Skipping the generation read here removes a Kahuna route (and its
+            // string-building) from every database open — the dominant per-operation cost in single-node mode.
+            if (!isClusterMode)
+                return cached;
+
             // A cache hit is authoritative only while this node's cache is at the current generation.
             // If a mutation (possibly on another node) has advanced the generation since we last loaded,
             // the hit may be stale — revalidate against KV before trusting it, then re-resolve from the

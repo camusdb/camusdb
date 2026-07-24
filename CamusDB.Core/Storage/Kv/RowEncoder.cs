@@ -95,6 +95,16 @@ public static class RowEncoder
     public sealed class RowDecodeState
     {
         internal readonly Dictionary<int, RowDecodePlan> Plans = new();
+
+        /// <summary>
+        /// Per-scan override for slot-backed decode. <see langword="null"/> defers to the global
+        /// <see cref="CamusDBConfig.SlotBackedDecode"/>; a non-null value lets the scan opt in or out
+        /// based on its own shape. Slot-backed decode only pays off when the scan rejects rows (a
+        /// rejected row decodes to slots but never materializes its projection cells); a scan that
+        /// materializes every row — no residual filter, or a full-materialize consumer — is faster on
+        /// the eager path, so the scanner sets this to enable slots only when a rejecting filter exists.
+        /// </summary>
+        public bool? SlotBackedDecode { get; init; }
     }
 
     /// <summary>
@@ -392,7 +402,10 @@ public static class RowEncoder
             decodeState?.Plans.Add(schemaVersion, plan);
         }
 
-        return ExecuteDecodePlan(plan, data.Span, ref pointer, rowId);
+        // Slot-backed decode is chosen per scan: the caller's RowDecodeState may opt in/out based on
+        // its shape (see RowDecodeState.SlotBackedDecode); absent an override, the global default applies.
+        bool useSlots = decodeState?.SlotBackedDecode ?? CamusDBConfig.SlotBackedDecode;
+        return ExecuteDecodePlan(plan, data.Span, ref pointer, rowId, useSlots);
     }
 
     /// <summary>
@@ -474,16 +487,18 @@ public static class RowEncoder
     /// required-set lookups, layout index lookups, or current-column searches.
     ///
     /// <para>
-    /// Produces a slot-backed <see cref="QueryRow"/> when <see cref="CamusDBConfig.SlotBackedDecode"/>
-    /// is set (the default): one <c>ValueSlot[]</c> allocation and zero per-cell <see cref="ColumnValue"/>
-    /// objects, with cells materialized lazily on access. The flag falls back to the eager
-    /// <see cref="ColumnValue"/><c>[]</c> path — a kill switch and the A/B baseline for the slot work.
-    /// Both paths are value-identical.
+    /// Produces a slot-backed <see cref="QueryRow"/> when <paramref name="useSlots"/> is set: one
+    /// <c>ValueSlot[]</c> allocation and zero per-cell <see cref="ColumnValue"/> objects, with cells
+    /// materialized lazily on access — a win only when the scan rejects rows, so those cells are never
+    /// materialized. Otherwise it takes the eager <see cref="ColumnValue"/><c>[]</c> path, which is
+    /// faster when every row is fully materialized. The caller chooses per scan (see
+    /// <see cref="RowDecodeState.SlotBackedDecode"/> / <see cref="CamusDBConfig.SlotBackedDecode"/>);
+    /// both paths are value-identical.
     /// </para>
     /// </summary>
-    private static QueryRow ExecuteDecodePlan(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId)
+    private static QueryRow ExecuteDecodePlan(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId, bool useSlots)
     {
-        if (!CamusDBConfig.SlotBackedDecode)
+        if (!useSlots)
             return ExecuteDecodePlanEager(plan, data, ref pointer, rowId);
 
         ValueSlot[] values = new ValueSlot[plan.Layout.Count];
