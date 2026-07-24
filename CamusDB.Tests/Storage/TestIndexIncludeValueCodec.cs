@@ -142,6 +142,56 @@ public sealed class TestIndexIncludeValueCodec
     }
 
     [Test]
+    public void DecodeTupleInto_ProjectingOne_AllocatesFarLessThanDecodingAll()
+    {
+        // A wide covering index (16 string includes) where the query projects only one column. The
+        // selective decode must allocate materially less than decoding the whole tuple — the guard
+        // against a regression where covering scans silently decode every included column again.
+        const int count = 16;
+        string[] cols = new string[count];
+        ColumnType[] types = new ColumnType[count];
+        Dictionary<string, ColumnValue> row = new(count);
+        for (int c = 0; c < count; c++)
+        {
+            cols[c] = "c" + c;
+            types[c] = ColumnType.String;
+            row[cols[c]] = new ColumnValue(ColumnType.String, new string('x', 48) + c);
+        }
+        byte[] tuple = Encode(cols, row);
+
+        // Project only the last position (worst case: every earlier column must be skipped).
+        int[] planOne = new int[count];
+        System.Array.Fill(planOne, -1);
+        planOne[count - 1] = 0;
+        ColumnValue[] output = new ColumnValue[1];
+
+        const int iterations = 4000;
+
+        // Warm up the JIT for both paths so measurement excludes first-call compilation.
+        for (int i = 0; i < 50; i++)
+        {
+            IndexIncludeValueCodec.DecodeTupleInto(types, planOne, output, tuple);
+            _ = IndexIncludeValueCodec.DecodeTuple(types, tuple);
+        }
+
+        long beforeSelective = System.GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+            IndexIncludeValueCodec.DecodeTupleInto(types, planOne, output, tuple);
+        long selective = System.GC.GetAllocatedBytesForCurrentThread() - beforeSelective;
+
+        long beforeAll = System.GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < iterations; i++)
+            _ = IndexIncludeValueCodec.DecodeTuple(types, tuple);
+        long all = System.GC.GetAllocatedBytesForCurrentThread() - beforeAll;
+
+        TestContext.WriteLine($"project-one={selective / (double)iterations:F0} B/op, decode-all={all / (double)iterations:F0} B/op (16 string includes)");
+
+        // Decoding all 16 strings + composite must cost several times the single projected column.
+        Assert.That(selective * 3, Is.LessThan(all),
+            "selective include decode should allocate far less than decoding the whole tuple");
+    }
+
+    [Test]
     public void FusedValue_SplitsRowIdFromTuple()
     {
         string[] cols = ["x"];

@@ -109,4 +109,59 @@ internal sealed class TestIndexIncludeColumnsCluster : SharedNodeBaseTest
         Assert.AreEqual("open", rows[0].Row["status"].StrValue);
         Assert.AreEqual(6.0, rows[0].Row["total"].FloatValue);
     }
+
+    /// <summary>
+    /// A second executor (a distinct descriptor cache over the same shared node — the stand-in for a
+    /// follower) that <b>pre-opened</b> the table before the covering index existed must, after the
+    /// index is created + backfilled on the first executor, observe the include metadata and serve
+    /// covered reads and updates through it. Guards the "follower descriptor opened before the schema
+    /// change and used after publish" window the review flagged as unverified.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task Follower_PreOpenedTable_SeesIncludeMetadata_AfterLeaderCreatesIndex()
+    {
+        (string dbname, _, CommandExecutor leader) = await CreateDatabase();
+        await ExecDDL(leader, dbname,
+            $"CREATE TABLE {TableName} (id oid primary key, customer_id int64 not null, status string(32) not null, total float64 not null)");
+
+        for (int i = 1; i <= 5; i++)
+        {
+            string total = (i * 1.5).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            await ExecNonQuery(leader, dbname,
+                $"INSERT INTO {TableName} (id, customer_id, status, total) VALUES (gen_id(), {i}, 'open', {total})");
+        }
+
+        // A second executor over the same shared node, with its own descriptor cache. Pre-open the
+        // table now, BEFORE the index exists, so its cached descriptor has no covering index.
+        CommandExecutor follower = CreateCommandExecutor();
+        TrackDatabase(dbname, follower);
+        await follower.OpenDatabase(dbname);
+        _ = await follower.OpenTable(new OpenTableTicket(dbname, TableName));
+
+        // Leader creates + backfills the covering index (replicated schema log).
+        await ExecDDL(leader, dbname,
+            $"CREATE INDEX idx_customer ON {TableName} (customer_id) INCLUDE (status, total)");
+
+        // The follower must now see the index with its include metadata and serve a covered read.
+        TableDescriptor followerTable = await follower.OpenTable(new OpenTableTicket(dbname, TableName));
+        Assert.IsTrue(followerTable.Indexes.ContainsKey("idx_customer"), "follower must observe the new index");
+        Assert.AreEqual(new[] { "status", "total" }, followerTable.Indexes["idx_customer"].IncludeColumns);
+
+        const string sql = $"SELECT customer_id, status, total FROM {TableName} WHERE customer_id = 4";
+        long? rowsRead = await ScanRowsRead(follower, dbname, sql);
+        Assert.AreEqual(0L, rowsRead!.Value, "follower covered read must fetch zero primary rows");
+
+        List<QueryResultRow> rows = await ExecSelect(follower, dbname, sql);
+        Assert.AreEqual("open", rows[0].Row["status"].StrValue);
+        Assert.AreEqual(6.0, rows[0].Row["total"].FloatValue);
+
+        // An include-only update through the follower stays covered and returns the fresh payload.
+        await ExecNonQuery(follower, dbname,
+            $"UPDATE {TableName} SET status = 'shipped' WHERE customer_id = 4");
+        long? rowsRead2 = await ScanRowsRead(follower, dbname, sql);
+        Assert.AreEqual(0L, rowsRead2!.Value);
+        List<QueryResultRow> rows2 = await ExecSelect(follower, dbname, sql);
+        Assert.AreEqual("shipped", rows2[0].Row["status"].StrValue);
+    }
 }
