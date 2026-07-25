@@ -52,7 +52,7 @@ public class TestGrpcSqlService : BaseTest
         serviceExecutor = new(validator, catalogsManager, logger,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
-        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance);
+        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge());
     }
 
     [TearDown]

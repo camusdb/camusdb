@@ -54,6 +54,70 @@ public static class CamusDBConfig
     /// </summary>
     public static int StatsHistogramBuckets = 100;
 
+    // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────
+    // Auto-analyze keeps optimizer statistics fresh without a user running ANALYZE, while staying
+    // low-priority: it reads a lock-free snapshot (never blocks/aborts foreground work), bounds
+    // peak memory with sampling, throttles its scan rate, and backs off under load.
+
+    /// <summary>
+    /// Master switch for automatic background <c>ANALYZE</c>. Opt-in for now: while false the
+    /// scheduler never runs and there is zero behavioral change from manual-only ANALYZE.
+    /// </summary>
+    public static bool AutoAnalyzeEnabled = false;
+
+    /// <summary>
+    /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the schema/registry
+    /// leader sweeps, so a table is analyzed once per cluster. <c>&lt;= 0</c> also disables the loop.
+    /// </summary>
+    public static int AutoAnalyzeCheckIntervalMs = 60_000;
+
+    /// <summary>
+    /// Staleness fraction (CockroachDB's <c>fraction_stale_rows</c>): a table is stale once its
+    /// mutations since the last ANALYZE reach <c>fraction · rowCount + minStaleRows</c>.
+    /// </summary>
+    public static double AutoAnalyzeFractionStaleRows = 0.20;
+
+    /// <summary>
+    /// Absolute floor of mutations before a table is ever considered stale (CockroachDB's
+    /// <c>min_stale_rows</c>) — stops tiny tables and light churn from re-analyzing constantly.
+    /// </summary>
+    public static long AutoAnalyzeMinStaleRows = 500;
+
+    /// <summary>Maximum background analyses running at once on this node. Keep small (1–2).</summary>
+    public static int AutoAnalyzeMaxConcurrent = 1;
+
+    /// <summary>
+    /// Scan-rate cap for a background analyze, in rows/second — the primary CPU/IO throttle that
+    /// keeps a background scan from saturating a core or the KV read path. <c>&lt;= 0</c> disables throttling.
+    /// </summary>
+    public static int AutoAnalyzeMaxRowsPerSecond = 50_000;
+
+    /// <summary>
+    /// Reservoir sample size per orderable column for background histograms — the memory bound.
+    /// Peak memory is a function of this, not table size.
+    /// </summary>
+    public static int AutoAnalyzeHistogramSampleRows = 10_000;
+
+    /// <summary>
+    /// HyperLogLog precision (index bits) for background NDV sketches; register count is
+    /// <c>2^precision</c>. 11 ⇒ ~2 KB/column, ~2.3% error. Valid range 4..16.
+    /// </summary>
+    public static int AutoAnalyzeHllPrecision = 11;
+
+    /// <summary>
+    /// Foreground-load surge protector: when the number of in-flight foreground transactions
+    /// exceeds this, the scheduler skips starting (and cancels a running) background analyze this
+    /// sweep and retries when the node is quieter. <c>&lt;= 0</c> disables load-based backoff.
+    /// </summary>
+    public static int AutoAnalyzeLoadPauseThreshold = 16;
+
+    /// <summary>
+    /// How many rows the background scan processes between successive mid-scan re-checks of ownership
+    /// (leadership) and foreground load. Smaller reacts faster to a lost lease or a load surge but adds
+    /// per-batch overhead; larger amortizes the (async) leadership probe. Clamped to at least 1.
+    /// </summary>
+    public static int AutoAnalyzeOwnershipCheckRows = 1000;
+
     /// <summary>
     /// Max keys the non-transactional <c>DROP DATABASE</c> keyspace purge scans and deletes per batch.
     /// The purge pages through each bucket one batch at a time so peak memory is bounded to this many

@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Linq;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -77,6 +78,14 @@ public sealed class StatisticsManager
         // Protected by ColumnStatsLock.
         public Dictionary<string, long>? ColumnNdv;
         public Dictionary<string, long>? KeyNdv;
+
+        // Row mutations (insert/update/delete) accumulated since the last completed ANALYZE.
+        // Updated with Interlocked; drives auto-analyze staleness. Same Loaded/delta merge
+        // semantics as RowCount: pre-load increments are added to the persisted base on load.
+        public long MutationsSinceAnalyze;
+
+        // HLC timestamp the last successful ANALYZE read (advisory). Guarded by ColumnStatsLock.
+        public Kommander.Time.HLCTimestamp LastAnalyzedAt;
     }
 
     private readonly ConcurrentDictionary<string, Entry> _cache = new(StringComparer.Ordinal);
@@ -246,6 +255,242 @@ public sealed class StatisticsManager
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Auto-analyze staleness API
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Number of row mutations accumulated since the last completed <c>ANALYZE</c>, or 0 if the
+    /// table's statistics are not loaded. The background auto-analyze scheduler reads this to
+    /// decide whether a table is stale; it is also the baseline an in-flight ANALYZE captures so
+    /// concurrent churn during the (throttled) scan is preserved on completion.
+    /// </summary>
+    public long GetMutationsSinceAnalyze(DatabaseDescriptor database, TableDescriptor table)
+    {
+        string key = CacheKey(database.Id, table.Id);
+        return _cache.TryGetValue(key, out Entry? entry) ? Interlocked.Read(ref entry.MutationsSinceAnalyze) : 0;
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="table"/>'s statistics are stale enough to warrant a
+    /// background <c>ANALYZE</c>, using the CockroachDB-style rule
+    /// <c>mutations &gt;= fractionStaleRows · rowCount + minStaleRows</c>:
+    ///
+    /// <list type="bullet">
+    ///   <item>A never-analyzed table with tracked data (<c>RowCount &lt; 0</c>) is stale.</item>
+    ///   <item>Below <paramref name="minStaleRows"/> mutations is never stale — small tables and
+    ///         light churn don't trigger constant re-analysis.</item>
+    ///   <item>An empty, never-mutated table is not stale.</item>
+    /// </list>
+    ///
+    /// Returns false when statistics are not yet loaded (the caller shouldn't force a load just to
+    /// test staleness — an unopened/untouched table has nothing worth analyzing).
+    /// </summary>
+    public bool IsStale(DatabaseDescriptor database, TableDescriptor table, double fractionStaleRows, long minStaleRows) =>
+        IsStaleByKey(CacheKey(database.Id, table.Id), fractionStaleRows, minStaleRows);
+
+    /// <summary>
+    /// Staleness test keyed by table id, for the cluster-visible discovery path: the elected leader
+    /// loads persisted staleness for a table it may not have a <see cref="TableDescriptor"/> for yet
+    /// (via <see cref="LoadByIdAsync"/>) and asks whether it is worth opening and analyzing.
+    /// </summary>
+    public bool IsStale(DatabaseDescriptor database, string tableId, double fractionStaleRows, long minStaleRows) =>
+        IsStaleByKey(CacheKey(database.Id, tableId), fractionStaleRows, minStaleRows);
+
+    private bool IsStaleByKey(string key, double fractionStaleRows, long minStaleRows)
+    {
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return false;
+
+        long rowCount = Interlocked.Read(ref entry.RowCount);
+        long mutations = Interlocked.Read(ref entry.MutationsSinceAnalyze);
+
+        // Has tracked data but no histograms/NDV have ever been built for it.
+        if (rowCount < 0)
+            return true;
+
+        if (mutations < minStaleRows)
+            return false;
+
+        return mutations >= (long)(fractionStaleRows * rowCount) + minStaleRows;
+    }
+
+    /// <summary>
+    /// Marks a completed <c>ANALYZE</c>: records the snapshot timestamp it read and subtracts the
+    /// mutation baseline it consumed so any churn that happened <em>during</em> the scan remains
+    /// counted (the table is not falsely reported fresh). Persists the update.
+    ///
+    /// <paramref name="mutationsConsumed"/> must be the value <see cref="GetMutationsSinceAnalyze"/>
+    /// returned at the <b>start</b> of the scan — not a re-read at the end — so concurrent mutations
+    /// survive. Passing 0 leaves the counter untouched (used by callers that don't track a baseline).
+    /// </summary>
+    public async Task MarkAnalyzedAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        Kommander.Time.HLCTimestamp analyzedAt,
+        long mutationsConsumed)
+    {
+        await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
+
+        string key = CacheKey(database.Id, table.Id);
+        Entry entry = GetOrCreateEntry(database, table, key);
+
+        if (mutationsConsumed > 0)
+        {
+            long current, next;
+            do
+            {
+                current = Interlocked.Read(ref entry.MutationsSinceAnalyze);
+                next = Math.Max(0, current - mutationsConsumed);
+            } while (Interlocked.CompareExchange(ref entry.MutationsSinceAnalyze, next, current) != current);
+        }
+
+        if (!analyzedAt.IsNull())
+        {
+            lock (entry.ColumnStatsLock)
+                entry.LastAnalyzedAt = analyzedAt;
+        }
+
+        await FlushAsync(database, table).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Snapshot of a table's live tracked counters at the moment an <c>ANALYZE</c> scan starts. The
+    /// scan reads a fixed MVCC snapshot, so writes that commit while it runs update these same live
+    /// counters underneath it; <see cref="PublishAsync"/> uses this baseline to apply only the scan's
+    /// <em>correction</em> (scanned − baseline) to the current live value, preserving that concurrent
+    /// churn instead of clobbering it back to snapshot-time values.
+    /// </summary>
+    public sealed class AnalyzeBaseline
+    {
+        public required long RowCount { get; init; }
+        public required Dictionary<string, long> IndexCounts { get; init; }
+        public required long Mutations { get; init; }
+    }
+
+    /// <summary>
+    /// Captures the live counter baseline for a table before an <c>ANALYZE</c> scan. Forces the entry
+    /// loaded first so <see cref="AnalyzeBaseline.RowCount"/> is the absolute tracked count (not a raw
+    /// pre-load delta), which is what <see cref="PublishAsync"/>'s correction arithmetic requires.
+    /// </summary>
+    public async Task<AnalyzeBaseline> CaptureAnalyzeBaselineAsync(DatabaseDescriptor database, TableDescriptor table)
+    {
+        await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
+        Entry entry = GetOrCreateEntry(database, table, CacheKey(database.Id, table.Id));
+
+        var indexCounts = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, long> kv in entry.IndexEntries)
+            indexCounts[kv.Key] = kv.Value;
+
+        return new AnalyzeBaseline
+        {
+            RowCount = Interlocked.Read(ref entry.RowCount),
+            IndexCounts = indexCounts,
+            Mutations = Interlocked.Read(ref entry.MutationsSinceAnalyze),
+        };
+    }
+
+    /// <summary>
+    /// Atomically publishes one complete statistics generation from a finished <c>ANALYZE</c> scan,
+    /// replacing the three-flush <c>Seed</c>/<c>SetHistograms</c>/<c>SetNdv</c> sequence. Two guarantees:
+    ///
+    /// <list type="bullet">
+    ///   <item><b>Post-snapshot deltas survive.</b> Row and per-index counts are updated by the scan's
+    ///   <em>correction</em> (<paramref name="scannedRowCount"/> − <see cref="AnalyzeBaseline.RowCount"/>)
+    ///   applied to the current live value, so a write that committed after the scan snapshot but before
+    ///   publication is preserved rather than lost. Min/max is <em>widened</em>, never replaced.
+    ///   Histograms and NDV are rebuilt wholesale (they are not tracked incrementally, so there is no
+    ///   delta to preserve). Index counts for indexes neither scanned nor currently writable
+    ///   (dropped/unreadable) are removed.</item>
+    ///   <item><b>One generation, one transaction.</b> All fields are mutated under the entry lock and
+    ///   persisted in a single flush, so a concurrent planner and the persisted blob never observe a
+    ///   mixture of old and new fields.</item>
+    /// </list>
+    ///
+    /// <paramref name="scanComplete"/> must be false for a sampled scan: <paramref name="scannedRowCount"/>
+    /// is then a sample size, not the true count, so the row-count correction is skipped and the live
+    /// tracked count is kept.
+    /// </summary>
+    public async Task PublishAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        long scannedRowCount,
+        bool scanComplete,
+        Dictionary<string, ColumnMinMax> scannedMinMax,
+        Dictionary<string, long> scannedIndexCounts,
+        Dictionary<string, ColumnHistogram> histograms,
+        Dictionary<string, long> columnNdv,
+        Dictionary<string, long>? keyNdv,
+        AnalyzeBaseline baseline,
+        Kommander.Time.HLCTimestamp analyzedAt)
+    {
+        await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
+        Entry entry = GetOrCreateEntry(database, table, CacheKey(database.Id, table.Id));
+
+        var writableIndexNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (TableIndexSchema ix in GetWritableIndexes(table))
+            writableIndexNames.Add(ix.Name);
+
+        lock (entry.ColumnStatsLock)
+        {
+            // Row count: apply the scan's correction to the live count (preserving concurrent DML).
+            // A sampled scan's count is not the true size, so it must not correct the live count.
+            if (scanComplete)
+                ApplyDelta(ref entry.RowCount, scannedRowCount - baseline.RowCount);
+
+            // Per-index counts: same correction, then prune counts for dropped/unreadable indexes.
+            foreach ((string name, long scanned) in scannedIndexCounts)
+            {
+                baseline.IndexCounts.TryGetValue(name, out long baseCount);
+                long correction = scanned - baseCount;
+                entry.IndexEntries.AddOrUpdate(name, Math.Max(0, scanned), (_, live) => Math.Max(0, live + correction));
+            }
+            foreach (string name in entry.IndexEntries.Keys.ToList())
+            {
+                if (!scannedIndexCounts.ContainsKey(name) && !writableIndexNames.Contains(name))
+                    entry.IndexEntries.TryRemove(name, out _);
+            }
+
+            // Min/max: replace with the freshly scanned truth. Correcting delete-drift (a deleted
+            // extreme that DML tracking never lowers) is the whole point of recomputing bounds, so a
+            // merge that only ever widens would defeat it. Bounds are advisory and self-healing, so the
+            // rare case of a concurrent insert committing outside the scanned range after the snapshot
+            // is re-captured by the next DML that touches that column — unlike row/index counts above,
+            // there is no cardinality correctness riding on it.
+            entry.ColumnStats.Clear();
+            foreach ((string col, ColumnMinMax mm) in scannedMinMax)
+                entry.ColumnStats[col] = new ColumnMinMax { Min = mm.Min, Max = mm.Max };
+
+            // Histograms / NDV: rebuilt wholesale by ANALYZE (no incremental delta to preserve).
+            entry.Histograms = histograms;
+            entry.ColumnNdv = columnNdv;
+            if (keyNdv is not null)
+                entry.KeyNdv = keyNdv;
+
+            // Staleness: subtract the baseline consumed (so churn during the scan is not lost), record ts.
+            ApplyDelta(ref entry.MutationsSinceAnalyze, -baseline.Mutations);
+
+            if (!analyzedAt.IsNull())
+                entry.LastAnalyzedAt = analyzedAt;
+
+            entry.Loaded = true;
+        }
+
+        // One flush → the whole generation reaches Kahuna in a single transaction.
+        await FlushAsync(database, table).ConfigureAwait(false);
+    }
+
+    // CAS-applies a signed delta to an Interlocked-managed counter, flooring at zero.
+    private static void ApplyDelta(ref long counter, long delta)
+    {
+        long cur, next;
+        do
+        {
+            cur = Interlocked.Read(ref counter);
+            next = Math.Max(0, cur + delta);
+        } while (Interlocked.CompareExchange(ref counter, next, cur) != cur);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Public DML tracking API
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -257,6 +502,7 @@ public sealed class StatisticsManager
     {
         if (delta <= 0) return;
         ApplyRowDelta(database, table, delta);
+        AddMutations(database, table, delta);
         ScheduleFlush(database, table);
     }
 
@@ -273,6 +519,7 @@ public sealed class StatisticsManager
         if (delta <= 0) return;
 
         ApplyRowDelta(database, table, delta);
+        AddMutations(database, table, delta);
 
         string key = CacheKey(database.Id, table.Id);
         Entry entry = GetOrCreateEntry(database, table, key);
@@ -297,6 +544,7 @@ public sealed class StatisticsManager
         if (delta <= 0) return;
 
         ApplyRowDelta(database, table, -delta);
+        AddMutations(database, table, delta);
 
         string key = CacheKey(database.Id, table.Id);
         Entry entry = GetOrCreateEntry(database, table, key);
@@ -325,6 +573,11 @@ public sealed class StatisticsManager
         int delta,
         IReadOnlyDictionary<string, ColumnValue>? updatedValues)
     {
+        // Every updated row is a mutation for staleness purposes, even when no indexed column
+        // changed (so no min/max work happens below). Count before the early return.
+        if (delta > 0)
+            AddMutations(database, table, delta);
+
         if (updatedValues is null || updatedValues.Count == 0)
             return;
 
@@ -426,6 +679,7 @@ public sealed class StatisticsManager
                 MergeColumnStats(entry, loaded.ColumnStats);
                 MergeHistograms(entry, loaded.Histograms);
                 MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
+                MergeStaleness(entry, loaded.MutationsSinceAnalyze, loaded.LastAnalyzedAt);
             }
 
             entry.Loaded = true;
@@ -469,6 +723,16 @@ public sealed class StatisticsManager
 
     private Entry GetOrCreateEntry(DatabaseDescriptor database, TableDescriptor table, string key) =>
         _cache.GetOrAdd(key, _ => new Entry());
+
+    // Accumulates row mutations since the last ANALYZE. The count is a monotonically-growing
+    // total (inserts + updates + deletes) — deletes count as churn too, so a table that is fully
+    // rewritten still trips the staleness threshold even though its row count barely moved.
+    private void AddMutations(DatabaseDescriptor database, TableDescriptor table, long count)
+    {
+        if (count <= 0) return;
+        Entry entry = GetOrCreateEntry(database, table, CacheKey(database.Id, table.Id));
+        Interlocked.Add(ref entry.MutationsSinceAnalyze, count);
+    }
 
     private static IReadOnlyList<TableIndexSchema> GetWritableIndexes(TableDescriptor table)
     {
@@ -672,12 +936,14 @@ public sealed class StatisticsManager
 
         TableStatistics snapshot = new()
         {
-            RowCount         = Interlocked.Read(ref entry.RowCount),
-            IndexEntryCounts = indexSnapshot,
-            ColumnStats      = colSnapshot,
-            Histograms       = histSnapshot,
-            ColumnNdv        = colNdvSnapshot,
-            KeyNdv           = keyNdvSnapshot,
+            RowCount              = Interlocked.Read(ref entry.RowCount),
+            IndexEntryCounts      = indexSnapshot,
+            ColumnStats           = colSnapshot,
+            Histograms            = histSnapshot,
+            ColumnNdv             = colNdvSnapshot,
+            KeyNdv                = keyNdvSnapshot,
+            MutationsSinceAnalyze = Interlocked.Read(ref entry.MutationsSinceAnalyze),
+            LastAnalyzedAt        = ReadLastAnalyzedAt(entry),
         };
 
         byte[] bytes = MetaJsonSerializer.Serialize(snapshot, MetaJsonContext.Default.TableStatistics);
@@ -711,6 +977,12 @@ public sealed class StatisticsManager
 
             if (setType == KeyValueResponseType.Set)
             {
+                // Test-only: fault after the value is staged but before commit, to prove the publish
+                // is a single atomic transaction — the rollback leaves the persisted blob entirely at
+                // its prior generation with no partial fields written.
+                if (FailFlushForTesting)
+                    throw new InvalidOperationException("Injected flush failure (test-only)");
+
                 tx.TrackModified(kahunaKey, KeyValueDurability.Persistent);
                 await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
             }
@@ -749,6 +1021,7 @@ public sealed class StatisticsManager
                 MergeColumnStats(entry, loaded.ColumnStats);
                 MergeHistograms(entry, loaded.Histograms);
                 MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
+                MergeStaleness(entry, loaded.MutationsSinceAnalyze, loaded.LastAnalyzedAt);
             }
 
             entry.Loaded = true;
@@ -807,6 +1080,37 @@ public sealed class StatisticsManager
         {
             entry.Histograms ??= new Dictionary<string, ColumnHistogram>(persisted, StringComparer.Ordinal);
         }
+    }
+
+    // Merge persisted staleness state on load. Mutations follow the same base+pending rule as
+    // RowCount (any churn tracked before the load is added to the persisted base). LastAnalyzedAt
+    // is taken from the persisted value only when no in-memory ANALYZE has set it this session.
+    private static void MergeStaleness(Entry entry, long persistedMutations, Kommander.Time.HLCTimestamp persistedLastAnalyzedAt)
+    {
+        if (persistedMutations > 0)
+        {
+            long pending, merged;
+            do
+            {
+                pending = Interlocked.Read(ref entry.MutationsSinceAnalyze);
+                merged = Math.Max(0, persistedMutations + pending);
+            } while (Interlocked.CompareExchange(ref entry.MutationsSinceAnalyze, merged, pending) != pending);
+        }
+
+        if (!persistedLastAnalyzedAt.IsNull())
+        {
+            lock (entry.ColumnStatsLock)
+            {
+                if (entry.LastAnalyzedAt.IsNull())
+                    entry.LastAnalyzedAt = persistedLastAnalyzedAt;
+            }
+        }
+    }
+
+    private static Kommander.Time.HLCTimestamp ReadLastAnalyzedAt(Entry entry)
+    {
+        lock (entry.ColumnStatsLock)
+            return entry.LastAnalyzedAt;
     }
 
     private static void MergeNdv(Entry entry, Dictionary<string, long>? persistedCol, Dictionary<string, long>? persistedKey)
@@ -873,6 +1177,12 @@ public sealed class StatisticsManager
     /// </summary>
     internal void EvictForTesting(DatabaseDescriptor database, TableDescriptor table)
         => _cache.TryRemove(CacheKey(database.Id, table.Id), out _);
+
+    /// <summary>
+    /// Test-only: when set, the next (and every) stats flush faults after staging the value but before
+    /// commit, so a test can prove a failed publish leaves the persisted blob atomically unchanged.
+    /// </summary>
+    internal volatile bool FailFlushForTesting;
 
     /// <summary>
     /// When true, the join planner emits <c>MergeJoinNode</c> for any inner equi-join instead

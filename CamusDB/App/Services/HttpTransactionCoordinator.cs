@@ -81,6 +81,12 @@ public sealed class HttpTransactionCoordinator
         this.executor = executor;
     }
 
+    /// <summary>
+    /// Number of in-flight explicit transactions this node is tracking. Used as a lightweight
+    /// foreground-load signal so background work (e.g. auto-analyze) can back off when the node is busy.
+    /// </summary>
+    public int ActiveCount => active.Count;
+
     public async Task<KvTransaction> StartAsync(string databaseName, CancellationToken cancellationToken = default) =>
         await StartAsync(databaseName, isolationLevel: null, transactionMode: null, locking: null, cancellationToken: cancellationToken).ConfigureAwait(false);
 

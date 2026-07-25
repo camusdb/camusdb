@@ -973,4 +973,6 @@ cost are modeled; remote operator execution is not).
 - **Streaming (`IAsyncEnumerable`)** — pulling rows one at a time without materializing the whole result.
 - **SQL-over-KV** — the architectural boundary where relational operations become Kahuna key/value reads.
 
-For `EXPLAIN` output as a user feature, see [`docs/explain.md`](./explain.md).
+For `EXPLAIN` output as a user feature, see [`docs/explain.md`](./explain.md). For how histograms/NDV
+are built by `ANALYZE` and kept fresh automatically in the background, see
+[`docs/automatic-analyze.md`](./automatic-analyze.md).

@@ -46,7 +46,7 @@ public class TestGrpcClientEndToEnd : BaseTest
         executor = new(validator, catalogs, logger,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(executor);
-        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance);
+        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge());
     }
 
     [TearDown]

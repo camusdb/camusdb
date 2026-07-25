@@ -203,6 +203,7 @@ if (config.IsClusterMode)
     builder.Services.AddSingleton<DdlOperationIdCache>();
 
 builder.Services.AddSingleton<HttpTransactionCoordinator>();
+builder.Services.AddSingleton<CamusDB.App.Services.ForegroundRequestGauge>();
 
 // Reclaims abandoned explicit transactions (client opened one and never committed/rolled back) so
 // their locks — renewed forever by the range-lock heartbeat — cannot be held indefinitely.
@@ -235,14 +236,16 @@ if (config.IsClusterMode)
 
     builder.Services.AddSingleton(new KahunaConfiguration());
 
-    builder.Services.AddGrpc();
+    builder.Services.AddGrpc(options =>
+        options.Interceptors.Add<CamusDB.App.Grpc.ForegroundRequestGaugeInterceptor>());
 }
 
 // In standalone mode AddGrpc() was not called by the cluster branch above; call it now so
 // the client-facing CamusSqlService can be resolved in both modes. The Kestrel gRPC port is
 // only bound when grpc_enabled is true, so the service is externally reachable only then.
 if (!config.IsClusterMode)
-    builder.Services.AddGrpc();
+    builder.Services.AddGrpc(options =>
+        options.Interceptors.Add<CamusDB.App.Grpc.ForegroundRequestGaugeInterceptor>());
 
 // Initialize min threads
 ThreadPool.SetMinThreads(1024, 512);
@@ -283,6 +286,10 @@ if (!config.IsClusterMode && !string.IsNullOrEmpty(config.HttpsCertificate))
     app.UseHttpsRedirection();
 app.UseStaticFiles();
 
+// Track in-flight data requests so auto-analyze can back off when the node is busy with foreground
+// SQL/API work (autocommit statements the explicit-transaction coordinator does not see).
+app.UseMiddleware<CamusDB.App.Services.ForegroundRequestGaugeMiddleware>();
+
 app.MapControllers();
 
 app.UseRouting();
@@ -317,6 +324,15 @@ CamusStartup camus = new(
 await camus.Initialize();
 
 CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
+
+// Give the background auto-analyze scheduler a foreground-load signal so it backs off under load:
+// explicit transactions plus in-flight autocommit data requests.
+{
+    HttpTransactionCoordinator loadCoordinator = app.Services.GetRequiredService<HttpTransactionCoordinator>();
+    CamusDB.App.Services.ForegroundRequestGauge requestGauge =
+        app.Services.GetRequiredService<CamusDB.App.Services.ForegroundRequestGauge>();
+    commandExecutor.ForegroundLoadProbe = () => loadCoordinator.ActiveCount + requestGauge.InFlight;
+}
 
 try
 {

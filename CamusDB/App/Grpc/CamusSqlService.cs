@@ -51,17 +51,20 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private readonly HttpTransactionCoordinator transactions;
     private readonly ILogger<ICamusDB> logger;
     private readonly IHostApplicationLifetime appLifetime;
+    private readonly ForegroundRequestGauge loadGauge;
 
     public CamusSqlService(
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
         ILogger<ICamusDB> logger,
-        IHostApplicationLifetime appLifetime)
+        IHostApplicationLifetime appLifetime,
+        ForegroundRequestGauge loadGauge)
     {
         this.executor     = executor;
         this.transactions = transactions;
         this.logger       = logger;
         this.appLifetime  = appLifetime;
+        this.loadGauge    = loadGauge;
     }
 
     // ─── ExecuteQuery (server-streaming) ─────────────────────────────────────
@@ -513,6 +516,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
         CancellationToken ct)
     {
+        // Count each batched op individually (not the long-lived duplex stream) toward the foreground
+        // load signal, so a node saturated purely over BatchExecute still backs off auto-analyze.
+        loadGauge.Increment();
         try
         {
             SqlRequest request = req.Request
@@ -560,6 +566,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 RequestId = req.RequestId,
                 Error = new BatchError { Code = "CADB0000", Message = "Internal server error" },
             }, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            loadGauge.Decrement();
         }
     }
 

@@ -63,6 +63,17 @@ public sealed class CommandExecutor : IAsyncDisposable
     // window. Started alongside the renewer; disposed on teardown.
     private OrphanReclaimer? orphanReclaimer;
 
+    // Leader-owned loop that keeps optimizer statistics fresh via throttled, lock-free background
+    // ANALYZE. Started alongside the renewer; disposed on teardown.
+    private AutoAnalyzeScheduler? autoAnalyzeScheduler;
+
+    /// <summary>
+    /// Optional probe returning the number of in-flight foreground transactions, wired by the host so
+    /// the auto-analyze scheduler can back off under load. Null in contexts (tests, standalone) that
+    /// don't track foreground load — treated as zero load.
+    /// </summary>
+    public Func<int>? ForegroundLoadProbe { get; set; }
+
     private readonly TableOpener tableOpener;
 
     private readonly TableCreator tableCreator;
@@ -232,6 +243,161 @@ public sealed class CommandExecutor : IAsyncDisposable
         reclaimer.Start();
         orphanReclaimer = reclaimer;
         _ = ReclaimExpiredOrphansOnStartupAsync(reclaimer);
+
+        // Keep optimizer statistics fresh in the background. Leader-elected on the same registry key
+        // so exactly one node analyzes each table; disabled entirely unless AutoAnalyzeEnabled is set.
+        AutoAnalyzeScheduler analyzeScheduler = new(
+            node,
+            registry.RegistryBucket,
+            tableAnalyzer,
+            DiscoverStaleTablesAsync,
+            () => ForegroundLoadProbe?.Invoke() ?? 0,
+            logger,
+            CamusDBConfig.AutoAnalyzeCheckIntervalMs);
+        analyzeScheduler.Start();
+        autoAnalyzeScheduler = analyzeScheduler;
+    }
+
+    /// <summary>
+    /// Cluster-visible candidate discovery for auto-analyze. Runs on the elected leader and enumerates
+    /// <em>authoritative</em> metadata — every database in the registry and every table's per-object
+    /// meta key — rather than this node's open-object list, so a hot table opened and mutated only on a
+    /// follower is still found. For each table it loads the persisted staleness state (which another
+    /// node's flush writes), and opens the descriptor only for tables that are actually stale.
+    /// </summary>
+    private async Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>> DiscoverStaleTablesAsync(CancellationToken ct)
+    {
+        var result = new List<(DatabaseDescriptor, TableDescriptor)>();
+        if (sharedNode is null)
+            return result;
+
+        double fraction = CamusDBConfig.AutoAnalyzeFractionStaleRows;
+        long minRows = CamusDBConfig.AutoAnalyzeMinStaleRows;
+
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
+
+        foreach (DatabaseRegistryEntry entry in entries)
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            DatabaseDescriptor database;
+            try
+            {
+                database = await databaseOpener.Open(entry.Name).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Auto-analyze discovery: could not open database {Db}", entry.Name);
+                continue;
+            }
+
+            foreach ((string tableId, string tableName) in await ScanTableMetaAsync(entry.Id, ct).ConfigureAwait(false))
+            {
+                if (ct.IsCancellationRequested)
+                    break;
+
+                // Load persisted staleness so the decision reads cluster-wide state (a follower's
+                // flushed mutation count), not this node's possibly-absent cache entry.
+                await statisticsManager.LoadByIdAsync(database, tableId).ConfigureAwait(false);
+                if (!statisticsManager.IsStale(database, tableId, fraction, minRows))
+                    continue;
+
+                try
+                {
+                    TableDescriptor table = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+                    result.Add((database, table));
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Auto-analyze discovery: could not open table {Table} in database {Db}", tableName, entry.Name);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Enumerates a database's live tables by scanning its per-object meta keys
+    /// (<c>{dbId}/meta/table:{tableId}</c>) and returns each table's id and current name. Reads the
+    /// authoritative KV catalog directly, so it sees tables this node has never opened.
+    /// </summary>
+    private async Task<List<(string tableId, string tableName)>> ScanTableMetaAsync(string dbId, CancellationToken ct)
+    {
+        string metaBucket = $"{dbId}/meta";
+        string tablePrefix = $"{dbId}/meta/table:";
+        var tables = new List<(string, string)>();
+
+        await foreach ((string key, Kahuna.Server.KeyValues.ReadOnlyKeyValueEntry kvEntry) in sharedNode!.Kahuna.LocateAndScanRange(
+            Kommander.Time.HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+            Kommander.Time.HLCTimestamp.Zero, Kahuna.Shared.KeyValue.KeyValueDurability.Persistent, ct).ConfigureAwait(false))
+        {
+            if (!key.StartsWith(tablePrefix, StringComparison.Ordinal) || kvEntry.Value is null)
+                continue;
+
+            CamusDB.Core.Catalogs.Models.TableSchema schema = CamusDB.Core.Catalogs.MetaJsonSerializer.Deserialize(
+                kvEntry.Value, CamusDB.Core.Catalogs.MetaJsonContext.Default.TableSchema);
+
+            if (schema.Id is not null && schema.Name is not null)
+                tables.Add((schema.Id, schema.Name));
+        }
+
+        return tables;
+    }
+
+    /// <summary>
+    /// Test-only seam: forces one auto-analyze sweep (after the deferred renewer start completes) and
+    /// returns the number of tables analyzed, so a test can drive it deterministically instead of
+    /// waiting for the timer. Requires <see cref="CamusDBConfig.AutoAnalyzeEnabled"/> to be set.
+    /// </summary>
+    internal async Task<int> RunAutoAnalyzeForTestsAsync()
+    {
+        if (snapshotRenewerStart is not null)
+            await snapshotRenewerStart.ConfigureAwait(false);
+        return autoAnalyzeScheduler is null ? 0 : await autoAnalyzeScheduler.RunSweepAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only seam: runs the throttled background analyzer directly against one table, with an
+    /// optional load-pause callback, so a test can drive the mid-scan cancel path without going through
+    /// leader election or the sweep's pre-dispatch load gate.
+    /// </summary>
+    internal Task RunBackgroundAnalyzeForTestsAsync(
+        DatabaseDescriptor database, TableDescriptor table, Func<bool>? shouldPause, CancellationToken cancellationToken)
+        => tableAnalyzer.AnalyzeBackgroundAsync(
+            database, table, default, stillOwner: null, shouldPause: shouldPause, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// Test-only seam: runs the background analyzer against a table with the <b>real</b> registry
+    /// leadership ownership check wired in (the same one the scheduler uses), opening the database and
+    /// table on this node first. Lets a cluster test start an analyze on the current owner, revoke its
+    /// leadership mid-scan, and observe that it aborts without publishing.
+    /// </summary>
+    internal async Task RunBackgroundAnalyzeWithOwnershipForTestsAsync(
+        string databaseName, string tableName, CancellationToken cancellationToken)
+    {
+        DatabaseDescriptor database = await databaseOpener.Open(databaseName).ConfigureAwait(false);
+        TableDescriptor table = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        await tableAnalyzer.AnalyzeBackgroundAsync(
+            database, table, default,
+            stillOwner: c => sharedNode!.AmILeaderForKeyAsync(registry.RegistryBucket, c),
+            shouldPause: null,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only seam: voluntarily steps this node down from leadership of the registry-bucket
+    /// partition (the key that gates auto-analyze ownership), so an in-flight owned analyze observes
+    /// the loss and aborts. The node stays online as a follower, so snapshot reads keep working.
+    /// </summary>
+    internal async Task StepDownAutoAnalyzeLeadershipForTestsAsync()
+    {
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        await sharedNode!.StepDownForKeyAsync(registry.RegistryBucket).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -2477,7 +2643,12 @@ public sealed class CommandExecutor : IAsyncDisposable
                         {
                             TableDescriptor table = await tableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
                             PinSchemaVersion(database, table, ticket.TxnState);
-                            return new(database, table, await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false));
+                            int inserted = await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false);
+                            // Track statistics on the SQL path too, mirroring the ticket-based Insert()
+                            // wrapper — otherwise SQL DML never updates row/mutation counts and auto-analyze
+                            // never triggers for the common SQL workload.
+                            statisticsManager.TrackInsert(database, table, inserted, insertTicket.Values);
+                            return new(database, table, inserted);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
                         {
@@ -2497,7 +2668,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                         {
                             TableDescriptor table = await tableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
                             PinSchemaVersion(database, table, ticket.TxnState);
-                            return new(database, table, await rowUpdater.Update(queryExecutor, database, table, updateTicket));
+                            int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket).ConfigureAwait(false);
+                            statisticsManager.TrackUpdate(database, table, updated, updateTicket.PlainValues);
+                            return new(database, table, updated);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
                         {
@@ -2537,7 +2710,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                         {
                             TableDescriptor table = await tableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
                             PinSchemaVersion(database, table, ticket.TxnState);
-                            return new(database, table, await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false));
+                            int deleted = await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+                            statisticsManager.TrackDelete(database, table, deleted);
+                            return new(database, table, deleted);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
                         {
@@ -3141,6 +3316,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         if (orphanReclaimer is not null)
             await orphanReclaimer.DisposeAsync().ConfigureAwait(false);
+
+        if (autoAnalyzeScheduler is not null)
+            await autoAnalyzeScheduler.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

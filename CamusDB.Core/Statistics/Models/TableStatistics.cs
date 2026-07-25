@@ -7,6 +7,7 @@
  */
 
 using System.Text.Json.Serialization;
+using Kommander.Time;
 
 namespace CamusDB.Core.Statistics.Models;
 
@@ -67,4 +68,23 @@ public sealed class TableStatistics
     /// </summary>
     [JsonPropertyName("keyNdv")]
     public Dictionary<string, long>? KeyNdv { get; set; }
+
+    /// <summary>
+    /// Number of row mutations (inserts + updates + deletes) observed since the last
+    /// <c>ANALYZE</c> completed. Drives automatic-analyze staleness: when it grows past a
+    /// fraction of <see cref="RowCount"/> the table's histograms/NDV are considered stale and a
+    /// background <c>ANALYZE</c> is scheduled. Reset (minus concurrent churn) when an ANALYZE
+    /// succeeds. Persisted so staleness survives a restart. See <c>docs/query-planner.md</c>.
+    /// </summary>
+    [JsonPropertyName("mutSinceAnalyze")]
+    public long MutationsSinceAnalyze { get; set; }
+
+    /// <summary>
+    /// HLC timestamp of the snapshot the last successful <c>ANALYZE</c> read, or the default
+    /// (zero) timestamp when the table has never been analyzed. Advisory/observability only —
+    /// staleness decisions use <see cref="MutationsSinceAnalyze"/>, not wall time — so a missing
+    /// value is harmless.
+    /// </summary>
+    [JsonPropertyName("lastAnalyzedAt")]
+    public HLCTimestamp LastAnalyzedAt { get; set; }
 }

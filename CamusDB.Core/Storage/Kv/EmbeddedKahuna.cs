@@ -378,6 +378,19 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// Voluntarily steps down from leadership of the partition that owns <paramref name="key"/>,
+    /// staying online as a follower. Companion to <see cref="AmILeaderForKeyAsync"/> for the same
+    /// key-to-partition routing. Used to hand off ownership of a keyed responsibility (e.g. the
+    /// registry-bucket key that gates background sweeps) without isolating the node's transport, so
+    /// its in-flight reads keep working while its leadership check flips to false.
+    /// </summary>
+    public async Task StepDownForKeyAsync(string key, CancellationToken cancellationToken = default)
+    {
+        int partitionId = Raft.GetPrefixPartitionKey(key);
+        await Raft.StepDownAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Returns the current leader endpoint for <paramref name="partitionId"/>, waiting up to
     /// the Raft election timeout if no leader is currently elected.
     /// </summary>

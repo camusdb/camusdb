@@ -14,6 +14,8 @@ using CamusDB.Core.Statistics.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -49,6 +51,11 @@ internal sealed class TableAnalyzer
         int sampleLimit = CamusDBConfig.StatsAnalyzeSampleRows;
         int bucketCount = CamusDBConfig.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
+
+        // Capture the live counter baseline before scanning so any DML that commits during the scan
+        // is preserved at publication (see StatisticsManager.PublishAsync) rather than clobbered.
+        StatisticsManager.AnalyzeBaseline baseline =
+            await statistics.CaptureAnalyzeBaselineAsync(database, table).ConfigureAwait(false);
 
         // Collect indexed columns and composite index key-column groups.
         List<string> indexedColumns = GetIndexedColumns(table);
@@ -153,17 +160,15 @@ internal sealed class TableAnalyzer
 
         // --- Persist ---
 
-        // Seed all base stats (row count, min/max, index counts) in one call before the first
-        // flush so every SetXxxAsync call captures the complete snapshot. The actual Kahuna write
-        // happens inside SetHistogramsAsync / SetNdvAsync (each calls FlushAsync internally).
-        // Running SeedColumnStats after those flushes would leave min/max and index counts
-        // in-memory only and they would never reach Kahuna.
-        statistics.SeedColumnStats(database, table, rowCount, minMax, indexCounts);
-
-        // These two calls each load the entry (if evicted) then flush everything to Kahuna,
-        // including the RowCount and ColumnStats seeded above.
-        await statistics.SetHistogramsAsync(database, table, histograms).ConfigureAwait(false);
-        await statistics.SetNdvAsync(database, table, columnNdv, keyNdv.Count > 0 ? keyNdv : null).ConfigureAwait(false);
+        // One atomic generation: merges any DML that committed during the scan, resets staleness, and
+        // writes the whole blob in a single transaction. A sampled scan's row count is a sample, not
+        // the true size, so it must not correct the live tracked count (scanComplete: !isSampled).
+        // Record the analysis timestamp from the caller's read snapshot when it has one.
+        await statistics.PublishAsync(
+            database, table,
+            rowCount, scanComplete: !isSampled,
+            minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
+            baseline, tx.ReadTimestamp).ConfigureAwait(false);
 
         string status = isSampled
             ? $"sampled {rowCount} rows (table larger than {CamusDBConfig.StatsAnalyzeSampleRows})"
@@ -176,6 +181,242 @@ internal sealed class TableAnalyzer
             { "rows",    new ColumnValue(ColumnType.Integer64, rowCount) },
             { "columns", new ColumnValue(ColumnType.Integer64, (long)columnNdv.Count) },
         });
+    }
+
+    /// <summary>
+    /// Bounded, throttled, lock-free background variant of <see cref="AnalyzeAsync"/> used by the
+    /// automatic-analyze scheduler. Produces the same <see cref="Statistics.Models.TableStatistics"/>
+    /// shape but with three hard guarantees that keep it from spiking resources or interfering with
+    /// foreground work:
+    ///
+    /// <list type="bullet">
+    ///   <item><b>Constant peak memory.</b> Histograms are built from a fixed-size
+    ///   <see cref="ReservoirSampler{T}"/> and NDV from fixed-size <see cref="HyperLogLog"/> sketches,
+    ///   so memory does not scale with table size (unlike the manual path's full distinct-sets).
+    ///   Row and index-entry counts stay exact (running integers, O(1) memory).</item>
+    ///   <item><b>Throttled scan.</b> Rows are paced to <see cref="CamusDBConfig.AutoAnalyzeMaxRowsPerSecond"/>
+    ///   with an inter-batch delay and cooperative yield, bounding CPU/IO.</item>
+    ///   <item><b>Zero lock contention.</b> It opens its <em>own</em> read-only snapshot transaction
+    ///   (no range locks, no read-set folding), so it can neither block nor abort a foreground
+    ///   query/writer, and is never itself aborted. It must not reuse a caller's ambient transaction —
+    ///   that is why this is a separate method, not a flag on <see cref="AnalyzeAsync"/>.</item>
+    /// </list>
+    ///
+    /// <para><b>All-or-nothing.</b> Statistics are accumulated in bounded memory and persisted only
+    /// after a complete scan. If <paramref name="cancellationToken"/> fires, a load surge trips
+    /// <paramref name="shouldPause"/>, or leadership is lost (<paramref name="stillOwner"/> returns
+    /// false), the scan aborts by throwing and nothing is persisted, so the table stays marked stale
+    /// and is retried later — making the whole operation idempotent and safe to resume.</para>
+    /// </summary>
+    /// <param name="analyzedAt">HLC timestamp recorded as the table's last-analyzed marker.</param>
+    /// <param name="stillOwner">Re-checked at each batch boundary and immediately before publishing;
+    /// returning false (this node is no longer the elected owner) aborts the scan without persisting,
+    /// so a former leader can never publish after losing its lease. Null disables the check (tests).</param>
+    /// <param name="shouldPause">Re-checked at each batch boundary; returning true (foreground load
+    /// surged) aborts the scan so it retries when the node is quieter. Null disables the check.</param>
+    internal async Task AnalyzeBackgroundAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        Kommander.Time.HLCTimestamp analyzedAt,
+        Func<CancellationToken, ValueTask<bool>>? stillOwner,
+        Func<bool>? shouldPause,
+        CancellationToken cancellationToken)
+    {
+        // Rows between successive leadership/load re-checks. Amortizes the (async) leadership probe
+        // while still noticing a surge or a lost lease within a bounded number of rows mid-scan.
+        int checkEveryRows = Math.Max(1, CamusDBConfig.AutoAnalyzeOwnershipCheckRows);
+
+        int bucketCount = CamusDBConfig.StatsHistogramBuckets;
+        if (bucketCount < 1) bucketCount = 1;
+
+        int sampleCapacity = CamusDBConfig.AutoAnalyzeHistogramSampleRows;
+        if (sampleCapacity < 1) sampleCapacity = 1;
+
+        int hllPrecision = CamusDBConfig.AutoAnalyzeHllPrecision;
+        if (hllPrecision is < 4 or > 16) hllPrecision = 11;
+
+        int maxRowsPerSecond = CamusDBConfig.AutoAnalyzeMaxRowsPerSecond;
+
+        List<string> indexedColumns = GetIndexedColumns(table);
+        List<(string indexName, string[] keyColumns)> readableIndexes = GetReadableIndexes(table);
+
+        // Bounded accumulators — memory is fixed regardless of how many rows/distinct values exist.
+        var reservoirSeed = SeedFor(database, table, analyzedAt);
+        var minMax        = new Dictionary<string, ColumnMinMax>(StringComparer.Ordinal);
+        var columnHll     = new Dictionary<string, HyperLogLog>(StringComparer.Ordinal);
+        var valueSamples  = new Dictionary<string, ReservoirSampler<ScalarBound>>(StringComparer.Ordinal);
+        var keyHll        = new Dictionary<string, HyperLogLog>(StringComparer.Ordinal);
+        var indexCounts   = new Dictionary<string, long>(StringComparer.Ordinal);
+
+        int colSeed = 0;
+        foreach (string col in indexedColumns)
+        {
+            columnHll[col]    = new HyperLogLog(hllPrecision);
+            // Vary each column's reservoir seed so columns don't share an identical retention pattern.
+            valueSamples[col] = new ReservoirSampler<ScalarBound>(sampleCapacity, reservoirSeed + (ulong)(++colSeed) * 0x100000001B3UL);
+        }
+
+        foreach ((string indexName, string[] keyCols) in readableIndexes)
+        {
+            for (int len = 2; len <= keyCols.Length; len++)
+            {
+                string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);
+                keyHll.TryAdd(sig, new HyperLogLog(hllPrecision));
+            }
+            indexCounts[indexName] = 0;
+        }
+
+        // Capture the live counter baseline before pinning the scan snapshot so DML that commits
+        // during the (throttled) scan is preserved at publication rather than clobbered.
+        StatisticsManager.AnalyzeBaseline baseline =
+            await statistics.CaptureAnalyzeBaselineAsync(database, table).ConfigureAwait(false);
+        long rowCount = 0;
+
+        // Open our own lock-free read-only snapshot. Under the serializable default this pins a
+        // single HLC across every scan page (consistent), takes no range locks, and does not fold
+        // reads into any transaction's validation set — so it cannot interfere with foreground work.
+        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+        try
+        {
+            long throttleStartTicks = Environment.TickCount64;
+
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in
+                table.Store.ScanRows(tx, maxRows: null, afterRowId: null, cancellationToken).ConfigureAwait(false))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data.Span);
+                rowCount++;
+
+                foreach (string col in indexedColumns)
+                {
+                    if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
+                        continue;
+
+                    ScalarBound bound = ScalarBound.FromColumnValue(val);
+                    UpdateMinMax(minMax, col, bound);
+                    columnHll[col].Add(BoundKey(bound));
+
+                    if (IsOrderable(val.Type))
+                        valueSamples[col].Add(bound);
+                }
+
+                foreach ((string indexName, string[] keyCols) in readableIndexes)
+                {
+                    if (!row.TryGetValue(keyCols[0], out ColumnValue? firstVal) || firstVal.Type == ColumnType.Null)
+                        continue;
+
+                    indexCounts[indexName]++;
+
+                    for (int len = 2; len <= keyCols.Length; len++)
+                    {
+                        string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);
+                        keyHll[sig].Add(BuildTupleKey(row, keyCols[..len]));
+                    }
+                }
+
+                // At each batch boundary, bail out (without persisting) if the node lost leadership or
+                // foreground load surged. Cheap-and-lock-free reads, so abandoning here loses nothing.
+                if (rowCount % checkEveryRows == 0)
+                {
+                    if (shouldPause is not null && shouldPause())
+                        throw new OperationCanceledException("Auto-analyze paused: foreground load surge");
+                    if (stillOwner is not null && !await stillOwner(cancellationToken).ConfigureAwait(false))
+                        throw new OperationCanceledException("Auto-analyze aborted: leadership lost");
+                }
+
+                await ThrottleAsync(rowCount, throttleStartTicks, maxRowsPerSecond, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            // A read-only snapshot holds no locks; finalizing it is a cheap no-op (or a bare rollback
+            // for a promoted identity). Always finalize so nothing leaks even on cancellation.
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        // Reaching here means the scan completed without cancellation — safe to build and persist.
+        var columnNdv = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach ((string col, HyperLogLog hll) in columnHll)
+            columnNdv[col] = hll.Estimate();
+
+        var keyNdv = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach ((string sig, HyperLogLog hll) in keyHll)
+            keyNdv[sig] = hll.Estimate();
+
+        var histograms = new Dictionary<string, ColumnHistogram>(StringComparer.Ordinal);
+        foreach ((string col, ReservoirSampler<ScalarBound> sampler) in valueSamples)
+        {
+            if (sampler.Items.Count == 0) continue;
+            // Build the histogram over the bounded sample. Bucket boundaries and cumulative
+            // fractions are sample-invariant; the estimator scales them by the exact RowCount below.
+            histograms[col] = BuildEquiDepthHistogram([.. sampler.Items], bucketCount);
+        }
+
+        // Publish under a cluster-visible per-table fence so that, during a failover, exactly one node
+        // writes the new generation. The scan itself was lock-free (no foreground interference); the
+        // fence is taken only for the brief publish. An exclusive lock on the analyze key excludes every
+        // other node, and re-confirming ownership *under* the lock guarantees a former leader that lost
+        // its lease mid-scan aborts here instead of publishing. A node that cannot take the fence
+        // (another node holds it) or is no longer the owner throws — nothing is persisted, so the table
+        // stays stale and is retried by the current owner.
+        KvTransaction fenceTx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+        try
+        {
+            string fenceKey = $"{database.Id}/meta/analyze:{table.Id}";
+            (KeyValueResponseType lockType, _, _, _) = await database.Kahuna.Kahuna.LocateAndTryAcquireExclusiveLock(
+                fenceTx.TransactionId, fenceKey, 0, KeyValueDurability.Persistent, cancellationToken,
+                coordinatorKey: fenceTx.CoordinatorKey, operationId: TransactionOperationId.NewRandom()).ConfigureAwait(false);
+
+            if (lockType != KeyValueResponseType.Locked)
+                throw new OperationCanceledException("Auto-analyze fence held by another node");
+
+            if (stillOwner is not null && !await stillOwner(cancellationToken).ConfigureAwait(false))
+                throw new OperationCanceledException("Auto-analyze aborted before publish: leadership lost");
+
+            // One atomic generation that merges any DML committed during the scan and resets staleness.
+            await statistics.PublishAsync(
+                database, table,
+                rowCount, scanComplete: true,
+                minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
+                baseline, analyzedAt).ConfigureAwait(false);
+
+            await database.Transactions.CommitAsync(fenceTx).ConfigureAwait(false); // releases the fence
+        }
+        catch
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(fenceTx).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    // Paces the scan to the configured rows/second. Checked every row but only actually delays when
+    // the scan has run ahead of its rate budget, so steady-state overhead is one comparison per row.
+    private static async Task ThrottleAsync(long rowsProcessed, long startTicks, int maxRowsPerSecond, CancellationToken cancellationToken)
+    {
+        if (maxRowsPerSecond <= 0)
+            return;
+
+        // Time this many rows *should* have taken at the cap, minus how long they actually took.
+        double targetMs = rowsProcessed * 1000.0 / maxRowsPerSecond;
+        double elapsedMs = Environment.TickCount64 - startTicks;
+        double aheadMs = targetMs - elapsedMs;
+
+        // Only sleep once we're at least a few ms ahead, to avoid thousands of sub-millisecond delays.
+        if (aheadMs >= 5.0)
+            await Task.Delay((int)Math.Min(aheadMs, 1000), cancellationToken).ConfigureAwait(false);
+    }
+
+    // Stable per-(table, run) seed so a reservoir sample is reproducible for a given snapshot.
+    private static ulong SeedFor(DatabaseDescriptor database, TableDescriptor table, Kommander.Time.HLCTimestamp analyzedAt)
+    {
+        ulong seed = 1469598103934665603UL;
+        foreach (char c in database.Id) seed = (seed ^ c) * 1099511628211UL;
+        foreach (char c in (table.Id ?? "")) seed = (seed ^ c) * 1099511628211UL;
+        seed ^= (ulong)analyzedAt.L * 0x9E3779B97F4A7C15UL;
+        seed ^= (ulong)analyzedAt.C;
+        return seed;
     }
 
     // --- Private helpers ---
