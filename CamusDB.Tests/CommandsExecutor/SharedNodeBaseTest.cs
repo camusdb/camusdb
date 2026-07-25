@@ -59,6 +59,9 @@ public abstract class SharedNodeBaseTest : BaseTest
     /// <summary>Exposes the shared node's IKahuna so tests can inspect raw KV state.</summary>
     protected IKahuna SharedKahuna => sharedNode!.Kahuna;
 
+    /// <summary>Exposes the shared embedded node itself, e.g. to build a fault-injecting registry over it.</summary>
+    protected EmbeddedKahuna SharedNode => sharedNode!;
+
     protected override Task<DatabaseRegistry> CreateRegistryAsync()
         => DatabaseRegistry.OpenAsync(sharedNode!);
 

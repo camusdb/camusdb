@@ -357,6 +357,48 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         return registry;
     }
 
+    /// <summary>
+    /// Test-only factory that routes the registry's own KV operations through <paramref name="kvOverride"/>
+    /// (typically a fault-injecting fake) while still minting timestamps and the local node id from the
+    /// real <paramref name="node"/>. Lets a test fault a specific registry operation (e.g. make
+    /// <see cref="UnregisterAsync"/> throw, or force <see cref="HasDropIntentAsync"/> to see a present
+    /// marker) without perturbing the descriptor/hold/metadata paths, which resolve their own node. Loads
+    /// the in-memory cache like <see cref="OpenAsync"/> so name lookups behave normally.
+    /// </summary>
+    internal static async Task<DatabaseRegistry> OpenForTestingAsync(EmbeddedKahuna node, IKahuna kvOverride, bool isClusterMode = false)
+    {
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(kvOverride);
+
+        Func<HLCTimestamp?, HLCTimestamp> mintLocalT = (floor) =>
+        {
+            if (floor.HasValue && !floor.Value.IsNull())
+                return node.Raft.HybridLogicalClock.ReceiveEvent(node.Raft.GetLocalNodeId(), floor.Value);
+            return node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
+        };
+
+        KvTransactionsManager txManager = new(kvOverride, mintLocalT);
+        DatabaseRegistry registry = new(kvOverride, txManager, "_system/", node.Raft.GetLocalNodeId(), isClusterMode);
+
+        await node.WaitUntilStartedAsync().ConfigureAwait(false);
+        await registry.LoadAsync().ConfigureAwait(false);
+        return registry;
+    }
+
+    /// <summary>
+    /// Test-only: reads whether the pending-create marker for <paramref name="branchId"/> is still
+    /// present in the persistent registry. Used to assert that an indeterminate branch-create abort
+    /// retained its recovery handle rather than clearing it.
+    /// </summary>
+    internal async Task<bool> PendingMarkerExistsForTestingAsync(string branchId)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, PendingKey(branchId), -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+        return type == KeyValueResponseType.Get;
+    }
+
     // -----------------------------------------------------------------------
     // Startup load
     // -----------------------------------------------------------------------
@@ -969,18 +1011,61 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     /// <summary>
-    /// Returns <c>true</c> if a drop-in-progress marker is set for <paramref name="sourceId"/>,
-    /// meaning a concurrent <see cref="DropDatabase"/> is actively processing the source and its
-    /// keyspace may be purged at any moment. A branch-create that detects this after registering
-    /// must unregister the newly-created branch and abort.
+    /// Returns <c>true</c> if a drop-intent marker is set for <paramref name="sourceId"/>, meaning a
+    /// concurrent <see cref="DropDatabase"/> is actively processing the source and its keyspace may be
+    /// purged at any moment. A branch-create that detects this after registering must unregister the
+    /// newly-created branch and abort.
+    ///
+    /// <para>This read is the second half of the cross-node drop/create fence, so an <em>indeterminate</em>
+    /// result must never be reported as "no drop". Only an authoritative key-absent response
+    /// (<see cref="KeyValueResponseType.DoesNotExist"/>) returns <c>false</c>; a present marker
+    /// (<see cref="KeyValueResponseType.Get"/>) returns <c>true</c>; transient statuses
+    /// (<c>MustRetry</c>/<c>WaitingForReplication</c>) are retried with bounded backoff; and any other
+    /// status, an exhausted retry, or an exception <b>throws</b> a retryable
+    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/> so the create path keeps its published-child
+    /// recovery state rather than treating the fence as clear. Mapping an unconfirmed read to "absent"
+    /// would let a branch publish while its parent is being purged.</para>
     /// </summary>
     public async Task<bool> HasDropIntentAsync(string sourceId)
     {
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? _) = await kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, DropIntentKey(sourceId), -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
-        ).ConfigureAwait(false);
-        return type == KeyValueResponseType.Get;
+        int retries = 0;
+        while (true)
+        {
+            KeyValueResponseType type;
+            try
+            {
+                (type, _) = await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, DropIntentKey(sourceId), -1,
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"Could not confirm drop-intent state for '{sourceId}' ({ex.Message}); retry the operation");
+            }
+
+            if (type == KeyValueResponseType.Get)
+                return true;
+
+            // Authoritative absence is the ONLY result that clears the fence.
+            if (type == KeyValueResponseType.DoesNotExist)
+                return false;
+
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+                && ++retries < MaxRetries)
+            {
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+                continue;
+            }
+
+            // Any other status, or exhausted transient retries: the read is indeterminate. Do NOT report
+            // "no drop" — surface a retryable error so the fence is re-evaluated rather than bypassed.
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"Drop-intent read for '{sourceId}' was indeterminate (status {type}); retry the operation");
+        }
     }
 
     /// <summary>

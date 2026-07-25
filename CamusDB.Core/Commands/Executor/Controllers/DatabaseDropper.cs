@@ -94,15 +94,30 @@ internal sealed class DatabaseDropper
     /// collector can reclaim it after the retention window. The caller has already written the orphan
     /// record and unregistered the name.</para>
     /// </summary>
+    /// <param name="headlessKahuna">
+    /// Shared node used to purge the keyspace by id alone when there is no usable descriptor on this node
+    /// (absent from the cache, or a faulted load lazy). Required to purge in those cases — without it the
+    /// purge cannot be verified and the recovery marker is kept. Ignored when a live descriptor is found.
+    /// </param>
+    /// <param name="drainTimeout">
+    /// How long to wait for in-flight operations to drain before aborting their transactions and retrying.
+    /// Defaults to 30 s; exposed so tests can drive the timeout path quickly.
+    /// </param>
     /// <returns>
     /// <c>true</c> if the keyspace was fully and verifiably purged (or <paramref name="purge"/> was
     /// <c>false</c>, i.e. nothing to purge). <c>false</c> means the purge was incomplete — the caller
-    /// must <b>not</b> clear the drop-in-progress marker so a later startup/GC pass resumes it.
+    /// must <b>not</b> clear the drop-in-progress marker so a later startup/GC pass resumes it. A missing
+    /// or faulted descriptor no longer returns a phantom <c>true</c>: it falls back to a headless purge,
+    /// and a drain that never completes returns <c>false</c> without purging or disposing.
     /// </returns>
-    public async Task<bool> Drop(string id, bool purge = true)
+    public async Task<bool> Drop(string id, bool purge = true, IKahuna? headlessKahuna = null, TimeSpan? drainTimeout = null)
     {
         if (!databaseDescriptors.Descriptors.TryRemove(id, out AsyncLazy<DatabaseDescriptor>? databaseDescriptorLazy))
-            return true;
+        {
+            // No live descriptor on this node. There is nothing to drain or dispose, but the keyspace may
+            // still exist in shared KV, so a purge must still run headlessly rather than reporting success.
+            return await PurgeHeadlessAsync(id, purge, headlessKahuna).ConfigureAwait(false);
+        }
 
         DatabaseDescriptor databaseDescriptor;
         try
@@ -111,27 +126,50 @@ internal sealed class DatabaseDropper
         }
         catch
         {
-            // The cached lazy is faulted (e.g. LoadDatabase threw during a prior Open attempt).
-            // The name is already unregistered by the caller before Drop is invoked — nothing more to do.
-            return true;
+            // The cached lazy is faulted (e.g. LoadDatabase threw during a prior Open attempt). There is no
+            // usable descriptor to drain or dispose, but its keyspace may still be on disk — purge by id
+            // rather than declaring the drop complete and leaking the keyspace while clearing its marker.
+            return await PurgeHeadlessAsync(id, purge, headlessKahuna).ConfigureAwait(false);
         }
 
         // Signal all new AddRef calls to fail immediately with DatabaseDoesntExist.
         databaseDescriptor.MarkDropped();
 
+        TimeSpan timeout = drainTimeout ?? TimeSpan.FromSeconds(30);
+
         // Wait for any operations already holding a use-reference to finish.
-        // Cap at 30 s to avoid blocking forever on a stuck in-flight operation.
-        try
+        bool drained = await WaitForDrainAsync(databaseDescriptor, timeout).ConfigureAwait(false);
+
+        if (!drained)
         {
-            await databaseDescriptor.WhenDrainedAsync()
-                .WaitAsync(TimeSpan.FromSeconds(30))
-                .ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
+            // Writers are still in-flight. Abort their transactions so none can commit row/index writes
+            // AFTER the purge scan has passed their bucket (which would recreate keys behind the drop),
+            // then wait a bounded second time for the now-failing operations to release their refs.
             logger.LogWarning(
-                "DropDatabase for id={Id} timed out waiting for in-flight operations; forcing disposal",
+                "DropDatabase for id={Id}: in-flight operations did not drain within {Timeout}; aborting active transactions and retrying drain",
+                id, timeout);
+            try
+            {
+                await databaseDescriptor.Transactions.RollbackAllActiveAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to abort active transactions for id={Id} during drop drain", id);
+            }
+
+            drained = await WaitForDrainAsync(databaseDescriptor, timeout).ConfigureAwait(false);
+        }
+
+        if (!drained)
+        {
+            // Still not drained: a writer may yet commit into the keyspace. Do NOT purge (a recreated key
+            // could outlive the drop) and do NOT dispose the descriptor (in-flight operations would then
+            // run against a disposed descriptor). Report the drop incomplete so the caller keeps the
+            // drop-in-progress marker durable; a startup/GC resume finishes the purge once writers drain.
+            logger.LogWarning(
+                "DropDatabase for id={Id}: operations still in-flight after abort; deferring purge and disposal and leaving the recovery marker",
                 id);
+            return false;
         }
 
         // Purge all key-value entries that belong to this database from the shared node.
@@ -154,6 +192,45 @@ internal sealed class DatabaseDropper
         databaseDescriptor.Dispose();
         Log.LogDatabaseDropped(logger, databaseDescriptor.Name);
         return purged;
+    }
+
+    /// <summary>
+    /// Awaits the descriptor's drain up to <paramref name="timeout"/>. Returns <c>true</c> if every
+    /// in-flight use-reference was released in time, <c>false</c> on timeout.
+    /// </summary>
+    private static async Task<bool> WaitForDrainAsync(DatabaseDescriptor descriptor, TimeSpan timeout)
+    {
+        try
+        {
+            await descriptor.WhenDrainedAsync().WaitAsync(timeout).ConfigureAwait(false);
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Purge path taken when there is no usable descriptor on this node (absent from cache or faulted
+    /// load). A deferred drop (<paramref name="purge"/> <c>= false</c>) has nothing to reclaim and returns
+    /// <c>true</c>. Otherwise the keyspace is purged by id via <paramref name="headlessKahuna"/>; if none
+    /// was supplied the purge cannot be verified, so it returns <c>false</c> to keep the recovery marker.
+    /// </summary>
+    private async Task<bool> PurgeHeadlessAsync(string id, bool purge, IKahuna? headlessKahuna)
+    {
+        if (!purge)
+            return true;
+
+        if (headlessKahuna is null)
+        {
+            logger.LogWarning(
+                "DropDatabase for id={Id}: no descriptor and no shared node available to purge the keyspace; leaving the recovery marker",
+                id);
+            return false;
+        }
+
+        return await PurgeKeyspaceByIdAsync(headlessKahuna, id, null).ConfigureAwait(false);
     }
 
     /// <summary>

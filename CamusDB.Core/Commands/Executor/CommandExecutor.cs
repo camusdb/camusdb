@@ -618,8 +618,12 @@ public sealed class CommandExecutor : IAsyncDisposable
             }
             catch
             {
-                // If the child was published (drop-intent check threw after RegisterAsync), retract
-                // it so no stale entry remains. Hold release and meta purge follow regardless.
+                // If the child was published (e.g. the drop-intent check threw after RegisterAsync, or
+                // returned an indeterminate status), retract it before releasing the hold or purging the
+                // metadata. The destructive cleanup below is only safe once the child is CONFIRMED
+                // unpublished — otherwise it would leave a durable registry entry pointing at a deleted
+                // metadata namespace, with no snapshot floor protecting the inherited rows and no
+                // recovery handle.
                 if (childRegistered)
                 {
                     try
@@ -629,14 +633,23 @@ public sealed class CommandExecutor : IAsyncDisposable
                     }
                     catch (Exception unregEx)
                     {
-                        logger.LogWarning(unregEx,
-                            "Failed to unregister branch '{Branch}' after aborting due to concurrent parent drop; entry may be stale",
-                            branchName);
+                        // Indeterminate create: the child is still registered and we cannot confirm its
+                        // removal. Retain the snapshot hold, the copied metadata, AND the pending-create
+                        // marker so a startup scrubber / reconciliation can later finish either
+                        // unpublication + cleanup or completion of the branch. Do NOT release the hold or
+                        // purge the metadata here. Surface a retryable indeterminate error.
+                        leaveMarkerForScrubber = true;
+                        logger.LogError(unregEx,
+                            "Branch '{Branch}' (id={BranchId}) remains registered after an aborted create and could not be unregistered; retaining snapshot hold, metadata, and pending-create marker for recovery",
+                            branchName, branchId);
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.TransactionMustRetry,
+                            $"Branch '{branchName}' creation is in an indeterminate state (the published branch could not be retracted after aborting); retry after reconciliation");
                     }
                 }
 
-                // The branch was never published (or has now been retracted), so nothing will ever
-                // renew or release this hold. Release it best-effort.
+                // Confirmed unpublished (never published, or now retracted): nothing will ever renew or
+                // release this hold, so release it best-effort.
                 try
                 {
                     await sourceKahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
@@ -761,9 +774,20 @@ public sealed class CommandExecutor : IAsyncDisposable
         catch (CamusDBException) { throw; }
         catch (Exception intentEx)
         {
-            // Transient Kahuna error; fall through with only the single-node semaphore guard (BR8).
+            // In cluster mode the drop-intent marker is the ONLY cross-node fence against a branch-create
+            // racing on another node. If it cannot be acquired or confirmed, fail the drop CLOSED before
+            // any destructive step (no orphan/drop marker, no unregister, no purge): the local
+            // SchemaDdlSemaphore does not fence other nodes, so proceeding could unregister and purge the
+            // parent while a remote branch-create publishes a child against it. Surface a retryable error.
+            if (isClusterMode)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"Could not acquire the cross-node drop fence for '{ticket.DatabaseName}' ({intentEx.Message}); retry the drop");
+
+            // Standalone: no other node can race, so the single-node semaphore guard is sufficient and the
+            // drop may proceed without the distributed fence.
             logger.LogWarning(intentEx,
-                "Could not acquire drop-intent marker for '{Database}'; cross-node branch-create race is not fully fenced",
+                "Could not acquire drop-intent marker for '{Database}' (standalone mode); proceeding under the single-node semaphore guard",
                 ticket.DatabaseName);
         }
 
@@ -828,7 +852,11 @@ public sealed class CommandExecutor : IAsyncDisposable
             }
 
             // Deferred drop closes the database but leaves its keyspace intact for recovery.
-            bool purged = await databaseDroper.Drop(entry.Id, purge: !deferred).ConfigureAwait(false);
+            // Pass the shared node so a missing/faulted descriptor still purges the keyspace by id
+            // (headless) instead of reporting a phantom success and leaking the keyspace.
+            bool purged = await databaseDroper
+                .Drop(entry.Id, purge: !deferred, headlessKahuna: sharedNode?.Kahuna)
+                .ConfigureAwait(false);
 
             if (!deferred)
             {

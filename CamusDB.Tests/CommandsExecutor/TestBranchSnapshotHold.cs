@@ -146,6 +146,63 @@ public sealed class TestBranchSnapshotHold : BaseTest
     }
 
     /// <summary>
+    /// A sweep-level exception (leader check or persistent registry scan throwing) must not kill the
+    /// background renew loop. If it did, every branch hold on the node would lapse after its lease with
+    /// nothing to restart the sweep. This drives the real <see cref="SnapshotHoldRenewer.Start"/> loop
+    /// with a sweep that throws on its first invocation and succeeds afterward, and asserts that a later
+    /// tick still renews the hold and advances the liveness timestamp.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task RenewerLoop_SurvivesSweepException_ContinuesRenewing()
+    {
+        (_, string branchName, DatabaseDescriptor rootDb, _) = await CreateRootAndBranch();
+
+        HLCTimestamp forkT = sharedRegistry!.Get(branchName)!.Ancestors[0].ForkTimestamp;
+
+        SnapshotHoldRenewer renewer = new(
+            TestNode!, sharedRegistry!, logger, CamusDB.Core.CamusDBConfig.BranchSnapshotHoldLeaseMs)
+        {
+            IntervalMsForTesting = 150,
+        };
+
+        int sweeps = 0;
+        int successfulSweeps = 0;
+        renewer.SweepForTesting = async ct =>
+        {
+            int attempt = Interlocked.Increment(ref sweeps);
+            if (attempt == 1)
+                throw new InvalidOperationException("injected sweep-level failure (e.g. leader check or registry scan)");
+
+            // Subsequent sweeps run the real renew path so the hold is actually renewed and the
+            // liveness timestamp advances.
+            int renewed = await renewer.RenewDueHoldsAsync(ct);
+            Interlocked.Increment(ref successfulSweeps);
+            return renewed;
+        };
+
+        renewer.Start();
+
+        // Wait until at least two successful sweeps have run AFTER the first (failing) one, proving the
+        // loop was not terminated by the injected exception.
+        for (int i = 0; i < 40 && Volatile.Read(ref successfulSweeps) < 2; i++)
+            await Task.Delay(100);
+
+        await renewer.DisposeAsync();
+
+        Assert.That(Volatile.Read(ref sweeps), Is.GreaterThanOrEqualTo(3),
+            "the loop must keep sweeping after a sweep-level exception (first throws, later ones succeed)");
+        Assert.That(Volatile.Read(ref successfulSweeps), Is.GreaterThanOrEqualTo(2),
+            "sweeps after the injected failure must still run");
+        Assert.That(renewer.LastSuccessfulSweep, Is.Not.EqualTo(HLCTimestamp.Zero),
+            "a successful sweep after the failure must advance the liveness timestamp");
+
+        (HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        Assert.That(live, Is.GreaterThanOrEqualTo(1), "the hold must remain live after the loop recovered");
+        Assert.That(floor, Is.EqualTo(forkT), "recovery must not move the effective floor");
+    }
+
+    /// <summary>
     /// The snapshot-hold renewer must sweep the persistent KV registry, not only the local in-memory
     /// cache. Branches registered on another node after the sweeping leader's startup load will not
     /// appear in the cache; if the renewer used only <c>registry.List()</c> their holds would never

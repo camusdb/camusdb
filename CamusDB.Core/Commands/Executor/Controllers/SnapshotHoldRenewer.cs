@@ -7,6 +7,7 @@
  */
 
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using Microsoft.Extensions.Logging;
@@ -39,9 +40,18 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
     private readonly DatabaseRegistry registry;
     private readonly ILogger<ICamusDB> logger;
     private readonly int leaseMs;
-    private readonly int intervalMs;
+    private int intervalMs;
     private readonly CancellationTokenSource cts = new();
     private Task? loop;
+
+    /// <summary>
+    /// HLC timestamp of the last sweep that completed without throwing (leader check + registry scan
+    /// succeeded, regardless of how many individual holds were due). Stays <see cref="HLCTimestamp.Zero"/>
+    /// until the first successful sweep. Exposed as a liveness signal so a stalled renewal pipeline —
+    /// e.g. one that keeps failing the leader check or the registry scan — is observable rather than
+    /// silent. Ordered by HLC, never wall clock, so the value is comparable across nodes.
+    /// </summary>
+    internal HLCTimestamp LastSuccessfulSweep { get; private set; } = HLCTimestamp.Zero;
 
     public SnapshotHoldRenewer(
         EmbeddedKahuna sharedNode,
@@ -57,6 +67,21 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
         this.intervalMs = Math.Max(1000, leaseMs / 3);
     }
 
+    /// <summary>
+    /// Test-only seam. When set, the background loop invokes this instead of <see cref="RenewDueHoldsAsync"/>,
+    /// so a test can inject a one-shot sweep failure and assert the loop survives it (the production fix is
+    /// that a thrown sweep is caught inside the loop and retried on the next tick). Null in production —
+    /// the loop then sweeps via <see cref="RenewDueHoldsAsync"/> directly.
+    /// </summary>
+    internal Func<CancellationToken, Task<int>>? SweepForTesting { get; set; }
+
+    /// <summary>Uses a short renew interval so the loop's per-tick behavior is testable without waiting a full lease/3.</summary>
+    internal int IntervalMsForTesting
+    {
+        get => intervalMs;
+        set => intervalMs = value;
+    }
+
     /// <summary>Starts the background renew loop. Idempotent: a second call is a no-op.</summary>
     public void Start()
     {
@@ -65,21 +90,29 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
 
     private async Task RenewLoopAsync(CancellationToken ct)
     {
-        try
+        // A sweep-level failure (leader check or registry scan throwing) must never terminate the
+        // loop: if it did, every branch hold on this node would lapse after its lease and Kahuna
+        // could reclaim the revisions branch as-of reads depend on, with nothing to restart the
+        // sweep. So the catch lives INSIDE the loop — one failed sweep is logged and the loop keeps
+        // sweeping on the next tick. Only cancellation (shutdown) ends the loop.
+        while (!ct.IsCancellationRequested)
         {
-            while (!ct.IsCancellationRequested)
+            try
             {
                 await Task.Delay(intervalMs, ct).ConfigureAwait(false);
-                await RenewDueHoldsAsync(ct).ConfigureAwait(false);
+                await (SweepForTesting is null
+                    ? RenewDueHoldsAsync(ct)
+                    : SweepForTesting(ct)).ConfigureAwait(false);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal shutdown.
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Snapshot-hold renewer loop terminated unexpectedly");
+            catch (OperationCanceledException)
+            {
+                // Normal shutdown.
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Snapshot-hold renewer sweep failed; will retry on the next tick");
+            }
         }
     }
 
@@ -97,7 +130,12 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
     internal async Task<int> RenewDueHoldsAsync(CancellationToken ct)
     {
         if (!await sharedNode.AmILeaderForKeyAsync(registry.RegistryBucket, ct).ConfigureAwait(false))
+        {
+            // Reaching here without throwing means the pipeline is alive even though this node does
+            // not currently sweep; record it so the liveness signal reflects a healthy no-op.
+            MarkSweepSucceeded();
             return 0;
+        }
 
         int renewed = 0;
         IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
@@ -125,7 +163,17 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
             }
         }
 
+        // The full sweep completed (leader check + registry scan succeeded); individual per-entry
+        // renew failures above are contained and do not count against liveness.
+        MarkSweepSucceeded();
         return renewed;
+    }
+
+    /// <summary>Stamps <see cref="LastSuccessfulSweep"/> with a fresh local HLC event.</summary>
+    private void MarkSweepSucceeded()
+    {
+        LastSuccessfulSweep = sharedNode.Raft.HybridLogicalClock
+            .SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
     }
 
     public async ValueTask DisposeAsync()
