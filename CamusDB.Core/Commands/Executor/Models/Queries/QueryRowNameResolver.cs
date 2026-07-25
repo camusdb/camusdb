@@ -123,7 +123,7 @@ public sealed class QueryRowNameResolver
                     $"Unknown column: {originalIdentifier}");
             }
 
-            return FormatLookupKey(alias, columnName);
+            return QualifiedLookupKey(columnName, originalIdentifier);
         }
 
         if (aliasToDerived.TryGetValue(alias, out BoundDerivedTableSource? derived))
@@ -135,13 +135,24 @@ public sealed class QueryRowNameResolver
                     $"Unknown column: {originalIdentifier}");
             }
 
-            return FormatLookupKey(alias, columnName);
+            return QualifiedLookupKey(columnName, originalIdentifier);
         }
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,
             $"Unknown alias '{alias}'");
     }
+
+    /// <summary>
+    /// Lookup key for an already-qualified <c>alias.column</c> reference. When the query uses
+    /// qualified row keys, that key is character-identical to the incoming identifier — parse-time
+    /// normalization lowercases the whole identifier as one string, so <c>alias + "." + column</c>
+    /// reconstructs it exactly — so the original identifier is returned instead of rebuilding an
+    /// equal string via <see cref="FormatQualifiedKey"/>. A single base table stores bare column
+    /// keys, so it returns the already-split column name.
+    /// </summary>
+    private string QualifiedLookupKey(string columnName, string originalIdentifier) =>
+        UsesQualifiedRowKeys() ? originalIdentifier : columnName;
 
     private string ResolveUnqualifiedColumn(string columnName)
     {
