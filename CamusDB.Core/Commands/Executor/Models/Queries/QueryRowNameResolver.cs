@@ -25,6 +25,20 @@ public sealed class QueryRowNameResolver
 
     private readonly Dictionary<string, List<string>> columnNameToAliases;
 
+    /// <summary>
+    /// Memoizes the pure mapping from an identifier to its resolved row-lookup key. The result is a
+    /// function only of this resolver's fixed sources and the identifier text, both constant for the
+    /// life of the query, yet <see cref="ResolveRowLookupKey"/> is invoked once per scanned row per
+    /// identifier occurrence on the hot predicate path — recomputing it re-runs the qualified split,
+    /// the linear column scan, and key formatting on every row. Caching successful resolutions
+    /// collapses all of that to one dictionary probe. Only successes are stored: the three failure
+    /// modes throw, so a repeated bad identifier must re-throw the same exception rather than read a
+    /// cached result. Safe as a plain <see cref="Dictionary{TKey,TValue}"/> because a resolver
+    /// instance is consumed by a single strictly-sequential scan; it is never touched by two threads
+    /// at once within one execution.
+    /// </summary>
+    private readonly Dictionary<string, string> lookupKeyMemo = new(StringComparer.Ordinal);
+
     public QueryRowNameResolver(
         IReadOnlyList<BoundTableSource> sources,
         IReadOnlyList<BoundDerivedTableSource>? derivedSources = null)
@@ -82,10 +96,17 @@ public sealed class QueryRowNameResolver
     /// </summary>
     public string ResolveRowLookupKey(string identifier)
     {
-        if (TrySplitQualified(identifier, out string alias, out string columnName))
-            return ResolveQualifiedColumn(alias, columnName, identifier);
+        if (lookupKeyMemo.TryGetValue(identifier, out string? cachedKey))
+            return cachedKey;
 
-        return ResolveUnqualifiedColumn(columnName: identifier);
+        string lookupKey = TrySplitQualified(identifier, out string alias, out string columnName)
+            ? ResolveQualifiedColumn(alias, columnName, identifier)
+            : ResolveUnqualifiedColumn(columnName: identifier);
+
+        // Cache successes only. The failure modes above throw before reaching here, so a repeated
+        // bad identifier keeps re-throwing the same exception instead of returning a stale result.
+        lookupKeyMemo[identifier] = lookupKey;
+        return lookupKey;
     }
 
     public static string FormatQualifiedKey(string alias, string columnName) =>

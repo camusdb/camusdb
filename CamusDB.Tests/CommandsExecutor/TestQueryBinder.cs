@@ -97,6 +97,106 @@ public class TestQueryBinder : BaseTest
     }
 
     [Test]
+    public void ResolveRowLookupKey_SameIdentifierTwice_returnsEqualKey_singleTable()
+    {
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id), ("name", ColumnType.String));
+        QueryRowNameResolver resolver = new([users]);
+
+        string first = resolver.ResolveRowLookupKey("u.name");
+        string second = resolver.ResolveRowLookupKey("u.name");
+
+        Assert.AreEqual("name", first);
+        Assert.AreEqual(first, second);
+    }
+
+    [Test]
+    public void ResolveRowLookupKey_SameIdentifierTwice_returnsEqualKey_join()
+    {
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id), ("name", ColumnType.String));
+        BoundTableSource posts = MakeBoundSource("posts", "p", ("id", ColumnType.Id), ("title", ColumnType.String));
+        QueryRowNameResolver resolver = new([users, posts]);
+
+        string first = resolver.ResolveRowLookupKey("u.name");
+        string second = resolver.ResolveRowLookupKey("u.name");
+
+        Assert.AreEqual("u.name", first);
+        Assert.AreEqual(first, second);
+    }
+
+    [Test]
+    public void ResolveRowLookupKey_QualifiedAndUnqualified_resolveConsistently_singleTable()
+    {
+        // Single base table stores unqualified keys, so both references collapse to the bare column.
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id), ("name", ColumnType.String));
+        QueryRowNameResolver resolver = new([users]);
+
+        Assert.AreEqual("name", resolver.ResolveRowLookupKey("name"));
+        Assert.AreEqual("name", resolver.ResolveRowLookupKey("u.name"));
+        // Second round trips the memo — same answers.
+        Assert.AreEqual("name", resolver.ResolveRowLookupKey("name"));
+        Assert.AreEqual("name", resolver.ResolveRowLookupKey("u.name"));
+    }
+
+    [Test]
+    public void ResolveRowLookupKey_QualifiedAndUnqualified_resolveConsistently_join()
+    {
+        // A join uses qualified keys; the unqualified reference still resolves to the qualified key
+        // through the single owning alias, and repeating it hits the memo with the same result.
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id));
+        BoundTableSource posts = MakeBoundSource("posts", "p", ("title", ColumnType.String));
+        QueryRowNameResolver resolver = new([users, posts]);
+
+        Assert.AreEqual("p.title", resolver.ResolveRowLookupKey("title"));
+        Assert.AreEqual("p.title", resolver.ResolveRowLookupKey("p.title"));
+        Assert.AreEqual("p.title", resolver.ResolveRowLookupKey("title"));
+        Assert.AreEqual("p.title", resolver.ResolveRowLookupKey("p.title"));
+    }
+
+    [Test]
+    public void ResolveRowLookupKey_UnknownColumn_throwsSameOnRepeatedCall()
+    {
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id));
+        QueryRowNameResolver resolver = new([users]);
+
+        CamusDBException first = Assert.Throws<CamusDBException>(() => resolver.ResolveRowLookupKey("missing"))!;
+        CamusDBException second = Assert.Throws<CamusDBException>(() => resolver.ResolveRowLookupKey("missing"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.UnknownColumn, first.Code);
+        Assert.AreEqual(first.Code, second.Code);
+        Assert.AreEqual(first.Message, second.Message);
+    }
+
+    [Test]
+    public void ResolveRowLookupKey_AmbiguousColumn_throwsSameOnRepeatedCall()
+    {
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id));
+        BoundTableSource posts = MakeBoundSource("posts", "p", ("id", ColumnType.Id));
+        QueryRowNameResolver resolver = new([users, posts]);
+
+        CamusDBException first = Assert.Throws<CamusDBException>(() => resolver.ResolveRowLookupKey("id"))!;
+        CamusDBException second = Assert.Throws<CamusDBException>(() => resolver.ResolveRowLookupKey("id"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, first.Code);
+        Assert.AreEqual(first.Code, second.Code);
+        Assert.AreEqual(first.Message, second.Message);
+    }
+
+    [Test]
+    public void ResolveRowLookupKey_UnknownAlias_throwsSameOnRepeatedCall()
+    {
+        BoundTableSource users = MakeBoundSource("users", "u", ("id", ColumnType.Id));
+        BoundTableSource posts = MakeBoundSource("posts", "p", ("id", ColumnType.Id));
+        QueryRowNameResolver resolver = new([users, posts]);
+
+        CamusDBException first = Assert.Throws<CamusDBException>(() => resolver.ResolveRowLookupKey("missing.id"))!;
+        CamusDBException second = Assert.Throws<CamusDBException>(() => resolver.ResolveRowLookupKey("missing.id"))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, first.Code);
+        Assert.AreEqual(first.Code, second.Code);
+        Assert.AreEqual(first.Message, second.Message);
+    }
+
+    [Test]
     public void EvalExpr_UsesRowNameResolverForAliasedSingleTableColumn()
     {
         BoundTableSource users = MakeBoundSource("users", "u", ("score", ColumnType.Integer64));

@@ -46,6 +46,7 @@ public class EvalExprBenchmarks
     private NodeAst _updateExpr = null!;       // upper(name)  (idempotent UPDATE SET expr)
     private NodeAst _inSmall = null!;          // value IN (1,2,3,4)
     private NodeAst _inLarge = null!;          // value IN (1..1000)
+    private NodeAst _filterQualified = null!;  // bench.value > 10 (qualified identifier)
 
     // ── row dictionaries ─────────────────────────────────────────────────────
 
@@ -162,6 +163,11 @@ public class EvalExprBenchmarks
 
         // value IN (1..1000)
         _inLarge = InMembership(Identifier("value"), BuildIntList(1000));
+
+        // bench.value > 10 — a fully-qualified "alias.column" identifier on the join-path
+        // resolver. This is the hot shape the profile flagged: resolving it splits the
+        // identifier (two Substrings), linear-scans the source columns, and formats the key.
+        _filterQualified = BinaryOp(NodeType.ExprGreaterThan, Identifier("bench.value"), Int(10));
     }
 
     // ── benchmarks — all use _resolverBare to match the real single-table path ──
@@ -227,6 +233,18 @@ public class EvalExprBenchmarks
     [Benchmark(Description = "IN large (1000 elements): value IN (1..1000)")]
     public ColumnValue InListLarge() =>
         SQLExecutorBaseCreator.EvalExpr(_inLarge, _row, null, _resolverBare);
+
+    /// <summary>
+    /// Join resolver with a fully-qualified "bench.value" identifier — the shape a dotMemory
+    /// back-trace attributed 42.96 MB of <c>String.Substring</c> to (the two slices in
+    /// <c>TrySplitQualified</c>) plus a <c>FormatQualifiedKey</c> allocation, once per scanned
+    /// row. Because the resolver memoizes successful resolutions, only the first iteration pays
+    /// the split/scan/format; every later call is one dictionary probe, so allocation should be
+    /// zero here after memoization lands.
+    /// </summary>
+    [Benchmark(Description = "filter qualified: bench.value > 10 (join path, alias.column)")]
+    public ColumnValue FilterQualifiedIdentifier() =>
+        SQLExecutorBaseCreator.EvalExpr(_filterQualified, _rowQualified, null, _resolverQualified);
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
