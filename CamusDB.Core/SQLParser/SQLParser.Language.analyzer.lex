@@ -57,6 +57,7 @@ TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
 TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
 TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
 TAs 		    (A|a)(S|s)
+TAsOfSystemTime (A|a)(S|s)[ \t\r\n]+(O|o)(F|f)[ \t\r\n]+(S|s)(Y|y)(S|s)(T|t)(E|e)(M|m)[ \t\r\n]+(T|t)(I|i)(M|m)(E|e)
 TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
 THaving         (H|h)(A|a)(V|v)(I|i)(N|n)(G|g)
 TDistinct       (D|d)(I|i)(S|s)(T|t)(I|i)(N|n)(C|c)(T|t)
@@ -281,6 +282,8 @@ TDot            \.
 {TLimit} { return (int)Token.TLIMIT; }
 
 {TOffset} { return (int)Token.TOFFSET; }
+
+{TAsOfSystemTime} { return (int)Token.TASOFSYSTEMTIME; }
 
 {TAs} { return (int)Token.TAS; }
 

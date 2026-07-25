@@ -38,6 +38,7 @@
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
 %token TCASE TWHEN TTHEN TELSE TEND
 %token TINCLUDE
+%token TASOFSYSTEMTIME
 
 %%
 
@@ -69,10 +70,25 @@ opt_distinct : TDISTINCT { $$.s = "1"; }
              | { $$.s = null; }
              ;
 
-select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_where opt_group opt_having opt_order opt_limit opt_offset
-            { $$.n = new(NodeType.Select, $3.n, $5.n, $6.n, $9.n, $10.n, $11.n, $7.n, $2.s, $8.n); }
+select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_as_of opt_where opt_group opt_having opt_order opt_limit opt_offset
+            { $$.n = new(NodeType.Select, $3.n, $5.n, $7.n, $10.n, $11.n, $12.n, $8.n, $2.s, $9.n, $6.n); }
             | TSELECT opt_distinct select_field_list opt_limit opt_offset
             { $$.n = new(NodeType.Select, $3.n, null, null, null, $4.n, $5.n, null, $2.s, null); }
+            ;
+
+/* AS OF SYSTEM TIME '<expr>' — time-travel read. Placed immediately after the FROM clause and before
+   WHERE, matching the standard SQL time-travel placement. The scanner recognises the whole
+   "AS OF SYSTEM TIME" phrase as a single TASOFSYSTEMTIME token, so it never collides with the
+   table-alias rule (opt_table_alias : TAS any_identifier). The value is a string ('-10s' relative
+   offset, or an absolute timestamp), a bare integer (Unix epoch milliseconds), or a @placeholder;
+   the executor resolves it to an HLC snapshot timestamp and pins the read to it. */
+opt_as_of : TASOFSYSTEMTIME as_of_value { $$.n = $2.n; }
+          | { $$.n = null; }
+          ;
+
+as_of_value : string { $$.n = $1.n; $$.s = $1.s; }
+            | int { $$.n = $1.n; $$.s = $1.s; }
+            | placeholder { $$.n = $1.n; $$.s = $1.s; }
             ;
 
 /* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt

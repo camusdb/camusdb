@@ -44,6 +44,15 @@ public sealed class NodeAst
 
     public NodeAst? extendedSix;
 
+    /// <summary>
+    /// Seventh optional child slot, appended after <see cref="extendedSix"/>. Currently carries the
+    /// <c>AS OF SYSTEM TIME</c> value node (a <see cref="NodeType.String"/>, <see cref="NodeType.Integer"/>,
+    /// or <see cref="NodeType.Placeholder"/>) on a <see cref="NodeType.Select"/> node; null when the
+    /// SELECT has no time-travel clause. Kept as a trailing defaulted constructor parameter so the
+    /// dozens of existing positional <c>new(...)</c> call sites in the grammar remain unchanged.
+    /// </summary>
+    public NodeAst? extendedSeven;
+
     public string? yytext;
 
     public NodeAst(
@@ -56,7 +65,8 @@ public sealed class NodeAst
         NodeAst? extendedFour,
         NodeAst? extendedFive,
         string? yytext,
-        NodeAst? extendedSix = null
+        NodeAst? extendedSix = null,
+        NodeAst? extendedSeven = null
     )
 	{
 		this.nodeType = nodeType;
@@ -68,6 +78,7 @@ public sealed class NodeAst
         this.extendedFour = extendedFour;
         this.extendedFive = extendedFive;
         this.extendedSix = extendedSix;
+        this.extendedSeven = extendedSeven;
         this.yytext = yytext;
 	}
 

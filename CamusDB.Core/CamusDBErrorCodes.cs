@@ -45,6 +45,15 @@ public static class CamusDBErrorCodes
     public const string InvalidAstStmt = "CADB0407";
 
     /// <summary>
+    /// An <c>AS OF SYSTEM TIME</c> clause could not be honored: the value is malformed (bad duration
+    /// or timestamp), resolves to a future or pre-epoch instant, or the statement is not an autocommit
+    /// read-only SELECT (time-travel is rejected inside an explicit or promoted transaction, which
+    /// already holds a live Kahuna session pinned to its own read snapshot). A permanent caller
+    /// mistake — maps to HTTP 400.
+    /// </summary>
+    public const string InvalidAsOfSystemTime = "CADB0409";
+
+    /// <summary>
     /// A schema operation would exceed a configured limit (identifier length, columns per table,
     /// indexes per table, or tables per database). The limit and offending value are named in the
     /// exception message. <c>&lt;= 0</c> values in <see cref="CamusDBConfig"/> disable the
@@ -155,6 +164,7 @@ public static class CamusDBErrorCodes
     {
         TransactionMutationLimitExceeded => 400,
         CheckConstraintViolation => 400,
+        InvalidAsOfSystemTime => 400,
         OrphanNotFound => 404,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

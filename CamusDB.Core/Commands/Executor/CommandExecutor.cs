@@ -2574,6 +2574,46 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
+    /// Applies an <c>AS OF SYSTEM TIME</c> clause (carried on the SELECT node's
+    /// <see cref="NodeAst.extendedSeven"/> slot) by returning a ticket whose transaction is a cheap
+    /// read-only snapshot pinned to the resolved historical timestamp. Returns the ticket unchanged
+    /// when the SELECT has no time-travel clause.
+    /// <para>
+    /// Time-travel is only supported for an autocommit read-only SELECT: the incoming transaction must
+    /// be the lock-free zero-identity snapshot the autocommit read path creates
+    /// (<see cref="KvTransaction.CreateReadOnly"/> / <see cref="KvTransaction.CreateSnapshotReadOnly"/>).
+    /// A transaction that already holds a live Kahuna session — an explicit multi-statement transaction
+    /// or a promoted key-range-sharded read — is pinned to its own read snapshot and cannot be
+    /// retroactively moved to an arbitrary past point, so the clause is rejected there rather than
+    /// silently ignored.
+    /// </para>
+    /// </summary>
+    private ExecuteSQLTicket ApplyAsOfSystemTime(NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        if (ast.extendedSeven is null)
+            return ticket;
+
+        KvTransaction current = ticket.TxnState;
+
+        if (!current.IsReadOnly || current.TransactionId != HLCTimestamp.Zero)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidAsOfSystemTime,
+                "AS OF SYSTEM TIME is only supported for an autocommit read-only SELECT, not inside an " +
+                "explicit or promoted transaction.");
+
+        if (sharedNode is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "AS OF SYSTEM TIME requires a storage node to resolve the snapshot timestamp.");
+
+        HLCTimestamp now = sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
+        HLCTimestamp snapshotT = AsOfSystemTimeResolver.Resolve(ast.extendedSeven, ticket.Parameters, now);
+
+        KvTransaction snapshotTx = KvTransaction.CreateSnapshotReadOnly(snapshotT);
+        return new ExecuteSQLTicket(snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters);
+    }
+
+    /// <summary>
     /// Execute a SQL statement that returns rows
     /// </summary>
     /// <param name="ticket"></param>
@@ -2643,6 +2683,11 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
                     if (ast.rightAst is null)
                         return (database, await ExecuteFromlessSelectAsync(database, ast, ticket, schemaOut).ConfigureAwait(false));
+
+                    // AS OF SYSTEM TIME: rebind the whole statement onto a read-only snapshot pinned
+                    // to the requested past timestamp, so every scan/join/subquery below reads that
+                    // one historical point. No-op when the SELECT carries no time-travel clause.
+                    ticket = ApplyAsOfSystemTime(ast, ticket);
 
                     SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
 
