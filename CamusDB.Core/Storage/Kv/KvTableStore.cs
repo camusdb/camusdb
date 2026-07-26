@@ -313,7 +313,8 @@ public sealed class KvTableStore
         CompositeColumnValue? toBound,   bool toInclusive,
         bool unique,
         bool exclusive = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int keyColumnCount = 0)
     {
         if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
@@ -333,8 +334,18 @@ public sealed class KvTableStore
         // covers {encode(V)+rowId} (those sort after {encode(V)}), wrongly locking value V and
         // overlapping a disjoint "<= V" lock. Appending the sentinel makes the bound clear V's rows.
         // For an inclusive lower bound (">=") value V is wanted, so no sentinel.
+        //
+        // A prefix bound (fewer components than the index has key columns) behaves like the
+        // non-unique case even on a unique index: real keys carry the remaining columns' encodings
+        // after the bound, so the sentinel is what makes the lock span the prefix's rows. Without
+        // this a prefix scan on a unique index would lock a bare point while reading a whole range,
+        // leaving the phantom inserts it is supposed to fence unfenced. keyColumnCount == 0 means
+        // the caller did not say, so the bound is assumed full-width (previous behaviour).
+        bool fromIsPrefixBound = keyColumnCount > 0 && fromBound is not null && fromBound.Values.Length < keyColumnCount;
+        bool toIsPrefixBound   = keyColumnCount > 0 && toBound   is not null && toBound.Values.Length   < keyColumnCount;
+
         string? startKey = fromEncoded is not null
-            ? (unique || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + IndexKeySentinel)
+            ? ((unique && !fromIsPrefixBound) || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + IndexKeySentinel)
             : null;
         // End bound: the sentinel is appended ONLY when toInclusive=true, to cover all rowId suffixes
         // of the last value. When toInclusive=false ("<") it must be omitted: appending it would
@@ -342,7 +353,7 @@ public sealed class KvTableStore
         // {encode(V)} itself and any {encode(V)+rowId} entries, causing a false range-overlap with
         // the next disjoint lock whose fromBound is exactly {encode(V)}.
         string? endKey   = toEncoded is not null
-            ? (unique || !toInclusive ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
+            ? ((unique && !toIsPrefixBound) || !toInclusive ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
         return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken,
@@ -1222,12 +1233,21 @@ public sealed class KvTableStore
         string? fromEncoded = from is not null ? KeyEncoder.Encode(from, directions) : null;
         string? toEncoded   = to   is not null ? KeyEncoder.Encode(to, directions)   : null;
 
-        // Push bounds into the scan. For non-unique indexes the stored key is
-        // {encodedKey}{rowIdHex24}, so the end key needs IndexKeySentinel to include all
-        // possible rowId suffixes for the last encoded value.
+        // Push bounds into the scan. The end key needs IndexKeySentinel whenever a stored key can
+        // extend *past* the encoded bound, which happens two ways:
+        //   • non-unique index: the stored key is {encodedKey}{rowIdHex24}, so every value carries
+        //     rowId suffixes that sort after {encodedKey};
+        //   • prefix bound: the bound pins only the leading key columns, so real keys carry the
+        //     remaining columns' encodings after it — true for unique indexes too. Without the
+        //     sentinel a prefix bound on a unique index excludes every matching row (the range
+        //     [enc(prefix), enc(prefix)] contains no key of the form enc(prefix)+enc(rest)).
+        // Widening here is always safe: the decoded-key ComparePrefix filter below is authoritative
+        // and trims whatever the raw bound over-reads.
+        bool toIsPrefixBound = to is not null && to.Values.Length < keyTypes.Length;
+
         string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
         string? endKey   = toEncoded   is not null
-            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
+            ? (unique && !toIsPrefixBound ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
         if (ancestorStores.Length == 0)
@@ -1329,11 +1349,11 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound).GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
-                iters[ai + 1] = ancestorStore.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken).GetAsyncEnumerator(cancellationToken);
+                iters[ai + 1] = ancestorStore.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, "", toIsPrefixBound).GetAsyncEnumerator(cancellationToken);
             }
 
             if (ancestorStores.Length > 0)
@@ -2826,15 +2846,17 @@ public sealed class KvTableStore
         string? toEncoded, bool toInclusive,
         bool unique,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
-        string coordinatorKey = "")
+        string coordinatorKey = "",
+        bool toIsPrefixBound = false)
     {
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix = bucketPrefix + "/";
         int prefixLen = keyPrefix.Length;
 
+        // See ScanIndex for why a prefix bound needs the sentinel even on a unique index.
         string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
         string? endKey   = toEncoded   is not null
-            ? (unique ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
+            ? (unique && !toIsPrefixBound ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
         // See ScanRowsRawAsync: non-empty coordinatorKey registers the index scan for read-set folding.

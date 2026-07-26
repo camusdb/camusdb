@@ -122,8 +122,8 @@ internal sealed class QueryFilterer
     /// <summary>
     /// Synchronous twin of <see cref="EvaluatePredicateAsync"/> for predicates that cannot suspend
     /// (guaranteed by <see cref="PredicateNeedsAsync"/> returning false). Mirrors it exactly — AND/OR
-    /// short-circuit, prepared IN-set membership, and the ordinal-fast-path delegation to
-    /// <see cref="SqlExecutor.EvalExpr"/> — but as a plain recursive call with no async machinery.
+    /// short-circuit, NOT negation, prepared IN-set membership, and the ordinal-fast-path delegation
+    /// to <see cref="SqlExecutor.EvalExpr"/> — but as a plain recursive call with no async machinery.
     /// </summary>
     private ColumnValue EvaluatePredicate(
         NodeAst expr,
@@ -162,6 +162,13 @@ internal sealed class QueryFilterer
                     return ColumnValue.True;
 
                 return EvaluatePredicate(expr.rightAst!, row, ticket);
+            }
+
+            case NodeType.ExprNot:
+            {
+                ColumnValue value = EvaluatePredicate(expr.leftAst!, row, ticket);
+
+                return NegatePredicateValue(value);
             }
 
             default:
@@ -290,6 +297,16 @@ internal sealed class QueryFilterer
                 return await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
             }
 
+            case NodeType.ExprNot:
+            {
+                // Recurse through the filterer rather than delegating the whole subtree to EvalExpr,
+                // so a correlated EXISTS under the NOT is executed against its prepared registry
+                // entry instead of hitting EvalExpr's "must be evaluated by the query filter" throw.
+                ColumnValue value = await EvaluatePredicateAsync(expr.leftAst!, row, ticket, database).ConfigureAwait(false);
+
+                return NegatePredicateValue(value);
+            }
+
             default:
                 // Use ordinal fast path when the row is a QueryRow (emitted by the scanner
                 // via RowEncoder.DecodeToQueryRowAsync). Falls back to the dictionary overload
@@ -298,6 +315,30 @@ internal sealed class QueryFilterer
                     ? SqlExecutor.EvalExpr(expr, qr, ticket.Parameters, ticket.RowNameResolver)
                     : SqlExecutor.EvalExpr(expr, row, ticket.Parameters, ticket.RowNameResolver);
         }
+    }
+
+    /// <summary>
+    /// Negates a predicate operand using SQL three-valued logic, matching
+    /// <see cref="SqlExecutor.EvalExpr"/>'s <c>ExprNot</c> case exactly: NOT NULL is NULL (unknown,
+    /// which <see cref="ToPredicateResult"/> treats as non-matching), NOT of a boolean is its
+    /// complement, and any other operand type is a user error rather than a truthiness coercion —
+    /// so <c>NOT &lt;non-boolean&gt;</c> fails identically whether or not the enclosing predicate
+    /// happens to contain a correlated EXISTS (which is what decides between the async walker here
+    /// and the synchronous delegation to <see cref="SqlExecutor.EvalExpr"/>).
+    /// </summary>
+    private static ColumnValue NegatePredicateValue(ColumnValue value)
+    {
+        if (value.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        if (value.Type != ColumnType.Bool)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"No matching signature for operator NOT for argument type: {value.Type}");
+        }
+
+        return ColumnValue.FromBool(!value.BoolValue);
     }
 
     private static bool ToPredicateResult(ColumnValue evaluatedExpr) =>

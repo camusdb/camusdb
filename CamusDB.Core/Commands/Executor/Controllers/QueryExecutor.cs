@@ -716,7 +716,8 @@ internal sealed class QueryExecutor
         await table.Store.AcquireBoundedIndexRangeLockAsync(
             ticket.TxnState, index.KvId,
             fromBound, fromInclusive, toBound, toInclusive,
-            unique, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+            unique, exclusive: plan.Ticket.ExclusivePredicateLocks,
+            keyColumnCount: index.Columns.Length).ConfigureAwait(false);
 
         if (plan.IndexOnly)
         {

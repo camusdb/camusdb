@@ -3052,6 +3052,169 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         Assert.AreEqual(4, result.Count);
     }
 
+    private static async Task<List<QueryResultRow>> ExecuteJoinSelect(
+        AppUsersPostsFixture fixture,
+        string sql,
+        Dictionary<string, ColumnValue> parameters)
+    {
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: sql,
+            parameters: parameters);
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        return await cursor.ToListAsync();
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotExistsCorrelatedSubquery()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        // Only A ("Draft") and C ("Post C") have an unpublished post.
+        List<QueryResultRow> matching = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users u "
+            + "WHERE EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id AND p.published = false) "
+            + "ORDER BY email");
+
+        Assert.AreEqual(2, matching.Count);
+        Assert.AreEqual("a@example.com", matching[0].Row["email"].StrValue);
+        Assert.AreEqual("c@example.com", matching[1].Row["email"].StrValue);
+
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users u "
+            + "WHERE NOT EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id AND p.published = false) "
+            + "ORDER BY email");
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("b@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("d@example.com", result[1].Row["email"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotExistsCorrelatedSubqueryWithParameter()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        // Only A has a post titled "Draft".
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users u "
+            + "WHERE NOT EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id AND p.title = @title) "
+            + "ORDER BY email",
+            new() { { "@title", new(ColumnType.String, "Draft") } });
+
+        Assert.AreEqual(3, result.Count);
+        Assert.AreEqual("b@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("c@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("d@example.com", result[2].Row["email"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectExistsAndNotExistsCorrelatedComposite()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        // A has both a published and an unpublished post; C has only an unpublished one.
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users u "
+            + "WHERE EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id AND p.published = true) "
+            + "AND NOT EXISTS (SELECT * FROM posts p2 WHERE p2.user_id = u.id AND p2.published = false) "
+            + "ORDER BY email");
+
+        Assert.AreEqual(2, result.Count);
+        Assert.AreEqual("b@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("d@example.com", result[1].Row["email"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotOverOrWithCorrelatedExists()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        // A and C are excluded by the EXISTS, B by the role; only D survives.
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users u "
+            + "WHERE NOT (EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id AND p.published = false) "
+            + "OR u.role = 'admin') "
+            + "ORDER BY email");
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual("d@example.com", result[0].Row["email"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotExistsUncorrelatedSubquery()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        // Uncorrelated EXISTS is folded to a boolean literal before evaluation, so this never
+        // reaches the correlated path — posts is non-empty, so NOT EXISTS excludes every row.
+        List<QueryResultRow> result = await ExecuteJoinSelect(
+            fixture,
+            "SELECT email FROM app_users WHERE NOT EXISTS (SELECT * FROM posts) ORDER BY email");
+
+        Assert.IsEmpty(result);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectNotOverNonBooleanWithCorrelatedExistsThrows()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        // A correlated EXISTS routes the predicate through the async walker; a NOT over a
+        // non-boolean must still raise the same error as the fully synchronous path below.
+        CamusDBException correlated = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            _ = await ExecuteJoinSelect(
+                fixture,
+                "SELECT email FROM app_users u "
+                + "WHERE EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id) AND NOT u.email");
+        })!;
+
+        Assert.That(correlated.Message, Does.Contain("operator NOT"));
+
+        CamusDBException synchronous = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            _ = await ExecuteJoinSelect(fixture, "SELECT email FROM app_users u WHERE NOT u.email");
+        })!;
+
+        Assert.That(synchronous.Message, Does.Contain("operator NOT"));
+        Assert.AreEqual(synchronous.Message, correlated.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExplainNotExistsCorrelatedSubquery()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        List<QueryResultRow> rows = await ExecuteJoinSelect(
+            fixture,
+            "EXPLAIN SELECT email FROM app_users u "
+            + "WHERE NOT EXISTS (SELECT * FROM posts p WHERE p.user_id = u.id AND p.published = false)");
+
+        Assert.IsTrue(rows.Count > 0, "EXPLAIN must return at least one row");
+
+        bool rendersNegatedExists = rows.Any(r => r.Row.Values.Any(v =>
+            v.Type == ColumnType.String && v.StrValue is not null && v.StrValue.Contains("NOT EXISTS (SELECT ...)")));
+
+        Assert.IsTrue(rendersNegatedExists, "EXPLAIN must render the negated correlated EXISTS predicate");
+    }
+
     [Test]
     [NonParallelizable]
     public async Task TestExecuteSelectJoinAggregatedDerivedTable()

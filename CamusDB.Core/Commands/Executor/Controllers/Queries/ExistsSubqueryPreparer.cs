@@ -158,11 +158,22 @@ internal sealed class ExistsSubqueryPreparer
         if (innerQuery.Where is not null)
             ValidateExpression(innerQuery.Where.Expression, combinedResolver);
 
+        // Choose the inner access path once here rather than per outer row: it depends only on the
+        // inner predicate and the inner table's indexes. Null keeps the full-scan fallback.
+        CorrelatedExistsSeekPlan? seekPlan = innerBound.Sources.Count == 1
+            ? CorrelatedExistsSeekPlanner.TryPlan(
+                innerBound.Sources[0].Table,
+                innerQuery.Where?.Expression,
+                innerBound.Sources[0].Alias,
+                ExistsSubqueryAnalyzer.CollectSourceAliases(innerQuery.Source))
+            : null;
+
         return new PreparedExistsSubquery(
             innerQuery.Where?.Expression,
             innerBound,
             outerTableSources,
-            outerDerivedSources);
+            outerDerivedSources,
+            seekPlan);
     }
 
     private static void ValidateExpression(NodeAst expression, QueryRowNameResolver rowNames)
