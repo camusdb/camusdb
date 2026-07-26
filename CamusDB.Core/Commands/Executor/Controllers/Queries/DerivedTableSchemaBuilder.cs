@@ -123,6 +123,16 @@ internal static class DerivedTableSchemaBuilder
         new("kv_scan_entries", ColumnType.Integer64),
     ];
 
+    // ANALYZE TABLE: a single summary row. Column names/types must match the dictionary keys
+    // emitted by TableAnalyzer.AnalyzeAsync so the positional response resolves each cell by name.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> AnalyzeTableSchema =
+    [
+        new("table",   ColumnType.String),
+        new("status",  ColumnType.String),
+        new("rows",    ColumnType.Integer64),
+        new("columns", ColumnType.Integer64),
+    ];
+
     // -------------------------------------------------------------------------
     // Build — derives schema from a bound SELECT query.
     // ExprAllFields (*) is expanded to all readable columns from every source.

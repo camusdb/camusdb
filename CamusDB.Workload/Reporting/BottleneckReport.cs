@@ -63,11 +63,14 @@ public static class BottleneckReport
         sb.AppendLine();
 
         // ── Resources ───────────────────────────────────────────────────────────
-        double? gcAlloc = scrape.Sum("process_runtime_dotnet_gc_allocations_size_bytes_total");
-        double? tpQueue = scrape.Gauge("process_runtime_dotnet_thread_pool_queue_length");
-        double? tpThreads = scrape.Gauge("process_runtime_dotnet_thread_pool_threads_count");
-        double gcGen0 = scrape.Sum("process_runtime_dotnet_gc_collections_count_total", ("generation", "gen0"));
-        double gcGen2 = scrape.Sum("process_runtime_dotnet_gc_collections_count_total", ("generation", "gen2"));
+        // .NET runtime metric names follow OpenTelemetry.Instrumentation.Runtime 1.10+ (the "dotnet_*"
+        // scheme); the generation label is "gc_heap_generation". Earlier "process_runtime_dotnet_*"
+        // names were emitted by 1.9 and are no longer produced.
+        double? gcAlloc = scrape.Sum("dotnet_gc_heap_total_allocated_bytes_total");
+        double? tpQueue = scrape.Gauge("dotnet_thread_pool_queue_length_total");
+        double? tpThreads = scrape.Gauge("dotnet_thread_pool_thread_count_total");
+        double gcGen0 = scrape.Sum("dotnet_gc_collections_total", ("gc_heap_generation", "gen0"));
+        double gcGen2 = scrape.Sum("dotnet_gc_collections_total", ("gc_heap_generation", "gen2"));
 
         sb.AppendLine("## Runtime / resources (server)").AppendLine();
         sb.AppendLine("| Metric | Value |");
