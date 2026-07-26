@@ -21,7 +21,7 @@ internal static class QueryRowMerger
         IReadOnlyDictionary<string, ColumnValue> row,
         string alias)
     {
-        Dictionary<string, ColumnValue> qualified = new(row.Count);
+        Dictionary<string, ColumnValue> qualified = new(row.Count, StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, ColumnValue> entry in row)
         {
@@ -98,7 +98,7 @@ internal static class QueryRowMerger
         string rightAlias,
         RowLayout joinLayout)
     {
-        Dictionary<string, int> map = new(rightRow.Count, StringComparer.Ordinal);
+        Dictionary<string, int> map = new(rightRow.Count, StringComparer.OrdinalIgnoreCase);
         foreach (string key in rightRow.Keys)
         {
             string qualKey = IsQualifiedKey(key) ? key : QueryRowNameResolver.FormatQualifiedKey(rightAlias, key);
@@ -112,7 +112,7 @@ internal static class QueryRowMerger
         IReadOnlyDictionary<string, ColumnValue> rightRow,
         string rightAlias)
     {
-        Dictionary<string, ColumnValue> merged = new(leftRow);
+        Dictionary<string, ColumnValue> merged = new(leftRow, StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, ColumnValue> entry in rightRow)
         {
@@ -166,7 +166,7 @@ internal static class QueryRowMerger
             physicalNames.Add(key);
 
         // Right keys: qualify bare names, leave already-qualified names unchanged.
-        HashSet<string> leftKeySet = new(leftQualified.Keys, StringComparer.Ordinal);
+        HashSet<string> leftKeySet = new(leftQualified.Keys, StringComparer.OrdinalIgnoreCase);
         foreach (string key in rightRow.Keys)
         {
             string qualKey = IsQualifiedKey(key) ? key : QueryRowNameResolver.FormatQualifiedKey(rightAlias, key);
@@ -180,7 +180,7 @@ internal static class QueryRowMerger
         // Bare aliases: for each bare name that appears in exactly one physical slot (after
         // stripping the qualifier), add a bare→ordinal alias so ordinal lookup works for
         // unqualified column references in ON predicates and projections.
-        Dictionary<string, int> bareCounts = new(physicalNames.Count, StringComparer.Ordinal);
+        Dictionary<string, int> bareCounts = new(physicalNames.Count, StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < physicalNames.Count; i++)
         {
             string name = physicalNames[i];

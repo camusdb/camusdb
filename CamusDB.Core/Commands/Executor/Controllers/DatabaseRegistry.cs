@@ -93,11 +93,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // is lost. Populated by AcquireDropIntentAsync, torn down by ReleaseDropIntentAsync / DisposeAsync.
     private readonly ConcurrentDictionary<string, CancellationTokenSource> fenceRenewers = new(StringComparer.Ordinal);
 
-    // Database names are normalised to lowercase at the registry boundary so that the
-    // storage key, the in-memory cache, and the filesystem path are all consistent.
-    // This mirrors the SQL parser's treatment of unquoted identifiers (table/column names
-    // are lower-cased by the grammar's ToLowerInvariant productions).  HTTP callers that
-    // send mixed-case names are silently folded — no separate "Foo" / "foo" databases.
+    // Database names are case-insensitive but case-preserving. The name is stored and displayed
+    // in the exact case the user created it with (DatabaseRegistryEntry.Name), while lookups and
+    // uniqueness are case-insensitive: the persistent KV key and the in-memory cache are both keyed
+    // by this normalized (lower-cased) form. Normalizing the KV key is what makes "MyDb" and "mydb"
+    // resolve to the same database and prevents a cross-node split-brain where two nodes each create
+    // a differently-cased key for what should be one database. No physical path is named after the
+    // database (keyspaces use the immutable id), so normalization only governs the registry keyspace.
     private static string Normalize(string name) => name.ToLowerInvariant();
 
     /// <summary>
@@ -291,14 +293,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
                     entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
-                present.Add(loaded.Name);
-                byName[loaded.Name] = loaded;
+                present.Add(Normalize(loaded.Name));
+                byName[Normalize(loaded.Name)] = loaded;
                 byId[loaded.Id] = loaded;
             }
 
             // Evict names that no longer exist in KV. Remove the id mapping only if it still points at the
             // evicted entry — a rename re-points byId[id] at the NEW name, which the upsert above already
-            // wrote, so the id must not be dropped along with the old name.
+            // wrote, so the id must not be dropped along with the old name. `name` here is the normalized
+            // cache key, so compare it against the entry's normalized name.
             foreach (string name in byName.Keys.ToList())
             {
                 if (present.Contains(name))
@@ -306,7 +309,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
                 if (byName.TryRemove(name, out DatabaseRegistryEntry? removed)
                     && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
-                    && currentById.Name == name)
+                    && Normalize(currentById.Name) == name)
                 {
                     byId.TryRemove(removed.Id, out _);
                 }
@@ -473,7 +476,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
                 entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
-            byName[loaded.Name] = loaded;
+            byName[Normalize(loaded.Name)] = loaded;
             byId[loaded.Id] = loaded;
         }
     }
@@ -547,7 +550,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 kvEntry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
             // Backfill the local cache so subsequent reads are fast.
-            byName[entry.Name] = entry;
+            byName[Normalize(entry.Name)] = entry;
             byId[entry.Id] = entry;
             return entry;
         }
@@ -662,9 +665,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         IReadOnlyList<DatabaseBranchAncestor>? ancestors = null,
         string? immediateParentHoldId = null)
     {
-        name = Normalize(name);
+        // Preserve the original case for storage/display; key the KV write and cache by the normalized form.
+        string normalized = Normalize(name);
 
-        if (ReservedNames.Contains(name))
+        if (ReservedNames.Contains(normalized))
             throw new CamusDBException(
                 CamusDBErrorCodes.DatabaseNameReserved,
                 $"'{name}' is a reserved database name");
@@ -672,7 +676,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (byName.ContainsKey(name))
+            if (byName.ContainsKey(normalized))
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{name}' is already registered");
@@ -681,7 +685,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             // a different name — the guard that stops a stale-orphan relink from minting a second alias
             // for one physical keyspace. (Fresh CREATE always allocates an unregistered id; only relink
             // passes a reused id, and it checks authoritative state under the fence before calling here.)
-            if (byId.TryGetValue(id, out DatabaseRegistryEntry? existingById) && existingById.Name != name)
+            if (byId.TryGetValue(id, out DatabaseRegistryEntry? existingById)
+                && !string.Equals(existingById.Name, name, StringComparison.OrdinalIgnoreCase))
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database id '{id}' is already registered under name '{existingById.Name}'");
@@ -706,7 +711,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 // If another node races to register the same name and commits first, this
                 // returns false — throw DatabaseAlreadyExists rather than silently overwriting
                 // the winning node's entry and splitting the namespace into two id-based spaces.
-                bool written = await WriteRegistryKey(tx, NameKey(name), entryBytes, ifAbsent: true).ConfigureAwait(false);
+                bool written = await WriteRegistryKey(tx, NameKey(normalized), entryBytes, ifAbsent: true).ConfigureAwait(false);
                 if (!written)
                 {
                     await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
@@ -722,7 +727,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 throw;
             }
 
-            byName[name] = entry;
+            byName[normalized] = entry;
             byId[id] = entry;
 
             // Advance the shared generation so other nodes revalidate their caches and observe this new
@@ -786,10 +791,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// </exception>
     public async Task RenameAsync(string oldName, string newName)
     {
-        oldName = Normalize(oldName);
-        newName = Normalize(newName);
+        // Preserve the original case of the new name for storage/display; key by the normalized form.
+        string normalizedOld = Normalize(oldName);
+        string normalizedNew = Normalize(newName);
 
-        if (ReservedNames.Contains(newName))
+        if (ReservedNames.Contains(normalizedNew))
             throw new CamusDBException(
                 CamusDBErrorCodes.DatabaseNameReserved,
                 $"'{newName}' is a reserved database name");
@@ -797,12 +803,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (!byName.TryGetValue(oldName, out DatabaseRegistryEntry? existing))
+            if (!byName.TryGetValue(normalizedOld, out DatabaseRegistryEntry? existing))
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseDoesntExist,
                     $"Database '{oldName}' is not registered");
 
-            if (byName.ContainsKey(newName))
+            // A pure case-change rename (mydb -> MyDb) keeps the same normalized key, so the "already
+            // exists" guard must skip it — the new name occupies the same cache slot as the old one.
+            if (normalizedOld != normalizedNew && byName.ContainsKey(normalizedNew))
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{newName}' is already registered");
@@ -822,14 +830,18 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             byte[] updatedBytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.DatabaseRegistryEntry);
 
+            // A case-only rename (mydb -> MyDb) targets the SAME normalized KV key, so it must overwrite
+            // that key in place rather than SetIfNotExists (which would see the existing key and fail) and
+            // must not delete it afterward. A true rename to a different normalized name still uses
+            // ifAbsent to guard against a concurrent node registering the new name.
+            bool caseOnlyRename = normalizedOld == normalizedNew;
+
             KvTransaction tx = await transactions.BeginAsync(
                 CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
             ).ConfigureAwait(false);
             try
             {
-                // ifAbsent=true: protect against a concurrent node registering newName between
-                // our local byName check above and the KV commit.
-                bool written = await WriteRegistryKey(tx, NameKey(newName), updatedBytes, ifAbsent: true).ConfigureAwait(false);
+                bool written = await WriteRegistryKey(tx, NameKey(normalizedNew), updatedBytes, ifAbsent: !caseOnlyRename).ConfigureAwait(false);
                 if (!written)
                 {
                     await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
@@ -837,7 +849,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                         CamusDBErrorCodes.DatabaseAlreadyExists,
                         $"Database '{newName}' is already registered");
                 }
-                await DeleteRegistryKey(tx, NameKey(oldName)).ConfigureAwait(false);
+                if (!caseOnlyRename)
+                    await DeleteRegistryKey(tx, NameKey(normalizedOld)).ConfigureAwait(false);
                 await transactions.CommitAsync(tx).ConfigureAwait(false);
             }
             catch
@@ -846,8 +859,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 throw;
             }
 
-            byName.TryRemove(oldName, out _);
-            byName[newName] = updated;
+            if (!caseOnlyRename)
+                byName.TryRemove(normalizedOld, out _);
+            byName[normalizedNew] = updated;
             byId[existing.Id] = updated;
 
             // Advance the shared generation so other nodes stop resolving the old name and pick up the new.

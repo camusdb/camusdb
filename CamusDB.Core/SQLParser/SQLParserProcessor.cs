@@ -20,8 +20,9 @@ public static class SQLParserProcessor
     /// </summary>
     /// <remarks>
     /// <b>Immutability invariant:</b> the returned <see cref="NodeAst"/> must be treated as
-    /// immutable by all callers. <see cref="IdentifierNormalizer.Normalize"/> is applied here,
-    /// before the tree is returned, so identifiers are already lower-cased. Any transformation of
+    /// immutable by all callers. Identifiers are preserved verbatim, in the exact case the user
+    /// wrote them; case-insensitive matching happens at lookup time via case-insensitive
+    /// comparers, not by folding the identifier text here. Any transformation of
     /// the tree downstream must construct new <see cref="NodeAst"/> nodes; it must not assign into
     /// the fields of a node that was returned by this method. This invariant is the prerequisite
     /// for the SQL parser AST cache: a single cached instance may be shared across many
@@ -43,7 +44,6 @@ public static class SQLParserProcessor
     {
         sqlParser sqlParser = new();
         NodeAst ast = sqlParser.Parse(sql);
-        IdentifierNormalizer.Normalize(ast);
         return ast;
     }
 
@@ -70,7 +70,7 @@ public static class SQLParserProcessor
     /// <summary>
     /// Parses <paramref name="sql"/> through the supplied <paramref name="cache"/>.
     /// Returns the cached <see cref="NodeAst"/> on a hit (same reference, TTL slid);
-    /// parses, normalises, stores, and returns a fresh instance on a miss.
+    /// parses, stores, and returns a fresh instance on a miss.
     /// When the cache is disabled (<see cref="SqlParserCache.IsEnabled"/> is
     /// <see langword="false"/>) behaves identically to <see cref="Parse(string)"/>.
     /// </summary>
@@ -81,7 +81,6 @@ public static class SQLParserProcessor
 
         sqlParser sqlParser = new();
         NodeAst ast = sqlParser.Parse(sql);
-        IdentifierNormalizer.Normalize(ast);
 
         cache.Store(sql, ast);
         return ast;

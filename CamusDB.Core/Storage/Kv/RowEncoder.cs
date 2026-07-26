@@ -669,7 +669,7 @@ public static class RowEncoder
     {
         bool decodeAll = requiredColumns is null;
 
-        Dictionary<string, ColumnValue> result = new(decodeAll ? columns.Count : requiredColumns!.Count);
+        Dictionary<string, ColumnValue> result = new(decodeAll ? columns.Count : requiredColumns!.Count, StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < columns.Count; i++)
         {
@@ -752,7 +752,7 @@ public static class RowEncoder
         {
             foreach (TableColumnSchema current in currentColumns)
             {
-                if (current.Name == historyColumn.Name)
+                if (string.Equals(current.Name, historyColumn.Name, StringComparison.OrdinalIgnoreCase))
                     return current;
             }
         }

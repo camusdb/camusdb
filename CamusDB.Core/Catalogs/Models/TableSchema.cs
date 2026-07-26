@@ -60,6 +60,29 @@ public sealed class TableSchema
     public List<CheckConstraintSchema>? CheckConstraints { get; set; }
 
     /// <summary>
+    /// Table storage parameters (<c>ALTER TABLE t SET (key = value)</c>). A free-form string→string bag
+    /// so new settings need no schema-model change. Like <c>Indexes</c> / <c>CheckConstraints</c> it
+    /// rides the table blob and does <b>not</b> bump <c>Version</c> — settings do not affect row
+    /// encoding. Null for tables that have never set one (all defaults). Currently the only recognized
+    /// key is <c>sql_stats_automatic_collection_enabled</c>.
+    /// </summary>
+    public Dictionary<string, string>? Settings { get; set; }
+
+    /// <summary>
+    /// Whether the automatic-analyze scheduler may collect statistics for this table
+    /// (<c>sql_stats_automatic_collection_enabled</c>). Default <c>true</c> (absent ⇒ enabled). Gates
+    /// only the background scheduler; a manual <c>ANALYZE TABLE</c> always runs regardless.
+    /// </summary>
+    [JsonIgnore]
+    public bool AutoStatsCollectionEnabled =>
+        Settings is null ||
+        !Settings.TryGetValue(SqlStatsAutomaticCollectionEnabledKey, out string? value) ||
+        !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The one recognized storage-parameter key: per-table auto-analyze opt-out.</summary>
+    public const string SqlStatsAutomaticCollectionEnabledKey = "sql_stats_automatic_collection_enabled";
+
+    /// <summary>
     /// A list of all the previous versions of the table schema.
     /// </summary>
     public List<TableSchemaHistory>? SchemaHistory { get; set; }

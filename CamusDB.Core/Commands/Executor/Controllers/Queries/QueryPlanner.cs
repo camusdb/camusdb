@@ -505,7 +505,7 @@ public sealed class QueryPlanner
                         if (competitor is not null)
                         {
                             NodeAst? absorbed = analysis.InListComparisons
-                                .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.Ordinal))
+                                .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.OrdinalIgnoreCase))
                                 ?.Conjunct;
                             return (WithDistribution(competitor, table), null, absorbed);
                         }
@@ -519,7 +519,7 @@ public sealed class QueryPlanner
                     if (inListNode is not null)
                     {
                         NodeAst? absorbed = analysis.InListComparisons
-                            .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.Ordinal))
+                            .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.OrdinalIgnoreCase))
                             ?.Conjunct;
                         return (WithDistribution(inListNode, table), null, absorbed);
                     }
@@ -541,10 +541,15 @@ public sealed class QueryPlanner
         //   4. The scan does not hold exclusive predicate locks (UPDATE/DELETE path) — widening to a
         //      full-table exclusive row range lock would block all concurrent writes on disjoint ranges,
         //      defeating key-range concurrency. Shared-lock SELECTs are safe to promote to table scan.
+        //   5. The scan is not covering. A covered scan (index key + INCLUDE columns supply every needed
+        //      column) fetches zero primary rows, so it is at least as cheap as a full table scan for
+        //      any table size; downgrading it would defeat the covering-index optimization — most
+        //      visibly on tiny tables, where the breakeven fraction rounds down to the matched rows.
         if (scanStep is { Type: QueryPlanStepType.RangeScanFromIndex } step
             && (step.FromBound is not null || step.ToBound is not null)
             && _stats is not null
-            && !ticket.ExclusivePredicateLocks)
+            && !ticket.ExclusivePredicateLocks
+            && !ScanCoversProjection(step, ticket))
         {
             long? tableRowCount = _stats.GetRowCountEstimate(database, table);
             if (tableRowCount is { } trc && trc > 0)
@@ -573,7 +578,7 @@ public sealed class QueryPlanner
                 if (competitor is not null)
                 {
                     NodeAst? absorbed = analysis.InListComparisons
-                        .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.Ordinal))
+                        .FirstOrDefault(il => string.Equals(il.ColumnName, competitor.ColumnName, StringComparison.OrdinalIgnoreCase))
                         ?.Conjunct;
                     return (WithDistribution(competitor, table), null, absorbed);
                 }
@@ -591,7 +596,7 @@ public sealed class QueryPlanner
             if (inListNode is not null)
             {
                 NodeAst? absorbed = analysis.InListComparisons
-                    .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.Ordinal))
+                    .FirstOrDefault(il => string.Equals(il.ColumnName, inListNode.ColumnName, StringComparison.OrdinalIgnoreCase))
                     ?.Conjunct;
                 return (WithDistribution(inListNode, table), null, absorbed);
             }
@@ -658,7 +663,7 @@ public sealed class QueryPlanner
                     continue;
 
                 if (index.Columns.Length == 0
-                    || !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                    || !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 bool isUnique = index.Type == IndexType.Unique;
@@ -740,7 +745,7 @@ public sealed class QueryPlanner
                     if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
                         continue;
                     if (index.Columns.Length == 0 ||
-                        !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                        !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.OrdinalIgnoreCase))
                         continue;
                     bool isUnique = index.Type == IndexType.Unique;
                     if (isUnique && index.Columns.Length != 1)
@@ -782,7 +787,7 @@ public sealed class QueryPlanner
                         continue;
                     if (index.Type != IndexType.Unique || index.Columns.Length != 1)
                         continue;
-                    if (!string.Equals(index.Columns[0], inList.ColumnName, StringComparison.Ordinal))
+                    if (!string.Equals(index.Columns[0], inList.ColumnName, StringComparison.OrdinalIgnoreCase))
                         continue;
                     uniqueIndex = index;
                     break;
@@ -860,7 +865,7 @@ public sealed class QueryPlanner
 
         foreach (string col in distinctCols)
         {
-            TableColumnSchema? schema = table.Schema.Columns.Find(c => c.Name == col);
+            TableColumnSchema? schema = table.Schema.Columns.Find(c => string.Equals(c.Name, col, StringComparison.OrdinalIgnoreCase));
             if (schema is null || !schema.NotNull)
                 return false;
         }
@@ -933,7 +938,7 @@ public sealed class QueryPlanner
             if (orderBy[i].Type != OrderType.Ascending)
                 return false; // streaming only guarantees ascending
 
-            if (!string.Equals(orderBy[i].ColumnName, streamingOrdering[i].ColumnName, StringComparison.Ordinal))
+            if (!string.Equals(orderBy[i].ColumnName, streamingOrdering[i].ColumnName, StringComparison.OrdinalIgnoreCase))
                 return false;
         }
 
@@ -1023,6 +1028,41 @@ public sealed class QueryPlanner
 
         plan.IndexOnly = true;
         plan.IndexOnlyColumns = covered;
+    }
+
+    /// <summary>
+    /// True when the index behind <paramref name="step"/> supplies every column the query needs (its
+    /// key columns plus INCLUDE columns cover the projection), so the scan reads zero primary rows.
+    /// Mirrors <see cref="TryMarkIndexOnly"/>'s covering rule but is evaluated at scan-selection time —
+    /// before projection pushdown finalizes <see cref="QueryPlan.ScanRequiredColumns"/> — so the
+    /// small-table cost override does not downgrade a covering scan to a full table scan.
+    /// </summary>
+    private static bool ScanCoversProjection(QueryPlanStep step, QueryTicket ticket)
+    {
+        if (step.Index is not { } index)
+            return false;
+
+        // UPDATE/DELETE locate phase always needs the primary row (re-encode / stale-entry removal).
+        if (ticket.LocateColumns is not null)
+            return false;
+
+        IReadOnlySet<string>? required = RequiredColumnAnalyzer.ComputeSingleTable(ticket);
+        if (required is null)
+            return false;   // SELECT * / no pushdown — not covering
+        if (required.Count == 0)
+            return true;    // row-id only — always available from the index entry
+
+        HashSet<string> available = new(index.Columns, StringComparer.Ordinal);
+        foreach (string includeColumn in index.IncludeColumns)
+            available.Add(includeColumn);
+
+        foreach (string col in required)
+        {
+            if (!available.Contains(col))
+                return false;
+        }
+
+        return true;
     }
 
 }

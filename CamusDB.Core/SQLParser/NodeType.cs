@@ -156,6 +156,14 @@ public enum NodeType
     /// </summary>
     AlterTableDropNotNull,
     /// <summary>
+    /// <c>ALTER TABLE t SET (key = bool, ...)</c> — table storage-parameter settings.
+    /// <c>leftAst</c> = table name node; <c>rightAst</c> = a chain of <see cref="UpdateList"/> /
+    /// <see cref="UpdateItem"/> nodes, each item's <c>leftAst</c> the setting key and <c>rightAst</c>
+    /// a <see cref="Bool"/> leaf. Currently the only recognized key is
+    /// <c>sql_stats_automatic_collection_enabled</c> (per-table auto-analyze opt-out).
+    /// </summary>
+    AlterTableSetSetting,
+    /// <summary>
     /// Column-level <c>CONSTRAINT name NOT NULL</c> written inline on a column definition.
     /// <c>yytext</c> = the user-supplied constraint name.
     /// </summary>

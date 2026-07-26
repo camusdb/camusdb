@@ -88,16 +88,17 @@ public class TestSQLParserInMembership
     }
 
     [Test]
-    public void ParseInMembership_ColumnNameIsNormalized()
+    public void ParseInMembership_ColumnNameIsPreservedVerbatim()
     {
-        // IdentifierNormalizer lower-cases identifiers before the tree is returned.
+        // Identifiers keep the exact case the user wrote; case-insensitive matching happens at
+        // lookup time, not by folding the identifier in the parser.
         NodeAst ast = SQLParserProcessor.Parse(
             "SELECT id FROM t WHERE UserInventoryItemId IN ('a', 'b')");
 
         NodeAst where = SelectWhere(ast);
         Assert.AreEqual(NodeType.ExprInMembership, where.nodeType);
         Assert.AreEqual(NodeType.Identifier, where.leftAst!.nodeType);
-        Assert.AreEqual("userinventoryitemid", where.leftAst.yytext);
+        Assert.AreEqual("UserInventoryItemId", where.leftAst.yytext);
     }
 
     // ── ExprInMembership — list contents ──────────────────────────────────────

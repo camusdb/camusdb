@@ -133,7 +133,10 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
                 $"The number of fields is not equal to the number of values. Fields={fields.Count} != Values={filled} Position={batchValues.Count}"
             );
 
-        Dictionary<string, ColumnValue> row = new(fields.Count + extraDefaults.Count);
+        // Keyed case-insensitively: the INSERT column list may use different case than the schema
+        // (INSERT INTO t (UserName) for a column stored as "username"), and the row is later read
+        // back by the schema's column name during encoding — an ordinal dict would miss and write null.
+        Dictionary<string, ColumnValue> row = new(fields.Count + extraDefaults.Count, StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < fields.Count; i++)
         {

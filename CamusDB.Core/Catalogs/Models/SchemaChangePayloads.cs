@@ -136,6 +136,13 @@ public sealed class SchemaRelinkTablePayload
     public TableIndexSchema[]? Indexes { get; set; }
 
     public CheckConstraintSchema[]? CheckConstraints { get; set; }
+
+    /// <summary>
+    /// Table storage parameters captured at drop time, preserved so a deferred-dropped table that is
+    /// relinked keeps its opt-out (e.g. <c>sql_stats_automatic_collection_enabled</c>) rather than
+    /// silently reverting to defaults. Null/empty when the table had no settings.
+    /// </summary>
+    public Dictionary<string, string>? Settings { get; set; }
 }
 
 public sealed class SchemaIndexPayload
@@ -237,4 +244,15 @@ public sealed class SchemaElementStatePayload
     /// Absent in legacy log entries — deserialized as <see cref="SchemaElementKind.Column"/>.
     /// </summary>
     public SchemaElementKind ElementKind { get; set; } = SchemaElementKind.Column;
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetTableSettings"/>: table storage parameters merged into
+/// <see cref="TableSchema.Settings"/> (e.g. <c>sql_stats_automatic_collection_enabled</c>).
+/// </summary>
+public sealed class SchemaSetTableSettingsPayload
+{
+    public string TableName { get; set; } = "";
+
+    public Dictionary<string, string> Settings { get; set; } = new();
 }

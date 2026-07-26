@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Linq;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.StateMachines;
@@ -48,7 +49,7 @@ public sealed class RowUpdater
             if (string.IsNullOrEmpty(columnName))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid or empty column name in values list");
 
-            if (string.Equals(column.Name, columnName) && SchemaElementStateRules.IsWritable(column))
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsWritable(column))
             {
                 hasColumn = true;
                 break;
@@ -63,7 +64,7 @@ public sealed class RowUpdater
 
         if (indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? indexSchema))
         {
-            if (indexSchema.Columns.Contains(columnName))
+            if (indexSchema.Columns.Contains(columnName, StringComparer.OrdinalIgnoreCase))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
         }
     }
@@ -323,7 +324,10 @@ public sealed class RowUpdater
         UpdateTicket ticket
     )
     {
-        Dictionary<string, ColumnValue> rowValues = new(currentRow.Count);
+        // Keyed case-insensitively so a SET clause written in a different case than the schema
+        // (SET UserName = ... for a column stored as "username") overwrites the existing slot
+        // rather than adding a second, case-variant key that the re-encode would ignore.
+        Dictionary<string, ColumnValue> rowValues = new(currentRow.Count, StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, ColumnValue> keyValue in currentRow)
             rowValues[keyValue.Key] = keyValue.Value;

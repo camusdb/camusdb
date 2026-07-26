@@ -723,7 +723,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), new ColumnValue(ColumnType.Integer64, count) } });
+            new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase) { { GetGlobalAggregateOutputName(ticket, 0), new ColumnValue(ColumnType.Integer64, count) } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalSum(
@@ -768,7 +768,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), result } });
+            new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase) { { GetGlobalAggregateOutputName(ticket, 0), result } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalAverage(
@@ -807,7 +807,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), result } });
+            new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase) { { GetGlobalAggregateOutputName(ticket, 0), result } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMin(
@@ -827,7 +827,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), min ?? ColumnValue.Null } });
+            new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase) { { GetGlobalAggregateOutputName(ticket, 0), min ?? ColumnValue.Null } });
     }
 
     private static async IAsyncEnumerable<QueryResultRow> AggregateGlobalMax(
@@ -847,7 +847,7 @@ internal sealed class QueryAggregator
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
-            new Dictionary<string, ColumnValue> { { GetGlobalAggregateOutputName(ticket, 0), max ?? ColumnValue.Null } });
+            new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase) { { GetGlobalAggregateOutputName(ticket, 0), max ?? ColumnValue.Null } });
     }
 
     private static string GetGlobalAggregateOutputName(QueryTicket ticket, int index)
@@ -895,7 +895,7 @@ internal sealed class QueryAggregator
     private sealed class GroupAccumulator
     {
         private readonly List<AnalyzedProjection> projections;
-        private readonly Dictionary<string, ColumnValue> outputValues = new();
+        private readonly Dictionary<string, ColumnValue> outputValues = new(StringComparer.OrdinalIgnoreCase);
         private readonly AggregateMetricState?[] aggregateStates;
         // Flat list: (projectionIndex, placeholder, state) for each sub-aggregate in each compound projection.
         private readonly (int ProjIdx, string Placeholder, AggregateMetricState State)[] compoundStates;
@@ -1008,7 +1008,7 @@ internal sealed class QueryAggregator
         /// </summary>
         public QueryResultRow ToResultRow(QueryTicket ticket)
         {
-            Dictionary<string, ColumnValue> row = new(outputValues);
+            Dictionary<string, ColumnValue> row = new(outputValues, StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < projections.Count; i++)
             {
@@ -1020,7 +1020,7 @@ internal sealed class QueryAggregator
                 {
                     // Build a synthetic row that merges the already-captured group-key values
                     // with the finalized placeholder values for this projection's sub-aggregates.
-                    Dictionary<string, ColumnValue> syntheticRow = new(row);
+                    Dictionary<string, ColumnValue> syntheticRow = new(row, StringComparer.OrdinalIgnoreCase);
                     foreach (var (projIdx, placeholder, state) in compoundStates)
                     {
                         if (projIdx == i)

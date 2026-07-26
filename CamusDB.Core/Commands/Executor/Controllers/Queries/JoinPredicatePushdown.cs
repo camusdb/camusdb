@@ -20,14 +20,14 @@ internal static class JoinPredicatePushdown
     public sealed class Result
     {
         public IReadOnlyDictionary<string, NodeAst?> ScanFiltersByAlias { get; init; } =
-            new Dictionary<string, NodeAst?>();
+            new Dictionary<string, NodeAst?>(StringComparer.OrdinalIgnoreCase);
 
         public NodeAst? PostJoinFilter { get; init; }
     }
 
     public static Result Analyze(BoundSelectQuery bound, NodeAst? where)
     {
-        Dictionary<string, List<NodeAst>> conjunctsByAlias = new(StringComparer.Ordinal);
+        Dictionary<string, List<NodeAst>> conjunctsByAlias = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (BoundTableSource source in bound.Sources)
             conjunctsByAlias[source.Alias] = new List<NodeAst>();
@@ -53,7 +53,7 @@ internal static class JoinPredicatePushdown
             }
         }
 
-        Dictionary<string, NodeAst?> scanFilters = new(conjunctsByAlias.Count, StringComparer.Ordinal);
+        Dictionary<string, NodeAst?> scanFilters = new(conjunctsByAlias.Count, StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, List<NodeAst>> entry in conjunctsByAlias)
             scanFilters[entry.Key] = PredicateAnalyzer.CombineConjuncts(entry.Value);
@@ -67,7 +67,7 @@ internal static class JoinPredicatePushdown
 
     private static HashSet<string> CollectReferencedAliases(NodeAst node, BoundSelectQuery bound)
     {
-        HashSet<string> aliases = new(StringComparer.Ordinal);
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
         WalkIdentifiers(node, bound, aliases);
         return aliases;
     }
@@ -124,7 +124,7 @@ internal static class JoinPredicatePushdown
     {
         foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
         {
-            if (column.Name == columnName && SchemaElementStateRules.IsReadable(column))
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsReadable(column))
                 return true;
         }
 

@@ -92,7 +92,7 @@ internal static class QueryProjectionResolver
             {
                 ProjectionItem projection = projections[i];
 
-                if (string.Equals(projection.OutputName, name, StringComparison.Ordinal))
+                if (string.Equals(projection.OutputName, name, StringComparison.OrdinalIgnoreCase))
                 {
                     columnName = GetOutputName(projection, i);
                     return true;

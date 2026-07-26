@@ -108,7 +108,7 @@ internal sealed class ExplainExecutor
             long? estRows = physNode?.EstimatedCardinality;
             double? estCost = physNode?.Cost?.Total;
 
-            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
                 { "stage",          new ColumnValue(ColumnType.String, stage) },
                 { "node",           new ColumnValue(ColumnType.String, name) },
@@ -129,7 +129,7 @@ internal sealed class ExplainExecutor
                 ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableId}@{d.SchemaVersion}")) + "]"
                 : "[]";
 
-            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
                 { "stage",          new ColumnValue(ColumnType.String, stage) },
                 { "node",           new ColumnValue(ColumnType.String, "plan-info") },
@@ -145,7 +145,7 @@ internal sealed class ExplainExecutor
         // effects: it never probes or populates the cache.
         if (plan.Ticket.CacheHint is { } cacheHint)
         {
-            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
                 { "stage",          new ColumnValue(ColumnType.String, stage) },
                 { "node",           new ColumnValue(ColumnType.String, "cache") },
@@ -257,7 +257,7 @@ internal sealed class ExplainExecutor
             else
                 stats = physNode?.Stats;
 
-            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
                 { "stage",             new ColumnValue(ColumnType.String, "analyze") },
                 { "node",              new ColumnValue(ColumnType.String, name) },
@@ -283,7 +283,7 @@ internal sealed class ExplainExecutor
                 ? "[" + string.Join(", ", plan.SchemaDeps.Select(d => $"{d.TableId}@{d.SchemaVersion}")) + "]"
                 : "[]";
 
-            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
                 { "stage",           new ColumnValue(ColumnType.String, "analyze") },
                 { "node",            new ColumnValue(ColumnType.String, "plan-info") },
@@ -390,7 +390,7 @@ internal sealed class ExplainExecutor
 
     private static QueryResultRow FromlessRow(string stage, string node, string detail, long? estimatedRows)
     {
-        return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+        return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
             { "stage",          new ColumnValue(ColumnType.String, stage) },
             { "node",           new ColumnValue(ColumnType.String, node) },

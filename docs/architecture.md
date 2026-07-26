@@ -19,8 +19,9 @@ A statement travels through the stack in roughly this order:
    text (or a structured command), parameters, and an optional transaction handle and
    isolation/mode hints.
 2. **Parser.** An LALR(1) parser (YaccLexTools) turns SQL text into an AST. Identifiers
-   are normalized to lowercase at parse time. Parsed ASTs are cached per instance and
-   swept periodically so repeated statements skip re-parsing.
+   are preserved verbatim in the exact case the user wrote them — the parser does not fold
+   case. SQL keywords are still matched case-insensitively. Parsed ASTs are cached per
+   instance and swept periodically so repeated statements skip re-parsing.
 3. **Binder.** The bound model resolves table aliases, derived-table output columns,
    projection aliases, ordinal `GROUP BY` / `ORDER BY` references, aggregate and `HAVING`
    scope, and subquery scope against the catalog.
@@ -39,8 +40,14 @@ A statement travels through the stack in roughly this order:
 ### Parser
 
 LALR(1) grammar compiled with YaccLexTools, producing the AST consumed by the binder.
-Lowercasing of identifiers happens here, which is why identifier handling is
-case-insensitive throughout the engine.
+Identifiers are kept in their original case here (not folded); identifiers are stored
+in the exact case the user declared them (`CREATE TABLE`/`CREATE INDEX`/`CREATE DATABASE`),
+while every reference to them in SQL matches **case-insensitively**. That case-insensitive
+matching is done at lookup time by case-insensitive comparers on the schema/catalog
+dictionaries and name comparisons, not by rewriting identifier text in the parser. Because
+identifiers are restricted to ASCII (`[A-Za-z_][A-Za-z0-9_]*`), `OrdinalIgnoreCase` is an
+exact, culture-independent fold. Database names are likewise case-insensitive-unique
+(`MyDb` and `mydb` are the same database) but stored and displayed in their original case.
 
 ### Binder
 

@@ -206,7 +206,7 @@ public static class PredicateAnalyzer
         if (dot >= 0 && dot < columnName.Length - 1)
             columnName = columnName[(dot + 1)..];
 
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == columnName);
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         return column?.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
     }
 

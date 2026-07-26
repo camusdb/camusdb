@@ -70,9 +70,9 @@ public sealed class TestDropFenceClosed : SharedNodeBaseTest
             sharedNode: SharedNode, registry: faultRegistry, isClusterMode: true);
 
         // The drop must fail closed with a retryable error.
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await faultExecutor.DropDatabase(new DropDatabaseTicket(rootName)));
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
             "a cluster drop that cannot fence must fail with a retryable error");
 
         // The parent survives: still registered, no drop-intent marker, and still openable.

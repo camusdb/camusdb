@@ -24,7 +24,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
 
         GetUpdateItemList(ast.rightAst, updateItemList);
 
-        Dictionary<string, NodeAst> values = new(updateItemList.Count);
+        Dictionary<string, NodeAst> values = new(updateItemList.Count, StringComparer.OrdinalIgnoreCase);
 
         foreach ((string columnName, NodeAst value) updateItem in updateItemList)
             values[updateItem.columnName] = updateItem.value;

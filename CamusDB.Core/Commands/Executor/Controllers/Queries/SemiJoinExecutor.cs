@@ -281,7 +281,7 @@ internal sealed class SemiJoinExecutor
     /// </summary>
     private static IReadOnlySet<string> BuildRequiredColumns(string innerColumn, NodeAst? filter)
     {
-        HashSet<string> cols = new(StringComparer.Ordinal) { innerColumn };
+        HashSet<string> cols = new(StringComparer.OrdinalIgnoreCase) { innerColumn };
         if (filter is not null)
             CollectIdentifiers(filter, cols);
         return cols;
@@ -324,7 +324,7 @@ internal sealed class SemiJoinExecutor
         if (table.Schema.Columns is null)
             return ColumnType.String;
 
-        TableColumnSchema? col = table.Schema.Columns.Find(c => c.Name == columnName);
+        TableColumnSchema? col = table.Schema.Columns.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         return col?.Type ?? ColumnType.String;
     }
 }

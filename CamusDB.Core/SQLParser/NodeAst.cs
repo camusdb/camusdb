@@ -14,8 +14,10 @@ namespace CamusDB.Core.SQLParser;
 /// <remarks>
 /// <b>Immutability invariant:</b> a <see cref="NodeAst"/> returned by
 /// <see cref="SQLParserProcessor.Parse"/> must be treated as immutable after it is returned.
-/// <see cref="SQLParser.SQLParserProcessor.Parse"/> applies <see cref="IdentifierNormalizer"/> before
-/// returning, so all identifier text is already normalized. Downstream transformations
+/// Identifier text is preserved verbatim in the exact case the user wrote it; the parser does
+/// not fold case. Case-insensitive table/column/index matching is done at lookup time via
+/// case-insensitive comparers, so callers must compare identifier text case-insensitively rather
+/// than assume it was lower-cased. Downstream transformations
 /// (<c>SubqueryRewriter</c>, binders, planners) must <b>construct new nodes</b> rather than
 /// modifying fields of an existing node. This invariant is what makes sharing a single cached
 /// <see cref="NodeAst"/> across concurrent executions of the same SQL text safe.

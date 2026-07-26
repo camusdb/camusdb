@@ -80,6 +80,20 @@ public static class ConfigResolver
             CamusDBConfig.DataDirectory = config.DataDir;
 
         CamusDBConfig.StatsFlushIntervalMs = config.StatsFlushIntervalMs;
+        CamusDBConfig.StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows;
+        CamusDBConfig.StatsHistogramBuckets = config.StatsHistogramBuckets;
+
+        CamusDBConfig.AutoAnalyzeEnabled = config.AutoAnalyzeEnabled;
+        CamusDBConfig.AutoAnalyzeCheckIntervalMs = config.AutoAnalyzeCheckIntervalMs;
+        CamusDBConfig.AutoAnalyzeFractionStaleRows = config.AutoAnalyzeFractionStaleRows;
+        CamusDBConfig.AutoAnalyzeMinStaleRows = config.AutoAnalyzeMinStaleRows;
+        CamusDBConfig.AutoAnalyzeMaxConcurrent = config.AutoAnalyzeMaxConcurrent;
+        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond = config.AutoAnalyzeMaxRowsPerSecond;
+        CamusDBConfig.AutoAnalyzeHistogramSampleRows = config.AutoAnalyzeHistogramSampleRows;
+        CamusDBConfig.AutoAnalyzeHllPrecision = config.AutoAnalyzeHllPrecision;
+        CamusDBConfig.AutoAnalyzeLoadPauseThreshold = config.AutoAnalyzeLoadPauseThreshold;
+        CamusDBConfig.AutoAnalyzeOwnershipCheckRows = config.AutoAnalyzeOwnershipCheckRows;
+
         CamusDBConfig.SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds;
         CamusDBConfig.SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries;
         CamusDBConfig.SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds;
@@ -124,6 +138,10 @@ public static class ConfigResolver
         CamusDBConfig.MaxColumnsPerTable = config.MaxColumnsPerTable;
         CamusDBConfig.MaxIndexesPerTable = config.MaxIndexesPerTable;
         CamusDBConfig.MaxTablesPerDatabase = config.MaxTablesPerDatabase;
+        CamusDBConfig.MaxIndexColumns = config.MaxIndexColumns;
+        CamusDBConfig.MaxIndexIncludeTupleBytes = config.MaxIndexIncludeTupleBytes;
+        CamusDBConfig.MaxMutationsPerTransaction = config.MaxMutationsPerTransaction;
+        CamusDBConfig.BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs;
 
         CamusDBConfig.QueryResultCacheEnabled = config.QueryResultCacheEnabled;
         CamusDBConfig.QueryResultCacheDefaultTtlMs = config.QueryResultCacheDefaultTtlMs;

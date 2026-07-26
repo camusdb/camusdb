@@ -23,7 +23,7 @@ public sealed record BoundDerivedTableSource(
     {
         foreach (DerivedColumnSchema column in Columns)
         {
-            if (column.Name == columnName)
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 
@@ -34,7 +34,7 @@ public sealed record BoundDerivedTableSource(
     {
         foreach (DerivedColumnSchema column in Columns)
         {
-            if (column.Name == columnName)
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase))
                 return column.Type;
         }
 

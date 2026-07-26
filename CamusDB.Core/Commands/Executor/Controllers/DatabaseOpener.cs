@@ -130,7 +130,7 @@ internal sealed class DatabaseOpener
         };
 
         KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT, logger, cache);
-        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new();
+        ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new(StringComparer.OrdinalIgnoreCase);
 
         DatabaseDescriptor databaseDescriptor = new(
             id: id,

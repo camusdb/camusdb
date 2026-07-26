@@ -356,8 +356,10 @@ public static class PlanRenderer
             NodeType.ExprMult => $"{RenderExpr(expr.leftAst!)} * {RenderExpr(expr.rightAst!)}",
             NodeType.ExprDiv  => $"{RenderExpr(expr.leftAst!)} / {RenderExpr(expr.rightAst!)}",
 
+            // Function names are case-insensitive; render them in a canonical lower-case form so the
+            // EXPLAIN output is stable regardless of the case the function was written in.
             NodeType.ExprFuncCall =>
-                $"{expr.leftAst?.yytext ?? "?"}({(expr.rightAst is null || expr.rightAst.nodeType == NodeType.ExprAllFields ? "*" : RenderExpr(expr.rightAst))})",
+                $"{expr.leftAst?.yytext?.ToLowerInvariant() ?? "?"}({(expr.rightAst is null || expr.rightAst.nodeType == NodeType.ExprAllFields ? "*" : RenderExpr(expr.rightAst))})",
 
             NodeType.ExprCast => $"CAST({RenderExpr(expr.leftAst!)} AS {expr.rightAst?.yytext ?? "?"})",
 

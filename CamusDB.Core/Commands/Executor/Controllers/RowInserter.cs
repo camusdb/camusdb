@@ -41,7 +41,7 @@ internal sealed class RowInserter
         // Build lookups once per statement rather than rescanning per row.
         // writableNames: O(1) membership test for step 1.
         // validationRules: single precomputed list of columns that need not-null or length checks.
-        HashSet<string> writableNames = new(columns.Count, StringComparer.Ordinal);
+        HashSet<string> writableNames = new(columns.Count, StringComparer.OrdinalIgnoreCase);
         List<TableColumnSchema> validationRules = new(columns.Count);
 
         foreach (TableColumnSchema col in columns)

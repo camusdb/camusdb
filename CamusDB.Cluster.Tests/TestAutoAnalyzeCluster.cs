@@ -230,4 +230,53 @@ public sealed class TestAutoAnalyzeCluster
         Assert.IsNull(owner.Executor.Statistics.GetColumnNdv(owner.Database, ownerTable, "year"),
             "A former owner that lost its lease mid-scan must publish nothing");
     }
+
+    /// <summary>
+    /// The per-table opt-out replicates cluster-wide (SchemaOp.SetTableSettings): after
+    /// <c>SET (sql_stats_automatic_collection_enabled = false)</c> on the schema leader, every node's
+    /// schema shows it and the registry leader's sweep skips the table even though it is stale.
+    /// </summary>
+    [Test]
+    public async Task Cluster_DisabledTableIsNotAutoAnalyzed()
+    {
+        CamusDBConfig.AutoAnalyzeEnabled = true;
+        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
+        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
+
+        await using InProcessSchemaCluster cluster =
+            await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 1);
+
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+        await CreateRobotsTableAsync(cluster, db);
+        await InsertRobotsAsync(cluster, db, 10);
+
+        // Opt the table out on the schema leader; the delta replicates (schema version 1 → 2).
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: db,
+            sql: "ALTER TABLE robots SET (sql_stats_automatic_collection_enabled = false)", parameters: null)));
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
+
+        // Every node's in-memory schema reflects the opt-out.
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Assert.IsTrue(node.Database!.Schema.Tables.TryGetValue("robots", out TableSchema? schema));
+            Assert.IsFalse(schema!.AutoStatsCollectionEnabled,
+                $"Node {node.Index} must see the replicated opt-out");
+        }
+
+        // Sweep on every node: the disabled table must not be analyzed (no NDV published).
+        int analyzed = 0;
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            analyzed += await node.Executor.RunAutoAnalyzeForTestsAsync();
+
+        Assert.AreEqual(0, analyzed, "A disabled table must not be auto-analyzed cluster-wide");
+
+        InProcessSchemaCluster.Node writer = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        TableDescriptor writerTable = await writer.Database!.TableDescriptors["robots"];
+        writer.Executor.Statistics.EvictForTesting(writer.Database, writerTable);
+        await writer.Executor.Statistics.LoadByIdAsync(writer.Database, writerTable.Id);
+        Assert.IsNull(writer.Executor.Statistics.GetColumnNdv(writer.Database, writerTable, "year"),
+            "No statistics may be published for a disabled table");
+    }
 }

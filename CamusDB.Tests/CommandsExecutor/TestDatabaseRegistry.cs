@@ -337,14 +337,14 @@ internal sealed class TestDatabaseRegistry
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task Register_MixedCase_NormalizedToLowercase()
+    public async Task Register_MixedCase_PreservesCaseButResolvesCaseInsensitively()
     {
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
 
         string id = NewId();
         DatabaseRegistryEntry entry = await registry.RegisterAsync("MyDatabase", id);
 
-        Assert.AreEqual("mydatabase", entry.Name, "stored name must be lowercase");
+        Assert.AreEqual("MyDatabase", entry.Name, "stored name must preserve the original case");
         Assert.IsTrue(registry.TryResolveId("MyDatabase", out string resolved));
         Assert.AreEqual(id, resolved);
         Assert.IsTrue(registry.TryResolveId("MYDATABASE", out _), "upper-case lookup must hit");

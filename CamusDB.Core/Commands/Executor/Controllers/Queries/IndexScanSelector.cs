@@ -111,7 +111,7 @@ internal static class IndexScanSelector
 
     private static Dictionary<string, List<AnalyzedComparison>> BuildColumnMap(PredicateAnalysis analysis)
     {
-        Dictionary<string, List<AnalyzedComparison>> byColumn = new(StringComparer.Ordinal);
+        Dictionary<string, List<AnalyzedComparison>> byColumn = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (AnalyzedComparison comparison in analysis.IndexableComparisons)
         {
@@ -352,7 +352,7 @@ internal static class IndexScanSelector
     {
         foreach (string columnName in index.Columns)
         {
-            TableColumnSchema? schema = table.Schema.Columns!.Find(c => c.Name == columnName);
+            TableColumnSchema? schema = table.Schema.Columns!.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
             if (schema is null || !schema.NotNull)
                 return false;
         }
@@ -638,7 +638,7 @@ internal static class IndexScanSelector
 
     private static ColumnType GetColumnType(TableDescriptor table, string columnName)
     {
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == columnName);
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         return column?.Type ?? ColumnType.String;
     }
 

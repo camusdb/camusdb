@@ -30,7 +30,9 @@ internal sealed class CreateTableValidator : ValidatorBase
                 CamusDBErrorCodes.SchemaLimitExceeded,
                 $"Table '{ticket.TableName}' declares {ticket.Columns.Length} columns, which exceeds the maximum of {maxCols}");
 
-        HashSet<string> existingColumns = new();
+        // Case-insensitive so two columns differing only in case (Foo / foo) collide, while the
+        // schema still stores each column's name in the exact case the user declared it.
+        HashSet<string> existingColumns = new(StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < ticket.Columns.Length; i++)
         {
@@ -41,7 +43,7 @@ internal sealed class CreateTableValidator : ValidatorBase
             if (IsReservedName(columnInfo.Name))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Reserved column name: " + columnInfo.Name);
 
-            if (!existingColumns.Add(columnInfo.Name.ToLowerInvariant()))
+            if (!existingColumns.Add(columnInfo.Name))
                 throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, "Duplicate column name: " + columnInfo.Name);
 
             if (columnInfo.Type == ColumnType.Null)

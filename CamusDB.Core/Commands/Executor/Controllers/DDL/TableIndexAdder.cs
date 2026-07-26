@@ -79,7 +79,7 @@ internal sealed class TableIndexAdder
         IndexColumnOrder.RejectDescendingOnUnsupportedType(
             ticket.Columns,
             ticket.IndexName,
-            name => table.Schema.Columns!.Find(c => c.Name == name)?.Type);
+            name => table.Schema.Columns!.Find(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Type);
 
         foreach (ColumnIndexInfo indexColumn in ticket.Columns)
         {
@@ -87,7 +87,7 @@ internal sealed class TableIndexAdder
 
             foreach (TableColumnSchema column in table.Schema.Columns!)
             {
-                if (column.Name == indexColumn.Name)
+                if (string.Equals(column.Name, indexColumn.Name, StringComparison.OrdinalIgnoreCase))
                 {
                     tableColumn = column;
                     break;
@@ -164,7 +164,7 @@ internal sealed class TableIndexAdder
                     CamusDBErrorCodes.InvalidInput,
                     $"Column '{includeName}' is already indexed as a key column of index '{ticket.IndexName}'");
 
-            TableColumnSchema? tableColumn = table.Schema.Columns!.Find(c => c.Name == includeName);
+            TableColumnSchema? tableColumn = table.Schema.Columns!.Find(c => string.Equals(c.Name, includeName, StringComparison.OrdinalIgnoreCase));
 
             if (tableColumn is null)
                 throw new CamusDBException(
@@ -265,7 +265,7 @@ internal sealed class TableIndexAdder
 
         bool unique = ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex;
         string indexId = state.IndexId
-            ?? table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)?.Id
+            ?? table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
 
         TableIndexSchema? schemaIndex = table.Schema.Indexes?.FirstOrDefault(ix => ix.Id == indexId);
@@ -343,7 +343,7 @@ internal sealed class TableIndexAdder
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
         string indexId = state.IndexId
-            ?? table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)?.Id
+            ?? table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
         string finalOffset = state.LastBackfilledRowId ?? "";
 
@@ -396,7 +396,7 @@ internal sealed class TableIndexAdder
 
             foreach (TableColumnSchema column in table.Schema.Columns!)
             {
-                if (column.Name == columnIndex.Name)
+                if (string.Equals(column.Name, columnIndex.Name, StringComparison.OrdinalIgnoreCase))
                 {
                     hasColumn = true;
                     columnsIds[i++] = column.Id;
@@ -421,7 +421,7 @@ internal sealed class TableIndexAdder
 
         for (int i = 0; i < columnNames.Length; i++)
         {
-            TableColumnSchema? column = table.Schema.Columns!.Find(c => c.Name == columnNames[i]);
+            TableColumnSchema? column = table.Schema.Columns!.Find(c => string.Equals(c.Name, columnNames[i], StringComparison.OrdinalIgnoreCase));
 
             if (column is null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Couldn't get column id for column '{columnNames[i]}'");

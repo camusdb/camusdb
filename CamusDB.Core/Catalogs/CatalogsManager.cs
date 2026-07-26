@@ -262,6 +262,8 @@ public sealed class CatalogsManager
                 Columns = columns,
                 Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes] : null,
                 CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
+                // Preserve table settings (e.g. the auto-analyze opt-out) across deferred drop + relink.
+                Settings = src.Settings is { Count: > 0 } ? new Dictionary<string, string>(src.Settings, StringComparer.Ordinal) : null,
             })
         };
     }
@@ -357,7 +359,7 @@ public sealed class CatalogsManager
                 name =>
                 {
                     foreach (SchemaColumnPayload column in columns)
-                        if (column.Name == name)
+                        if (string.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
                             return column.Type;
                     return null;
                 });
@@ -815,7 +817,7 @@ public sealed class CatalogsManager
     )
     {
         // The completed index lives in table.Schema.Indexes (written by TableIndexAdder).
-        TableIndexSchema? indexSchema = table.Schema.Indexes?.FirstOrDefault(ix => ix.Name == ticket.IndexName)
+        TableIndexSchema? indexSchema = table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))
             ?? throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Index '{ticket.IndexName}' not found in table schema after local apply — cannot build replication entry"
@@ -946,6 +948,44 @@ public sealed class CatalogsManager
 
     private static string FormatLaggards(IReadOnlyList<string> laggards)
         => laggards.Count == 0 ? "(none)" : string.Join(", ", laggards);
+
+    /// <summary>
+    /// Proposes a <see cref="SchemaOp.SetTableSettings"/> delta and replicates it to all cluster nodes,
+    /// so every node's in-memory <see cref="TableSchema.Settings"/> updates and the KV checkpoint is
+    /// rewritten. Advances the database schema version (like check constraints) but not
+    /// <see cref="TableSchema.Version"/>. Only valid in cluster mode; standalone applies directly.
+    /// </summary>
+    public async Task ReplicateSetTableSettingsAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        IReadOnlyDictionary<string, string> settings)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.SetTableSettings,
+                Payload = Serializator.Serialize(new SchemaSetTableSettingsPayload
+                {
+                    TableName = tableName,
+                    Settings = new Dictionary<string, string>(settings, StringComparer.Ordinal)
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Proposes an <c>AddCheckConstraint</c> delta and replicates it to all cluster nodes.
@@ -1145,6 +1185,7 @@ public sealed class CatalogsManager
         SchemaOp.RenameTable => DecodePayload<SchemaRenamePayload>(entry).NewName,
         SchemaOp.RenameColumn or SchemaOp.RenameIndex => DecodePayload<SchemaRenamePayload>(entry).TableName,
         SchemaOp.AddCheckConstraint or SchemaOp.DropCheckConstraint => DecodePayload<SchemaCheckConstraintPayload>(entry).TableName,
+        SchemaOp.SetTableSettings => DecodePayload<SchemaSetTableSettingsPayload>(entry).TableName,
         SchemaOp.SetColumnNotNull => DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
@@ -1209,11 +1250,11 @@ public sealed class CatalogsManager
             SchemaRenameKind.Column =>
                 schema.Tables.TryGetValue(payload.TableName, out TableSchema? ct) &&
                 ct.Columns is not null &&
-                ct.Columns.Any(c => c.Name == payload.NewName),
+                ct.Columns.Any(c => string.Equals(c.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)),
             SchemaRenameKind.Index =>
                 schema.Tables.TryGetValue(payload.TableName, out TableSchema? it) &&
                 it.Indexes is not null &&
-                it.Indexes.Any(ix => ix.Name == payload.NewName),
+                it.Indexes.Any(ix => string.Equals(ix.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)),
             _ => false
         };
     }
@@ -1222,14 +1263,14 @@ public sealed class CatalogsManager
     {
         return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
                table.Indexes is not null &&
-               table.Indexes.Any(ix => ix.Name == payload.IndexName);
+               table.Indexes.Any(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
     {
         return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
                table.Columns is not null &&
-               table.Columns.Any(column => column.Name == payload.Column.Name);
+               table.Columns.Any(column => string.Equals(column.Name, payload.Column.Name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
@@ -1239,7 +1280,7 @@ public sealed class CatalogsManager
 
         if (payload.ElementKind == SchemaElementKind.Index)
         {
-            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => ix.Name == payload.ElementName);
+            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
             return payload.State == SchemaElementState.Absent
                 ? index is null
                 : index?.State == payload.State;
@@ -1248,7 +1289,7 @@ public sealed class CatalogsManager
         if (table.Columns is null)
             return payload.State == SchemaElementState.Absent;
 
-        TableColumnSchema? column = table.Columns.FirstOrDefault(column => column.Name == payload.ElementName);
+        TableColumnSchema? column = table.Columns.FirstOrDefault(column => string.Equals(column.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
         return payload.State == SchemaElementState.Absent
             ? column is null
             : column?.State == payload.State;
@@ -1294,6 +1335,7 @@ public sealed class CatalogsManager
             SchemaOp.AddCheckConstraint => ApplyAddCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
             SchemaOp.DropCheckConstraint => ApplyDropCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
             SchemaOp.SetColumnNotNull => ApplySetColumnNotNull(schema, DecodePayload<SchemaSetColumnNotNullPayload>(entry)),
+            SchemaOp.SetTableSettings => ApplySetTableSettings(schema, DecodePayload<SchemaSetTableSettingsPayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -1444,6 +1486,9 @@ public sealed class CatalogsManager
             ParseCheckConstraintAsts(tableSchema);
         }
 
+        if (payload.Settings is { Count: > 0 })
+            tableSchema.Settings = new Dictionary<string, string>(payload.Settings, StringComparer.Ordinal);
+
         // Configure the lazy history loader (as for a disk-loaded table) so rows written under versions
         // older than the current one decode against their retained on-disk history layout.
         ConfigureSchemaHistoryLoader(database, tableSchema);
@@ -1476,7 +1521,7 @@ public sealed class CatalogsManager
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AddIndex payload for '{payload.IndexName}' carries no index definition");
 
         tableSchema.Indexes ??= [];
-        tableSchema.Indexes.RemoveAll(ix => ix.Name == payload.IndexName);
+        tableSchema.Indexes.RemoveAll(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
         tableSchema.Indexes.Add(payload.Index);
         return tableSchema;
     }
@@ -1491,7 +1536,33 @@ public sealed class CatalogsManager
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             return null;
 
-        tableSchema.Indexes?.RemoveAll(ix => ix.Name == payload.IndexName);
+        tableSchema.Indexes?.RemoveAll(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a <see cref="SchemaOp.SetTableSettings"/> delta by merging the payload's settings into
+    /// <see cref="TableSchema.Settings"/>. Idempotent; does not bump <see cref="TableSchema.Version"/>.
+    /// </summary>
+    private static TableSchema ApplySetTableSettings(Schema schema, SchemaSetTableSettingsPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        Dictionary<string, string> merged = tableSchema.Settings is null
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : new Dictionary<string, string>(tableSchema.Settings, StringComparer.Ordinal);
+
+        // Defensive: only apply recognized, lowercase-canonical keys, so a malformed log entry from an
+        // older/other proposer cannot inject divergent settings semantics on apply.
+        foreach (KeyValuePair<string, string> kv in payload.Settings)
+        {
+            string key = (kv.Key ?? "").Trim().ToLowerInvariant();
+            if (TableSettings.RecognizedKeys.Contains(key))
+                merged[key] = (kv.Value ?? "").Trim().ToLowerInvariant();
+        }
+
+        tableSchema.Settings = merged;
         return tableSchema;
     }
 
@@ -1517,7 +1588,7 @@ public sealed class CatalogsManager
             check.ParsedCondition = SQLParserProcessor.ParseCondition(payload.Expression);
 
         tableSchema.CheckConstraints ??= [];
-        tableSchema.CheckConstraints.RemoveAll(c => c.Name == payload.ConstraintName);
+        tableSchema.CheckConstraints.RemoveAll(c => string.Equals(c.Name, payload.ConstraintName, StringComparison.OrdinalIgnoreCase));
         tableSchema.CheckConstraints.Add(check);
         return tableSchema;
     }
@@ -1531,7 +1602,7 @@ public sealed class CatalogsManager
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             return null;
 
-        tableSchema.CheckConstraints?.RemoveAll(c => c.Name == payload.ConstraintName);
+        tableSchema.CheckConstraints?.RemoveAll(c => string.Equals(c.Name, payload.ConstraintName, StringComparison.OrdinalIgnoreCase));
         return tableSchema;
     }
 
@@ -1549,7 +1620,7 @@ public sealed class CatalogsManager
         if (tableSchema.Columns is null)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
 
-        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ColumnName, StringComparison.Ordinal));
+        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ColumnName, StringComparison.OrdinalIgnoreCase));
         if (idx < 0)
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ColumnName}' does not exist on table '{payload.TableName}'");
 
@@ -1688,11 +1759,11 @@ public sealed class CatalogsManager
         if (tableSchema.Columns is null)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
 
-        int idx = tableSchema.Columns.FindIndex(c => c.Name == payload.ElementName);
+        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
         if (idx < 0)
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ElementName}' does not exist in table '{payload.TableName}'");
 
-        if (tableSchema.Columns.Any(c => c.Name == payload.NewName))
+        if (tableSchema.Columns.Any(c => string.Equals(c.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)))
             throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, $"Column '{payload.NewName}' already exists in table '{payload.TableName}'");
 
         TableColumnSchema current = tableSchema.Columns[idx];
@@ -1756,11 +1827,11 @@ public sealed class CatalogsManager
         if (tableSchema.Indexes is null || tableSchema.Indexes.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no indexes");
 
-        int idx = tableSchema.Indexes.FindIndex(ix => ix.Name == payload.ElementName);
+        int idx = tableSchema.Indexes.FindIndex(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
         if (idx < 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{payload.ElementName}' does not exist on table '{payload.TableName}'");
 
-        if (tableSchema.Indexes.Any(ix => ix.Name == payload.NewName))
+        if (tableSchema.Indexes.Any(ix => string.Equals(ix.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{payload.NewName}' already exists on table '{payload.TableName}'");
 
         TableIndexSchema current = tableSchema.Indexes[idx];
@@ -1825,7 +1896,7 @@ public sealed class CatalogsManager
 
         foreach (TableColumnSchema column in tableSchema.Columns!)
         {
-            if (newColumn.Name == column.Name)
+            if (string.Equals(newColumn.Name, column.Name, StringComparison.OrdinalIgnoreCase))
                 hasColumn = true;
             else
                 tableColumns.Add(column);
@@ -1863,7 +1934,7 @@ public sealed class CatalogsManager
         if (tableSchema.Columns is null)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
 
-        int columnIndex = tableSchema.Columns.FindIndex(column => column.Name == payload.ElementName);
+        int columnIndex = tableSchema.Columns.FindIndex(column => string.Equals(column.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
         if (columnIndex < 0)
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{payload.ElementName}'");
 
@@ -1921,7 +1992,7 @@ public sealed class CatalogsManager
                 $"Table '{tableSchema.Name}' has no indexes — cannot apply state transition for '{payload.ElementName}'"
             );
 
-        int indexIdx = tableSchema.Indexes.FindIndex(ix => ix.Name == payload.ElementName);
+        int indexIdx = tableSchema.Indexes.FindIndex(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
         if (indexIdx < 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -2103,6 +2174,70 @@ public sealed class CatalogsManager
 
         // Update the grow-only keyspace catalog to track all index ids ever used by this table.
         await WriteKeyspaceCatalogAsync(kahuna, tx, database.Id, tableSchema).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Applies <c>ALTER TABLE … SET (key = value)</c> table storage parameters. Version-neutral: it
+    /// mutates <see cref="TableSchema.Settings"/> and rewrites the per-object table blob without
+    /// bumping <see cref="TableSchema.Version"/> (settings do not affect row encoding), mirroring how
+    /// index and check-constraint changes ride the blob.
+    ///
+    /// <para>The only consumer of these settings is the background auto-analyze scheduler, which reads
+    /// the setting from the freshly-scanned KV meta blob on the registry leader — not from any node's
+    /// in-memory descriptor. So a direct blob write is sufficient in both modes; the caller forwards to
+    /// the schema leader in cluster mode so the setting also lands in the leader's in-memory schema and
+    /// survives a later versioned DDL (which rebuilds the blob from that in-memory state).</para>
+    /// </summary>
+    public async Task AlterTableSettingsAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        IReadOnlyDictionary<string, string> settings)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        Dictionary<string, string>? previousSettings = null;
+        bool mutated = false;
+        try
+        {
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                // Snapshot for revert: PersistSchemaTableAsync serializes the in-memory schema, so the
+                // mutation must precede persist; a failed persist/commit must not leave in-memory ahead.
+                previousSettings = table.Schema.Settings is null ? null
+                    : new Dictionary<string, string>(table.Schema.Settings, StringComparer.Ordinal);
+
+                Dictionary<string, string> merged = table.Schema.Settings is null
+                    ? new Dictionary<string, string>(StringComparer.Ordinal)
+                    : new Dictionary<string, string>(table.Schema.Settings, StringComparer.Ordinal);
+
+                foreach (KeyValuePair<string, string> kv in settings)
+                    merged[kv.Key] = kv.Value;
+
+                table.Schema.Settings = merged;
+                mutated = true;
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            await PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            mutated = false;
+        }
+        finally
+        {
+            if (mutated)
+            {
+                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+                try { table.Schema.Settings = previousSettings; }
+                finally { database.Schema.ReleaseLock(); }
+            }
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
     }
 
     public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
@@ -2515,7 +2650,7 @@ public sealed class CatalogsManager
 
     private async Task<Dictionary<string, TableSchema>> LoadTablesAsync(DatabaseDescriptor database, KvTransaction tx)
     {
-        Dictionary<string, TableSchema> tables = new();
+        Dictionary<string, TableSchema> tables = new(StringComparer.OrdinalIgnoreCase);
         IKahuna kahuna = database.Kahuna.Kahuna;
         string tableKeyPrefix = TableKeyPrefix(database.Id);
 
@@ -2585,12 +2720,14 @@ public sealed class CatalogsManager
         )
         {
             SchemaCheckpoint checkpoint = JsonSerializer.Deserialize(json, MetaJsonContext.Default.SchemaCheckpoint) ?? new();
-            checkpoint.Tables ??= new();
+            // JSON deserialization builds an ordinal-comparer dictionary; rebuild it with a
+            // case-insensitive comparer so loaded table names match SQL identifiers case-insensitively.
+            checkpoint.Tables = ToCaseInsensitiveTables(checkpoint.Tables);
             return checkpoint;
         }
 
-        Dictionary<string, TableSchema> tables =
-            JsonSerializer.Deserialize(json, MetaJsonContext.Default.DictionaryStringTableSchema) ?? new();
+        Dictionary<string, TableSchema> tables = ToCaseInsensitiveTables(
+            JsonSerializer.Deserialize(json, MetaJsonContext.Default.DictionaryStringTableSchema));
 
         return new()
         {
@@ -2598,6 +2735,19 @@ public sealed class CatalogsManager
             SchemaVersion = MaxTableVersion(tables),
             Tables = tables
         };
+    }
+
+    /// <summary>
+    /// Rebuilds a table dictionary with a case-insensitive comparer. JSON deserialization always
+    /// produces an ordinal-comparer dictionary, so any table set loaded from a KV checkpoint must
+    /// be re-keyed here to match the case-insensitive lookup semantics of <see cref="Schema.Tables"/>.
+    /// </summary>
+    private static Dictionary<string, TableSchema> ToCaseInsensitiveTables(Dictionary<string, TableSchema>? tables)
+    {
+        if (tables is null)
+            return new(StringComparer.OrdinalIgnoreCase);
+
+        return new(tables, StringComparer.OrdinalIgnoreCase);
     }
 
     private static long MaxTableVersion(Dictionary<string, TableSchema> tables)
@@ -2635,6 +2785,7 @@ public sealed class CatalogsManager
             Columns = tableSchema.Columns,
             Indexes = tableSchema.Indexes,
             CheckConstraints = tableSchema.CheckConstraints,
+            Settings = tableSchema.Settings,
             SchemaHistory = null
         };
     }

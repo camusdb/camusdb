@@ -193,7 +193,7 @@ internal sealed class SemiJoinAnalyzer
         foreach ((string _, TableIndexSchema index) in table.Indexes)
         {
             if (index.Columns.Length == 1
-                && index.Columns[0].Equals(columnName, StringComparison.Ordinal)
+                && index.Columns[0].Equals(columnName, StringComparison.OrdinalIgnoreCase)
                 && SchemaElementStateRules.IsReadableIndex(table.Schema, index))
                 return index;
         }
@@ -207,7 +207,7 @@ internal sealed class SemiJoinAnalyzer
 
         foreach (TableColumnSchema col in table.Schema.Columns)
         {
-            if (col.Name.Equals(columnName, StringComparison.Ordinal))
+            if (col.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase))
                 return col.NotNull;
         }
         return false;

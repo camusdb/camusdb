@@ -374,11 +374,11 @@ public sealed class SchemaChangeCoordinator
 
         if (kind == SchemaElementKind.Index)
         {
-            TableIndexSchema? index = tableSchema.Indexes?.FirstOrDefault(ix => ix.Name == elementName);
+            TableIndexSchema? index = tableSchema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, elementName, StringComparison.OrdinalIgnoreCase));
             return index?.State ?? SchemaElementState.Absent;
         }
 
-        TableColumnSchema? column = tableSchema.Columns?.FirstOrDefault(c => c.Name == elementName);
+        TableColumnSchema? column = tableSchema.Columns?.FirstOrDefault(c => string.Equals(c.Name, elementName, StringComparison.OrdinalIgnoreCase));
         return column?.State ?? SchemaElementState.Absent;
     }
 

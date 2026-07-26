@@ -38,7 +38,7 @@ public static class SchemaElementStateRules
             return false;
 
         return index.Columns.All(columnName =>
-            table.Columns?.Any(column => column.Name == columnName && IsReadable(column)) == true
+            table.Columns?.Any(column => string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsReadable(column)) == true
         );
     }
 
@@ -49,7 +49,7 @@ public static class SchemaElementStateRules
             return false;
 
         return index.Columns.All(columnName =>
-            table.Columns?.Any(column => column.Name == columnName && IsWritable(column)) == true
+            table.Columns?.Any(column => string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsWritable(column)) == true
         );
     }
 }

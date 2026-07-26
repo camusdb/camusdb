@@ -21,8 +21,13 @@ public sealed class Schema : IDisposable
     /// <summary>Monotonic per-database schema version. Bumped by each applied delta.</summary>
     public long SchemaVersion { get; set; }
 
-    /// <summary>Live tables keyed by name. Renaming swaps the key; the table's immutable Id is unchanged.</summary>
-    public Dictionary<string, TableSchema> Tables { get; set; } = new();
+    /// <summary>
+    /// Live tables keyed by name. Renaming swaps the key; the table's immutable Id is unchanged.
+    /// The comparer is <see cref="StringComparer.OrdinalIgnoreCase"/> so table names match
+    /// case-insensitively regardless of the case the user wrote in SQL, while the stored
+    /// <see cref="TableSchema.Name"/> preserves the original case the table was created with.
+    /// </summary>
+    public Dictionary<string, TableSchema> Tables { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Serializes schema validation and apply so deltas are applied one at a time.

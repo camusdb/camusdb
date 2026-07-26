@@ -88,24 +88,26 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestParseNormalizesMixedCaseIdentifiers()
+    public void TestParsePreservesMixedCaseIdentifiers()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT Some_Field, Another_Field FROM Some_Table WHERE UserId = 1 ORDER BY CreatedAt DESC");
 
-        Assert.AreEqual("some_field", ast.leftAst!.leftAst!.yytext);
-        Assert.AreEqual("another_field", ast.leftAst!.rightAst!.yytext);
-        Assert.AreEqual("some_table", SelectFromTableName(ast));
-        Assert.AreEqual("userid", ast.extendedOne!.leftAst!.yytext);
-        Assert.AreEqual("createdat", ast.extendedTwo!.leftAst!.yytext);
+        // Identifiers keep the exact case the user wrote; case-insensitive matching happens at lookup time.
+        Assert.AreEqual("Some_Field", ast.leftAst!.leftAst!.yytext);
+        Assert.AreEqual("Another_Field", ast.leftAst!.rightAst!.yytext);
+        Assert.AreEqual("Some_Table", SelectFromTableName(ast));
+        Assert.AreEqual("UserId", ast.extendedOne!.leftAst!.yytext);
+        Assert.AreEqual("CreatedAt", ast.extendedTwo!.leftAst!.yytext);
     }
 
     [Test]
-    public void TestParseNormalizesEscapedIdentifiers()
+    public void TestParsePreservesEscapedIdentifierCase()
     {
         NodeAst ast = SQLParserProcessor.Parse("SELECT `UserName` FROM `Users`");
 
-        Assert.AreEqual("username", ast.leftAst!.yytext);
-        Assert.AreEqual("users", SelectFromTableName(ast));
+        // Backtick quoting strips the backticks but keeps the original case.
+        Assert.AreEqual("UserName", ast.leftAst!.yytext);
+        Assert.AreEqual("Users", SelectFromTableName(ast));
     }
 
     [Test]
@@ -564,13 +566,14 @@ public class TestSQLParser
     }
 
     [Test]
-    public void TestReservedWordAsColumnName_NormalizesToLower()
+    public void TestReservedWordAsColumnName_PreservesCase()
     {
-        // `KEY` (uppercase) is lowercased by escaped_identifier just like any other identifier.
+        // Backticks let a reserved word be used as an identifier; the case is preserved verbatim
+        // (only the backticks are stripped).
         NodeAst ast = SQLParserProcessor.Parse("SELECT `KEY` FROM t");
 
-        Assert.AreEqual("key", ast.leftAst!.yytext,
-            "Backtick-quoted identifiers must be normalised to lower-case");
+        Assert.AreEqual("KEY", ast.leftAst!.yytext,
+            "Backtick-quoted identifiers keep their original case");
     }
 
     // ── SHOW CREATE TABLE round-trip: KEY / UNIQUE KEY inside CREATE TABLE ────
@@ -791,7 +794,7 @@ public class TestSQLParser
         Assert.AreEqual("some_field", ast.leftAst!.yytext);
         Assert.AreEqual("some_table", ast.rightAst!.leftAst!.yytext);
         Assert.IsNotNull(ast.rightAst!.extendedOne);
-        Assert.AreEqual("force_index", ast.rightAst!.extendedOne!.rightAst!.yytext);
+        Assert.AreEqual("FORCE_INDEX", ast.rightAst!.extendedOne!.rightAst!.yytext);
         Assert.AreEqual("pk", ast.rightAst!.extendedOne!.extendedOne!.yytext);
     }
 

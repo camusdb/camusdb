@@ -323,7 +323,15 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TSET LPAREN table_setting_list RPAREN { $$.n = new(NodeType.AlterTableSetSetting, $3.n, $6.n, null, null, null, null, null, null); }
 				 ;
+
+table_setting_list : table_setting_list TCOMMA table_setting { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null, null, null, null); }
+                   | table_setting { $$.n = $1.n; }
+                   ;
+
+table_setting : any_identifier TEQUALS bool { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null, null); }
+              ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, $9.n, null, null, null, null); }
                   | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $10.n, $12.n, null, null, null, null); }
@@ -438,7 +446,7 @@ opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
                {
                  // The at-brace hint with a cache key is an accepted alias of the bare cache hint;
                  // any other key (e.g. FORCE_INDEX) stays an index-style table hint resolved later.
-                 if ($3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
+                 if ($3.n.yytext!.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
                      $$.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, $5.n.yytext);
                  else
                      $$.n = new(NodeType.IdentifierWithOpts, null, $3.n, $5.n, null, null, null, null, null);
@@ -446,7 +454,7 @@ opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
                | TAT LBRACE identifier TEQUALS identifier TCOMMA cache_hint_options RBRACE
                {
                  // ttl/strict options are only meaningful for the cache hint, never for FORCE_INDEX.
-                 if (!$3.n.yytext!.Equals("cache", System.StringComparison.Ordinal))
+                 if (!$3.n.yytext!.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
                      throw new CamusDB.Core.CamusDBException(
                          CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                          "Table hint options (ttl, strict) are only valid for the cache hint; got '" + $3.n.yytext + "'");
@@ -460,7 +468,7 @@ opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE
 /* {cache=name} or {cache=name, ttl=30s} or {cache=name, strict} or combinations.
  *
  * NodeType.CacheHint layout:
- *   yytext      = cache name (lowercased at reduce time by the `identifier` production's ToLowerInvariant)
+ *   yytext      = cache name, verbatim (case-folded to lower-case later, where the hint is consumed in SelectQueryCreator)
  *   leftAst     = option list: ExprList tree of option nodes, single option node, or null
  *
  * Option nodes:
@@ -848,10 +856,10 @@ qualified_identifier : any_identifier TDOT any_identifier
                      { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat($1.n.yytext, ".", $3.n.yytext)); }
                      ;
            
-identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.ToLowerInvariant()); }
+identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s); }
             ;
 
-escaped_identifier  : TESCAPED_IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.Trim('`').ToLowerInvariant()); }
+escaped_identifier  : TESCAPED_IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.Trim('`')); }
                     ;
 
 int     : TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, $$.s); }

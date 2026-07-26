@@ -71,7 +71,7 @@ internal sealed class TableConstraintAlterer
     {
         // Duplicate constraint name check.
         if (table.Schema.CheckConstraints?.Any(c =>
-                string.Equals(c.Name, ticket.ConstraintName, StringComparison.Ordinal)) == true)
+                string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase)) == true)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Constraint '{ticket.ConstraintName}' already exists on table '{table.Name}'");
@@ -114,7 +114,7 @@ internal sealed class TableConstraintAlterer
                         ParsedCondition = parsedCondition,
                     };
                     table.Schema.CheckConstraints ??= [];
-                    table.Schema.CheckConstraints.RemoveAll(c => c.Name == ticket.ConstraintName);
+                    table.Schema.CheckConstraints.RemoveAll(c => string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase));
                     table.Schema.CheckConstraints.Add(check);
                     mutated = true;
                 }
@@ -149,7 +149,7 @@ internal sealed class TableConstraintAlterer
     {
         // Resolve the constraint name: first against CHECK constraints, then against named NOT NULL.
         bool isCheckConstraint = table.Schema.CheckConstraints?.Any(c =>
-            string.Equals(c.Name, ticket.ConstraintName, StringComparison.Ordinal)) == true;
+            string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase)) == true;
 
         TableColumnSchema? notNullColumn = null;
         if (!isCheckConstraint && table.Schema.Columns is not null)
@@ -203,7 +203,7 @@ internal sealed class TableConstraintAlterer
                 try
                 {
                     previousChecks = table.Schema.CheckConstraints is null ? null : [.. table.Schema.CheckConstraints];
-                    table.Schema.CheckConstraints?.RemoveAll(c => c.Name == ticket.ConstraintName);
+                    table.Schema.CheckConstraints?.RemoveAll(c => string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase));
                     mutated = true;
                 }
                 finally
@@ -239,7 +239,7 @@ internal sealed class TableConstraintAlterer
 
         // Verify column exists.
         TableColumnSchema? column = table.Schema.Columns?.FirstOrDefault(c =>
-            string.Equals(c.Name, columnName, StringComparison.Ordinal));
+            string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         if (column is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -270,7 +270,7 @@ internal sealed class TableConstraintAlterer
                 try
                 {
                     List<TableColumnSchema> columns = table.Schema.Columns!;
-                    int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.Ordinal));
+                    int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
                     TableColumnSchema old = columns[idx];
                     revertIdx = idx;
                     revertColumn = old;
@@ -319,7 +319,7 @@ internal sealed class TableConstraintAlterer
         string columnName = ticket.ColumnName!;
 
         TableColumnSchema? column = table.Schema.Columns?.FirstOrDefault(c =>
-            string.Equals(c.Name, columnName, StringComparison.Ordinal));
+            string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         if (column is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -344,7 +344,7 @@ internal sealed class TableConstraintAlterer
                 try
                 {
                     List<TableColumnSchema> columns = table.Schema.Columns!;
-                    int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.Ordinal));
+                    int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
                     TableColumnSchema old = columns[idx];
                     revertIdx = idx;
                     revertColumn = old;

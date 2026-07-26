@@ -88,5 +88,12 @@ public enum SchemaOp
     /// written under the table's real (post-<c>ALTER</c>) versions still decode against the retained
     /// on-disk history keys. The reattached table reads its retained rows/indexes.
     /// </summary>
-    RelinkTable = 13
+    RelinkTable = 13,
+
+    /// <summary>
+    /// Set table storage parameters (payload: <c>SchemaSetTableSettingsPayload</c>), e.g.
+    /// <c>sql_stats_automatic_collection_enabled</c>. Merged into <c>TableSchema.Settings</c> on apply.
+    /// Does not bump <c>TableSchema.Version</c> — settings do not affect row encoding.
+    /// </summary>
+    SetTableSettings = 14
 }

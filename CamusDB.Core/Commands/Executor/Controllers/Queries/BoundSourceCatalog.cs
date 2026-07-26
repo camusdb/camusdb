@@ -17,7 +17,7 @@ internal static class BoundSourceCatalog
     {
         foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
         {
-            if (column.Name == columnName && SchemaElementStateRules.IsReadable(column))
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsReadable(column))
                 return true;
         }
 

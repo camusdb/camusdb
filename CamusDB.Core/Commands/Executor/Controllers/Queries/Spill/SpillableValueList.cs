@@ -163,5 +163,5 @@ internal sealed class SpillableValueList : IAsyncDisposable
     }
 
     private static QueryResultRow ToRow(ColumnValue value) =>
-        new(default, new Dictionary<string, ColumnValue> { { SpillColumn, value } });
+        new(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase) { { SpillColumn, value } });
 }

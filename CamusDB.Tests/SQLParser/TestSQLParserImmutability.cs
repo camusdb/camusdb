@@ -117,22 +117,48 @@ public class TestSQLParserImmutability
     }
 
     [Test]
-    public void IdentifierNormalization_AlreadyAppliedBeforeReturn()
+    public void Identifiers_ArePreservedVerbatim_NotFolded()
     {
-        // IdentifierNormalizer runs inside Parse, so the returned tree has lower-cased identifiers.
+        // Identifiers keep the exact case the user wrote; case-insensitive matching is done at
+        // lookup time, not by folding the identifier text in the parser.
         NodeAst ast = SQLParserProcessor.Parse("SELECT MyCol FROM MyTable");
 
-        static NodeAst? FindIdentifier(NodeAst? n)
+        static void CollectIdentifiers(NodeAst? n, System.Collections.Generic.List<string> found)
         {
-            if (n is null) return null;
-            if (n.nodeType == NodeType.Identifier) return n;
-            return FindIdentifier(n.leftAst) ?? FindIdentifier(n.rightAst)
-                ?? FindIdentifier(n.extendedOne);
+            if (n is null) return;
+            if (n.nodeType == NodeType.Identifier && n.yytext is not null) found.Add(n.yytext);
+            CollectIdentifiers(n.leftAst, found);
+            CollectIdentifiers(n.rightAst, found);
+            CollectIdentifiers(n.extendedOne, found);
+            CollectIdentifiers(n.extendedTwo, found);
+            CollectIdentifiers(n.extendedThree, found);
+            CollectIdentifiers(n.extendedFour, found);
+            CollectIdentifiers(n.extendedFive, found);
         }
 
-        NodeAst? ident = FindIdentifier(ast);
-        Assert.That(ident, Is.Not.Null);
-        Assert.That(ident!.yytext, Is.EqualTo(ident.yytext!.ToLowerInvariant()),
-            "Identifiers must already be lower-cased when Parse returns");
+        System.Collections.Generic.List<string> identifiers = new();
+        CollectIdentifiers(ast, identifiers);
+
+        Assert.That(identifiers, Does.Contain("MyCol"),
+            "Column identifier must be preserved in its original case");
+        Assert.That(identifiers, Does.Contain("MyTable"),
+            "Table identifier must be preserved in its original case");
+    }
+
+    [Test]
+    public void BacktickIdentifiers_ArePreservedVerbatim()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT `MixedCase` FROM t");
+
+        static NodeAst? FindIdentifier(NodeAst? n, string match)
+        {
+            if (n is null) return null;
+            if (n.nodeType == NodeType.Identifier && n.yytext == match) return n;
+            return FindIdentifier(n.leftAst, match) ?? FindIdentifier(n.rightAst, match)
+                ?? FindIdentifier(n.extendedOne, match);
+        }
+
+        Assert.That(FindIdentifier(ast, "MixedCase"), Is.Not.Null,
+            "Backtick-quoted identifier must keep its original case, minus the backticks");
     }
 }

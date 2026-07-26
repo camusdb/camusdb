@@ -74,7 +74,7 @@ internal static class JoinEquiJoinAnalyzer
         pair = null!;
 
         if (!TrySplitQualified(rightId, out string rightAlias, out string rightColumn)) return false;
-        if (!string.Equals(rightAlias, rightSource.Alias, StringComparison.Ordinal)) return false;
+        if (!string.Equals(rightAlias, rightSource.Alias, StringComparison.OrdinalIgnoreCase)) return false;
         if (!rightSource.HasColumn(rightColumn)) return false;
 
         // Arrays are not hashable by value (GetHashCode has no per-element hashing for arrays).
@@ -101,7 +101,7 @@ internal static class JoinEquiJoinAnalyzer
 
         if (TrySplitQualified(identifier, out string alias, out string columnName))
         {
-            if (string.Equals(alias, rightAlias, StringComparison.Ordinal)) return false;
+            if (string.Equals(alias, rightAlias, StringComparison.OrdinalIgnoreCase)) return false;
 
             foreach (BoundTableSource source in bound.Sources)
             {
@@ -123,7 +123,7 @@ internal static class JoinEquiJoinAnalyzer
         }
 
         leftLookupColumn = bound.RowNames.ResolveRowLookupKey(identifier);
-        if (leftLookupColumn.StartsWith($"{rightAlias}.", StringComparison.Ordinal)) return false;
+        if (leftLookupColumn.StartsWith($"{rightAlias}.", StringComparison.OrdinalIgnoreCase)) return false;
         return true;
     }
 
@@ -215,7 +215,7 @@ internal static class JoinEquiJoinAnalyzer
         if (!TrySplitQualified(identifier, out string alias, out string column))
             return false;
 
-        if (!string.Equals(alias, rightSource.Alias, StringComparison.Ordinal))
+        if (!string.Equals(alias, rightSource.Alias, StringComparison.OrdinalIgnoreCase))
             return false;
 
         columnName = column;
@@ -232,7 +232,7 @@ internal static class JoinEquiJoinAnalyzer
 
         if (TrySplitQualified(identifier, out string alias, out string columnName))
         {
-            if (string.Equals(alias, rightSource.Alias, StringComparison.Ordinal))
+            if (string.Equals(alias, rightSource.Alias, StringComparison.OrdinalIgnoreCase))
                 return false;
 
             foreach (BoundTableSource source in bound.Sources)
@@ -264,7 +264,7 @@ internal static class JoinEquiJoinAnalyzer
 
         leftLookupColumn = bound.RowNames.ResolveRowLookupKey(identifier);
 
-        if (leftLookupColumn.StartsWith($"{rightSource.Alias}.", StringComparison.Ordinal))
+        if (leftLookupColumn.StartsWith($"{rightSource.Alias}.", StringComparison.OrdinalIgnoreCase))
             return false;
 
         return true;
@@ -292,7 +292,7 @@ internal static class JoinEquiJoinAnalyzer
     {
         foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
         {
-            if (column.Name == columnName && SchemaElementStateRules.IsReadable(column))
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsReadable(column))
                 return true;
         }
 
@@ -312,7 +312,7 @@ internal static class JoinEquiJoinAnalyzer
     {
         foreach (TableColumnSchema col in tableSource.Table.Schema.Columns ?? [])
         {
-            if (col.Name == columnName && SchemaElementStateRules.IsReadable(col))
+            if (string.Equals(col.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsReadable(col))
                 return col.Type == ColumnType.Array;
         }
 

@@ -367,11 +367,11 @@ public sealed class SchemaReplicator
             SchemaRenameKind.Column =>
                 schema.Tables.TryGetValue(payload.TableName, out TableSchema? ct) &&
                 ct.Columns is not null &&
-                ct.Columns.Any(c => c.Name == payload.NewName),
+                ct.Columns.Any(c => string.Equals(c.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)),
             SchemaRenameKind.Index =>
                 schema.Tables.TryGetValue(payload.TableName, out TableSchema? it) &&
                 it.Indexes is not null &&
-                it.Indexes.Any(ix => ix.Name == payload.NewName),
+                it.Indexes.Any(ix => string.Equals(ix.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)),
             _ => false
         };
     }
@@ -380,14 +380,14 @@ public sealed class SchemaReplicator
     {
         return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
                table.Indexes is not null &&
-               table.Indexes.Any(ix => ix.Name == payload.IndexName);
+               table.Indexes.Any(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
     {
         return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
                table.Columns is not null &&
-               table.Columns.Any(column => column.Name == payload.Column.Name);
+               table.Columns.Any(column => string.Equals(column.Name, payload.Column.Name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
@@ -397,7 +397,7 @@ public sealed class SchemaReplicator
 
         if (payload.ElementKind == SchemaElementKind.Index)
         {
-            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => ix.Name == payload.ElementName);
+            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
             return payload.State == SchemaElementState.Absent
                 ? index is null
                 : index?.State == payload.State;
@@ -406,7 +406,7 @@ public sealed class SchemaReplicator
         if (table.Columns is null)
             return payload.State == SchemaElementState.Absent;
 
-        TableColumnSchema? column = table.Columns.FirstOrDefault(column => column.Name == payload.ElementName);
+        TableColumnSchema? column = table.Columns.FirstOrDefault(column => string.Equals(column.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
         return payload.State == SchemaElementState.Absent
             ? column is null
             : column?.State == payload.State;
@@ -450,6 +450,9 @@ public sealed class SchemaReplicator
             // are shared, matching the Indexes treatment. Omitting this dropped all checks from the
             // clone, silently losing them for any consumer that promotes the clone to a live schema.
             CheckConstraints = table.CheckConstraints is null ? null : [.. table.CheckConstraints],
+            // Preserve table settings so a clone promoted to a live schema (or used for validation)
+            // does not silently lose the opt-out; matches the Indexes/CheckConstraints treatment.
+            Settings = table.Settings is null ? null : new Dictionary<string, string>(table.Settings, StringComparer.Ordinal),
             SchemaHistory = table.SchemaHistory is null
                 ? null
                 : table.SchemaHistory.Select(CloneHistory).ToList(),

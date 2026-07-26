@@ -52,7 +52,7 @@ public sealed class TableColumnDropper
 
         foreach (TableColumnSchema column in table.Schema.Columns!)
         {
-            if (column.Name == ticket.Column.Name)
+            if (string.Equals(column.Name, ticket.Column.Name, StringComparison.OrdinalIgnoreCase))
             {
                 hasColumn = true;
                 break;

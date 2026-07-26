@@ -367,7 +367,11 @@ internal sealed class SelectQueryCreator
         if (hintAst.nodeType != NodeType.CacheHint)
             return null;
 
-        string cacheName = hintAst.yytext!;
+        // Cache-family names are case-insensitive: fold to lower-case here so a name is matched
+        // and evicted case-insensitively regardless of the case written in the hint. (The parser no
+        // longer folds identifiers; this hint is a cache label, not a schema identifier, so it is
+        // normalized at its own boundary — the eviction path lower-cases the name to match.)
+        string cacheName = hintAst.yytext!.ToLowerInvariant();
         int? ttlMs = null;
         bool isStrict = false;
 

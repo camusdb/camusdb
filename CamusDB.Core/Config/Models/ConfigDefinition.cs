@@ -63,6 +63,84 @@ public class ConfigDefinition
     public int StatsFlushIntervalMs { get; set; } = 5000;
 
     /// <summary>
+    /// Row-count threshold below which manual <c>ANALYZE</c> full-scans a table; above it, the first N
+    /// rows in storage order are sampled. <c>0</c> = always full scan. Must be <c>&gt;= 0</c>.
+    /// Maps to <c>CamusDBConfig.StatsAnalyzeSampleRows</c>.
+    /// </summary>
+    public int StatsAnalyzeSampleRows { get; set; } = 100_000;
+
+    /// <summary>
+    /// Number of equi-depth histogram buckets <c>ANALYZE</c> builds per column. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBConfig.StatsHistogramBuckets</c>.
+    /// </summary>
+    public int StatsHistogramBuckets { get; set; } = 100;
+
+    // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────────
+    // Keeps optimizer statistics fresh without a user running ANALYZE, while staying low-priority:
+    // lock-free snapshot reads, bounded-memory sampling, a throttled scan, and load backoff. Off by
+    // default. See docs/automatic-analyze.md.
+
+    /// <summary>Master switch for automatic background <c>ANALYZE</c>. Maps to <c>CamusDBConfig.AutoAnalyzeEnabled</c>.</summary>
+    public bool AutoAnalyzeEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the registry leader
+    /// sweeps (once per cluster). <c>&lt;= 0</c> also disables the loop.
+    /// Maps to <c>CamusDBConfig.AutoAnalyzeCheckIntervalMs</c>.
+    /// </summary>
+    public int AutoAnalyzeCheckIntervalMs { get; set; } = 60_000;
+
+    /// <summary>
+    /// Proportional staleness trigger: a table is stale once mutations since the last ANALYZE reach
+    /// <c>fraction · row_count + min_stale_rows</c>. Must be <c>&gt;= 0</c>.
+    /// Maps to <c>CamusDBConfig.AutoAnalyzeFractionStaleRows</c>.
+    /// </summary>
+    public double AutoAnalyzeFractionStaleRows { get; set; } = 0.20;
+
+    /// <summary>
+    /// Absolute mutation floor before a table is ever considered stale. Must be <c>&gt;= 0</c>.
+    /// Maps to <c>CamusDBConfig.AutoAnalyzeMinStaleRows</c>.
+    /// </summary>
+    public long AutoAnalyzeMinStaleRows { get; set; } = 500;
+
+    /// <summary>
+    /// Maximum background analyses running at once on a node. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBConfig.AutoAnalyzeMaxConcurrent</c>.
+    /// </summary>
+    public int AutoAnalyzeMaxConcurrent { get; set; } = 1;
+
+    /// <summary>
+    /// Scan-rate cap for a background analyze, in rows/second (the CPU/IO throttle). <c>&lt;= 0</c>
+    /// disables throttling. Maps to <c>CamusDBConfig.AutoAnalyzeMaxRowsPerSecond</c>.
+    /// </summary>
+    public int AutoAnalyzeMaxRowsPerSecond { get; set; } = 50_000;
+
+    /// <summary>
+    /// Reservoir sample size per column for background histograms — the memory bound. Must be
+    /// <c>&gt;= 1</c>. Maps to <c>CamusDBConfig.AutoAnalyzeHistogramSampleRows</c>.
+    /// </summary>
+    public int AutoAnalyzeHistogramSampleRows { get; set; } = 10_000;
+
+    /// <summary>
+    /// HyperLogLog precision (index bits) for background NDV sketches; register count is
+    /// <c>2^precision</c>. Must be in <c>4..16</c>. Maps to <c>CamusDBConfig.AutoAnalyzeHllPrecision</c>.
+    /// </summary>
+    public int AutoAnalyzeHllPrecision { get; set; } = 11;
+
+    /// <summary>
+    /// Foreground-load surge protector: when in-flight foreground work exceeds this, the sweep skips
+    /// starting (and cancels a running) background analyze. <c>&lt;= 0</c> disables load backoff.
+    /// Maps to <c>CamusDBConfig.AutoAnalyzeLoadPauseThreshold</c>.
+    /// </summary>
+    public int AutoAnalyzeLoadPauseThreshold { get; set; } = 16;
+
+    /// <summary>
+    /// Rows the background scan processes between successive mid-scan re-checks of ownership and load.
+    /// Must be <c>&gt;= 1</c>. Maps to <c>CamusDBConfig.AutoAnalyzeOwnershipCheckRows</c>.
+    /// </summary>
+    public int AutoAnalyzeOwnershipCheckRows { get; set; } = 1000;
+
+    /// <summary>
     /// Sliding TTL for the SQL parser AST cache, in seconds.
     /// Each cache hit extends the deadline by this interval.
     /// <c>0</c> disables the cache entirely (every parse re-lexes from scratch).
@@ -240,6 +318,33 @@ public class ConfigDefinition
     public int MaxTablesPerDatabase { get; set; } = 10_000;
 
     /// <summary>
+    /// Max key + stored/payload (<c>INCLUDE</c>) columns in one index. Guards a covering index from
+    /// duplicating unbounded row data into every entry. &lt;= 0 disables. Default 32.
+    /// Maps to <c>CamusDBConfig.MaxIndexColumns</c>.
+    /// </summary>
+    public int MaxIndexColumns { get; set; } = 32;
+
+    /// <summary>
+    /// Max encoded byte size of one index entry's key + INCLUDE tuple, checked at write time. &lt;= 0
+    /// disables. Default 4096 (4 KiB). Maps to <c>CamusDBConfig.MaxIndexIncludeTupleBytes</c>.
+    /// </summary>
+    public int MaxIndexIncludeTupleBytes { get; set; } = 4096;
+
+    /// <summary>
+    /// Max rows one user transaction may mutate before it is rejected. &lt;= 0 disables (unlimited);
+    /// DDL/backfill always run unlimited. Default 20 000. Maps to
+    /// <c>CamusDBConfig.MaxMutationsPerTransaction</c>.
+    /// </summary>
+    public int MaxMutationsPerTransaction { get; set; } = 20_000;
+
+    /// <summary>
+    /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
+    /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
+    /// &gt; 0. Default 300 000 (5 min). Maps to <c>CamusDBConfig.BranchSnapshotHoldLeaseMs</c>.
+    /// </summary>
+    public int BranchSnapshotHoldLeaseMs { get; set; } = 300_000;
+
+    /// <summary>
     /// Enables spill-to-disk for blocking query operators (sort, GROUP BY, DISTINCT,
     /// hash join, derived-table materialization, DELETE/UPDATE row buffers).
     /// When <c>false</c> (default), every operator keeps its in-memory path; when <c>true</c>,
@@ -370,6 +475,33 @@ public class ConfigDefinition
             throw Invalid(
                 "'stats_flush_interval_ms' must be >= 0 (interval), 0 (immediate), or -1 " +
                 $"(disabled), got {StatsFlushIntervalMs}");
+
+        if (StatsAnalyzeSampleRows < 0)
+            throw Invalid($"'stats_analyze_sample_rows' must be >= 0 (0 = always full scan), got {StatsAnalyzeSampleRows}");
+
+        if (StatsHistogramBuckets < 1)
+            throw Invalid($"'stats_histogram_buckets' must be >= 1, got {StatsHistogramBuckets}");
+
+        if (AutoAnalyzeFractionStaleRows < 0)
+            throw Invalid($"'auto_analyze_fraction_stale_rows' must be >= 0, got {AutoAnalyzeFractionStaleRows}");
+
+        if (AutoAnalyzeMinStaleRows < 0)
+            throw Invalid($"'auto_analyze_min_stale_rows' must be >= 0, got {AutoAnalyzeMinStaleRows}");
+
+        if (AutoAnalyzeMaxConcurrent < 1)
+            throw Invalid($"'auto_analyze_max_concurrent' must be >= 1, got {AutoAnalyzeMaxConcurrent}");
+
+        if (AutoAnalyzeHistogramSampleRows < 1)
+            throw Invalid($"'auto_analyze_histogram_sample_rows' must be >= 1, got {AutoAnalyzeHistogramSampleRows}");
+
+        if (AutoAnalyzeHllPrecision is < 4 or > 16)
+            throw Invalid($"'auto_analyze_hll_precision' must be in 4..16, got {AutoAnalyzeHllPrecision}");
+
+        if (AutoAnalyzeOwnershipCheckRows < 1)
+            throw Invalid($"'auto_analyze_ownership_check_rows' must be >= 1, got {AutoAnalyzeOwnershipCheckRows}");
+
+        if (BranchSnapshotHoldLeaseMs <= 0)
+            throw Invalid($"'branch_snapshot_hold_lease_ms' must be > 0, got {BranchSnapshotHoldLeaseMs}");
 
         if (SqlParserCacheTtlSeconds < 0)
             throw Invalid(

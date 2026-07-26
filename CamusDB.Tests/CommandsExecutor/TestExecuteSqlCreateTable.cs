@@ -371,7 +371,7 @@ public class TestExecuteSqlCreateTable : SharedNodeBaseTest
         Assert.True(table.Indexes.TryGetValue("~pk", out TableIndexSchema? pkIndex),
             "Inline PRIMARY KEY (UsersId, Id) must create the ~pk index");
         Assert.AreEqual(IndexType.Unique, pkIndex!.Type);
-        CollectionAssert.AreEquivalent(new[] { "usersid", "id" }, pkIndex.Columns);
+        CollectionAssert.AreEquivalent(new[] { "UsersId", "Id" }, pkIndex.Columns);
 
         await database.Transactions.CommitAsync(txnState);
     }

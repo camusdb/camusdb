@@ -75,7 +75,7 @@ public sealed class RowLayout
     {
         OutputNames = names.ToArray();
 
-        var builder = new Dictionary<string, int>(OutputNames.Length, StringComparer.Ordinal);
+        var builder = new Dictionary<string, int>(OutputNames.Length, StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < OutputNames.Length; i++)
             builder.TryAdd(OutputNames[i], i);
 
@@ -92,7 +92,7 @@ public sealed class RowLayout
             }
         }
 
-        nameToOrdinal = builder.ToFrozenDictionary(StringComparer.Ordinal);
+        nameToOrdinal = builder.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>

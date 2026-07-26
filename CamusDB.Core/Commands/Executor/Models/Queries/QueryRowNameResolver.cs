@@ -37,7 +37,7 @@ public sealed class QueryRowNameResolver
     /// instance is consumed by a single strictly-sequential scan; it is never touched by two threads
     /// at once within one execution.
     /// </summary>
-    private readonly Dictionary<string, string> lookupKeyMemo = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> lookupKeyMemo = new(StringComparer.OrdinalIgnoreCase);
 
     public QueryRowNameResolver(
         IReadOnlyList<BoundTableSource> sources,
@@ -45,9 +45,9 @@ public sealed class QueryRowNameResolver
     {
         this.sources = sources;
         this.derivedSources = derivedSources ?? Array.Empty<BoundDerivedTableSource>();
-        aliasToSource = new Dictionary<string, BoundTableSource>(StringComparer.Ordinal);
-        aliasToDerived = new Dictionary<string, BoundDerivedTableSource>(StringComparer.Ordinal);
-        columnNameToAliases = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        aliasToSource = new Dictionary<string, BoundTableSource>(StringComparer.OrdinalIgnoreCase);
+        aliasToDerived = new Dictionary<string, BoundDerivedTableSource>(StringComparer.OrdinalIgnoreCase);
+        columnNameToAliases = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (BoundTableSource source in sources)
         {
@@ -145,11 +145,11 @@ public sealed class QueryRowNameResolver
 
     /// <summary>
     /// Lookup key for an already-qualified <c>alias.column</c> reference. When the query uses
-    /// qualified row keys, that key is character-identical to the incoming identifier — parse-time
-    /// normalization lowercases the whole identifier as one string, so <c>alias + "." + column</c>
-    /// reconstructs it exactly — so the original identifier is returned instead of rebuilding an
-    /// equal string via <see cref="FormatQualifiedKey"/>. A single base table stores bare column
-    /// keys, so it returns the already-split column name.
+    /// qualified row keys, the incoming identifier is already the <c>alias.column</c> form, so it is
+    /// returned as-is instead of rebuilding an equal string via <see cref="FormatQualifiedKey"/>.
+    /// The returned key is consumed against case-insensitive row dictionaries, so any difference in
+    /// case between the SQL text and the schema's stored column name resolves correctly. A single
+    /// base table stores bare column keys, so it returns the already-split column name.
     /// </summary>
     private string QualifiedLookupKey(string columnName, string originalIdentifier) =>
         UsesQualifiedRowKeys() ? originalIdentifier : columnName;
@@ -207,7 +207,7 @@ public sealed class QueryRowNameResolver
     {
         foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
         {
-            if (column.Name == columnName && SchemaElementStateRules.IsReadable(column))
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsReadable(column))
                 return true;
         }
 

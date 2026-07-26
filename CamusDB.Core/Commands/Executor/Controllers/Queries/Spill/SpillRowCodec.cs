@@ -319,7 +319,7 @@ public static class SpillRowCodec
         ObjectIdValue rowId = ReadRowId(data, ref pos);
         int count = ReadInt32(data, ref pos);
 
-        var row = new Dictionary<string, ColumnValue>(count, StringComparer.Ordinal);
+        var row = new Dictionary<string, ColumnValue>(count, StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < count; i++)
         {
             string name = ReadStringUtf8(data, ref pos);

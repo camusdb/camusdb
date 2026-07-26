@@ -818,7 +818,7 @@ internal sealed class QueryJoinExecutor
         Array.Copy(lookupKey.Values, upperValues, lookupKey.Values.Length - 1);
 
         string lastColumn = index.Columns[lookupKey.Values.Length - 1];
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => c.Name == lastColumn);
+        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, lastColumn, StringComparison.OrdinalIgnoreCase));
         ColumnType columnType = column?.Type ?? ColumnType.String;
         ColumnValue lastValue = lookupKey.Values[^1];
         ColumnValue? nextValue = IndexScanSelector.NextSortValue(columnType, lastValue);
@@ -882,7 +882,7 @@ internal sealed class QueryJoinExecutor
         for (int i = 0; i < index.Columns.Length; i++)
         {
             string colName = index.Columns[i];
-            TableColumnSchema? col = table.Schema.Columns?.Find(c => c.Name == colName);
+            TableColumnSchema? col = table.Schema.Columns?.Find(c => string.Equals(c.Name, colName, StringComparison.OrdinalIgnoreCase));
             types[i] = col?.Type ?? ColumnType.String;
         }
 

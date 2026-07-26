@@ -101,7 +101,7 @@ internal static class CardinalityEstimator
             // this branch is unreachable for them, but guard anyway for clarity).
             if (compositeHandled?.Contains(c.ColumnName) == true) continue;
 
-            rangePairs ??= new(StringComparer.Ordinal);
+            rangePairs ??= new(StringComparer.OrdinalIgnoreCase);
             if (!rangePairs.TryGetValue(c.ColumnName, out var pair))
                 pair = (null, null);
 
@@ -120,7 +120,7 @@ internal static class CardinalityEstimator
                 if (kv.Value.lo is null || kv.Value.hi is null) continue;
 
                 sel *= EstimateRangeFraction(kv.Value.lo, kv.Value.hi, kv.Key, database, table, stats);
-                rangePairHandled ??= new(StringComparer.Ordinal);
+                rangePairHandled ??= new(StringComparer.OrdinalIgnoreCase);
                 rangePairHandled.Add(kv.Key);
             }
         }
@@ -163,7 +163,7 @@ internal static class CardinalityEstimator
         if (table.Indexes is null) return null;
 
         // Collect columns that appear as equality predicates — these are the candidates.
-        var equalityCols = new HashSet<string>(StringComparer.Ordinal);
+        var equalityCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (AnalyzedComparison c in comparisons)
             if (c.Operator == "=") equalityCols.Add(c.ColumnName);
 
@@ -200,7 +200,7 @@ internal static class CardinalityEstimator
         if (keyNdv is not > 0) return null;
 
         sel *= Math.Min(1.0, 1.0 / keyNdv.Value);
-        return new HashSet<string>(prefixCols, StringComparer.Ordinal);
+        return new HashSet<string>(prefixCols, StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -293,7 +293,7 @@ internal static class CardinalityEstimator
     {
         if (table.Indexes is null || keyColumns.Count == 0) return false;
 
-        var keySet = new HashSet<string>(keyColumns, StringComparer.Ordinal);
+        var keySet = new HashSet<string>(keyColumns, StringComparer.OrdinalIgnoreCase);
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
             TableIndexSchema idx = kv.Value;

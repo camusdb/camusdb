@@ -88,6 +88,21 @@ If the scan is cancelled (shutdown, a load surge, or leadership loss) or the pub
 is persisted** and the staleness counter is not reset — the table stays marked stale and is retried
 later. The whole operation is idempotent and safe to re-run.
 
+## Turning it off for one table
+
+A specific table can be exempted from **automatic** collection while the rest of the database stays
+on (e.g. a high-churn append-only log where periodic re-analysis is wasted work):
+
+```sql
+ALTER TABLE application_logs SET (sql_stats_automatic_collection_enabled = false);  -- opt out
+ALTER TABLE application_logs SET (sql_stats_automatic_collection_enabled = true);   -- opt back in
+```
+
+The setting gates **only the background scheduler** — a manual `ANALYZE TABLE application_logs` still
+runs. It defaults to enabled (an unset table is analyzed normally), rides the table's schema without
+affecting row encoding, and survives restarts. In a clustered deployment over HTTP the statement must
+be issued on the schema leader.
+
 ## Scheduling and cluster behavior
 
 A background loop, owned by the engine and modeled on the orphan-reclaimer, sweeps on an interval

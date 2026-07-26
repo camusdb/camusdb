@@ -37,9 +37,11 @@ public sealed class TableDescriptor
     public KvTableStore Store { get; }
 
     /// <summary>
-    /// List of indexes on the table
+    /// Indexes on the table, keyed by index name. Uses <see cref="StringComparer.OrdinalIgnoreCase"/>
+    /// so an index referenced in SQL (e.g. a <c>FORCE INDEX</c> hint or <c>DROP INDEX</c>) matches
+    /// regardless of the case written, while the stored name preserves the case it was created with.
     /// </summary>
-    public Dictionary<string, TableIndexSchema> Indexes { get; } = new();
+    public Dictionary<string, TableIndexSchema> Indexes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public TableDescriptor(string id, string name, TableSchema schema, KvTableStore store)
     {

@@ -62,6 +62,7 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(List<ColumnHistogramBucket>))]
 [JsonSerializable(typeof(Dictionary<string, ColumnHistogram>))]
 [JsonSerializable(typeof(Dictionary<string, long>))]
+[JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(OrderType))]
 [JsonSerializable(typeof(OrderType[]))]

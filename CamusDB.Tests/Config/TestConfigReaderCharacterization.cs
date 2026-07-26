@@ -143,6 +143,66 @@ public sealed class TestConfigReaderCharacterization
         Assert.That(config.TransactionReaperIntervalMs, Is.EqualTo(15000));
     }
 
+    [Test]
+    public void ReadsStatisticsAndAutoAnalyzeOverrides()
+    {
+        // These keys ship in the sample config.yml; reading them here locks in that they are accepted
+        // and bound (a new tuning knob missing from the allow-list would reject startup).
+        ConfigDefinition config = new ConfigReader().Read(
+            "stats_analyze_sample_rows: 250000\n" +
+            "stats_histogram_buckets: 64\n" +
+            "auto_analyze_enabled: true\n" +
+            "auto_analyze_check_interval_ms: 30000\n" +
+            "auto_analyze_fraction_stale_rows: 0.10\n" +
+            "auto_analyze_min_stale_rows: 250\n" +
+            "auto_analyze_max_concurrent: 2\n" +
+            "auto_analyze_max_rows_per_second: 20000\n" +
+            "auto_analyze_histogram_sample_rows: 5000\n" +
+            "auto_analyze_hll_precision: 12\n" +
+            "auto_analyze_load_pause_threshold: 8\n" +
+            "auto_analyze_ownership_check_rows: 200");
+
+        Assert.That(config.StatsAnalyzeSampleRows, Is.EqualTo(250000));
+        Assert.That(config.StatsHistogramBuckets, Is.EqualTo(64));
+        Assert.That(config.AutoAnalyzeEnabled, Is.True);
+        Assert.That(config.AutoAnalyzeCheckIntervalMs, Is.EqualTo(30000));
+        Assert.That(config.AutoAnalyzeFractionStaleRows, Is.EqualTo(0.10).Within(1e-9));
+        Assert.That(config.AutoAnalyzeMinStaleRows, Is.EqualTo(250));
+        Assert.That(config.AutoAnalyzeMaxConcurrent, Is.EqualTo(2));
+        Assert.That(config.AutoAnalyzeMaxRowsPerSecond, Is.EqualTo(20000));
+        Assert.That(config.AutoAnalyzeHistogramSampleRows, Is.EqualTo(5000));
+        Assert.That(config.AutoAnalyzeHllPrecision, Is.EqualTo(12));
+        Assert.That(config.AutoAnalyzeLoadPauseThreshold, Is.EqualTo(8));
+        Assert.That(config.AutoAnalyzeOwnershipCheckRows, Is.EqualTo(200));
+    }
+
+    [Test]
+    public void RejectsInvalidAutoAnalyzeHllPrecision()
+    {
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("auto_analyze_hll_precision: 3"));
+    }
+
+    [Test]
+    public void ReadsSchemaAndTransactionLimitOverrides()
+    {
+        ConfigDefinition config = new ConfigReader().Read(
+            "max_index_columns: 16\n" +
+            "max_index_include_tuple_bytes: 8192\n" +
+            "max_mutations_per_transaction: 50000\n" +
+            "branch_snapshot_hold_lease_ms: 120000");
+
+        Assert.That(config.MaxIndexColumns, Is.EqualTo(16));
+        Assert.That(config.MaxIndexIncludeTupleBytes, Is.EqualTo(8192));
+        Assert.That(config.MaxMutationsPerTransaction, Is.EqualTo(50000));
+        Assert.That(config.BranchSnapshotHoldLeaseMs, Is.EqualTo(120000));
+    }
+
+    [Test]
+    public void RejectsNonPositiveBranchSnapshotHoldLease()
+    {
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("branch_snapshot_hold_lease_ms: 0"));
+    }
+
     /// <summary>
     /// Guards the allow-list against drift: every settable <see cref="ConfigDefinition"/> property
     /// binds from an underscored root YAML key, so each one MUST have a matching entry in

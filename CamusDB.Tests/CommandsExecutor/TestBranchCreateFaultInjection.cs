@@ -188,9 +188,9 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             sql: "CREATE TABLE t (id OID PRIMARY KEY, name STRING)", parameters: null));
 
         // Attempt the branch create — it must fail with an indeterminate (retryable) error.
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.CreateDatabase(new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName)));
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
             "an indeterminate branch-create abort must surface a retryable error");
 
         // The branch is still registered (unregister failed).
@@ -255,9 +255,9 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         ScriptedDropIntentKahuna fault = new(TestNode!.Kahuna, statuses: null, throwInstead: true);
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault);
 
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await registry.HasDropIntentAsync("some-source-id"));
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
             "an indeterminate fence read must throw a retryable error, not return false");
     }
 
@@ -293,8 +293,8 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             Enumerable.Repeat(KeyValueResponseType.MustRetry, 50));
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault);
 
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await registry.HasDropIntentAsync("some-source-id"));
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
     }
 }

@@ -24,7 +24,7 @@ internal static class RequiredColumnAnalyzer
         if (RequiresAllColumns(ticket.Projection))
             return null;
 
-        HashSet<string> required = new(StringComparer.Ordinal);
+        HashSet<string> required = new(StringComparer.OrdinalIgnoreCase);
         CollectFromProjections(ticket.Projection, ticket.RowNameResolver, required, ticket);
         CollectFromExpression(ticket.Where, ticket.RowNameResolver, required, ticket);
         CollectFromOrderBy(ticket.OrderBy, required);
@@ -74,11 +74,11 @@ internal static class RequiredColumnAnalyzer
         if (where is not null && ContainsSubqueryNode(where))
             return null;
 
-        HashSet<string> required = new(StringComparer.Ordinal);
+        HashSet<string> required = new(StringComparer.OrdinalIgnoreCase);
 
         if (where is not null)
         {
-            HashSet<string> refs = new(StringComparer.Ordinal);
+            HashSet<string> refs = new(StringComparer.OrdinalIgnoreCase);
             QueryExpressionWalker.CollectColumnReferences(where, refs);
             foreach (string col in refs)
                 required.Add(col);
@@ -94,7 +94,7 @@ internal static class RequiredColumnAnalyzer
         {
             foreach (KeyValuePair<string, NodeAst> kv in exprValues)
             {
-                HashSet<string> refs = new(StringComparer.Ordinal);
+                HashSet<string> refs = new(StringComparer.OrdinalIgnoreCase);
                 QueryExpressionWalker.CollectColumnReferences(kv.Value, refs);
                 foreach (string col in refs)
                     required.Add(col);
@@ -128,14 +128,14 @@ internal static class RequiredColumnAnalyzer
             return BuildAllColumnsByAlias(bound);
         }
 
-        Dictionary<string, HashSet<string>> requiredByAlias = new(StringComparer.Ordinal);
+        Dictionary<string, HashSet<string>> requiredByAlias = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (BoundTableSource source in bound.Sources)
-            requiredByAlias[source.Alias] = new HashSet<string>(StringComparer.Ordinal);
+            requiredByAlias[source.Alias] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         CollectJoinSources(bound.Query.Source, bound, ticket, postJoinFilter, scanFiltersByAlias, requiredByAlias);
 
-        Dictionary<string, IReadOnlySet<string>> output = new(StringComparer.Ordinal);
+        Dictionary<string, IReadOnlySet<string>> output = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, HashSet<string>> entry in requiredByAlias)
             output[entry.Key] = entry.Value;
@@ -188,7 +188,7 @@ internal static class RequiredColumnAnalyzer
 
     private static Dictionary<string, IReadOnlySet<string>> BuildAllColumnsByAlias(BoundSelectQuery bound)
     {
-        Dictionary<string, IReadOnlySet<string>> output = new(StringComparer.Ordinal);
+        Dictionary<string, IReadOnlySet<string>> output = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (BoundTableSource source in bound.Sources)
             output[source.Alias] = null!;
@@ -291,7 +291,7 @@ internal static class RequiredColumnAnalyzer
         if (expression is null)
             return;
 
-        HashSet<string> identifiers = new(StringComparer.Ordinal);
+        HashSet<string> identifiers = new(StringComparer.OrdinalIgnoreCase);
         QueryExpressionWalker.CollectColumnReferences(expression, identifiers);
 
         foreach (string identifier in identifiers)
@@ -310,7 +310,7 @@ internal static class RequiredColumnAnalyzer
         if (expression is null)
             return;
 
-        HashSet<string> identifiers = new(StringComparer.Ordinal);
+        HashSet<string> identifiers = new(StringComparer.OrdinalIgnoreCase);
         QueryExpressionWalker.CollectColumnReferences(expression, identifiers);
 
         foreach (string identifier in identifiers)
@@ -354,7 +354,7 @@ internal static class RequiredColumnAnalyzer
             return;
 
         HashSet<string> innerAliases = ExistsSubqueryAnalyzer.CollectSourceAliases(prepared.InnerBound.Query.Source);
-        HashSet<string> references = new(StringComparer.Ordinal);
+        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
         QueryExpressionWalker.CollectColumnReferences(prepared.InnerWhere, references);
 
         foreach (string reference in references)
@@ -376,7 +376,7 @@ internal static class RequiredColumnAnalyzer
             return;
 
         HashSet<string> innerAliases = ExistsSubqueryAnalyzer.CollectSourceAliases(prepared.InnerBound.Query.Source);
-        HashSet<string> references = new(StringComparer.Ordinal);
+        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
         QueryExpressionWalker.CollectColumnReferences(prepared.InnerWhere, references);
 
         foreach (string reference in references)
@@ -395,7 +395,7 @@ internal static class RequiredColumnAnalyzer
         JoinSource joinSource,
         Dictionary<string, HashSet<string>> requiredByAlias)
     {
-        HashSet<string> identifiers = new(StringComparer.Ordinal);
+        HashSet<string> identifiers = new(StringComparer.OrdinalIgnoreCase);
         QueryExpressionWalker.CollectColumnReferences(onPredicate, identifiers);
 
         HashSet<string> leftAliases = ExistsSubqueryAnalyzer.CollectSourceAliases(joinSource.Left);

@@ -79,7 +79,7 @@ internal static class JoinOrderOptimizer
             return root;
 
         // Build alias → leaf map from the current source tree.
-        Dictionary<string, LeafEntry> leafMap = new(StringComparer.Ordinal);
+        Dictionary<string, LeafEntry> leafMap = new(StringComparer.OrdinalIgnoreCase);
         foreach (LeafEntry leaf in leaves)
             leafMap[leaf.Alias] = leaf;
 

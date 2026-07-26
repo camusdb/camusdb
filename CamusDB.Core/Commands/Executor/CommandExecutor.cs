@@ -340,7 +340,10 @@ public sealed class CommandExecutor : IAsyncDisposable
             CamusDB.Core.Catalogs.Models.TableSchema schema = CamusDB.Core.Catalogs.MetaJsonSerializer.Deserialize(
                 kvEntry.Value, CamusDB.Core.Catalogs.MetaJsonContext.Default.TableSchema);
 
-            if (schema.Id is not null && schema.Name is not null)
+            // Honor the per-table opt-out (ALTER TABLE ... SET (sql_stats_automatic_collection_enabled
+            // = false)) straight from the authoritative meta blob, so a disabled table costs discovery
+            // nothing — it is never opened or stats-loaded.
+            if (schema.Id is not null && schema.Name is not null && schema.AutoStatsCollectionEnabled)
                 tables.Add((schema.Id, schema.Name));
         }
 
@@ -1107,8 +1110,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             {
                 // Already relinked. If under the requested name, finish idempotently (clean any stale
                 // orphan record and return the live database); otherwise it is a conflicting second name.
-                // Registered names are stored lower-cased by the registry; compare on the same footing.
-                if (!string.Equals(existingName, ticket.NewName.ToLowerInvariant(), StringComparison.Ordinal))
+                // Database names are case-insensitive, so compare the stored name to the requested one
+                // case-insensitively rather than assuming either was folded.
+                if (!string.Equals(existingName, ticket.NewName, StringComparison.OrdinalIgnoreCase))
                     throw new CamusDBException(
                         CamusDBErrorCodes.DatabaseAlreadyExists,
                         $"Database id '{ticket.OrphanId}' is already live under name '{existingName}'");
@@ -1317,7 +1321,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         // Eagerly reject duplicates before acquiring the semaphore — the coordinator
         // would silently no-op (already-at-Public = empty path) instead of throwing.
-        if (table.Schema.Columns?.Any(c => c.Name == columnInfo.Name) == true)
+        if (table.Schema.Columns?.Any(c => string.Equals(c.Name, columnInfo.Name, StringComparison.OrdinalIgnoreCase)) == true)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{columnInfo.Name}'");
 
         await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
@@ -1539,7 +1543,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         IndexColumnOrder.RejectDescendingOnUnsupportedType(
             ticket.Columns,
             ticket.IndexName,
-            name => table.Schema.Columns!.Find(c => c.Name == name)?.Type);
+            name => table.Schema.Columns!.Find(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Type);
 
         TableIndexAdder.ValidateIncludeColumns(table, ticket);
 
@@ -1615,7 +1619,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         try
         {
             if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema) &&
-                tableSchema.Indexes?.Any(ix => ix.Name == indexName) == true)
+                tableSchema.Indexes?.Any(ix => string.Equals(ix.Name, indexName, StringComparison.OrdinalIgnoreCase)) == true)
             {
                 await catalogs.ReplicateDropIndexAsync(database, tableName, indexName).ConfigureAwait(false);
             }
@@ -1716,7 +1720,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            table.Schema.Indexes?.RemoveAll(ix => ix.Name == indexName);
+            table.Schema.Indexes?.RemoveAll(ix => string.Equals(ix.Name, indexName, StringComparison.OrdinalIgnoreCase));
         }
         finally
         {
@@ -1861,7 +1865,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             if (liveWithId is not null)
             {
-                if (!string.Equals(liveWithId.Name, ticket.NewTableName, StringComparison.Ordinal))
+                if (!string.Equals(liveWithId.Name, ticket.NewTableName, StringComparison.OrdinalIgnoreCase))
                     throw new CamusDBException(
                         CamusDBErrorCodes.TableAlreadyExists,
                         $"Table id '{ticket.OrphanTableId}' is already live under name '{liveWithId.Name}'");
@@ -2094,7 +2098,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             if (constraint.Type is ConstraintType.PrimaryKey or ConstraintType.IndexUnique or ConstraintType.IndexMulti)
             {
-                if (tableSchema.Indexes?.Any(ix => string.Equals(ix.Name, constraint.Name, StringComparison.Ordinal)) != true)
+                if (tableSchema.Indexes?.Any(ix => string.Equals(ix.Name, constraint.Name, StringComparison.OrdinalIgnoreCase)) != true)
                     return false;
             }
         }
@@ -2108,7 +2112,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             // After rename, new name present in any table (table name unchanged).
             return database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? ts) &&
-                   ts.Columns?.Any(c => c.Name == ticket.NewName) == true;
+                   ts.Columns?.Any(c => string.Equals(c.Name, ticket.NewName, StringComparison.OrdinalIgnoreCase)) == true;
         }
 
         if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
@@ -2119,9 +2123,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             // A forwarded AddColumn is complete only when the column is Public — intermediate
             // staged states (DeleteOnly, WriteOnly) are not yet visible to queries.
             AlterTableOperation.AddColumn =>
-                tableSchema.Columns?.Any(c => c.Name == ticket.Column.Name && c.State == SchemaElementState.Public) == true,
+                tableSchema.Columns?.Any(c => string.Equals(c.Name, ticket.Column.Name, StringComparison.OrdinalIgnoreCase) && c.State == SchemaElementState.Public) == true,
             AlterTableOperation.DropColumn =>
-                tableSchema.Columns?.Any(c => c.Name == ticket.Column.Name) != true,
+                tableSchema.Columns?.Any(c => string.Equals(c.Name, ticket.Column.Name, StringComparison.OrdinalIgnoreCase)) != true,
             _ => false
         };
     }
@@ -2131,14 +2135,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (ticket.Operation == AlterIndexOperation.RenameIndex)
         {
             return database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? ts) &&
-                   ts.Indexes?.Any(ix => string.Equals(ix.Name, ticket.NewName, StringComparison.Ordinal)) == true;
+                   ts.Indexes?.Any(ix => string.Equals(ix.Name, ticket.NewName, StringComparison.OrdinalIgnoreCase)) == true;
         }
 
         // Check TableSchema.Indexes (the source of truth). Fall back to SystemSchema
         // for nodes that haven't yet applied the migration (legacy path).
         bool existsInSchema = database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema) &&
                               tableSchema.Indexes is not null &&
-                              tableSchema.Indexes.Any(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.Ordinal));
+                              tableSchema.Indexes.Any(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase));
 
         return ticket.Operation switch
         {
@@ -2172,17 +2176,17 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         if (ticket.Operation == AlterConstraintOperation.SetNotNull)
         {
-            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => c.Name == ticket.ColumnName);
+            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => string.Equals(c.Name, ticket.ColumnName, StringComparison.OrdinalIgnoreCase));
             return col?.NotNull == true;
         }
 
         if (ticket.Operation == AlterConstraintOperation.DropNotNull)
         {
-            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => c.Name == ticket.ColumnName);
+            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => string.Equals(c.Name, ticket.ColumnName, StringComparison.OrdinalIgnoreCase));
             return col?.NotNull == false;
         }
 
-        bool constraintExists = ts.CheckConstraints?.Any(c => c.Name == ticket.ConstraintName) == true;
+        bool constraintExists = ts.CheckConstraints?.Any(c => string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase)) == true;
         return ticket.Operation == AlterConstraintOperation.AddCheck ? constraintExists : !constraintExists;
     }
 
@@ -2193,6 +2197,62 @@ public sealed class CommandExecutor : IAsyncDisposable
             (leader, opId, ct) => schemaDdlForwarder!.ForwardAlterConstraintAsync(leader, ticket, opId, ct),
             () => ForwardedAlterConstraintApplied(database, ticket)
         ).ConfigureAwait(false);
+    }
+
+
+    /// <summary>
+    /// Applies <c>ALTER TABLE t SET (key = value)</c> table storage parameters version-neutrally (rides
+    /// the table blob, no <see cref="TableSchema.Version"/> bump). Replicates in cluster mode (schema
+    /// leader only); applies directly in standalone mode. Public so a ticket caller can invoke it
+    /// without the SQL path.
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> AlterTableSettings(AlterTableSettingsTicket ticket)
+    {
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+        return await AlterTableSettings(database, ticket).ConfigureAwait(false);
+    }
+
+    private async Task<ExecuteDDLSQLResult> AlterTableSettings(DatabaseDescriptor database, AlterTableSettingsTicket ticket)
+    {
+        // Canonical validation for every entry point (SQL and direct ticket): unknown key, non-boolean
+        // value, empty set, or duplicate key are rejected here, and keys/values are lowercased.
+        Dictionary<string, string> settings = CamusDB.Core.Catalogs.Models.TableSettings.Canonicalize([.. ticket.Settings]);
+
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+        // Serialize with all other schema changes for this database, exactly like the established DDL
+        // paths: the version capture, proposal (cluster), and blob rewrite must not race another DDL.
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (isClusterMode)
+            {
+                // Settings DDL replicates through the schema log, which only the schema leader may
+                // propose. There is no HTTP forwarder for it yet, so a non-leader rejects with a clear
+                // error and the client retargets the leader (the in-process path issues it on the leader).
+                if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
+                {
+                    string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInternalOperation,
+                        $"ALTER TABLE SET must be executed by schema leader '{leader}' for database '{database.Name}'");
+                }
+
+                await catalogs.ReplicateSetTableSettingsAsync(database, ticket.TableName, settings).ConfigureAwait(false);
+            }
+            else
+            {
+                await catalogs.AlterTableSettingsAsync(database, table, settings).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        database.Cache?.InvalidateByTableId(database.Id, table.Id);
+        return new ExecuteDDLSQLResult(database, true);
     }
 
     /// <summary>
@@ -2430,6 +2490,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                     ).ConfigureAwait(false);
                     database.Cache?.InvalidateByTableId(database.Id, tableForConstraint.Id);
                     return new ExecuteDDLSQLResult(database, constraintOk);
+                }
+
+            case NodeType.AlterTableSetSetting:
+                {
+                    // Validation (recognized key, boolean value) happens at ticket creation.
+                    AlterTableSettingsTicket settingsTicket = sqlExecutor.CreateAlterTableSettingsTicket(ticket, ast);
+                    return await AlterTableSettings(database, settingsTicket).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableRenameTo:
@@ -3162,7 +3229,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         FlattenProjectionList(ast.leftAst!, projections);
 
         Dictionary<string, ColumnValue> emptyRow = new();
-        Dictionary<string, ColumnValue> projected = new(projections.Count);
+        Dictionary<string, ColumnValue> projected = new(projections.Count, StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < projections.Count; i++)
         {

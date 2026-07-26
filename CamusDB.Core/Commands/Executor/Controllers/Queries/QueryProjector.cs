@@ -26,7 +26,7 @@ internal sealed class QueryProjector
 
             await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
             {
-                Dictionary<string, ColumnValue> projected = new(visibleColumns.Count);
+                Dictionary<string, ColumnValue> projected = new(visibleColumns.Count, StringComparer.OrdinalIgnoreCase);
 
                 foreach (string columnName in visibleColumns)
                     projected[columnName] = resultRow.Row[columnName];
@@ -65,7 +65,7 @@ internal sealed class QueryProjector
         // Fallback path: SELECT * or any other case where the projection layout is not fixed.
         await foreach (QueryResultRow resultRow in dataCursor)
         {
-            Dictionary<string, ColumnValue> projected = new(ticket.Projection.Count);
+            Dictionary<string, ColumnValue> projected = new(ticket.Projection.Count, StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < ticket.Projection.Count; i++)
             {

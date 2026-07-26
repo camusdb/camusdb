@@ -174,7 +174,7 @@ internal sealed class TableAnalyzer
             ? $"sampled {rowCount} rows (table larger than {CamusDBConfig.StatsAnalyzeSampleRows})"
             : $"analyzed {rowCount} rows";
 
-        return new QueryResultRow(default, new Dictionary<string, ColumnValue>
+        return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
             { "table",   new ColumnValue(ColumnType.String, table.Name) },
             { "status",  new ColumnValue(ColumnType.String, status) },
@@ -225,6 +225,11 @@ internal sealed class TableAnalyzer
         // Rows between successive leadership/load re-checks. Amortizes the (async) leadership probe
         // while still noticing a surge or a lost lease within a bounded number of rows mid-scan.
         int checkEveryRows = Math.Max(1, CamusDBConfig.AutoAnalyzeOwnershipCheckRows);
+
+        // Honor a per-table opt-out that landed on this node's descriptor after discovery selected it
+        // (discovery already filters on the fresh meta blob; this covers the disable-during-sweep race).
+        if (!table.Schema.AutoStatsCollectionEnabled)
+            return;
 
         int bucketCount = CamusDBConfig.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
@@ -315,14 +320,17 @@ internal sealed class TableAnalyzer
                     }
                 }
 
-                // At each batch boundary, bail out (without persisting) if the node lost leadership or
-                // foreground load surged. Cheap-and-lock-free reads, so abandoning here loses nothing.
+                // At each batch boundary, bail out (without persisting) if the node lost leadership, the
+                // foreground load surged, or the table was opted out of automatic collection mid-scan.
+                // Cheap-and-lock-free reads, so abandoning here loses nothing.
                 if (rowCount % checkEveryRows == 0)
                 {
                     if (shouldPause is not null && shouldPause())
                         throw new OperationCanceledException("Auto-analyze paused: foreground load surge");
                     if (stillOwner is not null && !await stillOwner(cancellationToken).ConfigureAwait(false))
                         throw new OperationCanceledException("Auto-analyze aborted: leadership lost");
+                    if (!table.Schema.AutoStatsCollectionEnabled)
+                        throw new OperationCanceledException("Auto-analyze aborted: table opted out mid-scan");
                 }
 
                 await ThrottleAsync(rowCount, throttleStartTicks, maxRowsPerSecond, cancellationToken).ConfigureAwait(false);
@@ -374,6 +382,11 @@ internal sealed class TableAnalyzer
 
             if (stillOwner is not null && !await stillOwner(cancellationToken).ConfigureAwait(false))
                 throw new OperationCanceledException("Auto-analyze aborted before publish: leadership lost");
+
+            // Final opt-out fence: a SET (... = false) that committed during the scan must prevent
+            // publication, so the scheduler never publishes statistics for a now-disabled table.
+            if (!table.Schema.AutoStatsCollectionEnabled)
+                throw new OperationCanceledException("Auto-analyze aborted before publish: table opted out");
 
             // One atomic generation that merges any DML committed during the scan and resets staleness.
             await statistics.PublishAsync(

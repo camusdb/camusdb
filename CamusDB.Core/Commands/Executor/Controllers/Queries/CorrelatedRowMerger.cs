@@ -21,7 +21,7 @@ internal static class CorrelatedRowMerger
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
     {
-        Dictionary<string, ColumnValue> merged = new(StringComparer.Ordinal);
+        Dictionary<string, ColumnValue> merged = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, ColumnValue> entry in innerRow)
         {
