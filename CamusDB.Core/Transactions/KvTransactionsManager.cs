@@ -550,6 +550,8 @@ public sealed class KvTransactionsManager : IDisposable
         // so surfacing it in the finalize log makes slow-commit diagnosis (e.g. native fsync cost)
         // directly observable per transaction.
         ValueStopwatch commitTimer = ValueStopwatch.StartNew();
+        using System.Diagnostics.Activity? commitSpan =
+            Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.Commit);
         try
         {
             for (int attempt = 0; ; attempt++)
@@ -575,11 +577,12 @@ public sealed class KvTransactionsManager : IDisposable
             if (result == KeyValueResponseType.Committed)
             {
                 tx.Status = KvTransactionStatus.Committed;
+                long committedElapsedMs = commitTimer.GetElapsedMilliseconds();
+                Diagnostics.ServerDiagnostics.RecordCommitDuration(
+                    Diagnostics.ServerDiagnostics.Tags.Outcome.Ok, committedElapsedMs);
+                Diagnostics.ServerDiagnostics.RecordStagedMutations(tx.MutationCount);
                 if (logger.IsEnabled(LogLevel.Debug))
-                {
-                    long elapsedMs = commitTimer.GetElapsedMilliseconds();
-                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, elapsedMs);
-                }
+                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, committedElapsedMs);
 
                 // Gate: bump generation, evict stale entries, clear in-flight mark — all inside
                 // the gate's write lock so no concurrent publish can insert a stale entry.

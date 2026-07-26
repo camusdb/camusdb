@@ -28,6 +28,7 @@ using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.Statistics;
+using CamusDB.Core.Diagnostics;
 
 namespace CamusDB.Core.CommandsExecutor;
 
@@ -2282,11 +2283,24 @@ public sealed class CommandExecutor : IAsyncDisposable
         return new ExecuteDDLSQLResult(database, ok);
     }
 
+    /// <summary>Maps a parsed statement's node type to the bounded <c>statement</c> metric family tag.</summary>
+    private static string MapStatementFamily(NodeType nodeType) => nodeType switch
+    {
+        NodeType.Select => ServerDiagnostics.Tags.Statement.Select,
+        NodeType.Insert => ServerDiagnostics.Tags.Statement.Insert,
+        NodeType.Update => ServerDiagnostics.Tags.Statement.Update,
+        NodeType.Delete => ServerDiagnostics.Tags.Statement.Delete,
+        _ => ServerDiagnostics.Tags.Statement.Other,
+    };
+
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
     {
         validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+
+        using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(
+            ServerDiagnostics.Tags.Operation.Ddl, ServerDiagnostics.Tags.Statement.Other);
 
         // CREATE/DROP/RENAME DATABASE do not require an open database context.
         if (ast.nodeType is NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists
@@ -2659,6 +2673,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+
+        // Executor stage timing for the write path (parse+plan+stage, exclusive of transport/commit
+        // transport). Covers every return path of this method; a no-op when diagnostics are disabled.
+        using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(
+            ServerDiagnostics.Tags.Operation.NonQuery, MapStatementFamily(ast.nodeType));
+        using System.Diagnostics.Activity? executeSpan = ServerDiagnostics.StartSpan(ServerDiagnostics.Spans.Execute);
+        executeSpan?.SetTag("statement", MapStatementFamily(ast.nodeType));
 
         // DROP/RENAME DATABASE do not require an open database context — dispatch before Open so
         // we don't accidentally load the descriptor we're about to destroy or rename.

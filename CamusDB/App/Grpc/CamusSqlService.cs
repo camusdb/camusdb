@@ -7,9 +7,11 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Grpc.Core;
 using Microsoft.Extensions.Hosting;
 using CamusDB.Core;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -519,6 +521,19 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // Count each batched op individually (not the long-lived duplex stream) toward the foreground
         // load signal, so a node saturated purely over BatchExecute still backs off auto-analyze.
         loadGauge.Increment();
+
+        // Per-op request instrumentation over the multiplexed batch transport: this is the real
+        // one-logical-operation boundary, not the duplex stream's lifetime.
+        string operation = MapBatchOperation(req.Kind);
+        string outcome = ServerDiagnostics.Tags.Outcome.Ok;
+        long requestStart = Stopwatch.GetTimestamp();
+        ServerDiagnostics.AddRequestInFlight(ServerDiagnostics.Tags.Transport.GrpcBatch, 1);
+
+        // Root span for one logical operation carried over the multiplexed stream (not the duplex
+        // connection lifetime). Child spans (parse/execute/commit) parent to it via Activity.Current.
+        using System.Diagnostics.Activity? requestSpan = ServerDiagnostics.StartSpan(ServerDiagnostics.Spans.Request);
+        requestSpan?.SetTag("operation", operation);
+        requestSpan?.SetTag("transport", ServerDiagnostics.Tags.Transport.GrpcBatch);
         try
         {
             SqlRequest request = req.Request
@@ -548,9 +563,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         catch (OperationCanceledException)
         {
             // Stream cancelled — the op's own handler already rolled back; don't write onto a dead stream.
+            outcome = ServerDiagnostics.Tags.Outcome.Canceled;
         }
         catch (CamusDBException ex)
         {
+            outcome = ClassifyOutcome(ex.Code);
             logger.LogError("{Name}: {Message}", ex.GetType().Name, ex.Message);
             await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
             {
@@ -560,6 +577,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         catch (Exception ex)
         {
+            outcome = ServerDiagnostics.Tags.Outcome.InternalError;
             logger.LogError("{Name}: {Message}", ex.GetType().Name, ex.Message);
             await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
             {
@@ -570,8 +588,32 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         finally
         {
             loadGauge.Decrement();
+            ServerDiagnostics.AddRequestInFlight(ServerDiagnostics.Tags.Transport.GrpcBatch, -1);
+            ServerDiagnostics.RecordRequest(
+                operation, ServerDiagnostics.Tags.Transport.GrpcBatch, outcome,
+                Stopwatch.GetElapsedTime(requestStart).TotalMilliseconds);
+            requestSpan?.SetTag("outcome", outcome);
+            if (outcome != ServerDiagnostics.Tags.Outcome.Ok)
+                requestSpan?.SetStatus(System.Diagnostics.ActivityStatusCode.Error);
         }
     }
+
+    /// <summary>Maps a batch statement kind to the bounded <c>operation</c> metric tag.</summary>
+    private static string MapBatchOperation(BatchStatementKind kind) => kind switch
+    {
+        BatchStatementKind.Query => ServerDiagnostics.Tags.Operation.Query,
+        BatchStatementKind.Start => ServerDiagnostics.Tags.Operation.Begin,
+        BatchStatementKind.Commit => ServerDiagnostics.Tags.Operation.Commit,
+        BatchStatementKind.Rollback => ServerDiagnostics.Tags.Operation.Rollback,
+        _ => ServerDiagnostics.Tags.Operation.NonQuery,
+    };
+
+    /// <summary>Maps a domain error code to a bounded <c>outcome</c> tag (conflict classes vs other domain errors).</summary>
+    private static string ClassifyOutcome(string code) => code switch
+    {
+        "CADB0502" or "CADB0504" or "CADB0505" => ServerDiagnostics.Tags.Outcome.Conflict,
+        _ => ServerDiagnostics.Tags.Outcome.DomainError,
+    };
 
     private async Task RunBatchQueryAsync(
         int requestId,

@@ -103,35 +103,61 @@ internal sealed class QueryScanner
                 BorrowedDecode = ShouldUseBorrowedDecode(plan),
             };
 
-        // Fold the scanned rows into the commit-time read set only for an UPDATE/DELETE locate scan,
-        // where the rows observed here decide what is written. A plain SELECT relies on the range
-        // lock taken above instead, so its commit cost stays independent of how many rows it read.
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-            plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, trackReadSet: plan.Ticket.ExclusivePredicateLocks))
+        // Focused scan instrumentation: a full primary-table scan is the "storage-heavy read" shape.
+        // Counters track rows scanned vs returned; the span+duration isolate storage read time from the
+        // downstream CPU stages. Recorded on completion of the iterator (including early break) via finally.
+        using System.Diagnostics.Activity? storageSpan =
+            Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.StorageRead);
+        storageSpan?.SetTag("scan", Diagnostics.ServerDiagnostics.Tags.Scan.Full);
+        long scanStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        long rowsScanned = 0, rowsReturned = 0;
+
+        try
         {
-            if (data.Length == 0)
-                continue;
+            // Fold the scanned rows into the commit-time read set only for an UPDATE/DELETE locate scan,
+            // where the rows observed here decide what is written. A plain SELECT relies on the range
+            // lock taken above instead, so its commit cost stays independent of how many rows it read.
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, trackReadSet: plan.Ticket.ExclusivePredicateLocks))
+            {
+                if (data.Length == 0)
+                    continue;
 
-            if (scanStats is not null)
-                scanStats.KvScanEntries++;
+                rowsScanned++;
+                if (scanStats is not null)
+                    scanStats.KvScanEntries++;
 
-            // Record the point dep for every fetched row — catches updates to non-indexed columns.
-            deps?.RecordPoint(table.Store.RowPointKey(rowId));
+                // Record the point dep for every fetched row — catches updates to non-indexed columns.
+                deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
-                table.Schema,
-                txId,
-                rowId,
-                data,
-                plan.ScanRequiredColumns,
-                visibilityVersion,
-                decodeState).ConfigureAwait(false);
+                QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
+                    table.Schema,
+                    txId,
+                    rowId,
+                    data,
+                    plan.ScanRequiredColumns,
+                    visibilityVersion,
+                    decodeState).ConfigureAwait(false);
 
-            if (scanStats is not null)
-                scanStats.RowsRead++;
+                if (scanStats is not null)
+                    scanStats.RowsRead++;
 
-            if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
-                yield return new QueryResultRow(rowId, queryRow);
+                if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                {
+                    rowsReturned++;
+                    yield return new QueryResultRow(rowId, queryRow);
+                }
+            }
+        }
+        finally
+        {
+            Diagnostics.ServerDiagnostics.RecordScanDuration(
+                Diagnostics.ServerDiagnostics.Tags.Scan.Full,
+                System.Diagnostics.Stopwatch.GetElapsedTime(scanStart).TotalMilliseconds);
+            Diagnostics.ServerDiagnostics.RecordQueryRows(
+                Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Scanned, rowsScanned);
+            Diagnostics.ServerDiagnostics.RecordQueryRows(
+                Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Returned, rowsReturned);
         }
     }
 
@@ -178,6 +204,16 @@ internal sealed class QueryScanner
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version);
 
+        // Focused scan instrumentation for the index-driven scan shape. Recorded once on completion
+        // (covering path's yield break and the paged path both flow through finally).
+        using System.Diagnostics.Activity? storageSpan =
+            Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.StorageRead);
+        storageSpan?.SetTag("scan", Diagnostics.ServerDiagnostics.Tags.Scan.IndexRange);
+        long scanStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        long rowsScanned = 0;
+
+        try
+        {
         if (plan.IndexOnly)
         {
             // Covering (index-only) path: every needed column is already in the decoded index
@@ -199,6 +235,7 @@ internal sealed class QueryScanner
                 maxRows: plan.ScanRowLimit,
                 trackReadSet: ticket.ExclusivePredicateLocks))
             {
+                rowsScanned++;
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
 
@@ -264,6 +301,7 @@ internal sealed class QueryScanner
             maxRows: plan.ScanRowLimit,
             trackReadSet: ticket.ExclusivePredicateLocks))
         {
+            rowsScanned++;
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
 
@@ -282,6 +320,16 @@ internal sealed class QueryScanner
         if (pageBuf.Count > 0)
             await foreach (QueryResultRow r in flushPageAsync(pageBuf))
                 yield return r;
+        }
+        finally
+        {
+            Diagnostics.ServerDiagnostics.RecordScanDuration(
+                Diagnostics.ServerDiagnostics.Tags.Scan.IndexRange,
+                System.Diagnostics.Stopwatch.GetElapsedTime(scanStart).TotalMilliseconds);
+            Diagnostics.ServerDiagnostics.RecordQueryRows(
+                Diagnostics.ServerDiagnostics.Tags.Scan.IndexRange,
+                Diagnostics.ServerDiagnostics.Tags.Stage.Scanned, rowsScanned);
+        }
     }
 
     /// <summary>

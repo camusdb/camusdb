@@ -77,10 +77,17 @@ public static class SQLParserProcessor
     public static NodeAst Parse(string sql, SqlParserCache cache)
     {
         if (cache.TryGet(sql, out NodeAst? cached))
+        {
+            Diagnostics.ServerDiagnostics.RecordParse(cacheHit: true, milliseconds: 0);
             return cached!;
+        }
 
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
         sqlParser sqlParser = new();
         NodeAst ast = sqlParser.Parse(sql);
+        Diagnostics.ServerDiagnostics.RecordParse(
+            cacheHit: false,
+            milliseconds: System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds);
 
         cache.Store(sql, ast);
         return ast;

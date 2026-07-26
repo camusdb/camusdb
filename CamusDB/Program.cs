@@ -24,6 +24,9 @@ using Kahuna.Server.Configuration;
 using Kommander;
 using Kommander.Communication.Grpc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 Console.WriteLine("   ____                          ____  ____  ");
 Console.WriteLine("  / ___|__ _ _ __ ___  _   _ ___|  _ \\| __ ) ");
@@ -37,14 +40,22 @@ ParserResult<CamusCommandLineOptions> optsResult = Parser.Default.ParseArguments
 CamusCommandLineOptions opts = optsResult.Value ?? new();
 
 // Read and merge config before building the host so cluster-mode detection
-// can gate DI service registration.
-string configYml = await File.ReadAllTextAsync("Config/config.yml");
+// can gate DI service registration. CAMUS_CONFIG_PATH lets an orchestration script (e.g. the
+// bottleneck-snapshot harness) supply its own config file without mutating the checked-in default.
+string configPath = Environment.GetEnvironmentVariable("CAMUS_CONFIG_PATH") ?? "Config/config.yml";
+string configYml = await File.ReadAllTextAsync(configPath);
 ConfigDefinition config = new ConfigReader().Read(configYml);
 
 // CLI > env > YAML > default — only explicitly provided flags override YAML.
 ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
 config.Validate();
 ConfigResolver.ApplyToCamusDBConfig(config);
+
+// Diagnostics are opt-in and standalone-only this phase: enable the Core Meter/ActivitySource gate
+// only for a standalone node with diagnostics turned on. When false, every ServerDiagnostics record
+// helper short-circuits, so an unconfigured or cluster node emits nothing and pays no cost.
+bool diagnosticsActive = !config.IsClusterMode && config.Diagnostics.Enabled;
+CamusDB.Core.Diagnostics.ServerDiagnostics.Enabled = diagnosticsActive;
 
 // Build the singleton query-result cache once, after config statics are set.
 // When the feature is off we pass null (not NullQueryResultCache.Instance): every hot-path
@@ -205,6 +216,45 @@ if (config.IsClusterMode)
 builder.Services.AddSingleton<HttpTransactionCoordinator>();
 builder.Services.AddSingleton<CamusDB.App.Services.ForegroundRequestGauge>();
 
+// Opt-in OpenTelemetry export (standalone only). Subscribes to the CamusDB.Server meter/activity
+// source plus the embedded dependency meters ("Kahuna", "Kommander") and standard runtime/ASP.NET
+// signals, so a workload run can attribute time to server handler, execution, commit, and the
+// underlying KV/WAL/runtime layers. A run id supplied via CAMUS_DIAGNOSTICS_RUN_ID rides along as a
+// resource attribute (never a per-request tag).
+if (diagnosticsActive)
+{
+    string? diagnosticsRunId = Environment.GetEnvironmentVariable("CAMUS_DIAGNOSTICS_RUN_ID");
+
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(resource =>
+        {
+            resource.AddService("camusdb", serviceVersion: "0.8.0");
+            if (!string.IsNullOrWhiteSpace(diagnosticsRunId))
+                resource.AddAttributes(new[] { new KeyValuePair<string, object>("camus.run_id", diagnosticsRunId) });
+        })
+        .WithMetrics(metrics =>
+        {
+            metrics.AddMeter(CamusDB.Core.Diagnostics.ServerDiagnostics.MeterName);
+            metrics.AddMeter("Kahuna");
+            metrics.AddMeter("Kommander");
+            metrics.AddAspNetCoreInstrumentation();
+            if (config.Diagnostics.IncludeRuntimeMetrics)
+                metrics.AddRuntimeInstrumentation();
+            if (config.Diagnostics.PrometheusEnabled)
+                metrics.AddPrometheusExporter();
+            if (!string.IsNullOrWhiteSpace(config.Diagnostics.OtlpEndpoint))
+                metrics.AddOtlpExporter(otlp => otlp.Endpoint = new Uri(config.Diagnostics.OtlpEndpoint!));
+        })
+        .WithTracing(tracing =>
+        {
+            tracing.AddSource(CamusDB.Core.Diagnostics.ServerDiagnostics.MeterName);
+            tracing.SetSampler(new TraceIdRatioBasedSampler(config.Diagnostics.TraceSampleRatio));
+            tracing.AddAspNetCoreInstrumentation();
+            if (!string.IsNullOrWhiteSpace(config.Diagnostics.OtlpEndpoint))
+                tracing.AddOtlpExporter(otlp => otlp.Endpoint = new Uri(config.Diagnostics.OtlpEndpoint!));
+        });
+}
+
 // Reclaims abandoned explicit transactions (client opened one and never committed/rolled back) so
 // their locks — renewed forever by the range-lock heartbeat — cannot be held indefinitely.
 builder.Services.AddHostedService<AbandonedTransactionReaper>();
@@ -245,7 +295,10 @@ if (config.IsClusterMode)
 // only bound when grpc_enabled is true, so the service is externally reachable only then.
 if (!config.IsClusterMode)
     builder.Services.AddGrpc(options =>
-        options.Interceptors.Add<CamusDB.App.Grpc.ForegroundRequestGaugeInterceptor>());
+    {
+        options.Interceptors.Add<CamusDB.App.Grpc.ForegroundRequestGaugeInterceptor>();
+        options.Interceptors.Add<CamusDB.App.Grpc.MetricsServerInterceptor>();
+    });
 
 // Initialize min threads
 ThreadPool.SetMinThreads(1024, 512);
@@ -274,6 +327,11 @@ if (config.GrpcEnabled)
     app.MapGrpcService<CamusDB.App.Grpc.CamusSqlService>();
     app.MapGrpcService<CamusDB.App.Grpc.CamusRowsService>();
 }
+
+// Prometheus scrape endpoint (standalone + diagnostics + prometheus_enabled only). It exposes
+// operational metadata; protect it or bind it to a trusted interface in production.
+if (diagnosticsActive && config.Diagnostics.PrometheusEnabled)
+    app.MapPrometheusScrapingEndpoint(config.Diagnostics.PrometheusPath);
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

@@ -96,6 +96,7 @@ public class ConfigReader
         "orphan_retention_ms",
         "orphan_reclaim_interval_ms",
         "kahuna",
+        "diagnostics",
     };
 
     public ConfigDefinition Read(string yml)
@@ -138,23 +139,30 @@ public class ConfigReader
                     string.Join(", ", AllowedRootKeys.OrderBy(k => k)));
         }
 
-        if (!root.TryGetValue("kahuna", out object? kahunaRaw) || kahunaRaw is null)
+        ValidateNestedKeys(root, "kahuna", KahunaOptionsConfig.AllowedYamlKeys);
+        ValidateNestedKeys(root, "diagnostics", DiagnosticsConfig.AllowedYamlKeys);
+    }
+
+    private static void ValidateNestedKeys(
+        Dictionary<string, object> root, string section, HashSet<string> allowedKeys)
+    {
+        if (!root.TryGetValue(section, out object? raw) || raw is null)
             return;
 
-        if (kahunaRaw is not IDictionary kahunaDict)
+        if (raw is not IDictionary dict)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidConfig,
-                "'kahuna' must be a mapping of option names to values");
+                $"'{section}' must be a mapping of option names to values");
 
-        foreach (object key in kahunaDict.Keys)
+        foreach (object key in dict.Keys)
         {
             string name = key.ToString() ?? "";
-            if (!KahunaOptionsConfig.AllowedYamlKeys.Contains(name))
+            if (!allowedKeys.Contains(name))
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidConfig,
-                    $"Unknown 'kahuna' option '{name}'; allowed keys: " +
-                    string.Join(", ", KahunaOptionsConfig.AllowedYamlKeys.OrderBy(k => k)));
+                    $"Unknown '{section}' option '{name}'; allowed keys: " +
+                    string.Join(", ", allowedKeys.OrderBy(k => k)));
             }
         }
     }

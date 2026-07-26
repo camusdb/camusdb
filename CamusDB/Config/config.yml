@@ -242,3 +242,24 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 #   rocksdb_shared_memory: true                 # set false to give each database its own budget
 #   rocksdb_shared_memory_budget_mb: 320        # total shared block-cache budget (MiB)
 #   rocksdb_shared_memtable_budget_mb: 128      # memtable sub-budget (MiB); must be <= the total
+
+# ── Diagnostics (standalone only; opt-in) ─────────────────────────────────────
+# Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:
+# with enabled=false the server registers no exporter, endpoint, or collector and emits nothing.
+# Effective only for a standalone node; cluster behavior is unchanged. The Prometheus endpoint
+# exposes operational metadata — protect it or bind it to a trusted interface.
+#
+# enabled: master switch. Default false.
+# prometheus_enabled: bind the Prometheus scrape endpoint on the HTTP listener. Default false.
+# prometheus_path: path for the scrape endpoint; must start with '/'. Default /metrics.
+# otlp_endpoint: optional OTLP collector URL; its presence enables the OTLP push exporter.
+# trace_sample_ratio: head sampling ratio in [0, 1]. Default 0.01 (1%).
+# include_runtime_metrics: also export .NET runtime metrics (GC, thread-pool). Default true.
+#
+# diagnostics:
+#   enabled: false
+#   prometheus_enabled: false
+#   prometheus_path: /metrics
+#   otlp_endpoint:
+#   trace_sample_ratio: 0.01
+#   include_runtime_metrics: true

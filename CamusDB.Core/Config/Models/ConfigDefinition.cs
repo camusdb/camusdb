@@ -371,6 +371,9 @@ public class ConfigDefinition
     /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
     public KahunaOptionsConfig Kahuna { get; set; } = new();
 
+    /// <summary>Opt-in observability settings; effective only for a standalone node when enabled.</summary>
+    public DiagnosticsConfig Diagnostics { get; set; } = new();
+
     // ──────────────────────────────────────────────────────────────────────────
     // Query result cache
     // ──────────────────────────────────────────────────────────────────────────
@@ -561,6 +564,7 @@ public class ConfigDefinition
             throw Invalid($"'spill_merge_fan_in' must be > 0, got {SpillMergeFanIn}");
 
         Kahuna.Validate();
+        Diagnostics.Validate();
 
         // Compose the Kahuna session-timeout cap with the engine's serializable lifetime. The engine
         // starts every session with Timeout = MaxSerializableTransactionLifetimeMs and Kahuna clamps it
