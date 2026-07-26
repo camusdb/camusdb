@@ -12,13 +12,22 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal abstract class SQLExecutorBaseCreator
 {
+    /// <summary>
+    /// Per-string-literal cache of its decoded UTF-8 bytes, so the byte-native string-equality fast path
+    /// encodes each literal at most once per query rather than once per scanned row. Keyed by the literal
+    /// AST node's identity via a weak table, so a parsed query being GC'd drops its cached bytes too.
+    /// </summary>
+    private static readonly ConditionalWeakTable<NodeAst, byte[]> Utf8LiteralCache = new();
+
     protected static void GetIdentifierList(NodeAst orderByAst, List<string> identifierList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
@@ -94,6 +103,44 @@ internal abstract class SQLExecutorBaseCreator
 
     private static bool IsNumeric(ColumnType type) =>
         type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
+
+    /// <summary>
+    /// Attempts the byte-native equality fast path for an <c>=</c>/<c>&lt;&gt;</c> node of the shape
+    /// <c>stringColumn = 'literal'</c> (either operand order). Succeeds only when one operand is a plain
+    /// column identifier resolving to a non-NULL <see cref="ColumnType.String"/> cell that
+    /// <paramref name="queryRow"/> can hand back as a borrowed UTF-8 slice, and the other is a string
+    /// literal. On success <paramref name="equal"/> is whether the two UTF-8 byte sequences match — which
+    /// is identical to <see cref="CompareValues"/> reporting 0 for two strings — and no managed
+    /// <see cref="string"/> is materialized for the row's cell. Returns <see langword="false"/> for every
+    /// other shape (non-string column, NULL, both-identifier, non-string literal, eager/slot row), and the
+    /// caller falls back to the ordinary <see cref="ColumnValue"/> comparison.
+    /// </summary>
+    private static bool TryUtf8StringEquality(NodeAst expr, QueryRowNameResolver? rowNameResolver, QueryRow queryRow, out bool equal)
+    {
+        equal = false;
+
+        NodeAst left = expr.leftAst!;
+        NodeAst right = expr.rightAst!;
+
+        NodeAst? identifier = null, literal = null;
+        if (left.nodeType == NodeType.Identifier && right.nodeType == NodeType.String) { identifier = left; literal = right; }
+        else if (right.nodeType == NodeType.Identifier && left.nodeType == NodeType.String) { identifier = right; literal = left; }
+
+        if (identifier is null || literal is null)
+            return false;
+
+        string lookupKey = rowNameResolver?.ResolveRowLookupKey(identifier.yytext!) ?? identifier.yytext!;
+        int ordinal = queryRow.Layout.IndexOf(lookupKey);
+        if (ordinal < 0)
+            return false;
+
+        if (!queryRow.TryGetUtf8(ordinal, out ReadOnlySpan<byte> rowUtf8))
+            return false;
+
+        byte[] literalUtf8 = Utf8LiteralCache.GetValue(literal, static node => Encoding.UTF8.GetBytes(UnquoteStringLiteral(node.yytext!)));
+        equal = rowUtf8.SequenceEqual(literalUtf8);
+        return true;
+    }
 
     /// <summary>
     /// Applies <c>+ - * /</c> to two numeric operands using SQL-style numeric promotion: the wider
@@ -259,6 +306,12 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprEquals:
                 {
+                    // Byte-native fast path for `stringColumn = 'literal'` against a borrowed row: compares
+                    // the row's stored UTF-8 slice to the literal's UTF-8 bytes without materializing the
+                    // row's string. Byte equality is exactly string equality, so this matches CompareValues.
+                    if (queryRow is { IsBorrowedBacked: true } && TryUtf8StringEquality(expr, rowNameResolver, queryRow, out bool eq))
+                        return ColumnValue.FromBool(eq);
+
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
@@ -267,6 +320,9 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprNotEquals:
                 {
+                    if (queryRow is { IsBorrowedBacked: true } && TryUtf8StringEquality(expr, rowNameResolver, queryRow, out bool eq))
+                        return ColumnValue.FromBool(!eq);
+
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 

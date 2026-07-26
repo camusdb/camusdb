@@ -579,6 +579,29 @@ public static class CamusDBConfig
     public static bool SlotBackedDecode = false;
 
     /// <summary>
+    /// Global policy for borrowed (zero-copy) decode, which backs a decoded scan row with a
+    /// <see cref="CamusDB.Core.Storage.Kv.RowView"/> over the raw KV bytes instead of an eager
+    /// <c>ValueSlot[]</c> — an unread cell then decodes nothing (not even to a slot) and no per-row slot
+    /// array is allocated, a win on selective scans over wide or string/bytes-heavy rows. Three states,
+    /// default <see cref="BorrowedDecodePolicy.Adaptive"/>:
+    /// <list type="bullet">
+    /// <item><see cref="BorrowedDecodePolicy.Adaptive"/> — the scanner opts in per query for the case it
+    ///   strictly wins: a residual filter and no row-retaining operator downstream (see
+    ///   <c>QueryScanner.ShouldUseBorrowedDecode</c>). Unfiltered <c>SELECT *</c> and retaining scans stay
+    ///   eager. This is the production default.</item>
+    /// <item><see cref="BorrowedDecodePolicy.ForceBorrowed"/> — borrowed on <i>every</i> scan, including
+    ///   <c>SELECT *</c> (a small loss with no rejects to save on) and retaining scans (whose
+    ///   retained-memory cost is not yet bounded by copy-on-retain). For A/B measurement.</item>
+    /// <item><see cref="BorrowedDecodePolicy.ForceEager"/> — borrowed off everywhere: the kill-switch /
+    ///   eager A/B baseline.</item>
+    /// </list>
+    /// Takes precedence over <see cref="SlotBackedDecode"/> when both would apply. Per-scan control lives
+    /// on <see cref="CamusDB.Core.Storage.Kv.RowEncoder.RowDecodeState.BorrowedDecode"/>; each accessed
+    /// cell materializes at most once (the row caches it), so borrowed never re-decodes a cell.
+    /// </summary>
+    public static BorrowedDecodePolicy BorrowedDecode = BorrowedDecodePolicy.Adaptive;
+
+    /// <summary>
     /// Upper bound on a single spill-run record's declared payload length, checked before the
     /// reader allocates or rents a buffer for it. A spill file is trusted engine output, but the
     /// frame-length prefix is still read straight off disk, so a corrupt or truncated file could
@@ -778,4 +801,21 @@ public static class CamusDBConfig
     /// How often, in milliseconds, the background sweep removes expired entries. Default: 10 000 ms.
     /// </summary>
     public static int QueryResultCacheSweepIntervalMs = 10_000;
+}
+
+/// <summary>
+/// The three decode-backing policies for <see cref="CamusDBConfig.BorrowedDecode"/>: let the scanner
+/// choose per query (<see cref="Adaptive"/>), or force one path globally for A/B measurement and as a
+/// kill-switch (<see cref="ForceBorrowed"/> / <see cref="ForceEager"/>).
+/// </summary>
+public enum BorrowedDecodePolicy
+{
+    /// <summary>Scanner opts into borrowed decode for filtered, non-row-retaining scans; eager otherwise. Production default.</summary>
+    Adaptive,
+
+    /// <summary>Never use borrowed decode — the eager kill-switch / A/B baseline.</summary>
+    ForceEager,
+
+    /// <summary>Always use borrowed decode, on every scan — the A/B measurement mode.</summary>
+    ForceBorrowed,
 }

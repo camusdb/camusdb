@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Text;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -18,25 +20,43 @@ using Kommander.Time;
 namespace CamusDB.Core.Storage.Kv;
 
 /// <summary>
-/// Thin wrapper over <see cref="Serializator"/> that encodes/decodes a full row
-/// (all columns + embedded rowId) as a <c>byte[]</c> for storage as a Kahuna KV value.
+/// Row read/write facade over the positional <see cref="CompiledRowCodec"/>. It keeps the historical
+/// name-keyed / <see cref="QueryRow"/> entry points (encode from a name→value dictionary, decode to a
+/// dictionary or a layout-backed <see cref="QueryRow"/> with visibility, projection, and injected
+/// defaults) while the actual byte layout is the schema-driven positional format the codec owns — no
+/// per-cell type tags and no stored row id. Name-keyed encode goes through
+/// <see cref="RowSlotAdapter"/>; decode selects the stored version's codec (per-scan cached in
+/// <see cref="RowDecodeState"/>) and reads each column by its positional ordinal.
 ///
-/// Wire format is identical to the one produced by the original storage layer so existing
-/// data written before this codec can be read back without migration.
-///
-/// Layout:
-///   [TypeInteger32 marker][4-byte schema version]
-///   [TypeInteger32 marker][12-byte ObjectId rowId]
-///   per column in schema.Columns order:
-///     TypeNull (1 byte)                     — null / absent
-///     TypeId   + 12-byte ObjectId           — ColumnType.Id
-///     TypeInteger64 + 8-byte int64          — ColumnType.Integer64
-///     TypeString32  + 4-byte len + UTF-16   — ColumnType.String
-///     TypeDouble    + 8-byte double         — ColumnType.Float64
-///     TypeBool low-nibble in same byte      — ColumnType.Bool
+/// <para>
+/// The self-describing column-value helpers (<see cref="WriteColumnValue"/>,
+/// <see cref="ReadColumnValue"/>, <see cref="ColumnValueSize"/>, <see cref="SkipColumnValue"/>) remain
+/// because the secondary-index INCLUDE-tuple codec still uses that tagged form; they are unrelated to
+/// the positional row layout.
+/// </para>
 /// </summary>
 public static class RowEncoder
 {
+    /// <summary>
+    /// Per-<see cref="TableSchema"/> cache of compiled positional codecs, keyed by stored schema version.
+    /// A <see cref="CompiledRowCodec"/> is a pure function of one version's (immutable) column layout, so
+    /// building it once per (schema, version) — rather than on every dict-decode / encode call — avoids
+    /// reallocating its plan arrays in row loops (analyze samples, DDL backfills, update/delete loads).
+    /// Keyed weakly by the schema instance so a dropped/replaced schema's codecs are collected with it;
+    /// keyed internally by version because a version's layout never changes (history is append-only).
+    /// The per-scan <see cref="RowDecodeState"/> plan cache still covers <see cref="DecodeToQueryRowAsync"/>;
+    /// this closes the remaining per-row rebuild on the dictionary decode/encode facades.
+    /// </summary>
+    private static readonly ConditionalWeakTable<TableSchema, ConcurrentDictionary<int, CompiledRowCodec>> CodecCache = new();
+
+    private static CompiledRowCodec GetCodec(TableSchema schema, int version, IReadOnlyList<TableColumnSchema> columns)
+    {
+        ConcurrentDictionary<int, CompiledRowCodec> perSchema = CodecCache.GetValue(schema, static _ => new ConcurrentDictionary<int, CompiledRowCodec>());
+        return perSchema.TryGetValue(version, out CompiledRowCodec? cached)
+            ? cached
+            : perSchema.GetOrAdd(version, CompiledRowCodec.Build(version, columns));
+    }
+
     private enum ColumnVisibility
     {
         PublicOnly,
@@ -74,8 +94,23 @@ public static class RowEncoder
         /// <summary>Shared output layout (column names + ordinals) for every row on this plan.</summary>
         public required RowLayout Layout { get; init; }
 
-        /// <summary>One step per stored column, in byte-stream order: read into an ordinal or skip.</summary>
+        /// <summary>
+        /// Positional codec for the stored schema version these rows were written under. Reads a column
+        /// by its stored ordinal directly (no byte-stream cursor), so a projected-out column costs
+        /// nothing — there are no bytes to skip past.
+        /// </summary>
+        public required CompiledRowCodec Codec { get; init; }
+
+        /// <summary>One step per stored column: <see cref="ColumnDecodeStep.OutputOrdinal"/> is the output
+        /// slot to read this column's positional value into, or <c>-1</c> to leave it out of the row.</summary>
         public required ColumnDecodeStep[] Steps { get; init; }
+
+        /// <summary>
+        /// Inverse of <see cref="Steps"/> for borrowed decode: output ordinal → stored (codec) ordinal, or
+        /// <c>-1</c> for an output column supplied by <see cref="InjectedDefaults"/> rather than the bytes.
+        /// Lets a <see cref="RowView"/>-backed row read output ordinal <c>o</c> straight from the payload.
+        /// </summary>
+        public required int[] OutputToStored { get; init; }
 
         /// <summary>
         /// Output slots for columns that are visible in the current schema but were added after this
@@ -105,6 +140,17 @@ public static class RowEncoder
         /// the eager path, so the scanner sets this to enable slots only when a rejecting filter exists.
         /// </summary>
         public bool? SlotBackedDecode { get; init; }
+
+        /// <summary>
+        /// Per-scan override for borrowed (zero-copy) decode. <see langword="null"/> defers to the global
+        /// <see cref="CamusDBConfig.BorrowedDecode"/>. When set, a decoded row is backed by a
+        /// <see cref="RowView"/> over the raw KV bytes instead of an eager <c>ValueSlot[]</c>: no per-row
+        /// slot array is allocated and an unread cell decodes nothing, which wins hardest on selective
+        /// scans over wide or string/bytes-heavy rows. Takes precedence over
+        /// <see cref="SlotBackedDecode"/> when both would apply. The borrowed bytes must outlive the row
+        /// (guaranteed on the scan path — Kahuna hands out a fresh, stable array per entry).
+        /// </summary>
+        public bool? BorrowedDecode { get; init; }
     }
 
     /// <summary>
@@ -117,11 +163,9 @@ public static class RowEncoder
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(row);
 
-        int length = CalculateBufferLength(schema, row);
-        byte[] buffer = new byte[length];
-        int pointer = 0;
-        EncodeInto(buffer, ref pointer, schema, row, rowId);
-        return buffer;
+        List<TableColumnSchema> columns = schema.Columns!;
+        CompiledRowCodec codec = GetCodec(schema, schema.Version, columns);
+        return codec.Encode(RowSlotAdapter.FromRow(columns, row));
     }
 
     /// <summary>
@@ -136,48 +180,9 @@ public static class RowEncoder
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(row);
 
-        int length = CalculateBufferLength(schema, row);
-        byte[] buffer = new byte[1 + length];
-        buffer[0] = (byte)BranchKvKind.Value;
-        int pointer = 1;
-        EncodeInto(buffer, ref pointer, schema, row, rowId);
-        return buffer;
-    }
-
-    /// <summary>
-    /// Writes the row header and column values into <paramref name="buffer"/> starting at
-    /// <paramref name="pointer"/>. The caller owns buffer sizing (via <see cref="CalculateBufferLength"/>)
-    /// and any leading bytes (e.g. a storage-envelope marker); this method only advances
-    /// <paramref name="pointer"/> past the bytes it writes.
-    /// </summary>
-    private static void EncodeInto(byte[] buffer, ref int pointer, TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row, ObjectIdValue rowId)
-    {
-        Serializator.WriteType(buffer, SerializatorTypes.TypeInteger32, ref pointer);
-        Serializator.WriteInt32(buffer, schema.Version, ref pointer);
-
-        Serializator.WriteType(buffer, SerializatorTypes.TypeInteger32, ref pointer);
-        Serializator.WriteObjectId(buffer, rowId, ref pointer);
-
         List<TableColumnSchema> columns = schema.Columns!;
-
-        for (int i = 0; i < columns.Count; i++)
-        {
-            TableColumnSchema column = columns[i];
-
-            if (!SchemaElementStateRules.IsWritable(column))
-            {
-                Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
-                continue;
-            }
-
-            if (!row.TryGetValue(column.Name, out ColumnValue? columnValue))
-            {
-                Serializator.WriteType(buffer, SerializatorTypes.TypeNull, ref pointer);
-                continue;
-            }
-
-            WriteColumnValue(buffer, columnValue, ref pointer);
-        }
+        CompiledRowCodec codec = GetCodec(schema, schema.Version, columns);
+        return codec.EncodeStorageValue(RowSlotAdapter.FromRow(columns, row));
     }
 
     /// <summary>
@@ -295,21 +300,22 @@ public static class RowEncoder
     };
 
     /// <summary>
-    /// Reads the fixed row header (schema-version marker + value, rowId marker + value) from the front
-    /// of a serialized row, advancing <paramref name="pointer"/> past it, and returns the stored schema
-    /// version. The rowId in the payload duplicates the KV key and is discarded. Kept synchronous and
-    /// span-based so async decoders can read the header before awaiting lazy schema-history loads
-    /// without holding a span across the await.
+    /// Reads the stored schema version from the front of a positional row payload (a raw little-endian
+    /// <c>u32</c> at offset 0). The row id is not stored — it already lives in the KV key — so there is
+    /// no header past the version; every value is addressed positionally from the payload start. Kept
+    /// synchronous and span-based so async decoders can read the version before awaiting lazy
+    /// schema-history loads without holding a span across the await.
     /// </summary>
-    private static int ReadRowHeader(ReadOnlySpan<byte> data, ref int pointer)
+    private static int ReadRowHeader(ReadOnlySpan<byte> data)
     {
-        Serializator.ReadType(data, ref pointer);                    // schema type marker
-        int schemaVersion = Serializator.ReadInt32(data, ref pointer);
+        // Guard the version read: a shorter-than-header payload must surface as a corruption error, not a
+        // framework span/bounds exception, to honor the SystemSpaceCorrupt contract on malformed bytes.
+        if (data.Length < 4)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Row payload is {data.Length} bytes, shorter than the 4-byte schema-version header");
 
-        Serializator.ReadType(data, ref pointer);                    // rowId type marker
-        Serializator.ReadObjectId(data, ref pointer);                // rowId (it's the KV key — discard)
-
-        return schemaVersion;
+        return (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data);
     }
 
     public static Dictionary<string, ColumnValue> Decode(
@@ -320,15 +326,15 @@ public static class RowEncoder
     {
         ArgumentNullException.ThrowIfNull(schema);
 
-        int pointer = 0;
-        int schemaVersion = ReadRowHeader(data, ref pointer);
+        int schemaVersion = ReadRowHeader(data);
 
         List<TableColumnSchema> columns = schema.GetSchemaHistory(schemaVersion).Columns!;
+        CompiledRowCodec codec = GetCodec(schema, schemaVersion, columns);
         return DecodeColumns(
+            codec,
             columns,
             schema.Columns,
             data,
-            ref pointer,
             requiredColumns,
             ColumnVisibility.PublicOnly,
             injectMissingCurrentColumns: false);
@@ -344,20 +350,20 @@ public static class RowEncoder
     {
         ArgumentNullException.ThrowIfNull(schema);
 
-        // Read the fixed header synchronously (span released before the await); the schema version it
-        // yields selects which lazily-loaded history layout to await.
-        int pointer = 0;
-        int schemaVersion = ReadRowHeader(data.Span, ref pointer);
+        // Read the version synchronously (span released before the await); it selects which
+        // lazily-loaded history layout to await.
+        int schemaVersion = ReadRowHeader(data.Span);
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
             ? columns
             : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
+        CompiledRowCodec codec = GetCodec(schema, schemaVersion, columns);
         return DecodeColumns(
+            codec,
             columns,
             visibilityColumns,
             data.Span,
-            ref pointer,
             requiredColumns,
             ColumnVisibility.PublicOnly,
             injectMissingCurrentColumns: visibilitySchemaVersion is not null);
@@ -373,18 +379,18 @@ public static class RowEncoder
     {
         ArgumentNullException.ThrowIfNull(schema);
 
-        int pointer = 0;
-        int schemaVersion = ReadRowHeader(data.Span, ref pointer);
+        int schemaVersion = ReadRowHeader(data.Span);
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
             ? columns
             : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
+        CompiledRowCodec codec = GetCodec(schema, schemaVersion, columns);
         return DecodeColumns(
+            codec,
             columns,
             visibilityColumns,
             data.Span,
-            ref pointer,
             requiredColumns,
             ColumnVisibility.Writable,
             injectMissingCurrentColumns: visibilitySchemaVersion is not null);
@@ -429,8 +435,7 @@ public static class RowEncoder
     {
         ArgumentNullException.ThrowIfNull(schema);
 
-        int pointer = 0;
-        int schemaVersion = ReadRowHeader(data.Span, ref pointer);
+        int schemaVersion = ReadRowHeader(data.Span);
 
         // Resolve or build the decode plan for this stored schema version. Plan BUILDING may await lazy
         // schema-history loading; plan EXECUTION below is fully synchronous and span-based, so no span
@@ -444,14 +449,28 @@ public static class RowEncoder
                 : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
             bool injectMissing = visibilitySchemaVersion is not null;
 
-            plan = BuildRowDecodePlan(columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
+            plan = BuildRowDecodePlan(schema, schemaVersion, columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
             decodeState?.Plans.Add(schemaVersion, plan);
+        }
+
+        // Borrowed (zero-copy) decode is chosen per scan and takes precedence over slot-backed: the row
+        // is backed by a RowView over the KV bytes with no per-row ValueSlot[]. The frame is validated
+        // once here, up front, so later lazy per-cell reads are safe.
+        // The per-scan override wins; without one, only the global ForceBorrowed policy turns borrowed on
+        // at this level (the scanner sets the override for Adaptive-borrowed scans — this facade has no
+        // plan/filter context of its own, so Adaptive/ForceEager both mean eager here).
+        bool borrowed = decodeState?.BorrowedDecode ?? (CamusDBConfig.BorrowedDecode == BorrowedDecodePolicy.ForceBorrowed);
+        if (borrowed)
+        {
+            plan.Codec.ValidateFrame(data.Span);
+            RowView view = new(rowId, data, plan.Codec);
+            return QueryRow.FromRowView(rowId, plan.Layout, view, plan.OutputToStored, plan.InjectedDefaults);
         }
 
         // Slot-backed decode is chosen per scan: the caller's RowDecodeState may opt in/out based on
         // its shape (see RowDecodeState.SlotBackedDecode); absent an override, the global default applies.
         bool useSlots = decodeState?.SlotBackedDecode ?? CamusDBConfig.SlotBackedDecode;
-        return ExecuteDecodePlan(plan, data.Span, ref pointer, rowId, useSlots);
+        return ExecuteDecodePlan(plan, data.Span, rowId, useSlots);
     }
 
     /// <summary>
@@ -462,6 +481,8 @@ public static class RowEncoder
     /// two-pass decode.
     /// </summary>
     private static RowDecodePlan BuildRowDecodePlan(
+        TableSchema schema,
+        int schemaVersion,
         List<TableColumnSchema> columns,
         List<TableColumnSchema>? currentColumns,
         IReadOnlySet<string>? requiredColumns,
@@ -524,7 +545,24 @@ public static class RowEncoder
             injected = [];
         }
 
-        return new RowDecodePlan { Layout = layout, Steps = steps, InjectedDefaults = injected };
+        // Inverse map for borrowed decode: output ordinal → stored ordinal (-1 = injected default).
+        int[] outputToStored = new int[layout.Count];
+        Array.Fill(outputToStored, -1);
+        for (int i = 0; i < steps.Length; i++)
+        {
+            int outputOrdinal = steps[i].OutputOrdinal;
+            if (outputOrdinal >= 0)
+                outputToStored[outputOrdinal] = i;
+        }
+
+        return new RowDecodePlan
+        {
+            Layout = layout,
+            Codec = GetCodec(schema, schemaVersion, columns),
+            Steps = steps,
+            OutputToStored = outputToStored,
+            InjectedDefaults = injected,
+        };
     }
 
     /// <summary>
@@ -542,21 +580,23 @@ public static class RowEncoder
     /// both paths are value-identical.
     /// </para>
     /// </summary>
-    private static QueryRow ExecuteDecodePlan(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId, bool useSlots)
+    private static QueryRow ExecuteDecodePlan(RowDecodePlan plan, ReadOnlySpan<byte> data, ObjectIdValue rowId, bool useSlots)
     {
+        // One frame bounds-check before any positional read; a projected-out column costs nothing since
+        // positional access needs no byte-stream skip.
+        plan.Codec.ValidateFrame(data);
+
         if (!useSlots)
-            return ExecuteDecodePlanEager(plan, data, ref pointer, rowId);
+            return ExecuteDecodePlanEager(plan, data, rowId);
 
         ValueSlot[] values = new ValueSlot[plan.Layout.Count];
 
         ColumnDecodeStep[] steps = plan.Steps;
         for (int i = 0; i < steps.Length; i++)
         {
-            ColumnDecodeStep step = steps[i];
-            if (step.OutputOrdinal >= 0)
-                values[step.OutputOrdinal] = ReadValueSlot(step.Type, data, ref pointer);
-            else
-                SkipColumnValue(step.Type, data, ref pointer);
+            int outputOrdinal = steps[i].OutputOrdinal;
+            if (outputOrdinal >= 0)
+                values[outputOrdinal] = plan.Codec.GetSlot(data, i);
         }
 
         (int Ordinal, ColumnValue Value)[] injected = plan.InjectedDefaults;
@@ -571,18 +611,16 @@ public static class RowEncoder
     /// <see cref="ColumnValue"/> as the pipeline did before slot-backed rows. Kept as the kill-switch
     /// path (<see cref="CamusDBConfig.SlotBackedDecode"/> == false) and the A/B baseline.
     /// </summary>
-    private static QueryRow ExecuteDecodePlanEager(RowDecodePlan plan, ReadOnlySpan<byte> data, ref int pointer, ObjectIdValue rowId)
+    private static QueryRow ExecuteDecodePlanEager(RowDecodePlan plan, ReadOnlySpan<byte> data, ObjectIdValue rowId)
     {
         ColumnValue[] values = new ColumnValue[plan.Layout.Count];
 
         ColumnDecodeStep[] steps = plan.Steps;
         for (int i = 0; i < steps.Length; i++)
         {
-            ColumnDecodeStep step = steps[i];
-            if (step.OutputOrdinal >= 0)
-                values[step.OutputOrdinal] = ReadColumnValue(step.Type, data, ref pointer);
-            else
-                SkipColumnValue(step.Type, data, ref pointer);
+            int outputOrdinal = steps[i].OutputOrdinal;
+            if (outputOrdinal >= 0)
+                values[outputOrdinal] = plan.Codec.GetSlot(data, i).ToColumnValue();
         }
 
         (int Ordinal, ColumnValue Value)[] injected = plan.InjectedDefaults;
@@ -659,14 +697,16 @@ public static class RowEncoder
     }
 
     private static Dictionary<string, ColumnValue> DecodeColumns(
+        CompiledRowCodec codec,
         List<TableColumnSchema> columns,
         List<TableColumnSchema>? currentColumns,
         ReadOnlySpan<byte> data,
-        ref int pointer,
         IReadOnlySet<string>? requiredColumns,
         ColumnVisibility visibility,
         bool injectMissingCurrentColumns)
     {
+        codec.ValidateFrame(data);
+
         bool decodeAll = requiredColumns is null;
 
         Dictionary<string, ColumnValue> result = new(decodeAll ? columns.Count : requiredColumns!.Count, StringComparer.OrdinalIgnoreCase);
@@ -675,16 +715,13 @@ public static class RowEncoder
         {
             TableColumnSchema column = columns[i];
 
+            // Positional decode: a not-visible or projected-out column is simply not read — there is no
+            // byte-stream cursor to advance past it.
             if (!IsVisible(column, currentColumns, visibility))
-            {
-                SkipColumnValue(column.Type, data, ref pointer);
                 continue;
-            }
 
             if (decodeAll || requiredColumns!.Contains(column.Name))
-                result.Add(column.Name, ReadColumnValue(column.Type, data, ref pointer));
-            else
-                SkipColumnValue(column.Type, data, ref pointer);
+                result.Add(column.Name, codec.GetSlot(data, i).ToColumnValue());
         }
 
         // Columns added after this row was written are absent from the byte stream.
@@ -911,158 +948,6 @@ public static class RowEncoder
                     elements.Add(ReadArrayElement(elementType, data, ref pointer));
                 return ColumnValue.FromArray(elementType, elements);
             }
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);
-        }
-    }
-
-    /// <summary>
-    /// Reads one stored column value directly into a <see cref="ValueSlot"/> — the slot counterpart of
-    /// <see cref="ReadColumnValue"/>, producing no per-cell <see cref="ColumnValue"/> object for scalars,
-    /// strings, bytes, ids, or UUIDs. Arrays (uncommon) delegate to <see cref="ReadColumnValue"/> and
-    /// pack the result, since a slot array wraps <see cref="ValueSlot"/> elements anyway. Byte-for-byte
-    /// consumes the same bytes as <see cref="ReadColumnValue"/> for the same input.
-    /// </summary>
-    private static ValueSlot ReadValueSlot(ColumnType columnType, ReadOnlySpan<byte> data, ref int pointer)
-    {
-        switch (columnType)
-        {
-            case ColumnType.Id:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeId =>
-                        ValueSlot.FromId(Serializator.ReadObjectId(data, ref pointer).ToString()),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Integer64:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeInteger64 =>
-                        ValueSlot.FromLong(ColumnType.Integer64, Serializator.ReadInt64(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.String:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeString8 or
-                    SerializatorTypes.TypeString16 or
-                    SerializatorTypes.TypeString32 =>
-                        ValueSlot.FromString(Serializator.ReadString(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Float64:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeDouble =>
-                        ValueSlot.FromDouble(ColumnType.Float64, Serializator.ReadDouble(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Bool:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeBool =>
-                        ValueSlot.FromBool(Serializator.ReadBool(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Float32:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeFloat =>
-                        ValueSlot.FromDouble(ColumnType.Float32, (double)Serializator.ReadFloat(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Date:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeDate =>
-                        ValueSlot.FromLong(ColumnType.Date, Serializator.ReadInt64(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.DateTime:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeDateTime =>
-                        ValueSlot.FromLong(ColumnType.DateTime, Serializator.ReadInt64(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Bytes:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                return t switch
-                {
-                    SerializatorTypes.TypeBytes =>
-                        ValueSlot.FromBytes(Serializator.ReadBytesPayload(data, ref pointer)),
-                    SerializatorTypes.TypeNull =>
-                        ValueSlot.Null,
-                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
-                };
-            }
-
-            case ColumnType.Uuid:
-            {
-                int t = Serializator.ReadType(data, ref pointer);
-                if (t == SerializatorTypes.TypeUuid)
-                {
-                    (long high, long low) = Serializator.ReadUuid(data, ref pointer);
-                    return ValueSlot.FromUuid(high, low);
-                }
-                if (t == SerializatorTypes.TypeNull)
-                    return ValueSlot.Null;
-                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
-            }
-
-            case ColumnType.Array:
-                // Uncommon; decode to a ColumnValue then pack (a slot array wraps ValueSlot elements).
-                return ValueSlot.FromColumnValue(ReadColumnValue(columnType, data, ref pointer));
 
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown type " + columnType);
@@ -1328,37 +1213,4 @@ public static class RowEncoder
         }
     }
 
-    private static int CalculateBufferLength(TableSchema schema, IReadOnlyDictionary<string, ColumnValue> row)
-    {
-        int length = 20; // header: 1+4 (schema version) + 1+12 (rowId) + 2 padding
-
-        List<TableColumnSchema> columns = schema.Columns!;
-
-        for (int i = 0; i < columns.Count; i++)
-        {
-            TableColumnSchema column = columns[i];
-
-            if (!SchemaElementStateRules.IsWritable(column))
-            {
-                length += SerializatorTypeSizes.TypeNull;
-                continue;
-            }
-
-            if (!row.TryGetValue(column.Name, out ColumnValue? columnValue) || columnValue.Type == ColumnType.Null)
-            {
-                length += SerializatorTypeSizes.TypeNull;
-                continue;
-            }
-
-            if (column.Type != columnValue.Type)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.UnknownType,
-                    $"Type {columnValue.Type} cannot be assigned to {column.Name} ({column.Type})"
-                );
-
-            length += ColumnValueSize(columnValue);
-        }
-
-        return length;
-    }
 }

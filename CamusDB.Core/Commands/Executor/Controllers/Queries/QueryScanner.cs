@@ -41,9 +41,16 @@ internal sealed class QueryScanner
     /// </summary>
     private static bool ShouldUseBorrowedDecode(QueryPlan plan)
     {
-        if (CamusDBConfig.BorrowedDecode)
-            return true;
+        switch (CamusDBConfig.BorrowedDecode)
+        {
+            case BorrowedDecodePolicy.ForceBorrowed:
+                return true;
+            case BorrowedDecodePolicy.ForceEager:
+                return false;
+        }
 
+        // Adaptive: only the strict-win, memory-safe case — a residual filter, and no downstream operator
+        // that retains rows across scan iterations (a borrowed row holds its full KV bytes for its life).
         if (plan.ExecutionFilter is null)
             return false;
 

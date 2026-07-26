@@ -34,6 +34,14 @@ public sealed class TestRowEncoder
     ) => new(name, name, type, notNull, null, state);
 
     /// <summary>
+    /// An Array column carrying its element type on the schema, as real <c>ARRAY(type)</c> DDL produces.
+    /// The positional codec compiles the element type from the schema (not per row), so array columns
+    /// must declare it.
+    /// </summary>
+    private static TableColumnSchema ArrayCol(string name, ColumnType elementType) =>
+        new(name, name, ColumnType.Array, notNull: false, defaultValue: null, arrayElementType: elementType);
+
+    /// <summary>
     /// Builds a minimal TableSchema whose SchemaHistory[version] matches its Columns list,
     /// so both Encode and Decode agree on what columns exist.
     /// </summary>
@@ -504,7 +512,7 @@ public sealed class TestRowEncoder
     [Test]
     public void RoundTrip_Uuid_Array()
     {
-        TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));
+        TableSchema schema = MakeSchema(0, ArrayCol("a", ColumnType.Uuid));
         ObjectIdValue rowId = RowId();
 
         Guid g1 = Guid.NewGuid();
@@ -524,7 +532,7 @@ public sealed class TestRowEncoder
     [Test]
     public void RoundTrip_Array_Empty()
     {
-        TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));
+        TableSchema schema = MakeSchema(0, ArrayCol("a", ColumnType.Integer64));
         ObjectIdValue rowId = RowId();
 
         Dictionary<string, ColumnValue> row = new()
@@ -542,7 +550,7 @@ public sealed class TestRowEncoder
     [Test]
     public void RoundTrip_Array_WithNullElement()
     {
-        TableSchema schema = MakeSchema(0, Col("a", ColumnType.Array));
+        TableSchema schema = MakeSchema(0, ArrayCol("a", ColumnType.Integer64));
         ObjectIdValue rowId = RowId();
 
         Dictionary<string, ColumnValue> row = new()
@@ -569,7 +577,7 @@ public sealed class TestRowEncoder
             Col("dt",   ColumnType.DateTime),
             Col("d",    ColumnType.Date),
             Col("blob", ColumnType.Bytes),
-            Col("arr",  ColumnType.Array)
+            ArrayCol("arr", ColumnType.Integer64)
         );
         ObjectIdValue rowId = RowId();
 

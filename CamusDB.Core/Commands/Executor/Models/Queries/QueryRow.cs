@@ -8,6 +8,7 @@
 
 using System.Collections;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -17,14 +18,15 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// One layout is shared by every row a scan or join node emits; the per-row array owns the cell values.
 ///
 /// <para>
-/// <b>Two backings.</b> A row is built either from decoded <see cref="ValueSlot"/>s (the scan/decode
-/// path) or from ready <see cref="ColumnValue"/>s (synthetic producers: projection, join, merge,
-/// aggregate). Slot-backed rows convert to <see cref="ColumnValue"/> <b>lazily, per accessed cell</b>
-/// (cached), so a row that is filtered out — or a cell that is never read — never pays for a
-/// <see cref="ColumnValue"/>. This is the whole point of the slot path: decode allocates one
-/// <c>ValueSlot[]</c> and zero per-cell objects, and only the cells that actually escape materialize.
-/// Synthetic producers already hold <see cref="ColumnValue"/>s, so they use the eager backing with no
-/// slot round-trip.
+/// <b>Three backings.</b> A row is built from ready <see cref="ColumnValue"/>s (synthetic producers:
+/// projection, join, merge, aggregate — eager), from decoded <see cref="ValueSlot"/>s (the slot decode
+/// path), or from a borrowed <see cref="RowView"/> over the raw KV bytes (the zero-copy decode path).
+/// Both decode backings convert to <see cref="ColumnValue"/> <b>lazily, per accessed cell</b> (cached),
+/// so a row that is filtered out — or a cell that is never read — never pays for a
+/// <see cref="ColumnValue"/>. The borrowed backing goes further: it allocates no <c>ValueSlot[]</c> at
+/// all and decodes an unread cell not even to a <see cref="ValueSlot"/>, reading straight from the
+/// borrowed bytes; a fixed scalar it does read allocates nothing. Synthetic producers already hold
+/// <see cref="ColumnValue"/>s, so they use the eager backing with no round-trip.
 /// </para>
 ///
 /// <para>
@@ -55,10 +57,17 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     /// <summary>The plan-bound layout that maps column names to positions.</summary>
     public RowLayout Layout { get; }
 
-    // Exactly one primary backing is non-null at construction:
-    //   _slots != null  → decode path; _eager is filled lazily (whole-row) or _cellCache per-cell.
-    //   _slots == null  → eager path; _eager holds the values directly.
+    // Exactly one primary backing is chosen at construction:
+    //   _eager   != null → eager path; _eager holds ready ColumnValues directly.
+    //   _slots   != null → decode path; cells materialize lazily from ValueSlots (cached per cell).
+    //   _rowView != null → borrowed path; cells materialize lazily straight from the row's KV bytes,
+    //                      with no up-front ValueSlot[] — a filtered-out or unread cell decodes nothing.
+    // Slot- and view-backed rows may promote to _eager on a whole-row read.
     private readonly ValueSlot[]? _slots;
+    private readonly RowView? _rowView;
+    // For a view-backed row: output ordinal → stored (codec) ordinal, or -1 for a column injected as a
+    // default (added after the row was written); injected cells are pre-placed in _cellCache.
+    private readonly int[]? _outputToStored;
     private ColumnValue[]? _eager;
     private ColumnValue?[]? _cellCache;
 
@@ -88,6 +97,42 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     internal static QueryRow FromSlots(ObjectIdValue rowId, RowLayout layout, ValueSlot[] slots)
         => new(rowId, layout, slots, false);
 
+    private QueryRow(ObjectIdValue rowId, RowLayout layout, RowView view, int[] outputToStored, ColumnValue?[]? cellCache)
+    {
+        RowId = rowId;
+        Layout = layout;
+        _rowView = view;
+        _outputToStored = outputToStored;
+        _cellCache = cellCache;
+        _slots = null;
+        _eager = null;
+    }
+
+    /// <summary>
+    /// Borrowed backing — the zero-copy decode path. The row holds a <see cref="RowView"/> over the KV
+    /// bytes and decodes each cell on demand (mapping output ordinal → stored ordinal via
+    /// <paramref name="outputToStored"/>), so no <c>ValueSlot[]</c> is allocated and a cell that is never
+    /// read decodes nothing. Columns added after the row was written (<paramref name="injectedDefaults"/>,
+    /// stored ordinal -1) are pre-placed in the per-cell cache. Internal because <see cref="RowView"/> is
+    /// internal; value-identical to the slot/eager backings for the same row.
+    /// </summary>
+    internal static QueryRow FromRowView(
+        ObjectIdValue rowId,
+        RowLayout layout,
+        RowView view,
+        int[] outputToStored,
+        (int Ordinal, ColumnValue Value)[] injectedDefaults)
+    {
+        ColumnValue?[]? cache = null;
+        if (injectedDefaults.Length > 0)
+        {
+            cache = new ColumnValue?[layout.Count];
+            for (int i = 0; i < injectedDefaults.Length; i++)
+                cache[injectedDefaults[i].Ordinal] = injectedDefaults[i].Value;
+        }
+        return new QueryRow(rowId, layout, view, outputToStored, cache);
+    }
+
     /// <summary>
     /// True when this row is slot-backed (lazy per-cell materialization); false when eager
     /// (<see cref="ColumnValue"/><c>[]</c>). Reflects the decode path chosen for the producing scan —
@@ -95,6 +140,13 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     /// tests and diagnostics; consumers read values through <see cref="GetColumnValue"/> regardless.
     /// </summary>
     internal bool IsSlotBacked => _slots is not null;
+
+    /// <summary>
+    /// True when this row is borrowed-backed (a <see cref="RowView"/> over raw KV bytes, lazy per-cell,
+    /// no <c>ValueSlot[]</c>) and has not yet been promoted to the eager backing. Exposed for tests and
+    /// diagnostics; consumers read values through <see cref="GetColumnValue"/> regardless of backing.
+    /// </summary>
+    internal bool IsBorrowedBacked => _rowView is not null && _eager is null;
 
     /// <summary>
     /// The cell at <paramref name="ordinal"/> as a <see cref="ColumnValue"/>. For a slot-backed row this
@@ -107,7 +159,44 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
             return _eager[ordinal];
 
         _cellCache ??= new ColumnValue?[Layout.Count];
-        return _cellCache[ordinal] ??= _slots![ordinal].ToColumnValue();
+        if (_cellCache[ordinal] is { } cached)
+            return cached;
+
+        if (_rowView is { } view)
+        {
+            int stored = _outputToStored![ordinal];
+            // Injected (added-after-write) columns have stored == -1 and were pre-placed in the cache, so
+            // reaching here with stored < 0 means a genuinely absent value → NULL.
+            return _cellCache[ordinal] = stored < 0 ? ColumnValue.Null : view.GetSlot(stored).ToColumnValue();
+        }
+
+        return _cellCache[ordinal] = _slots![ordinal].ToColumnValue();
+    }
+
+    /// <summary>
+    /// Exposes a borrowed cell's raw UTF-8 bytes without materializing a managed <see cref="string"/> —
+    /// the seam operators use for byte-native string comparison. Succeeds only for a borrowed-backed row
+    /// whose cell at <paramref name="ordinal"/> is a non-NULL <see cref="ColumnType.String"/> that has not
+    /// already been materialized into the cache; the returned span is valid only for the row's borrowed
+    /// lifetime, so the caller must consume it immediately. Returns <see langword="false"/> in every other
+    /// case (eager/slot backing, injected default, NULL, non-string column, or already-cached cell), and
+    /// the caller falls back to <see cref="GetColumnValue"/>.
+    /// </summary>
+    internal bool TryGetUtf8(int ordinal, out ReadOnlySpan<byte> utf8)
+    {
+        utf8 = default;
+
+        if (_rowView is not { } view || _eager is not null)
+            return false;
+        if (_cellCache is not null && _cellCache[ordinal] is not null)
+            return false;
+
+        int stored = _outputToStored![ordinal];
+        if (stored < 0 || !view.Codec.IsStringColumn(stored) || view.IsNull(stored))
+            return false;
+
+        utf8 = view.GetVariableSlice(stored);
+        return true;
     }
 
     /// <summary>
@@ -118,9 +207,22 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     /// materialization. Used by ORDER BY so sorting a decoded result set allocates nothing per key.
     /// </summary>
     internal int CompareCellTo(int ordinal, QueryRow other, int otherOrdinal)
-        => _slots is not null && _eager is null && other._slots is not null && other._eager is null
-            ? _slots[ordinal].CompareTo(other._slots[otherOrdinal])
-            : GetColumnValue(ordinal).CompareTo(other.GetColumnValue(otherOrdinal));
+    {
+        if (_slots is not null && _eager is null && other._slots is not null && other._eager is null)
+            return _slots[ordinal].CompareTo(other._slots[otherOrdinal]);
+
+        // Both borrowed: compare on the decoded ValueSlots straight from the bytes, materializing no
+        // ColumnValue for the sort key. Injected (stored < 0) cells fall through to the general path.
+        if (_rowView is { } v1 && _eager is null && other._rowView is { } v2 && other._eager is null)
+        {
+            int s1 = _outputToStored![ordinal];
+            int s2 = other._outputToStored![otherOrdinal];
+            if (s1 >= 0 && s2 >= 0)
+                return v1.GetSlot(s1).CompareTo(v2.GetSlot(s2));
+        }
+
+        return GetColumnValue(ordinal).CompareTo(other.GetColumnValue(otherOrdinal));
+    }
 
     /// <summary>
     /// Column values in ordinal order. For a slot-backed row this materializes <b>every</b> cell (and
@@ -133,17 +235,11 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
             if (_eager is not null)
                 return _eager;
 
+            // Unified over the slot and borrowed backings: GetColumnValue reads each cell from whichever
+            // backing this row has (and its cache), so the whole-row materialization is backing-agnostic.
             ColumnValue[] full = new ColumnValue[Layout.Count];
-            if (_cellCache is null)
-            {
-                for (int i = 0; i < full.Length; i++)
-                    full[i] = _slots![i].ToColumnValue();
-            }
-            else
-            {
-                for (int i = 0; i < full.Length; i++)
-                    full[i] = _cellCache[i] ??= _slots![i].ToColumnValue();
-            }
+            for (int i = 0; i < full.Length; i++)
+                full[i] = GetColumnValue(i);
 
             // Promote to the eager backing so repeated whole-row access is free and the cache is dropped.
             _eager = full;
@@ -158,9 +254,17 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     /// (e.g. join input aliasing).
     /// </summary>
     public QueryRow WithLayout(RowLayout layout)
-        => _slots is not null && _eager is null
-            ? FromSlots(RowId, layout, _slots)
-            : new QueryRow(RowId, layout, Values);
+    {
+        if (_slots is not null && _eager is null)
+            return FromSlots(RowId, layout, _slots);
+
+        // Requalification keeps the same columns/ordinals, so the borrowed view and output→stored map stay
+        // valid; clone the cache so the two rows never share mutable per-cell state.
+        if (_rowView is { } view && _eager is null)
+            return new QueryRow(RowId, layout, view, _outputToStored!, (ColumnValue?[]?)_cellCache?.Clone());
+
+        return new QueryRow(RowId, layout, Values);
+    }
 
     // ── IReadOnlyDictionary<string, ColumnValue> adapter (per-cell materialization) ──
 

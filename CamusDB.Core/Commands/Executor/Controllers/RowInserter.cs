@@ -188,6 +188,11 @@ internal sealed class RowInserter
         InsertTicket ticket = state.Ticket;
         KvTransaction tx = ticket.TxnState;
 
+        // Compiled once per statement: every inserted row is written under the current schema version,
+        // so its positional layout is fixed for the whole VALUES list.
+        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
+        List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
+
         // Process rows in bounded chunks so a large VALUES list does not retain all serialized
         // row bytes on the heap before the first KV write. Chunk size is tied to
         // SpillEffectiveThreshold so tests that set ForceSpillThresholdRows drive both spill
@@ -233,7 +238,7 @@ internal sealed class RowInserter
             chunk.Add(new KvTableStore.RowWrite
             {
                 RowId = rowId,
-                RowData = RowEncoder.EncodeStorageValue(table.Schema, values, rowId),
+                RowData = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, values)),
                 IndexEntries = indexEntries,
             });
 

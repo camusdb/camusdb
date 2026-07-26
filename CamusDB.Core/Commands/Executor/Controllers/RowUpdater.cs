@@ -401,6 +401,11 @@ public sealed class RowUpdater
             rowIds.Add(chunkRows[i].RowId);
         ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds).ConfigureAwait(false);
 
+        // The rewritten row is stored under the current schema version, so its positional layout is
+        // fixed for the whole chunk. Compiled once here rather than per row.
+        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
+        List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
+
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
 
         for (int i = 0; i < chunkRows.Count; i++)
@@ -422,7 +427,7 @@ public sealed class RowUpdater
             CheckForNotNulls(table, newRow);
             CheckEnforcer.EnforceOnRow(table, newRow);
 
-            byte[] newData = RowEncoder.EncodeStorageValue(table.Schema, newRow, rowId);
+            byte[] newData = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, newRow));
 
             (IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries,
              IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
