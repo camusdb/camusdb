@@ -28,6 +28,37 @@ internal sealed class QueryScanner
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Decides whether a scan should decode rows with the borrowed (zero-copy <see cref="RowView"/>)
+    /// backing. Benchmarks show borrowed decode is a broad win for scans that reject or project
+    /// (−28% to −78% allocations, up to 2.7× faster), driven hardest by the byte-native string-equality
+    /// filter path — but it is enabled only when <b>both</b> hold: a residual filter exists (an unfiltered
+    /// <c>SELECT *</c> reads every cell and regresses slightly, so it stays eager), and no downstream
+    /// operator <b>retains</b> rows across scan iterations. A borrowed row holds its <i>full</i> KV bytes
+    /// for its lifetime, so retaining it (ORDER BY / GROUP BY / DISTINCT / semi-join) would hold more live
+    /// memory than the projected-only slot path; those shapes keep the existing decode. The global
+    /// <see cref="CamusDBConfig.BorrowedDecode"/> override still forces it on everywhere for A/B runs.
+    /// </summary>
+    private static bool ShouldUseBorrowedDecode(QueryPlan plan)
+    {
+        if (CamusDBConfig.BorrowedDecode)
+            return true;
+
+        if (plan.ExecutionFilter is null)
+            return false;
+
+        foreach (QueryPlanStep step in plan.Steps)
+        {
+            if (step.Type is QueryPlanStepType.SortBy
+                          or QueryPlanStepType.Aggregate
+                          or QueryPlanStepType.Distinct
+                          or QueryPlanStepType.SemiJoinProbe)
+                return false;
+        }
+
+        return true;
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ScanUsingTableIndex(
         QueryPlan plan,
         QueryFilterer queryFilterer
@@ -59,7 +90,11 @@ internal sealed class QueryScanner
         // every scanned row is consumed, so the eager path is faster. The global flag still forces slots
         // on everywhere when set (kill-switch / benchmark baseline) — see RowDecodeState.SlotBackedDecode.
         RowEncoder.RowDecodeState decodeState =
-            new() { SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null };
+            new()
+            {
+                SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null,
+                BorrowedDecode = ShouldUseBorrowedDecode(plan),
+            };
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
         {
@@ -173,7 +208,11 @@ internal sealed class QueryScanner
         // every scanned row is consumed, so the eager path is faster. The global flag still forces slots
         // on everywhere when set (kill-switch / benchmark baseline) — see RowDecodeState.SlotBackedDecode.
         RowEncoder.RowDecodeState decodeState =
-            new() { SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null };
+            new()
+            {
+                SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null,
+                BorrowedDecode = ShouldUseBorrowedDecode(plan),
+            };
         int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
 
