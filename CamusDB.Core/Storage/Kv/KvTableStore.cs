@@ -638,11 +638,18 @@ public sealed class KvTableStore
     /// This is a read-only operation: no locks are acquired, and no keys are tracked as
     /// modified. Serializable read-write callers that need shared point locks must use
     /// <see cref="GetRow"/> per entry.
+    ///
+    /// <paramref name="trackReadSet"/> controls commit-time read-set folding, and defaults to
+    /// <c>true</c> so a mutation batch-read keeps its read dependencies. Pass <c>false</c> from a
+    /// plain query fetch: registering one read dependency per fetched row makes the coordinator
+    /// probe every one of them again at commit, which turns a large scan into a commit-time cost
+    /// proportional to the rows it touched. See <see cref="ScanRows"/> for the full rationale.
     /// </summary>
     public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool trackReadSet = true)
     {
         if (rowIds.Count == 0)
             return [];
@@ -673,7 +680,7 @@ public sealed class KvTableStore
         // the identical batch, which the coordinator can only replay idempotently under the same id) and a
         // fresh id is minted only when the set shrinks (confirmed reads removed). Unregistered reads carry
         // the default id (no folding), so the identity is immaterial there.
-        string readCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+        string readCoordinatorKey = trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "";
         TransactionOperationId readOperationId = readCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
         while (pending.Count > 0)
@@ -823,20 +830,36 @@ public sealed class KvTableStore
     /// When <paramref name="tx"/> carries a non-Zero <see cref="KvTransaction.ReadTimestamp"/>
     /// the scan is pinned to that snapshot for its entire duration, including across page
     /// boundaries. All other transaction types pass Zero (read-committed fast path, unchanged).
+    ///
+    /// <para><b>Read-set folding is off by default for scans.</b> A folded read registers one
+    /// commit-time dependency per scanned key, and the coordinator re-probes every one of them
+    /// before it can decide — so folding a scan makes commit cost scale with rows scanned, which
+    /// is exactly the cost a scan-heavy transaction cannot afford. A query scan does not need it:
+    /// a Serializable read-write transaction already holds a shared range lock over the same
+    /// bucket for the life of the transaction (see <see cref="AcquireRowRangeLockAsync"/>), which
+    /// is strictly stronger — it also fences phantom inserts, which per-key folding can never
+    /// detect. Under Read Committed there is no repeatable-read promise for a plain query to
+    /// weaken.</para>
+    ///
+    /// <para>Callers whose scan drives a subsequent write — the UPDATE/DELETE locate scan, index
+    /// backfill, constraint validation — must pass <paramref name="trackReadSet"/> = <c>true</c>:
+    /// there the observed rows decide what gets written, so a concurrent modification to a scanned
+    /// row has to invalidate the transaction.</para>
     /// </summary>
     public async IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> ScanRows(
         KvTransaction tx,
         long? maxRows = null,
         ObjectIdValue? afterRowId = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        bool trackReadSet = false)
     {
         if (maxRows is <= 0)
             yield break;
 
-        // Open the deferred Kahuna session before reading tx.FoldReads / tx.TransactionId below, so an
-        // optimistic transaction that scans before its first write folds these reads (FoldReads is
-        // false while TransactionId is Zero). No-op for eager, read-only, and already-started
-        // transactions.
+        // Open the deferred Kahuna session before reading tx.TransactionId below: the scan must run
+        // under the transaction's own identity, and a tracked scan can only fold reads once the
+        // session exists (FoldReads is false while TransactionId is Zero). No-op for eager,
+        // read-only, and already-started transactions.
         await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
 
         if (ancestorStores.Length == 0)
@@ -845,10 +868,10 @@ public sealed class KvTableStore
             long emitted = 0;
             int prefixLen = rowKeyPrefix.Length;
 
-            // Register the scan for read-set folding on the optimistic / TrackAndValidate path so every
-            // scanned row becomes a commit-time read observation; empty coordinatorKey leaves it
-            // unregistered (pessimistic / snapshot), byte-for-byte the prior behavior.
-            string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+            // Register the scan for read-set folding only when the caller asked for it (a scan that
+            // drives a write) and the transaction folds reads at all; otherwise the empty
+            // coordinatorKey leaves every scanned row out of the commit-time read set.
+            string scanCoordinatorKey = trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
@@ -900,7 +923,7 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken, trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
@@ -1129,18 +1152,6 @@ public sealed class KvTableStore
     }
 
     /// <summary>
-    /// Ordered scan over a secondary index within optional inclusive bounds [from, to].
-    /// Yields (decodedKey, rowId) pairs in ascending encoded-key order.
-    ///
-    /// <paramref name="keyTypes"/> must match the column types of the index key in order.
-    /// When <paramref name="unique"/> is false the stored key has the rowId hex (24 chars)
-    /// appended directly to the encoded key (no separator); the rowId is stripped before decoding.
-    ///
-    /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so the scan is pinned to
-    /// the same consistent snapshot as <see cref="GetRow"/> and <see cref="LookupUnique"/>
-    /// across all pages. Zero is passed for non-snapshot transactions (read-committed fast path).
-    /// </summary>
-    /// <summary>
     /// Extracts the stored/payload (INCLUDE) tuple from a secondary-index entry value payload. The
     /// payload is <c>rowId (24 bytes) ‖ includeTuple</c>; anything past the fixed 24-byte rowId is the
     /// tuple. Returns an empty span for a plain (non-covering) index whose payload is exactly the rowId.
@@ -1163,6 +1174,23 @@ public sealed class KvTableStore
             ? payload[..BranchKvCodec.IndexRowIdPayloadLength]
             : payload);
 
+    /// <summary>
+    /// Ordered scan over a secondary index within optional inclusive bounds [from, to].
+    /// Yields (decodedKey, rowId) pairs in ascending encoded-key order.
+    ///
+    /// <paramref name="keyTypes"/> must match the column types of the index key in order.
+    /// When <paramref name="unique"/> is false the stored key has the rowId hex (24 chars)
+    /// appended directly to the encoded key (no separator); the rowId is stripped before decoding.
+    ///
+    /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so the scan is pinned to
+    /// the same consistent snapshot as <see cref="GetRow"/> and <see cref="LookupUnique"/>
+    /// across all pages. Zero is passed for non-snapshot transactions (read-committed fast path).
+    ///
+    /// <paramref name="trackReadSet"/> follows the same rule as <see cref="ScanRows"/>: off for a
+    /// query scan, because folding one commit-time dependency per scanned entry makes commit cost
+    /// scale with the scan while the index range lock held by a Serializable read-write transaction
+    /// already covers the same bucket more strongly; on for a scan that decides a subsequent write.
+    /// </summary>
     public async IAsyncEnumerable<(CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)> ScanIndex(
         KvTransaction tx,
         string indexId,
@@ -1173,14 +1201,15 @@ public sealed class KvTableStore
         bool fromInclusive = true,
         bool toInclusive = true,
         long? maxRows = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        bool trackReadSet = false)
     {
         if (maxRows is <= 0)
             yield break;
 
-        // Open the deferred Kahuna session before the fold decision below, so an optimistic
-        // transaction that scans an index before its first write folds these reads. No-op for eager,
-        // read-only, and already-started transactions.
+        // Open the deferred Kahuna session before reading tx.TransactionId below: the scan must run
+        // under the transaction's own identity, and a tracked scan can only fold reads once the
+        // session exists. No-op for eager, read-only, and already-started transactions.
         await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
 
         long emitted = 0;
@@ -1204,8 +1233,9 @@ public sealed class KvTableStore
         if (ancestorStores.Length == 0)
         {
             // Root database: stream directly without materialization. Register for read-set folding
-            // on the optimistic / TrackAndValidate path; empty coordinatorKey = unregistered.
-            string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+            // only when the caller asked for it (a scan that drives a write) and the transaction
+            // folds reads at all; empty coordinatorKey = unregistered.
+            string scanCoordinatorKey = trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
             await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
@@ -1299,7 +1329,7 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];

@@ -155,7 +155,7 @@ internal sealed class SemiJoinExecutor
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
             false, true, false,
-            maxRows: null))
+            maxRows: null, trackReadSet: outerTicket.ExclusivePredicateLocks))
         {
             ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId).ConfigureAwait(false);
             if (data is null || data.Value.Length == 0)
@@ -186,7 +186,8 @@ internal sealed class SemiJoinExecutor
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
+            outerTicket.TxnState, maxRows: null, trackReadSet: outerTicket.ExclusivePredicateLocks))
         {
             if (data.Length == 0)
                 continue;
@@ -225,7 +226,8 @@ internal sealed class SemiJoinExecutor
         // is not part of the subquery result set and must not poison the anti-join.
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: null))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
+            outerTicket.TxnState, maxRows: null, trackReadSet: outerTicket.ExclusivePredicateLocks))
         {
             if (data.Length == 0)
                 continue;
@@ -256,7 +258,8 @@ internal sealed class SemiJoinExecutor
         TableDescriptor inner = node.InnerTable;
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
 
-        await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(outerTicket.TxnState, maxRows: 1))
+        await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
+            outerTicket.TxnState, maxRows: 1, trackReadSet: outerTicket.ExclusivePredicateLocks))
         {
             if (data.Length > 0)
                 return true;

@@ -861,11 +861,15 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// Optimistic read-set validation: a transaction that read a row which a concurrent transaction
-    /// then modified and committed must ABORT at commit, even though the two transactions wrote
-    /// disjoint keys (a read-write / write-skew conflict). This exercises the read-folding path —
-    /// the optimistic transaction's read is registered as an observation and validated against the
-    /// current committed revision at commit.
+    /// Optimistic read-set validation: a transaction that point-read a row which a concurrent
+    /// transaction then modified and committed must ABORT at commit, even though the two
+    /// transactions wrote disjoint keys (a read-write / write-skew conflict). This exercises the
+    /// read-folding path — the optimistic transaction's read is registered as an observation and
+    /// validated against the current committed revision at commit.
+    ///
+    /// The read here is a primary-key lookup on purpose. Point reads always fold; a plain query
+    /// SCAN deliberately does not, so a full-table SELECT would no longer produce this abort — see
+    /// <see cref="TestOptimisticQueryScanIsNotFoldedIntoReadSet"/>.
     /// </summary>
     [Test]
     [NonParallelizable]
@@ -889,7 +893,7 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
             isolationLevel: CamusIsolationLevel.ReadCommitted,
             locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
         (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
-            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM accounts", null));
+            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM accounts WHERE id = \"a\"", null));
         List<QueryResultRow> t1rows = await t1cursor.ToListAsync();
         Assert.AreEqual("100", t1rows.Single().Row["balance"].StrValue);
 
@@ -914,6 +918,120 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
         int rowCount = (await cursor.ToListAsync()).Count;
         await database.Transactions.CommitAsync(txq);
         Assert.AreEqual(1, rowCount, "The aborted optimistic transaction's insert must not persist");
+    }
+
+    /// <summary>
+    /// A plain query scan is NOT folded into the commit-time read set. Same shape as
+    /// <see cref="TestOptimisticReadWriteConflictAbortsAtCommit"/> but the read is a full-table
+    /// SELECT instead of a primary-key lookup, and the transaction must now COMMIT: a concurrent
+    /// update to a row the query merely scanned is not a conflict.
+    ///
+    /// This is deliberate. Folding a scan registers one commit-time dependency per scanned row and
+    /// the coordinator re-probes every one of them before it can decide, so a scan-heavy
+    /// transaction paid a commit cost proportional to the rows it read. A query does not need it:
+    /// under Serializable the scan holds a shared range lock over the same bucket for the life of
+    /// the transaction, which also fences phantoms that per-key folding could never catch; under
+    /// Read Committed there is no repeatable-read promise for a query to weaken. Scans that decide
+    /// a write keep folding — see <see cref="TestUpdateLocateScanStillFoldsScannedRows"/>.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestOptimisticQueryScanIsNotFoldedIntoReadSet()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE balances (id STRING NOT NULL PRIMARY KEY, balance STRING NOT NULL)",
+            null));
+
+        KvTransaction seed = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(seed, dbname,
+            "INSERT INTO balances (id, balance) VALUES (\"a\", \"100\")", null));
+        await database.Transactions.CommitAsync(seed);
+
+        // T1 (optimistic) scans the table. No read dependency is registered for the scanned rows.
+        KvTransaction t1 = await database.Transactions.BeginAsync(
+            isolationLevel: CamusIsolationLevel.ReadCommitted,
+            locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
+        (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
+            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM balances", null));
+        Assert.AreEqual("100", (await t1cursor.ToListAsync()).Single().Row["balance"].StrValue);
+
+        // T2 modifies the row T1 scanned, and commits.
+        KvTransaction t2 = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(t2, dbname,
+            "UPDATE balances SET balance = \"200\" WHERE id = \"a\"", null));
+        await database.Transactions.CommitAsync(t2);
+
+        // T1 writes a disjoint key and commits successfully — the scan was never a dependency.
+        await executor.ExecuteNonSQLQuery(new(t1, dbname,
+            "INSERT INTO balances (id, balance) VALUES (\"b\", \"50\")", null));
+        await database.Transactions.CommitAsync(t1);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id FROM balances", null));
+        int rowCount = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txq);
+        Assert.AreEqual(2, rowCount, "The optimistic transaction's insert must persist: a scanned row is not a read dependency");
+    }
+
+    /// <summary>
+    /// The UPDATE locate scan still folds every row it scanned, including rows the WHERE rejected
+    /// and which the statement therefore never wrote. Here a concurrent transaction edits such a
+    /// row so that it would now match the UPDATE's predicate; because the row was in the locate
+    /// scan's read set, the optimistic UPDATE must abort rather than silently commit a result that
+    /// skipped a matching row.
+    ///
+    /// Write-intent conflict detection alone cannot catch this — the two transactions wrote
+    /// disjoint rows — which is why a write-driving scan keeps folding while a query scan does not.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestUpdateLocateScanStillFoldsScannedRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.ExecuteDDLSQL(new(
+            await database.Transactions.BeginAsync(),
+            dbname,
+            "CREATE TABLE tiers (id STRING NOT NULL PRIMARY KEY, tier STRING NOT NULL, note STRING NOT NULL)",
+            null));
+
+        KvTransaction seed = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(seed, dbname,
+            "INSERT INTO tiers (id, tier, note) VALUES (\"a\", \"gold\", \"-\")", null));
+        await executor.ExecuteNonSQLQuery(new(seed, dbname,
+            "INSERT INTO tiers (id, tier, note) VALUES (\"b\", \"silver\", \"-\")", null));
+        await database.Transactions.CommitAsync(seed);
+
+        // T1 (optimistic) updates every gold row. "tier" is not indexed, so the locate scan reads
+        // BOTH rows and writes only "a" — row "b" is read-only for this transaction.
+        KvTransaction t1 = await database.Transactions.BeginAsync(
+            isolationLevel: CamusIsolationLevel.ReadCommitted,
+            locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
+        await executor.ExecuteNonSQLQuery(new(t1, dbname,
+            "UPDATE tiers SET note = \"touched\" WHERE tier = \"gold\"", null));
+
+        // T2 promotes row "b" to gold and commits: T1's result is now missing a matching row.
+        KvTransaction t2 = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(t2, dbname,
+            "UPDATE tiers SET tier = \"gold\" WHERE id = \"b\"", null));
+        await database.Transactions.CommitAsync(t2);
+
+        Assert.ThrowsAsync<CamusDBException>(async () =>
+            await database.Transactions.CommitAsync(t1),
+            "An UPDATE must abort when a row its locate scan read was modified by a committed peer");
+
+        // The aborted UPDATE's write must not have landed.
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id, note FROM tiers WHERE id = \"a\"", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txq);
+        Assert.AreEqual("-", rows.Single().Row["note"].StrValue, "The aborted UPDATE must not persist its write");
     }
 
     /// <summary>

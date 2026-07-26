@@ -300,13 +300,21 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
             "INSERT INTO deferred_accounts (id, balance) VALUES (\"a\", \"100\")", null));
         await db.Transactions.CommitAsync(seed);
 
-        // T1: deferred optimistic. Its SELECT (before any write) must open the session and fold the
-        // read observation — this is the path that silently failed to fold before the scan ensure-start fix.
+        // T1: deferred optimistic. Its first SELECT is a scan, and it must open the session even
+        // though a scan no longer folds its reads — the session has to exist before any later
+        // statement, and this is the path that silently skipped ensure-start before.
         KvTransaction t1 = await coord.StartAsync(
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             KeyValueTransactionLocking.Optimistic, deferStart: true);
-        (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
+        (_, IAsyncEnumerable<QueryResultRow> t1scan) =
             await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM deferred_accounts", null));
+        Assert.AreEqual("100", (await t1scan.ToListAsync()).Single().Row["balance"].StrValue);
+        Assert.That(t1.TransactionId, Is.Not.EqualTo(HLCTimestamp.Zero), "a scan must open the deferred session");
+
+        // The folded observation comes from a point read: those still register a read dependency,
+        // which is what the commit-time validation below exercises.
+        (_, IAsyncEnumerable<QueryResultRow> t1cursor) =
+            await executor.ExecuteSQLQuery(new(t1, dbname, "SELECT id, balance FROM deferred_accounts WHERE id = \"a\"", null));
         List<QueryResultRow> t1rows = await t1cursor.ToListAsync();
         Assert.AreEqual("100", t1rows.Single().Row["balance"].StrValue);
 

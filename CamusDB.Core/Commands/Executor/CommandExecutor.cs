@@ -1428,8 +1428,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             try
             {
+                // Each scanned row produces an index entry in this same transaction, so the rows read
+                // are a genuine commit dependency and must stay in the read set.
                 await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                    tx, afterRowId: afterRowId).ConfigureAwait(false))
+                    tx, afterRowId: afterRowId, trackReadSet: true).ConfigureAwait(false))
                 {
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                         table.Schema, tx.TransactionId, rowId, data,

@@ -97,6 +97,9 @@ internal sealed class TableAnalyzer
         // Request one row past the sample limit so the sentinel can set isSampled=true;
         // the sentinel is detected below and not counted toward rowCount.
         long? scanLimit = limit.HasValue ? limit.Value + 1 : null;
+        // Statistics sampling never folds its reads: the sampled rows are not a correctness
+        // dependency of anything this transaction writes, and letting a concurrent update to a
+        // sampled row abort the analyze would make ANALYZE fail for no reason.
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(tx, maxRows: scanLimit))
         {
             if (limit.HasValue && rowCount >= limit.Value)
