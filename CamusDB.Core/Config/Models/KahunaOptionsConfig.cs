@@ -11,8 +11,11 @@ namespace CamusDB.Core.Config.Models;
 /// <summary>
 /// Allow-listed Kahuna engine tunables surfaced through the <c>kahuna:</c> YAML section and
 /// applied to <see cref="Kahuna.EmbeddedKahunaOptions"/> for both cluster and standalone nodes.
-/// Unset fields keep the mode-specific CamusDB baseline (cluster sqlite defaults in
-/// <c>Program.cs</c>, standalone sqlite defaults in <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder"/>).
+/// Unset fields keep the mode-specific CamusDB baseline. Both modes default to RocksDB for KV and WAL
+/// (see <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder"/>: standalone via
+/// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline"/>, cluster via
+/// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.ClusterBaseline"/> which adds election timeouts);
+/// a <c>kahuna: { storage: sqlite, wal_storage: sqlite }</c> override restores the sqlite backend.
 /// </summary>
 public sealed class KahunaOptionsConfig
 {
@@ -23,6 +26,8 @@ public sealed class KahunaOptionsConfig
         "wal_storage",
         "wal_revision",
         "wal_sync_writes",
+        "wal_group_commit_linger_ms",
+        "wal_single_fsync_commit",
         "default_transaction_timeout_ms",
         "max_transaction_timeout_ms",
         "locks_workers",
@@ -60,6 +65,28 @@ public sealed class KahunaOptionsConfig
     public string? WalRevision { get; set; }
 
     public bool? WalSyncWrites { get; set; }
+
+    /// <summary>
+    /// Group-commit linger window in milliseconds (0 = disabled, Kahuna's default). When positive, a WAL
+    /// worker briefly waits — bounded by this window — to gather more ready commits into a single group
+    /// fsync before flushing, so many concurrent commits amortize one disk barrier instead of each paying
+    /// its own. This raises WAL batch density (and thus write throughput) at the cost of a small, bounded
+    /// per-commit latency floor; it does <b>not</b> weaken durability, since data is still fsync'd before
+    /// the commit is acknowledged. Most impactful on write-heavy concurrent load where fsync latency
+    /// dominates (e.g. macOS/APFS). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalGroupCommitLingerMs"/>.
+    /// </summary>
+    public int? WalGroupCommitLingerMs { get; set; }
+
+    /// <summary>
+    /// Single-fsync commit fast path. When enabled, an auto-commit single-round proposal releases its
+    /// client ticket as soon as the propose quorum is durable and demotes the per-entry commit marker to a
+    /// lazy write that rides the next durable flush — removing one serial fsync from the commit critical
+    /// path without weakening durability. The Kahuna embedded default is <c>false</c> (two-fsync commit);
+    /// enabling it is the recommended standalone setting for write throughput. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalSingleFsyncCommit"/>.
+    /// </summary>
+    public bool? WalSingleFsyncCommit { get; set; }
 
     public int? DefaultTransactionTimeoutMs { get; set; }
 
@@ -168,6 +195,9 @@ public sealed class KahunaOptionsConfig
     {
         ValidateStorage(Storage, "kahuna.storage");
         ValidateStorage(WalStorage, "kahuna.wal_storage");
+
+        if (WalGroupCommitLingerMs is < 0)
+            throw InvalidConfig($"'kahuna.wal_group_commit_linger_ms' must be >= 0, got {WalGroupCommitLingerMs}");
 
         if (DefaultTransactionTimeoutMs is <= 0)
             throw InvalidConfig($"'kahuna.default_transaction_timeout_ms' must be > 0, got {DefaultTransactionTimeoutMs}");

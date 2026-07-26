@@ -88,8 +88,12 @@ run_once() {
   local rundir="$OUT/${tag}-${idx}"
   local log="$OUT/${tag}-${idx}.server.log"
 
-  ( cd "$REPO_ROOT"; CAMUS_CONFIG_PATH="$cfg" dotnet run -c Release --no-build --project CamusDB -- \
-      --mode standalone --data-dir "$DATADIR" ) > "$log" 2>&1 &
+  # Launch the built binary directly (not `dotnet run`, which forks a child server that survives a kill
+  # of the launcher pid) and silence Info logging so it doesn't skew the allocation/overhead measurement.
+  local server_bin="$REPO_ROOT/CamusDB/bin/Release/net10.0/CamusDB"
+  if [[ ! -x "$server_bin" ]]; then echo "server binary not found at $server_bin" >&2; return 1; fi
+  ( cd "$REPO_ROOT"; exec env CAMUS_CONFIG_PATH="$cfg" CAMUS_LOG_LEVEL="${CAMUS_LOG_LEVEL:-warning}" \
+      "$server_bin" --mode standalone --data-dir "$DATADIR" ) > "$log" 2>&1 &
   SERVER_PID=$!
 
   local ready=""
@@ -107,7 +111,10 @@ run_once() {
     --mode closed --workers "$WORKERS" --rows "$ROWS" --warmup "$WARMUP" --duration "$DURATION" \
     --output "$rundir" >/dev/null
 
-  kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null || true
+  kill "$SERVER_PID" 2>/dev/null || true
+  for _ in $(seq 1 10); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.5; done
+  kill -9 "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
   SERVER_PID=""
   rm -rf "$DATADIR"; DATADIR=""
 

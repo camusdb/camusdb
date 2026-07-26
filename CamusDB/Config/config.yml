@@ -14,7 +14,8 @@ data_dir: /tmp/camusdb/
 # raft_node_id: 1          # cluster: numeric Raft node id (> 0)
 # raft_host: localhost     # cluster: Raft bind/advertise host
 # raft_port: 7070          # cluster: Raft gRPC port (1..65535)
-initial_partitions: 3      # cluster: Raft partition count (>= 1)
+initial_partitions: 4      # Raft partition count (>= 1). More partitions spread writes across more WAL
+                           # queues, so concurrent commits can group-commit into denser fsyncs.
 # http_port: 5095          # HTTP API port (1..65535)
 # https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
 # https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
@@ -203,6 +204,17 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 # group-fsynced) can be dominated by fsync latency. Set it false for dev/bulk loads to trade that
 # durability for a large speedup; keep it true in production.
 #
+# The two knobs below raise write throughput WITHOUT giving up durability — the right lever when a
+# concurrent write load is fsync-bound (each commit paying its own disk barrier):
+#
+# wal_group_commit_linger_ms (default 0 = off): a WAL worker briefly waits up to this many ms to gather
+#   more ready commits into ONE group fsync, so many concurrent commits amortize a single disk barrier
+#   instead of each fsyncing alone. Raises WAL batch density and throughput for a small, bounded latency
+#   floor per commit; data is still fsync'd before a commit is acked. Try 1-2 for write-heavy loads.
+# wal_single_fsync_commit (Kahuna embedded default false): removes one serial fsync from the commit
+#   path — an auto-commit proposal acks once the propose quorum is durable and its commit marker rides
+#   the next durable flush, without weakening durability. Recommended true for standalone write throughput.
+#
 # To opt out of the rocksdb default and use sqlite for both KV and WAL:
 # kahuna:
 #   storage: sqlite
@@ -214,6 +226,8 @@ initial_partitions: 3      # cluster: Raft partition count (>= 1)
 #   wal_storage: rocksdb          # memory | sqlite | rocksdb (default rocksdb)
 #   wal_revision: v1
 #   wal_sync_writes: true
+#   wal_group_commit_linger_ms: 0
+#   wal_single_fsync_commit: false
 #   default_transaction_timeout_ms: 5000
 #   max_transaction_timeout_ms: 3600000  # hard cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset => derived from that lifetime so a long serializable txn is not clamped/reaped early
 #   locks_workers: 8

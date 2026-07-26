@@ -54,7 +54,12 @@ ENV CAMUS_DATA_DIR=/data
 #
 # e.g. docker run -e CAMUS_LOG_LEVEL=Debug -e CAMUS_LOG_LEVEL_KAHUNA=Debug camusdb/camusdb
 
+# Raft partition count. More partitions spread writes across more WAL queues so concurrent commits
+# group-commit into denser fsyncs (higher write throughput). Overridable at `docker run` time.
+ENV CAMUS_INITIAL_PARTITIONS=4
+
 ENTRYPOINT ["sh", "-c", "exec dotnet CamusDB.dll \
   --mode=standalone \
   --http-port=${CAMUS_HTTP_PORT:-5095} \
-  --data-dir=${CAMUS_DATA_DIR:-/data}"]
+  --data-dir=${CAMUS_DATA_DIR:-/data} \
+  --initial-cluster-partitions=${CAMUS_INITIAL_PARTITIONS:-4}"]

@@ -71,6 +71,11 @@ cleanup() {
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "stopping server pid $SERVER_PID"
     kill "$SERVER_PID" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      kill -0 "$SERVER_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -9 "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   rm -rf "$DATADIR"
@@ -96,14 +101,26 @@ diagnostics:
   include_runtime_metrics: true
 YML
 
-SERVER_CMD="CAMUS_CONFIG_PATH=$CONFIG_USED CAMUS_DIAGNOSTICS_RUN_ID=$RUN_ID dotnet run -c Release --no-build --project CamusDB -- --mode standalone --data-dir $DATADIR"
+# Launch the built binary directly rather than via `dotnet run`. `dotnet run` forks a child process
+# for the actual server, so the pid captured with $! is the launcher, not the server — killing it on
+# cleanup leaves the real server orphaned (still holding the HTTP/gRPC ports). Running the binary makes
+# $SERVER_PID the server itself, so the cleanup trap actually stops it.
+SERVER_BIN="$REPO_ROOT/CamusDB/bin/Release/net10.0/CamusDB"
+if [[ ! -x "$SERVER_BIN" ]]; then
+  echo "server binary not found at $SERVER_BIN (was the Release build run?)" >&2
+  exit 1
+fi
+SERVER_CMD="CAMUS_CONFIG_PATH=$CONFIG_USED CAMUS_DIAGNOSTICS_RUN_ID=$RUN_ID $SERVER_BIN --mode standalone --data-dir $DATADIR"
 echo "$SERVER_CMD" > "$OUT/server-command.txt"
 
 echo "==> Starting standalone server (data dir: $DATADIR)"
 (
   cd "$REPO_ROOT"
-  CAMUS_CONFIG_PATH="$CONFIG_USED" CAMUS_DIAGNOSTICS_RUN_ID="$RUN_ID" \
-    dotnet run -c Release --no-build --project CamusDB -- --mode standalone --data-dir "$DATADIR"
+  # Silence Info-level host logging by default so it doesn't add allocation noise to the measurement.
+  # Overridable: run with CAMUS_LOG_LEVEL=information to see full server logs.
+  exec env CAMUS_CONFIG_PATH="$CONFIG_USED" CAMUS_DIAGNOSTICS_RUN_ID="$RUN_ID" \
+    CAMUS_LOG_LEVEL="${CAMUS_LOG_LEVEL:-warning}" \
+    "$SERVER_BIN" --mode standalone --data-dir "$DATADIR"
 ) > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

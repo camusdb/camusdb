@@ -64,13 +64,20 @@ public static class EmbeddedKahunaOptionsBuilder
             WalPath = Path.Combine(dataPath, "wal"),
             WalRevision = "v1",
             InitialPartitions = 1,
+            RaftWalSingleFsyncCommit = true,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
         };
     }
 
-    /// <summary>Baseline standalone options using RocksDB for both KV and WAL.</summary>
+    /// <summary>
+    /// Baseline standalone options using RocksDB for both KV and WAL. Enables the single-fsync commit fast
+    /// path by default: an auto-commit proposal acks once its propose quorum is durable and its commit
+    /// marker rides the next durable flush, removing one serial fsync from the commit path without
+    /// weakening durability. This is the recommended standalone default (Kahuna's own embedded default is
+    /// off); a <c>kahuna.wal_single_fsync_commit</c> config value still overrides it.
+    /// </summary>
     public static EmbeddedKahunaOptions StandaloneRocksDbBaseline(string dataPath)
     {
         return new EmbeddedKahunaOptions
@@ -83,6 +90,7 @@ public static class EmbeddedKahunaOptionsBuilder
             WalPath = Path.Combine(dataPath, "wal"),
             WalRevision = "v1",
             InitialPartitions = 1,
+            RaftWalSingleFsyncCommit = true,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -122,6 +130,12 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.WalSyncWrites is bool walSync)
             baseline.WalSyncWrites = walSync;
+
+        if (kahuna.WalGroupCommitLingerMs is int lingerMs)
+            baseline.RaftWalGroupCommitLingerMs = lingerMs;
+
+        if (kahuna.WalSingleFsyncCommit is bool singleFsync)
+            baseline.RaftWalSingleFsyncCommit = singleFsync;
 
         if (kahuna.DefaultTransactionTimeoutMs is int txnTimeout)
             baseline.DefaultTransactionTimeout = txnTimeout;

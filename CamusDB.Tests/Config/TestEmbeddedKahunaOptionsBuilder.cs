@@ -66,6 +66,34 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void StandaloneRocksDbBaseline_EnablesSingleFsyncCommitByDefault()
+    {
+        // The single-fsync commit fast path is the recommended standalone default; Kahuna's own embedded
+        // default is off, so CamusDB opts standalone in via the baseline. Group-commit linger stays opt-in.
+        EmbeddedKahunaOptions built =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/fsync-db", new KahunaOptionsConfig());
+
+        Assert.That(built.RaftWalSingleFsyncCommit, Is.True);
+        Assert.That(built.RaftWalGroupCommitLingerMs, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void WalGroupCommitKnobs_OverrideStandaloneBaseline()
+    {
+        KahunaOptionsConfig kahuna = new()
+        {
+            WalGroupCommitLingerMs = 2,
+            WalSingleFsyncCommit = false,
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/gc-db", kahuna);
+
+        Assert.That(built.RaftWalGroupCommitLingerMs, Is.EqualTo(2));
+        // An explicit config value wins over the baseline default (which enables single-fsync).
+        Assert.That(built.RaftWalSingleFsyncCommit, Is.False);
+    }
+
+    [Test]
     public void KahunaStorageRocksdb_OverridesStandaloneBaseline()
     {
         KahunaOptionsConfig kahuna = new() { Storage = "rocksdb" };

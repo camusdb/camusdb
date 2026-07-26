@@ -32,6 +32,7 @@ BenchmarkDotNet.Artifacts/
 .idea/
 .DS_Store
 specs/
+artifacts/
 bench/node_modules/
 CamusDB/Data/
 CamusDB.Cluster.Tests/TestResults
