@@ -733,7 +733,8 @@ internal sealed class QueryExecutor
                 unique,
                 fromInclusive,
                 toInclusive,
-                maxRows: plan.ScanRowLimit))
+                maxRows: plan.ScanRowLimit,
+                trackReadSet: ticket.ExclusivePredicateLocks))
             {
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
@@ -756,7 +757,8 @@ internal sealed class QueryExecutor
 
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
-            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
+                ticket.TxnState, page, trackReadSet: ticket.ExclusivePredicateLocks).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 ObjectIdValue batchRowId = page[i];
@@ -782,7 +784,8 @@ internal sealed class QueryExecutor
             unique,
             fromInclusive,
             toInclusive,
-            maxRows: plan.ScanRowLimit))
+            maxRows: plan.ScanRowLimit,
+            trackReadSet: ticket.ExclusivePredicateLocks))
         {
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
@@ -892,7 +895,7 @@ internal sealed class QueryExecutor
                     ticket.TxnState, index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null).ConfigureAwait(false))
+                    maxRows: null, trackReadSet: ticket.ExclusivePredicateLocks).ConfigureAwait(false))
                 {
                     if (scanStats is not null)
                         scanStats.KvScanEntries++;

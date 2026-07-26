@@ -275,9 +275,12 @@ internal sealed class TableIndexAdder
 
         int rows = 0;
 
+        // The backfill writes one index entry per row it reads, so the rows it observed are a real
+        // commit dependency: a concurrent modification to one of them must invalidate this batch.
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
             tx,
-            afterRowId: afterRowId).ConfigureAwait(false))
+            afterRowId: afterRowId,
+            trackReadSet: true).ConfigureAwait(false))
         {
             Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                 table.Schema,

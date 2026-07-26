@@ -73,6 +73,9 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
 
         QueryRowNameResolver combinedResolver = new(combinedTableSources, combinedDerivedSources);
 
+        // The inner scan does not fold its reads (no query ticket reaches here, so an
+        // UPDATE/DELETE that contains this subquery cannot mark it as write-driving). It matches
+        // the surrounding behavior: this scan also takes no range lock.
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in innerTable.Store.ScanRows(txnState).ConfigureAwait(false))
         {
             if (data.Length == 0)

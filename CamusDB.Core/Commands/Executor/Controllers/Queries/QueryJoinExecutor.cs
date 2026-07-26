@@ -398,7 +398,8 @@ internal sealed class QueryJoinExecutor
             keyTypes,
             lookupKey,
             to: null,
-            unique: false).ConfigureAwait(false))
+            unique: false,
+            trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
         {
             if (key.Values[0].CompareTo(lookupValue) > 0)
                 break;
@@ -545,7 +546,8 @@ internal sealed class QueryJoinExecutor
         deps?.RecordRange(table.Store.RowKeySpace);
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
 
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState).ConfigureAwait(false))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+            plan.Ticket.TxnState, trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -603,7 +605,8 @@ internal sealed class QueryJoinExecutor
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
-            from: null, to: null, unique: unique).ConfigureAwait(false))
+            from: null, to: null, unique: unique,
+            trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
@@ -669,7 +672,8 @@ internal sealed class QueryJoinExecutor
             to: rangeNode.ToBound,
             fromInclusive: rangeNode.FromInclusive,
             toInclusive: rangeNode.ToInclusive,
-            unique: unique).ConfigureAwait(false))
+            unique: unique,
+            trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
@@ -774,7 +778,7 @@ internal sealed class QueryJoinExecutor
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null).ConfigureAwait(false))
+                    maxRows: null, trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
                 {
                     if (!seen.Add(rowId))
                         continue;

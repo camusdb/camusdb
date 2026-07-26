@@ -96,7 +96,11 @@ internal sealed class QueryScanner
                 BorrowedDecode = ShouldUseBorrowedDecode(plan),
             };
 
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
+        // Fold the scanned rows into the commit-time read set only for an UPDATE/DELETE locate scan,
+        // where the rows observed here decide what is written. A plain SELECT relies on the range
+        // lock taken above instead, so its commit cost stays independent of how many rows it read.
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+            plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, trackReadSet: plan.Ticket.ExclusivePredicateLocks))
         {
             if (data.Length == 0)
                 continue;
@@ -185,7 +189,8 @@ internal sealed class QueryScanner
                 unique,
                 fromInclusive: true,
                 toInclusive: true,
-                maxRows: plan.ScanRowLimit))
+                maxRows: plan.ScanRowLimit,
+                trackReadSet: ticket.ExclusivePredicateLocks))
             {
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
@@ -219,7 +224,8 @@ internal sealed class QueryScanner
         // Fetch and decode one buffered page; yields rows in the order they appear in the page.
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
-            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(ticket.TxnState, page).ConfigureAwait(false);
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
+                ticket.TxnState, page, trackReadSet: ticket.ExclusivePredicateLocks).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 ObjectIdValue batchRowId = page[i];
@@ -248,7 +254,8 @@ internal sealed class QueryScanner
             unique,
             fromInclusive: true,
             toInclusive: true,
-            maxRows: plan.ScanRowLimit))
+            maxRows: plan.ScanRowLimit,
+            trackReadSet: ticket.ExclusivePredicateLocks))
         {
             if (scanStats is not null)
                 scanStats.KvScanEntries++;

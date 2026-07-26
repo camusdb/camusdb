@@ -86,6 +86,12 @@ public sealed class QueryTicket
     /// than Shared. Set by UPDATE/DELETE so the scanned row/index range is held against
     /// concurrent Serializable+RW readers until the modifying transaction commits, preventing
     /// them from observing a partial mutation.
+    ///
+    /// <para>It also marks the scan as write-driving, which is what makes it fold its reads into
+    /// the commit-time read set. A plain query scan does not: folding one dependency per scanned
+    /// row makes commit cost scale with rows read, and a query has the range lock instead. Here
+    /// the rows the scan observed decide what is written, so a concurrent change to one of them
+    /// must invalidate the transaction even if that row was never written.</para>
     /// </summary>
     internal bool ExclusivePredicateLocks { get; }
 
