@@ -17,5 +17,12 @@ public enum ColumnConstraintType
     Default,
     DefaultFunction,
     Check,
-    ForeignKey
+    ForeignKey,
+
+    /// <summary>
+    /// Inline <c>COMMENT '&lt;text&gt;'</c> on a column definition. The decoded text is carried as a
+    /// String <c>ColumnValue</c>, so a present-but-empty comment stays distinguishable from an absent
+    /// one (which produces no entry at all).
+    /// </summary>
+    Comment
 }

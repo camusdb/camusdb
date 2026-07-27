@@ -168,6 +168,14 @@ public enum NodeType
     /// <c>yytext</c> = the user-supplied constraint name.
     /// </summary>
     ConstraintNotNullNamed,
+    /// <summary>
+    /// Column-level <c>COMMENT '&lt;text&gt;'</c> written inline on a column definition in
+    /// <c>CREATE TABLE</c> or <c>ALTER TABLE … ADD COLUMN</c>. <c>leftAst</c> = a
+    /// <see cref="String"/> leaf whose <c>yytext</c> still carries the surrounding single quotes;
+    /// the ticket creator strips them and un-doubles embedded quotes. There is no inline form for
+    /// removing a comment — removal is <c>COMMENT ON … IS NULL</c>.
+    /// </summary>
+    ConstraintComment,
     DropTable,
     DropTableIfExists,
     AlterTableAddColumn,
@@ -241,4 +249,32 @@ public enum NodeType
     /// Calls <see cref="IQueryResultCache.InvalidateDatabase"/> with the database id.
     /// </summary>
     EvictCacheAll,
+    /// <summary>
+    /// <c>COMMENT ON TABLE t IS '&lt;text&gt;' | NULL</c>. <c>leftAst</c> = table name node;
+    /// <c>rightAst</c> = a <see cref="String"/> leaf carrying the still-quoted literal, or
+    /// <b>null</b> for <c>IS NULL</c>. That null-vs-empty-literal distinction is the whole
+    /// encoding: <c>IS NULL</c> removes the comment, <c>IS ''</c> stores an empty string.
+    /// </summary>
+    CommentOnTable,
+    /// <summary>
+    /// <c>COMMENT ON COLUMN t.c IS '&lt;text&gt;' | NULL</c>. <c>leftAst</c> = a single
+    /// <see cref="Identifier"/> whose <c>yytext</c> is the dotted <c>table.column</c> text (the
+    /// grammar folds qualified names into one node); the ticket creator splits it and rejects the
+    /// unqualified form. <c>rightAst</c> follows the same null-vs-literal encoding as
+    /// <see cref="CommentOnTable"/>.
+    /// </summary>
+    CommentOnColumn,
+    /// <summary>
+    /// <c>COMMENT ON INDEX t.i IS '&lt;text&gt;' | NULL</c>. Indexes are per-table in CamusDB — there
+    /// is no global index namespace to resolve a bare name against — so the table-qualified form is
+    /// required. Node layout matches <see cref="CommentOnColumn"/>.
+    /// </summary>
+    CommentOnIndex,
+    /// <summary>
+    /// <c>COMMENT ON DATABASE d IS '&lt;text&gt;' | NULL</c>. <c>leftAst</c> = database name node;
+    /// <c>rightAst</c> follows the null-vs-literal encoding of <see cref="CommentOnTable"/>. Handled
+    /// before any database is opened — the comment lives on the cross-database registry entry, not in
+    /// the per-database schema log.
+    /// </summary>
+    CommentOnDatabase,
 }

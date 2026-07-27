@@ -45,6 +45,14 @@ public sealed class ColumnInfo
     /// </summary>
     public string? NotNullConstraintName { get; }
 
+    /// <summary>
+    /// Free-text description declared with an inline <c>COMMENT '…'</c> on the column in
+    /// <c>CREATE TABLE</c> or <c>ALTER TABLE … ADD COLUMN</c>. Null when the column was declared
+    /// without one. There is no inline form for removing a comment; that is
+    /// <c>COMMENT ON COLUMN … IS NULL</c>.
+    /// </summary>
+    public string? Comment { get; }
+
     public ColumnInfo(
         string name,
         ColumnType type,
@@ -53,7 +61,8 @@ public sealed class ColumnInfo
         int? maxLength = null,
         ColumnType? arrayElementType = null,
         string? defaultFunction = null,
-        string? notNullConstraintName = null
+        string? notNullConstraintName = null,
+        string? comment = null
     )
     {
         Name = name;
@@ -64,5 +73,6 @@ public sealed class ColumnInfo
         ArrayElementType = arrayElementType;
         DefaultFunction = defaultFunction;
         NotNullConstraintName = notNullConstraintName;
+        Comment = comment;
     }
 }

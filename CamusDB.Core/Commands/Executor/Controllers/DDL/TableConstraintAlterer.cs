@@ -284,7 +284,8 @@ internal sealed class TableConstraintAlterer
                         maxLength: old.MaxLength,
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
-                        notNullConstraintName: constraintName
+                        notNullConstraintName: constraintName,
+                        comment: old.Comment
                     );
                 }
                 finally
@@ -358,7 +359,8 @@ internal sealed class TableConstraintAlterer
                         maxLength: old.MaxLength,
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
-                        notNullConstraintName: null
+                        notNullConstraintName: null,
+                        comment: old.Comment
                     );
                 }
                 finally

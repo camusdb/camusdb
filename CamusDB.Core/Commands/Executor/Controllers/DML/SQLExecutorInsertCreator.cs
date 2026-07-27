@@ -34,7 +34,15 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         string tableName = ast.leftAst.yytext!;
 
         // If the fields are not provided, we consult them from the latest version of the schema.
-        TableDescriptor table = await commandExecutor.OpenTable(new(database.Name, tableName)).ConfigureAwait(false);
+        //
+        // Resolve against the descriptor we were handed, not by name. Re-resolving through the
+        // registry using database.Name reintroduces whatever name that cached descriptor was created
+        // with — after a RENAME DATABASE that is the *old* name, which the registry no longer knows,
+        // so every INSERT failed with "Database '<old>' does not exist" until the node restarted.
+        // It also saves a redundant registry lookup and use-handle on the INSERT hot path.
+        TableDescriptor table = await commandExecutor
+            .OpenTableWithDescriptor(database, new(ticket.DatabaseName, tableName))
+            .ConfigureAwait(false);
 
         List<string> fields = new();
 

@@ -70,7 +70,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             columns: [.. columnInfos],
             constraints: [.. constraintInfos],
             ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists,
-            checkConstraints: [.. checkConstraintInfos]
+            checkConstraints: [.. checkConstraintInfos],
+            comment: GetInlineComment(ast.extendedTwo)
         );
     }
 
@@ -103,7 +104,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne)));
+            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne), GetInlineComment(constraintList.extendedTwo)));
             return;
         }
 
@@ -113,7 +114,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne)));
+            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne), GetInlineComment(constraintList.extendedTwo)));
             return;
         }
 
@@ -145,6 +146,14 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     /// array. Payload columns are unordered, so a direction on an included column is a parse-time error.
     /// Returns an empty array when the clause is absent.
     /// </summary>
+    /// <summary>
+    /// Decodes an optional inline <c>COMMENT '…'</c> tail (on a table or an inline index) into its
+    /// text, or null when the clause is absent. An empty declared comment yields <c>""</c>, which is
+    /// a different state from absent and must stay that way.
+    /// </summary>
+    private static string? GetInlineComment(NodeAst? ast)
+        => ast is null ? null : UnquoteStringLiteral(ast.yytext ?? "");
+
     private static string[] GetIncludeColumnList(NodeAst? ast)
     {
         if (ast is null)
@@ -260,7 +269,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                         maxLength: maxLen,
                         arrayElementType: elemType,
                         defaultFunction: defaultFunction,
-                        notNullConstraintName: notNullConstraintName
+                        notNullConstraintName: notNullConstraintName,
+                        comment: GetCommentFromConstraints(constraintTypes)
                     )
                 );
                 return;
@@ -402,7 +412,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne)));
+            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne), GetInlineComment(fieldList.extendedTwo)));
             return;
         }
 
@@ -412,7 +422,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne)));
+            constraintInfos.Add(new(ConstraintType.IndexUnique, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne), GetInlineComment(fieldList.extendedTwo)));
             return;
         }
 

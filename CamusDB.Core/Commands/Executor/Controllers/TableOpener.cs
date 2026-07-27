@@ -157,7 +157,9 @@ internal sealed class TableOpener
                     // StartOffset are intentionally absent here; DDL and backfill read those from
                     // table.Schema.Indexes (or SystemSchema fallback), not from this descriptor.
                     tableDescriptor.Indexes[entry.Name] =
-                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames);
+                        // The comment rides the projection because SHOW CREATE TABLE renders from
+                        // TableDescriptor.Indexes, not from the persisted TableSchema.Indexes.
+                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames, comment: entry.Comment);
 
                     // Register display name so duplicate-key errors show the human-readable
                     // name instead of the opaque immutable KvId stored in KV keys.

@@ -60,6 +60,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             Constraints = MapConstraints(ticket.Constraints),
             CheckConstraints = MapCheckConstraints(ticket.CheckConstraints),
             IfNotExists = ticket.IfNotExists,
+            Comment = ticket.Comment,
         };
 
         return await PostAsync(leader, "create-table", request, cancellationToken).ConfigureAwait(false);
@@ -139,6 +140,22 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         };
 
         return await PostAsync(leader, "alter-constraint", request, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool?> ForwardCommentAsync(string leader, CommentTicket ticket, string operationId, CancellationToken cancellationToken)
+    {
+        ForwardCommentRequest request = new()
+        {
+            OperationId = operationId,
+            DatabaseName = ticket.DatabaseName,
+            Target = ticket.Target,
+            TableName = ticket.TableName ?? "",
+            ElementName = ticket.ElementName,
+            // Passed through as-is: null means "remove the comment" and must not collapse to "".
+            Comment = ticket.Comment,
+        };
+
+        return await PostAsync(leader, "comment", request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken)
@@ -259,6 +276,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         ArrayElementType = col.ArrayElementType,
         DefaultFunction = col.DefaultFunction,
         NotNullConstraintName = col.NotNullConstraintName,
+        Comment = col.Comment,
     };
 
     private static ColumnInfoRequest[] MapColumns(ColumnInfo[] cols)
@@ -280,6 +298,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
                 Type = c.Type,
                 Name = c.Name,
                 Columns = c.Columns.Select(col => new ColumnIndexInfoRequest { Name = col.Name, Order = col.Order }).ToArray(),
+                Comment = c.Comment,
             };
         }
         return result;

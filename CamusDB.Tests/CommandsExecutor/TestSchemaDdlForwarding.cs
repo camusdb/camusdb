@@ -551,6 +551,9 @@ public sealed class TestSchemaDdlForwarding
 
         public Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken)
             => Task.FromResult<bool?>(false);
+
+        public Task<bool?> ForwardCommentAsync(string leader, CommentTicket ticket, string operationId, CancellationToken cancellationToken)
+            => Task.FromResult<bool?>(false);
     }
 
     private sealed class CapturingHandler : HttpMessageHandler

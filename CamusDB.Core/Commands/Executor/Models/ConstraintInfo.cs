@@ -23,11 +23,18 @@ public sealed class ConstraintInfo
     /// </summary>
     public string[] IncludeColumns { get; }
 
-    public ConstraintInfo(ConstraintType type, string name, ColumnIndexInfo[] columns, string[]? includeColumns = null)
+    /// <summary>
+    /// Inline <c>COMMENT '…'</c> declared on a <c>KEY</c> / <c>UNIQUE KEY</c> in CREATE TABLE. Null
+    /// when absent, and always null for a primary key (which has no inline comment form).
+    /// </summary>
+    public string? Comment { get; }
+
+    public ConstraintInfo(ConstraintType type, string name, ColumnIndexInfo[] columns, string[]? includeColumns = null, string? comment = null)
 	{
         Name = name;
         Type = type;
         Columns = columns;
         IncludeColumns = includeColumns ?? [];
+        Comment = comment;
 	}
 }

@@ -153,6 +153,14 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string OrphanNotFound = "CADB0510";
 
+    /// <summary>
+    /// A <c>COMMENT ON</c> (or inline <c>COMMENT</c>) text exceeds
+    /// <see cref="CamusDBConfig.MaxCommentLength"/>. The bound keeps the replicated schema blob from
+    /// growing without limit, since comments ride the per-table metadata. A permanent caller mistake
+    /// — maps to HTTP 400.
+    /// </summary>
+    public const string CommentTooLong = "CADB0511";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -165,6 +173,7 @@ public static class CamusDBErrorCodes
         TransactionMutationLimitExceeded => 400,
         CheckConstraintViolation => 400,
         InvalidAsOfSystemTime => 400,
+        CommentTooLong => 400,
         OrphanNotFound => 404,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

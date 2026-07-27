@@ -77,6 +77,15 @@ public sealed class TableColumnSchema
     /// </summary>
     public string? NotNullConstraintName { get; }
 
+    /// <summary>
+    /// Free-text description attached via <c>COMMENT ON COLUMN</c> or an inline column
+    /// <c>COMMENT '…'</c>. Null means no comment; an empty string is a present-but-empty comment,
+    /// and the distinction is preserved end to end. Because this type is constructor-set, every
+    /// rebuild-copy of a column (rename, SET/DROP NOT NULL, schema-history rewrite) must pass the
+    /// existing value through or the comment is silently lost.
+    /// </summary>
+    public string? Comment { get; }
+
     public TableColumnSchema(
         string id,
         string name,
@@ -87,7 +96,8 @@ public sealed class TableColumnSchema
         int? maxLength = null,
         ColumnType? arrayElementType = null,
         string? defaultFunction = null,
-        string? notNullConstraintName = null
+        string? notNullConstraintName = null,
+        string? comment = null
     )
     {
         Id = id;
@@ -100,5 +110,6 @@ public sealed class TableColumnSchema
         ArrayElementType = arrayElementType;
         DefaultFunction = defaultFunction;
         NotNullConstraintName = notNullConstraintName;
+        Comment = comment;
     }
 }

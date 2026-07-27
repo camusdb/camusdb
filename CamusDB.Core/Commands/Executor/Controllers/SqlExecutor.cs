@@ -40,6 +40,8 @@ internal sealed class SqlExecutor()
 
     private readonly SQLExecutorAlterConstraintCreator sqlExecutorAlterConstraintCreator = new();
 
+    private readonly SQLExecutorCommentCreator sqlExecutorCommentCreator = new();
+
     public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorQueryCreator.CreateQueryTicket(ticket, ast);
@@ -112,6 +114,16 @@ internal sealed class SqlExecutor()
     internal AlterConstraintTicket CreateAlterConstraintTicket(ExecuteSQLTicket ticket, NodeAst ast, Catalogs.Models.TableSchema tableSchema)
     {
         return sqlExecutorAlterConstraintCreator.CreateAlterConstraintTicket(ticket, ast, tableSchema);
+    }
+
+    /// <summary>
+    /// Creates a ticket for any of the four <c>COMMENT ON</c> forms. Needs no schema: the target's
+    /// existence is checked at execution time against the opened schema, and the only parse-time
+    /// rejection is an unqualified column/index reference.
+    /// </summary>
+    internal CommentTicket CreateCommentTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        return sqlExecutorCommentCreator.CreateCommentTicket(ticket, ast);
     }
 
     /// <summary>

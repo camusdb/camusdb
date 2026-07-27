@@ -275,6 +275,23 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
+            await RevalidateFromKvLockedAsync(authoritativeGeneration).ConfigureAwait(false);
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    /// <summary>
+    /// The body of <see cref="RevalidateFromKvAsync"/>, for callers that <b>already hold</b>
+    /// <see cref="writeSem"/>. Mutating paths need to reconcile before they read the cache, and they
+    /// must do so without releasing the semaphore — calling the public wrapper from inside the lock
+    /// would deadlock on its own re-acquisition.
+    /// </summary>
+    private async Task RevalidateFromKvLockedAsync(long authoritativeGeneration)
+    {
+        {
             if (Volatile.Read(ref loadedGeneration) >= authoritativeGeneration)
                 return; // another hit already reloaded to at least this generation
 
@@ -316,10 +333,6 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             }
 
             Volatile.Write(ref loadedGeneration, authoritativeGeneration);
-        }
-        finally
-        {
-            writeSem.Release();
         }
     }
 
@@ -815,18 +828,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{newName}' is already registered");
 
-            // Ancestry is immutable: copy the list so the updated entry owns its own instance.
-            // ImmediateParentHoldId must be carried over — a branch keeps the same snapshot-floor
-            // hold on its parent across a rename; dropping it here would make the renewer skip the
-            // branch and the drop path unable to release the hold, losing the frozen view on expiry.
-            DatabaseRegistryEntry updated = new()
-            {
-                Id = existing.Id,
-                Name = newName,
-                CreatedAt = existing.CreatedAt,
-                Ancestors = existing.Ancestors.Count > 0 ? [.. existing.Ancestors] : [],
-                ImmediateParentHoldId = existing.ImmediateParentHoldId,
-            };
+            // Copy-then-change, never rebuild by hand: everything except the name must survive a
+            // rename, and enumerating the survivors here is how the comment got dropped and how the
+            // snapshot-floor hold id nearly did. Copy() owns that list.
+            DatabaseRegistryEntry updated = existing.Copy();
+            updated.Name = newName;
 
             byte[] updatedBytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.DatabaseRegistryEntry);
 
@@ -865,6 +871,102 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             byId[existing.Id] = updated;
 
             // Advance the shared generation so other nodes stop resolving the old name and pick up the new.
+            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    /// <summary>
+    /// Attaches or removes the free-text comment on a registered database (<c>COMMENT ON DATABASE</c>).
+    /// A null <paramref name="comment"/> removes it; the empty string stores a present-but-empty one.
+    ///
+    /// <para>Unlike the other registry mutations this one <b>reconciles before it reads the cache</b>
+    /// and <b>verifies before it writes</b>, because neither guard can be skipped safely here.
+    /// <see cref="writeSem"/> is process-local, so on a cluster it says nothing about what another
+    /// node has done. Without the reconcile, a database created elsewhere is reported as
+    /// non-existent. Without the verify, the write is an unconditional <c>Set</c> on a name this node
+    /// may only believe in — which would <em>resurrect</em> a key another node dropped or renamed
+    /// away, leaving two names pointing at one database id.</para>
+    ///
+    /// <para>The reconcile deliberately calls the lock-held core rather than
+    /// <c>TryResolveEntryAsync</c>: that method re-acquires <see cref="writeSem"/> on its
+    /// revalidation path and would deadlock against the lock this method already holds.</para>
+    /// </summary>
+    /// <exception cref="CamusDBException"><c>DatabaseDoesntExist</c> when the name is not registered,
+    /// or was dropped/renamed away by another node before this write landed.</exception>
+    public async Task SetCommentAsync(string dbName, string? comment)
+    {
+        string normalized = Normalize(dbName);
+
+        await writeSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Standalone: this process owns the only registry, so the cache is authoritative and
+            // writeSem alone orders this against every local mutation. Matches the fast path in
+            // TryResolveEntryAsync.
+            if (isClusterMode)
+            {
+                long authGen = await ReadGenerationAsync().ConfigureAwait(false);
+                if (authGen != Volatile.Read(ref loadedGeneration))
+                    await RevalidateFromKvLockedAsync(authGen).ConfigureAwait(false);
+            }
+
+            if (!byName.TryGetValue(normalized, out DatabaseRegistryEntry? existing))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseDoesntExist,
+                    $"Database '{dbName}' is not registered");
+
+            DatabaseRegistryEntry updated = existing.Copy();
+            updated.Comment = comment;
+
+            byte[] updatedBytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+            KvTransaction tx = await transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+
+            bool written;
+            try
+            {
+                // expectedId turns the write into a compare-and-set under the key's exclusive lock:
+                // the key must still exist and still name this database id. A concurrent drop or
+                // rename on another node fails the check instead of being undone by this write.
+                written = await WriteRegistryKey(
+                    tx, NameKey(normalized), updatedBytes, ifAbsent: false, expectedId: existing.Id
+                ).ConfigureAwait(false);
+
+                if (!written)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                }
+                else
+                {
+                    await transactions.CommitAsync(tx).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                throw;
+            }
+
+            if (!written)
+            {
+                // The name vanished or was repointed underneath us. Drop the stale cache entry so the
+                // next resolve re-reads KV rather than serving what we just failed to write.
+                byName.TryRemove(normalized, out _);
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DatabaseDoesntExist,
+                    $"Database '{dbName}' is not registered");
+            }
+
+            byName[normalized] = updated;
+            byId[existing.Id] = updated;
+
             AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
         }
         finally
@@ -1602,8 +1704,24 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// was written, <c>false</c> if the key already existed (only possible when <paramref name="ifAbsent"/>
     /// is <c>true</c>; always returns <c>true</c> for plain writes).
     /// </summary>
-    private async Task<bool> WriteRegistryKey(KvTransaction tx, string key, byte[] value, bool ifAbsent = false)
+    /// <summary>
+    /// Writes a registry key inside <paramref name="tx"/>, under that key's exclusive lock.
+    ///
+    /// <para><paramref name="ifAbsent"/> makes the write a create (returns false when the key already
+    /// exists). <paramref name="expectedId"/> makes it a compare-and-set: the key must already exist
+    /// and its entry's <c>Id</c> must match, or the write is skipped and false is returned. The two
+    /// are opposites and must not be combined. Passing neither is an unconditional overwrite, which
+    /// is only safe when the caller has independently established that the key still represents what
+    /// it thinks it does — on a cluster, a local cache is not such an establishment.</para>
+    /// </summary>
+    private async Task<bool> WriteRegistryKey(
+        KvTransaction tx, string key, byte[] value, bool ifAbsent = false, string? expectedId = null)
     {
+        if (ifAbsent && expectedId is not null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "WriteRegistryKey cannot both require absence and require a matching id");
+
         KeyValueResponseType lockType;
         int lockRetries = 0;
 
@@ -1631,6 +1749,26 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             throw new CamusDBException(
                 CamusDBErrorCodes.SystemSpaceCorrupt,
                 $"Failed to lock registry key '{key}': {lockType}");
+
+        // Read-and-verify happens after the lock is held, so nothing can slip between the check and
+        // the set: the key is pinned for the rest of this transaction.
+        if (expectedId is not null)
+        {
+            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? currentEntry) =
+                await kahuna.LocateAndTryGetValue(
+                    tx.TransactionId, key, -1,
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            if (getType != KeyValueResponseType.Get || currentEntry?.Value is null)
+                return false;
+
+            DatabaseRegistryEntry current = MetaJsonSerializer.Deserialize(
+                currentEntry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+            if (!string.Equals(current.Id, expectedId, StringComparison.Ordinal))
+                return false;
+        }
 
         KeyValueFlags flags = ifAbsent ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
         KeyValueResponseType setType;

@@ -27,15 +27,23 @@ public readonly struct CreateTableTicket
 
     public bool IfNotExists { get; }
 
+    /// <summary>
+    /// Table-level comment from a trailing <c>) COMMENT '…'</c>. Null when none was declared. There
+    /// is no removal form here — clearing a table comment is <c>COMMENT ON TABLE … IS NULL</c>.
+    /// </summary>
+    public string? Comment { get; }
+
     public CreateTableTicket(
         string databaseName,
         string tableName,
         ColumnInfo[] columns,
         ConstraintInfo[] constraints,
         bool ifNotExists,
-        CheckConstraintInfo[]? checkConstraints = null
+        CheckConstraintInfo[]? checkConstraints = null,
+        string? comment = null
     )
     {
+        Comment = comment;
         DatabaseName = databaseName;
         TableName = tableName;
         Columns = columns;

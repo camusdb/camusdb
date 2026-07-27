@@ -21,6 +21,9 @@ internal sealed class CreateTableValidator : ValidatorBase
 
         ValidateIdentifier(ticket.TableName, "Table");
 
+        ValidateCommentLength(ticket.Comment, $"Table '{ticket.TableName}'");
+        ValidateCommentIsRepresentable(ticket.Comment, $"Table '{ticket.TableName}'");
+
         if (ticket.Columns.Length == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table requires at least one column");
 
@@ -48,6 +51,9 @@ internal sealed class CreateTableValidator : ValidatorBase
 
             if (columnInfo.Type == ColumnType.Null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column type cannot be null");
+
+            ValidateCommentLength(columnInfo.Comment, $"Column '{columnInfo.Name}'");
+            ValidateCommentIsRepresentable(columnInfo.Comment, $"Column '{columnInfo.Name}'");
         }
 
         bool havePrimaryKey = false;
@@ -56,11 +62,12 @@ internal sealed class CreateTableValidator : ValidatorBase
         {
             ConstraintInfo constraint = ticket.Constraints[i];
 
+            // Checked for every constraint, so the loop must not break early on the primary key.
+            ValidateCommentLength(constraint.Comment, $"Index '{constraint.Name}'");
+            ValidateCommentIsRepresentable(constraint.Comment, $"Index '{constraint.Name}'");
+
             if (constraint.Type == ConstraintType.PrimaryKey)
-            {
                 havePrimaryKey = true;
-                break;
-            }
         }
 
         if (!havePrimaryKey)

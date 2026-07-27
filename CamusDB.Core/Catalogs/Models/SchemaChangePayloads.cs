@@ -42,6 +42,13 @@ public sealed class SchemaCreateTablePayload
     /// rebuilt from <c>Expression</c> at table-open time.
     /// </summary>
     public CheckConstraintSchema[]? CheckConstraints { get; set; }
+
+    /// <summary>
+    /// Table-level comment declared with a trailing <c>) COMMENT '…'</c> on the CREATE TABLE
+    /// statement. Null when none was declared, and absent in log entries written before this field
+    /// existed (backward-compatible: null ⇒ no comment).
+    /// </summary>
+    public string? Comment { get; set; }
 }
 
 public sealed class SchemaAlterColumnPayload
@@ -86,6 +93,11 @@ public sealed class SchemaColumnPayload
     /// </summary>
     public string? NotNullConstraintName { get; set; }
 
+    /// <summary>
+    /// Free-text column comment. Null when absent; an empty string is a present-but-empty comment.
+    /// </summary>
+    public string? Comment { get; set; }
+
     public static SchemaColumnPayload FromColumnInfo(ColumnInfo column)
     {
         return new()
@@ -98,6 +110,7 @@ public sealed class SchemaColumnPayload
             MaxLength = column.MaxLength,
             ArrayElementType = column.ArrayElementType,
             NotNullConstraintName = column.NotNullConstraintName,
+            Comment = column.Comment,
         };
     }
 }
@@ -143,6 +156,12 @@ public sealed class SchemaRelinkTablePayload
     /// silently reverting to defaults. Null/empty when the table had no settings.
     /// </summary>
     public Dictionary<string, string>? Settings { get; set; }
+
+    /// <summary>
+    /// Table comment captured at drop time, preserved so a relinked table keeps its description
+    /// rather than coming back undocumented. Null when the table had no comment.
+    /// </summary>
+    public string? Comment { get; set; }
 }
 
 public sealed class SchemaIndexPayload
@@ -255,4 +274,39 @@ public sealed class SchemaSetTableSettingsPayload
     public string TableName { get; set; } = "";
 
     public Dictionary<string, string> Settings { get; set; } = new();
+}
+
+/// <summary>
+/// What a <c>COMMENT ON</c> statement targets. Shared by the command ticket and by
+/// <see cref="SchemaSetCommentPayload"/>, whose value is persisted in the schema log — so members
+/// must never be renumbered. <see cref="Database"/> is valid on a ticket but never reaches the
+/// payload: a database comment lives on the cross-database registry entry, not in a per-database
+/// schema log.
+/// </summary>
+public enum CommentTarget
+{
+    Table = 0,
+    Column = 1,
+    Index = 2,
+    Database = 3,
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetComment"/>: attach or remove a free-text description on a
+/// table, one of its columns, or one of its indexes. <see cref="Comment"/> being <c>null</c> means
+/// <b>remove</b> — an empty string is a present-but-empty comment, and the two must stay distinct.
+/// </summary>
+public sealed class SchemaSetCommentPayload
+{
+    /// <summary>Table that owns the commented element (the table itself when Target is Table).</summary>
+    public string TableName { get; set; } = "";
+
+    /// <summary>Never <see cref="CommentTarget.Database"/> — that path bypasses the schema log.</summary>
+    public CommentTarget Target { get; set; }
+
+    /// <summary>Column or index name. Null (and ignored) when <see cref="Target"/> is Table.</summary>
+    public string? ElementName { get; set; }
+
+    /// <summary>The comment text, or null to remove an existing comment.</summary>
+    public string? Comment { get; set; }
 }

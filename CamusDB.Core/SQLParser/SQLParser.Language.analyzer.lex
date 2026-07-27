@@ -106,6 +106,7 @@ TExplain        (E|e)(X|x)(P|p)(L|l)(A|a)(I|i)(N|n)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
 TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
+TComment        (C|c)(O|o)(M|m)(M|m)(E|e)(N|n)(T|t)
 TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TRename         (R|r)(E|e)(N|n)(A|a)(M|m)(E|e)
 TTo             (T|t)(O|o)
@@ -202,6 +203,8 @@ TDot            \.
 {TEvict} { return (int)Token.TEVICT; }
 
 {TCommit} { return (int)Token.TCOMMIT; }
+
+{TComment} { return (int)Token.TCOMMENT; }
 
 {TStart} { return (int)Token.TSTART; }
 

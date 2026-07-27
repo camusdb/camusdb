@@ -686,6 +686,15 @@ public static class CamusDBConfig
     public const int DefaultBytesMaxLength = 10_485_760;
 
     /// <summary>
+    /// Maximum length (in UTF-16 <c>string.Length</c> characters) of a comment attached to a table,
+    /// column, index, or database. Comments ride the replicated per-table metadata blob and the
+    /// registry entry, so an unbounded comment would inflate every schema checkpoint and every
+    /// schema-log entry. Enforced at ticket validation; exceeding it raises
+    /// <see cref="CamusDBErrorCodes.CommentTooLong"/>.
+    /// </summary>
+    public const int MaxCommentLength = 65_535;
+
+    /// <summary>
     /// Number of row ids buffered from a non-covering secondary-index scan before issuing one
     /// <c>GetRowsBatch</c> call. Batching collapses N sequential Kahuna actor round-trips into
     /// one per page, keeping primary-row fetches snapshot-consistent with the scan via the

@@ -243,6 +243,7 @@ public sealed class CatalogsManager
             MaxLength = c.MaxLength,
             ArrayElementType = c.ArrayElementType,
             NotNullConstraintName = c.NotNullConstraintName,
+            Comment = c.Comment,
         })];
 
         return new()
@@ -264,6 +265,8 @@ public sealed class CatalogsManager
                 CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
                 // Preserve table settings (e.g. the auto-analyze opt-out) across deferred drop + relink.
                 Settings = src.Settings is { Count: > 0 } ? new Dictionary<string, string>(src.Settings, StringComparer.Ordinal) : null,
+                // Preserve the table comment too, so a relinked table comes back documented.
+                Comment = src.Comment,
             })
         };
     }
@@ -300,7 +303,8 @@ public sealed class CatalogsManager
                 TableName = ticket.TableName,
                 Columns = columns,
                 Indexes = indexes,
-                CheckConstraints = checkConstraints
+                CheckConstraints = checkConstraints,
+                Comment = ticket.Comment
             })
         };
     }
@@ -385,7 +389,8 @@ public sealed class CatalogsManager
                 SchemaElementState.Public,
                 startOffset: null,
                 columnDirections: IndexColumnOrder.Extract(constraint.Columns),
-                includeColumnIds: includeColumnIds
+                includeColumnIds: includeColumnIds,
+                comment: constraint.Comment
             ));
         }
 
@@ -988,6 +993,51 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
+    /// Proposes a <see cref="SchemaOp.SetComment"/> delta and replicates it, so every node's
+    /// in-memory schema carries the new comment and the KV checkpoint is rewritten. Advances the
+    /// database schema version but not <see cref="TableSchema.Version"/>. Cluster mode only —
+    /// standalone goes through <see cref="SetTableCommentAsync"/>.
+    ///
+    /// <para><paramref name="comment"/> is null to remove the comment; the empty string stores a
+    /// present-but-empty one.</para>
+    /// </summary>
+    public async Task ReplicateSetCommentAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        CommentTarget target,
+        string? elementName,
+        string? comment)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.SetComment,
+                Payload = Serializator.Serialize(new SchemaSetCommentPayload
+                {
+                    TableName = tableName,
+                    Target = target,
+                    ElementName = elementName,
+                    Comment = comment
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Proposes an <c>AddCheckConstraint</c> delta and replicates it to all cluster nodes.
     /// The proposer must already have validated the expression and confirmed existing rows pass.
     /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
@@ -1186,6 +1236,7 @@ public sealed class CatalogsManager
         SchemaOp.RenameColumn or SchemaOp.RenameIndex => DecodePayload<SchemaRenamePayload>(entry).TableName,
         SchemaOp.AddCheckConstraint or SchemaOp.DropCheckConstraint => DecodePayload<SchemaCheckConstraintPayload>(entry).TableName,
         SchemaOp.SetTableSettings => DecodePayload<SchemaSetTableSettingsPayload>(entry).TableName,
+        SchemaOp.SetComment => DecodePayload<SchemaSetCommentPayload>(entry).TableName,
         SchemaOp.SetColumnNotNull => DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
@@ -1336,6 +1387,7 @@ public sealed class CatalogsManager
             SchemaOp.DropCheckConstraint => ApplyDropCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
             SchemaOp.SetColumnNotNull => ApplySetColumnNotNull(schema, DecodePayload<SchemaSetColumnNotNullPayload>(entry)),
             SchemaOp.SetTableSettings => ApplySetTableSettings(schema, DecodePayload<SchemaSetTableSettingsPayload>(entry)),
+            SchemaOp.SetComment => ApplySetComment(schema, DecodePayload<SchemaSetCommentPayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -1377,6 +1429,7 @@ public sealed class CatalogsManager
             Version = 0,
             Name = payload.TableName,
             Columns = new(payload.Columns.Length),
+            Comment = payload.Comment,
             SchemaHistory = []
         };
 
@@ -1393,7 +1446,8 @@ public sealed class CatalogsManager
                     maxLength: column.MaxLength,
                     arrayElementType: column.ArrayElementType,
                     defaultFunction: column.DefaultFunction,
-                    notNullConstraintName: column.NotNullConstraintName
+                    notNullConstraintName: column.NotNullConstraintName,
+                    comment: column.Comment
                 )
             );
         }
@@ -1456,6 +1510,7 @@ public sealed class CatalogsManager
             Version = payload.Version,   // preserve the real version so rows decode against the right layout
             Name = payload.TableName,
             Columns = new(payload.Columns.Length),
+            Comment = payload.Comment,
             SchemaHistory = null,        // lazy-loaded from the retained {dbId}/meta/history:{tableId}:* keys
         };
 
@@ -1472,7 +1527,8 @@ public sealed class CatalogsManager
                     maxLength: column.MaxLength,
                     arrayElementType: column.ArrayElementType,
                     defaultFunction: column.DefaultFunction,
-                    notNullConstraintName: column.NotNullConstraintName
+                    notNullConstraintName: column.NotNullConstraintName,
+                    comment: column.Comment
                 )
             );
         }
@@ -1567,6 +1623,94 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
+    /// Applies a <see cref="SchemaOp.SetComment"/> delta: attaches or removes a free-text comment on
+    /// the table, one of its columns, or one of its indexes. A null <c>payload.Comment</c> means
+    /// remove, and is deliberately not conflated with the empty string.
+    ///
+    /// <para>Replay-safe by construction: every branch is a pure overwrite, and a column or index
+    /// that no longer exists is a silent no-op rather than a throw. That matters because a
+    /// re-delivered entry (Raft redelivery, WAL replay) can arrive after a later DROP COLUMN /
+    /// DROP INDEX has already been applied — throwing there would wedge the apply pipeline on an
+    /// operation that carries no data.</para>
+    ///
+    /// <para>Does not bump <see cref="TableSchema.Version"/>: comments do not affect row encoding.
+    /// The database schema version is advanced centrally by <see cref="ApplySchemaDelta"/>.</para>
+    /// </summary>
+    private static TableSchema? ApplySetComment(Schema schema, SchemaSetCommentPayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        switch (payload.Target)
+        {
+            case CommentTarget.Table:
+                tableSchema.Comment = payload.Comment;
+                break;
+
+            case CommentTarget.Column:
+                {
+                    if (tableSchema.Columns is null)
+                        break;
+
+                    int idx = tableSchema.Columns.FindIndex(
+                        c => string.Equals(c.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
+
+                    if (idx < 0)
+                        break;
+
+                    TableColumnSchema old = tableSchema.Columns[idx];
+                    tableSchema.Columns[idx] = new TableColumnSchema(
+                        id: old.Id,
+                        name: old.Name,
+                        type: old.Type,
+                        notNull: old.NotNull,
+                        defaultValue: old.DefaultValue,
+                        state: old.State,
+                        maxLength: old.MaxLength,
+                        arrayElementType: old.ArrayElementType,
+                        defaultFunction: old.DefaultFunction,
+                        notNullConstraintName: old.NotNullConstraintName,
+                        comment: payload.Comment
+                    );
+                    break;
+                }
+
+            case CommentTarget.Index:
+                {
+                    if (tableSchema.Indexes is null)
+                        break;
+
+                    int idx = tableSchema.Indexes.FindIndex(
+                        ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
+
+                    if (idx < 0)
+                        break;
+
+                    TableIndexSchema old = tableSchema.Indexes[idx];
+                    tableSchema.Indexes[idx] = new TableIndexSchema(
+                        id: old.Id,
+                        name: old.Name,
+                        columnIds: old.ColumnIds,
+                        type: old.Type,
+                        state: old.State,
+                        startOffset: old.StartOffset,
+                        columnDirections: old.ColumnDirections,
+                        includeColumnIds: old.IncludeColumnIds,
+                        comment: payload.Comment
+                    );
+                    break;
+                }
+
+            default:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Unsupported comment target '{payload.Target}' in the schema log");
+        }
+
+        return tableSchema;
+    }
+
+    /// <summary>
     /// Applies an AddCheckConstraint delta. Idempotent: an existing constraint with the same name
     /// is replaced. Rebuilds the <c>ParsedCondition</c> AST cache so enforcement is immediately
     /// available on the applying node. Does not bump <c>TableSchema.Version</c> — check constraints
@@ -1635,7 +1779,8 @@ public sealed class CatalogsManager
             maxLength: old.MaxLength,
             arrayElementType: old.ArrayElementType,
             defaultFunction: old.DefaultFunction,
-            notNullConstraintName: payload.ConstraintName
+            notNullConstraintName: payload.ConstraintName,
+            comment: old.Comment
         );
         return tableSchema;
     }
@@ -1783,7 +1928,8 @@ public sealed class CatalogsManager
             maxLength: current.MaxLength,
             arrayElementType: current.ArrayElementType,
             defaultFunction: current.DefaultFunction,
-            notNullConstraintName: current.NotNullConstraintName
+            notNullConstraintName: current.NotNullConstraintName,
+            comment: current.Comment
         );
 
         tableSchema.Version++;
@@ -1803,7 +1949,8 @@ public sealed class CatalogsManager
                 notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State,
                 maxLength: hCol.MaxLength, arrayElementType: hCol.ArrayElementType,
                 defaultFunction: hCol.DefaultFunction,
-                notNullConstraintName: hCol.NotNullConstraintName);
+                notNullConstraintName: hCol.NotNullConstraintName,
+                comment: hCol.Comment);
         }
 
         tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
@@ -1848,7 +1995,8 @@ public sealed class CatalogsManager
             state: current.State,
             startOffset: current.StartOffset,
             columnDirections: current.ColumnDirections,
-            includeColumnIds: current.IncludeColumnIds
+            includeColumnIds: current.IncludeColumnIds,
+            comment: current.Comment
         );
 
         // TableSchema.Version is intentionally NOT bumped: indexes are not part of row encoding.
@@ -1916,7 +2064,8 @@ public sealed class CatalogsManager
                 maxLength: newColumn.MaxLength,
                 arrayElementType: newColumn.ArrayElementType,
                 defaultFunction: newColumn.DefaultFunction,
-                notNullConstraintName: newColumn.NotNullConstraintName
+                notNullConstraintName: newColumn.NotNullConstraintName,
+                comment: newColumn.Comment
             )
         );
 
@@ -2019,7 +2168,8 @@ public sealed class CatalogsManager
                 payload.State,
                 current.StartOffset,
                 columnDirections: current.ColumnDirections,
-                includeColumnIds: current.IncludeColumnIds
+                includeColumnIds: current.IncludeColumnIds,
+                comment: current.Comment
             );
         }
 
@@ -2237,6 +2387,166 @@ public sealed class CatalogsManager
                 finally { database.Schema.ReleaseLock(); }
             }
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Standalone-mode counterpart of <see cref="ReplicateSetCommentAsync"/>: mutates the in-memory
+    /// schema and rewrites the table blob directly, with no schema-log entry. Like the settings path
+    /// it rides the blob without bumping <see cref="TableSchema.Version"/>, and — matching that same
+    /// precedent — it does not advance the database schema version either; only the replicated path
+    /// does.
+    ///
+    /// <para>Ordering matters and is not incidental: the mutation must happen before the persist
+    /// (which serializes the in-memory schema), the schema lock must be released before the persist
+    /// (no replicated write may run under it), and a failed persist/commit must roll the in-memory
+    /// value back so memory never runs ahead of what is durable.</para>
+    ///
+    /// <para>Returns the previous comment's presence so the caller can tell a genuine change from a
+    /// no-op; a null <paramref name="comment"/> removes the comment.</para>
+    /// </summary>
+    public async Task SetTableCommentAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        CommentTarget target,
+        string? elementName,
+        string? comment)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        TableSchema? revertSnapshot = null;
+        bool mutated = false;
+        try
+        {
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                revertSnapshot = CaptureCommentState(table.Schema, target, elementName);
+
+                ApplyCommentToSchema(table.Schema, target, elementName, comment);
+                mutated = true;
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            await PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            mutated = false;
+        }
+        finally
+        {
+            if (mutated && revertSnapshot is not null)
+            {
+                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+                try { RestoreCommentState(table.Schema, target, elementName, revertSnapshot); }
+                finally { database.Schema.ReleaseLock(); }
+            }
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Captures just enough of <paramref name="tableSchema"/> to undo a comment mutation: the prior
+    /// comment value for the targeted element, carried on a throwaway <see cref="TableSchema"/> so
+    /// the revert path needs no extra type.
+    /// </summary>
+    private static TableSchema CaptureCommentState(TableSchema tableSchema, CommentTarget target, string? elementName)
+    {
+        TableSchema snapshot = new();
+
+        switch (target)
+        {
+            case CommentTarget.Table:
+                snapshot.Comment = tableSchema.Comment;
+                break;
+
+            case CommentTarget.Column:
+                {
+                    TableColumnSchema? col = tableSchema.Columns?.FirstOrDefault(
+                        c => string.Equals(c.Name, elementName, StringComparison.OrdinalIgnoreCase));
+                    snapshot.Comment = col?.Comment;
+                    break;
+                }
+
+            case CommentTarget.Index:
+                {
+                    TableIndexSchema? ix = tableSchema.Indexes?.FirstOrDefault(
+                        i => string.Equals(i.Name, elementName, StringComparison.OrdinalIgnoreCase));
+                    snapshot.Comment = ix?.Comment;
+                    break;
+                }
+        }
+
+        return snapshot;
+    }
+
+    private static void RestoreCommentState(TableSchema tableSchema, CommentTarget target, string? elementName, TableSchema snapshot)
+        => ApplyCommentToSchema(tableSchema, target, elementName, snapshot.Comment);
+
+    /// <summary>
+    /// The single in-memory comment mutation, shared by the standalone write path and its revert so
+    /// the two can never drift. Mirrors <c>ApplySetComment</c>, which does the same work on the
+    /// replicated path.
+    /// </summary>
+    private static void ApplyCommentToSchema(TableSchema tableSchema, CommentTarget target, string? elementName, string? comment)
+    {
+        switch (target)
+        {
+            case CommentTarget.Table:
+                tableSchema.Comment = comment;
+                break;
+
+            case CommentTarget.Column:
+                {
+                    int idx = tableSchema.Columns?.FindIndex(
+                        c => string.Equals(c.Name, elementName, StringComparison.OrdinalIgnoreCase)) ?? -1;
+
+                    if (idx < 0)
+                        break;
+
+                    TableColumnSchema old = tableSchema.Columns![idx];
+                    tableSchema.Columns[idx] = new TableColumnSchema(
+                        id: old.Id,
+                        name: old.Name,
+                        type: old.Type,
+                        notNull: old.NotNull,
+                        defaultValue: old.DefaultValue,
+                        state: old.State,
+                        maxLength: old.MaxLength,
+                        arrayElementType: old.ArrayElementType,
+                        defaultFunction: old.DefaultFunction,
+                        notNullConstraintName: old.NotNullConstraintName,
+                        comment: comment
+                    );
+                    break;
+                }
+
+            case CommentTarget.Index:
+                {
+                    int idx = tableSchema.Indexes?.FindIndex(
+                        i => string.Equals(i.Name, elementName, StringComparison.OrdinalIgnoreCase)) ?? -1;
+
+                    if (idx < 0)
+                        break;
+
+                    TableIndexSchema old = tableSchema.Indexes![idx];
+                    tableSchema.Indexes[idx] = new TableIndexSchema(
+                        id: old.Id,
+                        name: old.Name,
+                        columnIds: old.ColumnIds,
+                        type: old.Type,
+                        state: old.State,
+                        startOffset: old.StartOffset,
+                        columnDirections: old.ColumnDirections,
+                        includeColumnIds: old.IncludeColumnIds,
+                        comment: comment
+                    );
+                    break;
+                }
         }
     }
 
@@ -2786,6 +3096,7 @@ public sealed class CatalogsManager
             Indexes = tableSchema.Indexes,
             CheckConstraints = tableSchema.CheckConstraints,
             Settings = tableSchema.Settings,
+            Comment = tableSchema.Comment,
             SchemaHistory = null
         };
     }

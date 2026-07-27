@@ -202,6 +202,17 @@ public sealed class SchemaReplicator
                 database.TableDescriptors.TryRemove(payload.TableName, out _);
         }
 
+        // An index comment lives on a *copy* of the index entry inside TableDescriptor.Indexes, so a
+        // cached descriptor would keep rendering the old comment in SHOW CREATE TABLE. Table and
+        // column comments need no eviction: the descriptor shares the very TableSchema/Columns
+        // instances that were mutated in place.
+        if (entry.Op == SchemaOp.SetComment)
+        {
+            SchemaSetCommentPayload payload = DecodePayload<SchemaSetCommentPayload>(entry);
+            if (payload.Target == CommentTarget.Index)
+                database.TableDescriptors.TryRemove(payload.TableName, out _);
+        }
+
         // Renames: evict so the next open rebuilds the descriptor with the new name(s).
         // For table rename, evict both old and new in case a stale entry exists under either.
         // For column/index rename the table name is unchanged; evict by table name.
@@ -453,6 +464,9 @@ public sealed class SchemaReplicator
             // Preserve table settings so a clone promoted to a live schema (or used for validation)
             // does not silently lose the opt-out; matches the Indexes/CheckConstraints treatment.
             Settings = table.Settings is null ? null : new Dictionary<string, string>(table.Settings, StringComparer.Ordinal),
+            // Same reason as the two above: a clone promoted to a live schema must not silently
+            // arrive undocumented.
+            Comment = table.Comment,
             SchemaHistory = table.SchemaHistory is null
                 ? null
                 : table.SchemaHistory.Select(CloneHistory).ToList(),

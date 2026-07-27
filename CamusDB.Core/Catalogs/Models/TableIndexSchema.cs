@@ -105,6 +105,15 @@ public sealed class TableIndexSchema
     public string? StartOffset { get; }
 
     /// <summary>
+    /// Free-text description attached via <c>COMMENT ON INDEX</c> or an inline
+    /// <c>KEY … COMMENT '…'</c>. Null means no comment; an empty string is a present-but-empty
+    /// comment. Carried on <b>both</b> forms of this type: <c>SHOW CREATE TABLE</c> renders from the
+    /// in-memory <c>TableDescriptor.Indexes</c> projection, so a comment threaded only into the
+    /// persisted form would never be visible.
+    /// </summary>
+    public string? Comment { get; }
+
+    /// <summary>
     /// Stable identifier used as the Kahuna key segment for this index's data. Returns
     /// <see cref="Id"/> when set (all indexes created after the stable-ID migration carry it);
     /// falls back to <see cref="Name"/> for legacy entries that pre-date the migration.
@@ -135,7 +144,7 @@ public sealed class TableIndexSchema
     /// <paramref name="columnDirections"/> is positionally aligned with <paramref name="columns"/>;
     /// null means all-ascending.
     /// </summary>
-    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null)
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null, string? comment = null)
     {
         Id = id;
         Name = name;
@@ -144,6 +153,7 @@ public sealed class TableIndexSchema
         State = state;
         ColumnDirections = columnDirections;
         IncludeColumns = includeColumns ?? [];
+        Comment = comment;
     }
 
     /// <summary>
@@ -156,7 +166,7 @@ public sealed class TableIndexSchema
     /// existed) means every column is ascending.
     /// </summary>
     [JsonConstructor]
-    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null)
+    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null, string? comment = null)
     {
         Id = id;
         Name = name;
@@ -168,5 +178,6 @@ public sealed class TableIndexSchema
         ColumnDirections = columnDirections;
         IncludeColumnIds = includeColumnIds;
         IncludeColumns = [];
+        Comment = comment;
     }
 }

@@ -59,6 +59,7 @@ internal static class DerivedTableSchemaBuilder
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowDatabaseSchema =
     [
         new("database", ColumnType.String),
+        new("comment", ColumnType.String),
     ];
 
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowBranchesSchema =

@@ -28,6 +28,8 @@ public sealed class CommandValidator
 
     private readonly AlterConstraintValidator alterConstraintValidator = new();
 
+    private readonly CommentValidator commentValidator = new();
+
     private readonly CloseDatabaseValidator closeDatabaseValidator = new();
 
     private readonly RelinkDatabaseValidator relinkDatabaseValidator = new();
@@ -72,6 +74,11 @@ public sealed class CommandValidator
     public void Validate(AlterConstraintTicket ticket)
     {
         alterConstraintValidator.Validate(ticket);
+    }
+
+    public void Validate(CommentTicket ticket)
+    {
+        commentValidator.Validate(ticket);
     }
 
     public void Validate(RenameTableTicket ticket)

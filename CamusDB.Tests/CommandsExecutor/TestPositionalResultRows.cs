@@ -329,18 +329,22 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
     }
 
     [Test]
-    public async Task ShowDatabase_SchemaHasDatabaseColumn()
+    public async Task ShowDatabase_SchemaHasDatabaseAndCommentColumns()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
 
         (IReadOnlyList<DerivedColumnSchema> schema, List<QueryResultRow> rows) =
             await ExecQuery(executor, database, dbname, "SHOW DATABASE");
 
-        Assert.AreEqual(1, schema.Count);
+        Assert.AreEqual(2, schema.Count);
         Assert.AreEqual("database", schema[0].Name);
         Assert.AreEqual(ColumnType.String, schema[0].Type);
+        Assert.AreEqual("comment", schema[1].Name);
+        Assert.AreEqual(ColumnType.String, schema[1].Type);
         Assert.AreEqual(1, rows.Count);
         Assert.AreEqual(dbname, rows[0].Row["database"].StrValue);
+        // A database with no comment renders an empty string, never a missing cell.
+        Assert.AreEqual("", rows[0].Row["comment"].StrValue);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

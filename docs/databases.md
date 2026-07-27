@@ -37,7 +37,12 @@ Consequences:
 
 ```sql
 RENAME DATABASE old TO new;
+ALTER DATABASE old RENAME TO new;   -- equivalent
 ```
+
+Both spellings are accepted and produce the same operation; the `ALTER` form matches
+`ALTER TABLE t RENAME TO …`. Neither requires a context database — the statement names its target —
+and neither opens a transaction.
 
 Rename is a **registry-only** operation. It swaps the `name→id` binding atomically (a single KV transaction) and leaves the id, the id-based directory, all Kahuna keys, table ids, and the cached descriptor untouched.
 

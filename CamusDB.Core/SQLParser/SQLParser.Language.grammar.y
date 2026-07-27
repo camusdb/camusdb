@@ -39,6 +39,7 @@
 %token TCASE TWHEN TTHEN TELSE TEND
 %token TINCLUDE
 %token TASOFSYSTEMTIME
+%token TCOMMENT
 
 %%
 
@@ -64,6 +65,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | set_transaction_stmt { $$.n = $1.n; }
         | analyze_stmt { $$.n = $1.n; }
         | evict_cache_stmt { $$.n = $1.n; }
+        | comment_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -271,10 +273,10 @@ set_transaction_stmt
     ;
 
 create_table_stmt : TCREATE TTABLE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateTableRelink, $3.n, $6.n, null, null, null, null, null, null); }
-                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, null, null, null, null, null); }
-                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, null, null, null, null, null); }
-                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, null, null, null, null, null); }
-                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $10.n, null, null, null, null, null); }
+                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN opt_table_comment { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, $7.n, null, null, null, null); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN opt_table_comment { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, $10.n, null, null, null, null); }
+                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $10.n, $11.n, null, null, null, null); }
                   ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
@@ -296,8 +298,22 @@ drop_database_stmt : TDROP TDATABASE any_identifier { $$.n = new(NodeType.DropDa
                    | TDROP TDATABASE TIF TEXISTS any_identifier TFORCE { $$.n = new(NodeType.DropDatabaseIfExists, $5.n, null, null, null, null, null, null, "force"); }
 				;
 
+/* Both spellings produce the same node. ALTER TABLE already has a RENAME TO form, so requiring
+   RENAME DATABASE for the database case was an inconsistency users hit. */
 rename_database_stmt : TRENAME TDATABASE any_identifier TTO any_identifier { $$.n = new(NodeType.RenameDatabase, $3.n, $5.n, null, null, null, null, null, null); }
+                     | TALTER TDATABASE any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.RenameDatabase, $3.n, $6.n, null, null, null, null, null, null); }
                      ;
+
+comment_stmt : TCOMMENT TON TTABLE any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnTable, $4.n, $6.n, null, null, null, null, null, null); }
+             | TCOMMENT TON TCOLUMN any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnColumn, $4.n, $6.n, null, null, null, null, null, null); }
+             | TCOMMENT TON TINDEX any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnIndex, $4.n, $6.n, null, null, null, null, null, null); }
+             | TCOMMENT TON TDATABASE any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnDatabase, $4.n, $6.n, null, null, null, null, null, null); }
+             ;
+
+/* A null node distinguishes "IS NULL" (remove the comment) from "IS ''" (store an empty string). */
+comment_value : string { $$.n = $1.n; $$.s = $1.s; }
+              | TNULL { $$.n = null; }
+              ;
 
 alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
@@ -342,6 +358,17 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
 index_include_clause : { $$.n = null; }
                      | TINCLUDE LPAREN identifier_index_list RPAREN { $$.n = $3.n; }
                      ;
+
+/* Optional trailing COMMENT '...' on an inline KEY / UNIQUE KEY definition, so the DDL that
+   SHOW CREATE TABLE emits parses back to the same index comment. Null when absent. */
+opt_inline_comment : { $$.n = null; }
+                   | TCOMMENT string { $$.n = $2.n; }
+                   ;
+
+/* Optional trailing COMMENT '...' after the closing paren of CREATE TABLE. Null when absent. */
+opt_table_comment : { $$.n = null; }
+                  | TCOMMENT string { $$.n = $2.n; }
+                  ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TTABLES { $$.n = NodeAst.ShowTables; }
@@ -571,8 +598,8 @@ create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n 
 create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
                                | TCONSTRAINT TSTRING TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
                                | TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null, null); }
-                               | TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, $6.n, null, null, null, null, null); }
-                               | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, null, null, null, null, null); }
+                               | TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
+                               | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
                                | TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $5.n, null, null, null, null, null, null, $2.s); }
                                | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $3.n, null, null, null, null, null, null, null); }
                                ;
@@ -595,6 +622,7 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                         | TUNIQUE { $$.n = NodeAst.ConstraintUnique; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
                         | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.ConstraintCheck, $3.n, null, null, null, null, null, null, null); }
+                        | TCOMMENT string { $$.n = new(NodeType.ConstraintComment, $2.n, null, null, null, null, null, null, null); }
                         ;
 
 default_expr : int { $$.n = $1.n; $$.s = $1.s; }

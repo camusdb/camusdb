@@ -420,6 +420,22 @@ public sealed class ExecuteSQLController : CommandsController
 
             (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2) = ParseRequestLevelMode(request);
 
+            // Clients route no-rows statements to whichever endpoint they use for non-SELECT SQL,
+            // so a database-scoped statement can arrive here as easily as at /execute-sql-ddl. It
+            // returns no descriptor, so it must bypass both the transaction and the commit below.
+            if (StatementScope.IsDatabaseScopedMutation(SQLParserProcessor.Parse(request.Sql ?? "").nodeType))
+            {
+                ExecuteSQLTicket dbScopedTicket = new(
+                    txnState: null!,
+                    database: request.DatabaseName ?? "",
+                    sql: request.Sql ?? "",
+                    parameters: request.Parameters
+                );
+
+                await executor.ExecuteNonSQLQuery(dbScopedTicket).ConfigureAwait(false);
+                return new JsonResult(new ExecuteNonSQLQueryResponse("ok", 0) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+            }
+
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
             if (request.TxnIdPT > 0)
             {
@@ -516,16 +532,10 @@ public sealed class ExecuteSQLController : CommandsController
                 string sql = request.Sql ?? "";
                 NodeAst ast = SQLParserProcessor.Parse(sql);
 
-                // CREATE/DROP/RENAME DATABASE do not require a database context or a transaction —
-                // they are handled in CommandExecutor before databaseOpener.Open is called.
-                bool isDbManagement = ast.nodeType is
-                    NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
-                    NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
-                    NodeType.CreateDatabaseRelink or
-                    NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
-                    NodeType.RenameDatabase;
-
-                if (!isDbManagement)
+                // Database-scoped statements need neither a context database nor a transaction:
+                // CommandExecutor handles them before databaseOpener.Open and returns no descriptor,
+                // so starting a transaction here would hand a null descriptor to the commit below.
+                if (!StatementScope.IsDatabaseScopedMutation(ast.nodeType))
                 {
                     (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3, KeyValueTransactionLocking? reqLocking3) = ParseRequestLevelMode(request);
                     (newTransaction, txnState) = await BeginOrResumeAsync(

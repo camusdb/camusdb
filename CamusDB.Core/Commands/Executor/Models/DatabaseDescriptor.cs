@@ -37,7 +37,32 @@ public sealed record DatabaseDescriptor : IDisposable
 {
     public string Id { get; }
 
-    public string Name { get; }
+    private volatile string _name;
+
+    /// <summary>
+    /// The database's current <b>display</b> name — for logs, error text, and diagnostics.
+    ///
+    /// <para>Never use it as a lookup key. Request-scoped code that needs a name to resolve something
+    /// must take it from <c>ticket.DatabaseName</c> (the name the caller actually asked for), and code
+    /// that already holds this descriptor should pass the descriptor itself — e.g.
+    /// <c>CommandExecutor.OpenTableWithDescriptor</c> rather than the by-name
+    /// <c>CommandExecutor.OpenTable</c>. Feeding this value back into a by-name resolution is what
+    /// broke INSERT after a RENAME DATABASE.</para>
+    ///
+    /// <para>A rename keeps this descriptor alive — the cache is keyed by the immutable id, and
+    /// evicting it would orphan the running Kahuna node — and refreshes this field in place via
+    /// <see cref="SetName"/>. It is <c>volatile</c> because logging and diagnostics on other threads
+    /// read it while a rename is running.</para>
+    /// </summary>
+    public string Name => _name;
+
+    /// <summary>
+    /// Refreshes the display name after a committed RENAME DATABASE. Called only by the rename path,
+    /// which has already durably swapped the registry binding, so this cannot fail the statement.
+    /// Does not touch the id, the key space, or any cached table descriptor — none of which a rename
+    /// changes.
+    /// </summary>
+    internal void SetName(string name) => _name = name;
 
     public EmbeddedKahuna Kahuna { get; }
 
@@ -231,7 +256,7 @@ public sealed record DatabaseDescriptor : IDisposable
     )
     {
         Id = id;
-        Name = name;
+        _name = name;
         Kahuna = kahuna;
         Transactions = transactions;
         TableDescriptors = tableDescriptors;

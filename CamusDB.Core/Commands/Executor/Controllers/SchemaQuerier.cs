@@ -148,6 +148,7 @@ internal sealed class SchemaQuerier
             createTableSql.Append(' ');
             createTableSql.Append(GetSQLConstraint(column));
             createTableSql.Append(GetSQLDefault(column));
+            createTableSql.Append(GetSQLComment(column.Comment));
             createTableSql.Append(',');
             i++;
         }
@@ -165,12 +166,16 @@ internal sealed class SchemaQuerier
                 ? " INCLUDE (" + string.Join(", ", kv.Value.IncludeColumns.Select(c => "`" + c + "`")) + ")"
                 : "";
 
+            // The PRIMARY KEY line has no inline COMMENT form to round-trip through, which is why
+            // COMMENT ON INDEX rejects the primary index outright.
+            string indexComment = GetSQLComment(kv.Value.Comment);
+
             if (kv.Key == CamusDBConfig.PrimaryKeyInternalName)
                 createTableSql.Append(" PRIMARY KEY (" + cols + "),");
             else if (kv.Value.Type == IndexType.Unique)
-                createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + ")" + include + ",");
+                createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + ")" + include + indexComment + ",");
             else
-                createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + ")" + include + ",");
+                createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + ")" + include + indexComment + ",");
         }
 
         if (table.Schema.CheckConstraints is { Count: > 0 } checks)
@@ -183,7 +188,9 @@ internal sealed class SchemaQuerier
         if (createTableSql[^1] == ',')
             createTableSql.Length--;
 
-        createTableSql.Append(");");
+        createTableSql.Append(')');
+        createTableSql.Append(GetSQLComment(table.Schema.Comment));
+        createTableSql.Append(';');
 
         yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
@@ -192,13 +199,20 @@ internal sealed class SchemaQuerier
         });
     }
 
-    internal async IAsyncEnumerable<QueryResultRow> ShowDatabase(DatabaseDescriptor database)
+    /// <summary>
+    /// One row describing the current database. <paramref name="comment"/> comes from the registry
+    /// entry (the descriptor does not carry it). Unlike <see cref="ShowCreateTable"/>, this surface
+    /// cannot distinguish an unset comment from an empty one — both render as an empty string,
+    /// because the row shape is fixed and every column is a plain String value.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowDatabase(DatabaseDescriptor database, string? comment = null)
     {
         await Task.CompletedTask;
 
         yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
-            { "database", new ColumnValue(ColumnType.String, database.Name) }
+            { "database", new ColumnValue(ColumnType.String, database.Name) },
+            { "comment", new ColumnValue(ColumnType.String, comment ?? "") }
         });
     }
 
@@ -443,6 +457,18 @@ internal sealed class SchemaQuerier
 
         return "NULL";
     }
+
+    /// <summary>
+    /// Renders a trailing <c>COMMENT '…'</c> clause, or an empty string when
+    /// <paramref name="comment"/> is null.
+    ///
+    /// <para>The null check is what keeps <c>IS NULL</c> and <c>IS ''</c> observably different: an
+    /// absent comment emits no clause at all, while an empty one emits <c>COMMENT ''</c>. Embedded
+    /// single quotes are doubled so the emitted DDL re-parses to the identical text — the
+    /// round-trip through the extended CREATE TABLE grammar depends on it.</para>
+    /// </summary>
+    private static string GetSQLComment(string? comment)
+        => comment is null ? "" : $" COMMENT '{comment.Replace("'", "''")}'";
 
     /// <summary>
     /// Renders the trailing <c>DEFAULT(...)</c> clause for a column definition in

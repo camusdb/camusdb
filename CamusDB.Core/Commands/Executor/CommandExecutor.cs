@@ -85,6 +85,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly TableConstraintAlterer tableConstraintAlterer;
 
+    private readonly CommentSetter commentSetter = new();
+
     private readonly TableDropper tableDropper;
 
     private readonly RowInserter rowInserter;
@@ -1160,9 +1162,49 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Do NOT evict the descriptor: evicting without flushing/disposing the node would orphan
         // the running SQLite+Raft process (standalone) or leak the schema-replication subscription
         // (cluster), and a second Load would open a second node on the same storage (double-writer).
-        // Name is display-only (logs, error messages) and never a storage or routing key,
-        // so a stale Name on the cached descriptor is functionally harmless.
+        //
+        // Instead refresh the descriptor's display name in place. It was previously left stale on the
+        // theory that Name is display-only — but any path that fed it back into a by-name resolution
+        // then resolved a name the registry no longer knows, which is exactly how INSERT broke after a
+        // rename. Request-scoped code must still prefer ticket.DatabaseName; this keeps the fallback
+        // honest rather than relying on every caller getting it right.
+        await RefreshCachedDescriptorNameAsync(registry, ticket.NewName).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Points the cached descriptor's display name at <paramref name="newName"/> after a committed
+    /// rename.
+    ///
+    /// <para>Resolved by id rather than by matching the old name: the descriptor cache is keyed by id,
+    /// the id is what a rename preserves, and the registry has already been updated so the new name
+    /// resolves to it.</para>
+    ///
+    /// <para>Best-effort by design — the registry swap is already durable when this runs, so a failure
+    /// here must not fail the statement; the worst case is a stale name in log output until the
+    /// descriptor is recycled. Only a descriptor that is already materialized is touched: forcing an
+    /// unstarted cache entry would load a database nobody asked for, and a later load already picks up
+    /// the new name.</para>
+    /// </summary>
+    private async Task RefreshCachedDescriptorNameAsync(DatabaseRegistry registry, string newName)
+    {
+        try
+        {
+            string? id = await registry.TryResolveIdAsync(newName).ConfigureAwait(false);
+            if (id is null)
+                return;
+
+            if (!databaseDescriptors.Descriptors.TryGetValue(id, out Nito.AsyncEx.AsyncLazy<DatabaseDescriptor>? lazy))
+                return;
+
+            if (!lazy.IsStarted || !lazy.Task.IsCompletedSuccessfully)
+                return;
+
+            lazy.Task.Result.SetName(newName);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to refresh the cached descriptor name after renaming to {NewName}", newName);
+        }
     }
 
     #endregion
@@ -1210,8 +1252,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         Action? postCommitInvalidate = null
     )
     {
-        if (isClusterMode)
-            await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        // Acquired in BOTH modes. It used to be cluster-only, on the reasoning that a standalone node
+        // has no replicated schema log to order proposals against — but the gate is also what makes
+        // "resolve the target, then mutate it" atomic against a concurrent drop/recreate of the same
+        // object. Skipping it standalone meant metadata-only DDL that *does* take the gate (COMMENT ON,
+        // ALTER TABLE SET) serialized against nothing there, and could persist a blob for a table that
+        // had just been dropped. One discipline in both modes; DDL is rare enough that the added
+        // serialization costs nothing that matters.
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
 
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
@@ -1250,8 +1298,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         finally
         {
-            if (isClusterMode)
-                database.SchemaDdlSemaphore.Release();
+            database.SchemaDdlSemaphore.Release();
             // Fire after CommitAsync (or RollbackIfNotCompletedAsync on error) so the
             // KV transaction is settled before schema-partition leadership changes.
             await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
@@ -1945,6 +1992,15 @@ public sealed class CommandExecutor : IAsyncDisposable
         ).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Opens a table by <b>database name</b>, resolving the database through the registry first.
+    ///
+    /// <para>For request-scoped callers that only have a name. Code that already holds a
+    /// <see cref="DatabaseDescriptor"/> must call <see cref="OpenTableWithDescriptor"/> instead —
+    /// passing <c>descriptor.Name</c> back into this method re-resolves a cached display name, which
+    /// after a RENAME DATABASE was the pre-rename name and made every INSERT fail with
+    /// "Database '&lt;old&gt;' does not exist". It is also two redundant lookups on a hot path.</para>
+    /// </summary>
     public async Task<TableDescriptor> OpenTable(OpenTableTicket ticket)
     {
         DatabaseDescriptor descriptor = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
@@ -1952,6 +2008,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         return await tableOpener.Open(descriptor, ticket.TableName).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Opens a table against an already-resolved database. The preferred entry point whenever the
+    /// caller holds a descriptor: it skips the registry round-trip and cannot be affected by a rename
+    /// that happened after the descriptor was cached. <c>ticket.DatabaseName</c> is carried for
+    /// diagnostics only — the descriptor decides which database is used.
+    /// </summary>
     public async Task<TableDescriptor> OpenTableWithDescriptor(DatabaseDescriptor descriptor, OpenTableTicket ticket)
     {
         return await tableOpener.Open(descriptor, ticket.TableName).ConfigureAwait(false);
@@ -2202,6 +2264,38 @@ public sealed class CommandExecutor : IAsyncDisposable
         ).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Whether a forwarded <c>COMMENT ON</c> is visible in this node's in-memory schema yet.
+    /// Comparison is ordinal and null-aware on purpose: <c>IS NULL</c> (null) and <c>IS ''</c> (empty)
+    /// are different outcomes, so treating them as equal would report "applied" for the wrong one.
+    /// </summary>
+    private static bool ForwardedCommentApplied(DatabaseDescriptor database, CommentTicket ticket)
+    {
+        if (!database.Schema.Tables.TryGetValue(ticket.TableName ?? "", out TableSchema? ts))
+            return false;
+
+        string? current = ticket.Target switch
+        {
+            CommentTarget.Table => ts.Comment,
+            CommentTarget.Column => ts.Columns?.FirstOrDefault(
+                c => string.Equals(c.Name, ticket.ElementName, StringComparison.OrdinalIgnoreCase))?.Comment,
+            CommentTarget.Index => ts.Indexes?.FirstOrDefault(
+                ix => string.Equals(ix.Name, ticket.ElementName, StringComparison.OrdinalIgnoreCase))?.Comment,
+            _ => null
+        };
+
+        return string.Equals(current, ticket.Comment, StringComparison.Ordinal);
+    }
+
+    private async Task<bool?> TryForwardCommentAsync(DatabaseDescriptor database, CommentTicket ticket)
+    {
+        return await TryForwardDdlAsync(
+            database,
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardCommentAsync(leader, ticket, opId, ct),
+            () => ForwardedCommentApplied(database, ticket)
+        ).ConfigureAwait(false);
+    }
+
 
     /// <summary>
     /// Applies <c>ALTER TABLE t SET (key = value)</c> table storage parameters version-neutrally (rides
@@ -2283,6 +2377,82 @@ public sealed class CommandExecutor : IAsyncDisposable
         return new ExecuteDDLSQLResult(database, ok);
     }
 
+    /// <summary>
+    /// Attaches or removes a comment on a table, column, index, or database. Public so a ticket caller
+    /// can invoke it without going through SQL. The database target is routed to the registry; the
+    /// other three open the table and go through <see cref="CommentSetter"/>.
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> Comment(CommentTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        if (ticket.Target == CommentTarget.Database)
+        {
+            await CommentDatabase(ticket).ConfigureAwait(false);
+
+            // No descriptor to hand back — the registry write needs no open database — but the
+            // operation did succeed, so report that rather than a defaulted (false) result.
+            return new ExecuteDDLSQLResult(null!, true);
+        }
+
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+        return await Comment(database, ticket).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Applies a table/column/index comment against an already-opened database, forwarding to the
+    /// schema leader first when this node is a follower. Serialized against other DDL on this
+    /// database by <c>SchemaDdlSemaphore</c>, exactly like <c>ALTER TABLE … SET</c>.
+    /// </summary>
+    private async Task<ExecuteDDLSQLResult> Comment(DatabaseDescriptor database, CommentTicket ticket)
+    {
+        bool? forwarded = await TryForwardCommentAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return new ExecuteDDLSQLResult(database, forwarded.Value);
+
+        // The table is opened INSIDE the gate, not before it. Resolving first and validating later
+        // is a check-then-act: a drop-and-recreate of the same name in between leaves the validation
+        // looking at the old object while the delta — which names its target by table name, not id —
+        // lands on the replacement. The apply deliberately no-ops on a missing column/index (for
+        // replay safety), so that mismatch would report success while doing nothing at all.
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            TableDescriptor table = await tableOpener.Open(database, ticket.TableName!).ConfigureAwait(false);
+
+            bool ok = await commentSetter.Set(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false);
+            return new ExecuteDDLSQLResult(database, ok);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Sets a database's comment on the cross-database registry. No schema-leader forwarding: the
+    /// registry write is a plain replicated KV write, exactly like RENAME DATABASE.
+    /// </summary>
+    private async Task CommentDatabase(CommentTicket ticket)
+    {
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        await registry.SetCommentAsync(ticket.DatabaseName, ticket.Comment).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only: resolves a registry entry through <b>this executor's own</b> registry instance,
+    /// exercising its cache-coherence path. Exists because cross-node registry behavior is otherwise
+    /// unobservable — each node owns a private <see cref="DatabaseRegistry"/>, and asserting that one
+    /// node sees another's write is the whole point of those tests. Not a production seam: callers
+    /// should go through <c>OpenDatabase</c> or <c>SHOW DATABASE</c>.
+    /// </summary>
+    internal async Task<DatabaseRegistryEntry?> ResolveRegistryEntryForTestingAsync(string databaseName)
+    {
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        return await registry.TryResolveEntryAsync(databaseName).ConfigureAwait(false);
+    }
+
     /// <summary>Maps a parsed statement's node type to the bounded <c>statement</c> metric family tag.</summary>
     private static string MapStatementFamily(NodeType nodeType) => nodeType switch
     {
@@ -2339,11 +2509,30 @@ public sealed class CommandExecutor : IAsyncDisposable
             return default;
         }
 
+        // A database comment lives on the cross-database registry entry, so it is handled here —
+        // before any database is opened — alongside the other database-scoped DDL.
+        if (ast.nodeType is NodeType.CommentOnDatabase)
+        {
+            CommentTicket databaseCommentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+            validator.Validate(databaseCommentTicket);
+            await CommentDatabase(databaseCommentTicket).ConfigureAwait(false);
+            return default;
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
         switch (ast.nodeType)
         {
+            case NodeType.CommentOnTable:
+            case NodeType.CommentOnColumn:
+            case NodeType.CommentOnIndex:
+                {
+                    CommentTicket commentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+                    validator.Validate(commentTicket);
+                    return await Comment(database, commentTicket).ConfigureAwait(false);
+                }
+
             case NodeType.CreateTable:
             case NodeType.CreateTableIfNotExists:
                 {
@@ -2700,6 +2889,18 @@ public sealed class CommandExecutor : IAsyncDisposable
             return default;
         }
 
+        // COMMENT ON DATABASE is database-scoped like the two above: it names its target in the SQL
+        // and touches only the cross-database registry, so it must not open a descriptor. Clients
+        // route no-rows statements to whichever endpoint they use for non-SELECT SQL, so every
+        // statement reachable through ExecuteDDLSQL's pre-open block has to be reachable here too.
+        if (ast.nodeType is NodeType.CommentOnDatabase)
+        {
+            CommentTicket databaseCommentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+            validator.Validate(databaseCommentTicket);
+            await CommentDatabase(databaseCommentTicket).ConfigureAwait(false);
+            return default;
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
@@ -2825,6 +3026,16 @@ public sealed class CommandExecutor : IAsyncDisposable
             case NodeType.EvictCacheAll:
                 {
                     database.Cache?.InvalidateDatabase(database.Id);
+                    return new(database, null!, 0);
+                }
+
+            case NodeType.CommentOnTable:
+            case NodeType.CommentOnColumn:
+            case NodeType.CommentOnIndex:
+                {
+                    CommentTicket commentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+                    validator.Validate(commentTicket);
+                    await Comment(database, commentTicket).ConfigureAwait(false);
                     return new(database, null!, 0);
                 }
 
@@ -3074,7 +3285,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowDatabaseSchema;
-                    return (database, schemaQuerier.ShowDatabase(database));
+
+                    // The comment lives on the cross-database registry entry, not on the descriptor,
+                    // so it is resolved here. A cache miss (another node set it and this node has not
+                    // reconciled yet) simply renders empty rather than failing the statement.
+                    DatabaseRegistry showRegistry = await registryTask.ConfigureAwait(false);
+                    string? databaseComment = showRegistry.GetById(database.Id)?.Comment;
+
+                    return (database, schemaQuerier.ShowDatabase(database, databaseComment));
                 }
 
             case NodeType.Explain:

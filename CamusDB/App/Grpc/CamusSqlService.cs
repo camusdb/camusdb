@@ -237,6 +237,21 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
                 ParseLevelMode(request);
 
+            // Mirrors the REST non-query path: a database-scoped statement returns no descriptor, so
+            // it must bypass both the transaction and the commit rather than be handed a null.
+            if (StatementScope.IsDatabaseScopedMutation(SQLParserProcessor.Parse(request.Sql ?? "").nodeType))
+            {
+                ExecuteSQLTicket dbScopedTicket = new(
+                    txnState: null!,
+                    database: request.Database,
+                    sql: request.Sql ?? "",
+                    parameters: ToColumnValueMap(request.Parameters)
+                );
+
+                await executor.ExecuteNonSQLQuery(dbScopedTicket).ConfigureAwait(false);
+                return new NonQueryReply { AffectedRows = 0 };
+            }
+
             // Explicit transaction — client handles retry and lifecycle.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
@@ -313,12 +328,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
-            bool isDbManagement = ast.nodeType is
-                NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
-                NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
-                NodeType.CreateDatabaseRelink or
-                NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
-                NodeType.RenameDatabase;
+            bool isDbManagement = StatementScope.IsDatabaseScopedMutation(ast.nodeType);
 
             KvTransaction? txnState = null;
             bool newTransaction = false;

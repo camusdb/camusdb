@@ -23,6 +23,10 @@ internal sealed class AlterTableValidator : ValidatorBase
 
         ValidateIdentifier(ticket.Column.Name, "Column");
 
+        // Covers ADD COLUMN … COMMENT '…'; other operations carry no comment and pass a null.
+        ValidateCommentLength(ticket.Column.Comment, $"Column '{ticket.Column.Name}'");
+        ValidateCommentIsRepresentable(ticket.Column.Comment, $"Column '{ticket.Column.Name}'");
+
         if (ticket.Operation == AlterTableOperation.RenameColumn)
         {
             ValidateIdentifier(ticket.NewName ?? "", "New column");

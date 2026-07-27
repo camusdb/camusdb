@@ -370,7 +370,8 @@ internal sealed class TableIndexAdder
                         SchemaElementState.Public,
                         finalOffset,
                         columnDirections: old.ColumnDirections,
-                        includeColumnIds: old.IncludeColumnIds
+                        includeColumnIds: old.IncludeColumnIds,
+                        comment: old.Comment
                     );
                     break;
                 }
@@ -383,7 +384,7 @@ internal sealed class TableIndexAdder
         }
 
         TableIndexSchema current = table.Indexes[ticket.IndexName];
-        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null);
+        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment);
 
         return FluxAction.Continue;
     }

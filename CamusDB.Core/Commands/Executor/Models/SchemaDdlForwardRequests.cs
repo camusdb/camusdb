@@ -29,6 +29,10 @@ public sealed class ColumnInfoRequest
 
     /// <summary>Name of a <c>CONSTRAINT name NOT NULL</c> declared on the column; null for bare NOT NULL.</summary>
     public string? NotNullConstraintName { get; set; }
+
+    /// <summary>Inline column comment; null when none was declared. Without it a forwarded
+    /// CREATE TABLE / ADD COLUMN would silently drop the comment on the leader.</summary>
+    public string? Comment { get; set; }
 }
 
 /// <summary>
@@ -53,6 +57,9 @@ public sealed class ConstraintInfoRequest
     public ConstraintType Type { get; set; }
     public string Name { get; set; } = "";
     public ColumnIndexInfoRequest[] Columns { get; set; } = [];
+
+    /// <summary>Inline comment on a <c>KEY</c> / <c>UNIQUE KEY</c>; null when none was declared.</summary>
+    public string? Comment { get; set; }
 }
 
 public sealed class ForwardCreateTableRequest
@@ -64,6 +71,9 @@ public sealed class ForwardCreateTableRequest
     public ConstraintInfoRequest[] Constraints { get; set; } = [];
     public CheckConstraintInfoRequest[] CheckConstraints { get; set; } = [];
     public bool IfNotExists { get; set; }
+
+    /// <summary>Inline table-level comment (<c>) COMMENT '…'</c>); null when none was declared.</summary>
+    public string? Comment { get; set; }
 }
 
 public sealed class ForwardAlterTableRequest
@@ -126,6 +136,25 @@ public sealed class ForwardRenameTableRequest
     public string DatabaseName { get; set; } = "";
     public string TableName { get; set; } = "";
     public string NewName { get; set; } = "";
+}
+
+/// <summary>
+/// Wire form of a <c>COMMENT ON TABLE/COLUMN/INDEX</c> forwarded to the schema leader.
+/// <see cref="Comment"/> is nullable on purpose and its null-vs-empty distinction is load-bearing:
+/// null means <c>IS NULL</c> (remove the comment), <c>""</c> means <c>IS ''</c> (store an empty one).
+/// <c>COMMENT ON DATABASE</c> is never forwarded through here — it is a plain registry write.
+/// </summary>
+public sealed class ForwardCommentRequest
+{
+    public string OperationId { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public CommentTarget Target { get; set; }
+    public string TableName { get; set; } = "";
+
+    /// <summary>Column or index name; null when <see cref="Target"/> is Table.</summary>
+    public string? ElementName { get; set; }
+
+    public string? Comment { get; set; }
 }
 
 public sealed class SchemaDdlForwardResponse

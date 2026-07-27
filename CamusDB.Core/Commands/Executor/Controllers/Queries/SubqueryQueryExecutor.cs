@@ -86,6 +86,9 @@ internal sealed class SubqueryQueryExecutor
 
         BoundSelectQuery bound = await queryBinder.BindAsync(database, subquery).ConfigureAwait(false);
 
+        // No request-scoped ticket reaches this helper, so the descriptor's display name is the only
+        // name available. That is safe because a rename refreshes it in place — but if this method
+        // ever gains access to the outer ticket, prefer its DatabaseName.
         ExecuteSQLTicket executeTicket = new(
             txnState: txnState,
             database: database.Name,

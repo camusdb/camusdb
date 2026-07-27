@@ -689,6 +689,13 @@ internal abstract class SQLExecutorBaseCreator
             return;
         }
 
+        if (constraintsList.nodeType == NodeType.ConstraintComment)
+        {
+            constraintTypes.Add((ColumnConstraintType.Comment,
+                new ColumnValue(ColumnType.String, UnquoteStringLiteral(constraintsList.leftAst?.yytext ?? ""))));
+            return;
+        }
+
         if (constraintsList.nodeType == NodeType.CreateTableFieldConstraintList)
         {
             if (constraintsList.leftAst != null)
@@ -741,6 +748,22 @@ internal abstract class SQLExecutorBaseCreator
         {
             if (type == ColumnConstraintType.NotNull && value?.StrValue is { Length: > 0 } name)
                 return name;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the inline column comment when the column was declared with <c>COMMENT '…'</c>, or
+    /// null when no comment clause was present. An empty declared comment returns <c>""</c>, not
+    /// null — the two are different states downstream, so this must not collapse them.
+    /// </summary>
+    protected static string? GetCommentFromConstraints(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.Comment)
+                return value?.StrValue ?? "";
         }
 
         return null;

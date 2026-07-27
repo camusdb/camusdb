@@ -95,5 +95,14 @@ public enum SchemaOp
     /// <c>sql_stats_automatic_collection_enabled</c>. Merged into <c>TableSchema.Settings</c> on apply.
     /// Does not bump <c>TableSchema.Version</c> — settings do not affect row encoding.
     /// </summary>
-    SetTableSettings = 14
+    SetTableSettings = 14,
+
+    /// <summary>
+    /// Attach or remove a free-text comment on a table, column, or index
+    /// (payload: <c>SchemaSetCommentPayload</c>). Idempotent on apply — a replay simply overwrites
+    /// with the same value, and a target that no longer exists is a no-op rather than a failure, so
+    /// a re-delivered entry cannot wedge apply after a later DROP COLUMN. Does not bump
+    /// <c>TableSchema.Version</c>: comments do not affect row encoding.
+    /// </summary>
+    SetComment = 15
 }

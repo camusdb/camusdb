@@ -83,6 +83,16 @@ public sealed class TableSchema
     public const string SqlStatsAutomaticCollectionEnabledKey = "sql_stats_automatic_collection_enabled";
 
     /// <summary>
+    /// Free-text description attached to the table via <c>COMMENT ON TABLE</c> or an inline
+    /// <c>) COMMENT '…'</c> on <c>CREATE TABLE</c>. Null means no comment; an empty string is a
+    /// comment that is present but empty (<c>IS ''</c>), and the two are deliberately
+    /// distinguishable — <c>SHOW CREATE TABLE</c> omits the clause entirely for null. Like
+    /// <c>Indexes</c> / <c>CheckConstraints</c> / <c>Settings</c> it rides the table blob and does
+    /// <b>not</b> bump <c>Version</c>: comments do not affect row encoding.
+    /// </summary>
+    public string? Comment { get; set; }
+
+    /// <summary>
     /// A list of all the previous versions of the table schema.
     /// </summary>
     public List<TableSchemaHistory>? SchemaHistory { get; set; }

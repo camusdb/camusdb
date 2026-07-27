@@ -31,4 +31,10 @@ public interface ISchemaDdlForwarder
     Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken);
 
     Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Forwards <c>COMMENT ON TABLE|COLUMN|INDEX</c>. <c>COMMENT ON DATABASE</c> never comes through
+    /// here — it writes the cross-database registry directly and needs no schema leader.
+    /// </summary>
+    Task<bool?> ForwardCommentAsync(string leader, CommentTicket ticket, string operationId, CancellationToken cancellationToken);
 }

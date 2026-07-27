@@ -26,18 +26,8 @@ internal sealed class ExecuteSQLValidator : ValidatorBase
             // Statements that operate at the server level (not tied to a specific database)
             // are valid without a DatabaseName. Parse to check before rejecting.
             NodeAst ast = SQLParserProcessor.Parse(ticket.Sql);
-            bool serverLevel = ast.nodeType is
-                NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists or
-                NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists or
-                NodeType.CreateDatabaseRelink or
-                NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
-                NodeType.RenameDatabase or
-                NodeType.ShowDatabases or
-                NodeType.ShowBranches or
-                NodeType.ShowAncestors or
-                NodeType.ShowOrphanDatabases;
 
-            if (!serverLevel)
+            if (!StatementScope.AllowsEmptyContextDatabase(ast.nodeType))
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     "Database name is required"

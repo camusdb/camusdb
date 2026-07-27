@@ -53,9 +53,12 @@ internal sealed class DerivedTableExecutor
     {
         BoundSelectQuery innerBound = source.InnerBound;
 
+        // The request-scoped name, not the descriptor's display name: the inner ticket can be
+        // re-resolved by name downstream, and the descriptor's name is a cached value that a rename
+        // refreshes rather than a value this request asked for.
         ExecuteSQLTicket executeTicket = new(
             txnState: outerTicket.TxnState,
-            database: database.Name,
+            database: outerTicket.DatabaseName,
             sql: "",
             parameters: outerTicket.Parameters);
 

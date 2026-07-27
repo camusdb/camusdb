@@ -93,7 +93,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 columns: MapColumns(req.Columns),
                 constraints: MapConstraints(req.Constraints),
                 ifNotExists: req.IfNotExists,
-                checkConstraints: MapCheckConstraints(req.CheckConstraints)
+                checkConstraints: MapCheckConstraints(req.CheckConstraints),
+                comment: req.Comment
             );
 
             CreateTableResult result = await executor.CreateTable(ticket).ConfigureAwait(false);
@@ -494,6 +495,65 @@ public sealed class SchemaDdlForwardController : CommandsController
         }
     }
 
+    [HttpPost]
+    [Route("/internal/schema-ddl/comment")]
+    public async Task<JsonResult> ForwardComment()
+    {
+        ForwardCommentRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<ForwardCommentRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("ForwardComment request is null");
+
+            if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
+
+        try
+        {
+            // req.Comment is forwarded verbatim: null means IS NULL (remove), "" means IS ''.
+            CommentTicket ticket = new(
+                target: req.Target,
+                databaseName: req.DatabaseName,
+                tableName: req.TableName,
+                elementName: req.ElementName,
+                comment: req.Comment
+            );
+
+            ExecuteDDLSQLResult result = await executor.Comment(ticket).ConfigureAwait(false);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result.Success };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -544,7 +604,7 @@ public sealed class SchemaDdlForwardController : CommandsController
 
     private static ColumnInfo MapColumn(ColumnInfoRequest r) =>
         new(r.Name, r.Type, r.NotNull, r.Default, r.MaxLength, r.ArrayElementType,
-            r.DefaultFunction, r.NotNullConstraintName);
+            r.DefaultFunction, r.NotNullConstraintName, r.Comment);
 
     private static ColumnInfo[] MapColumns(ColumnInfoRequest[] cols) =>
         cols.Select(MapColumn).ToArray();
@@ -553,7 +613,8 @@ public sealed class SchemaDdlForwardController : CommandsController
         constraints.Select(c => new ConstraintInfo(
             c.Type,
             c.Name,
-            c.Columns.Select(col => new ColumnIndexInfo(col.Name, col.Order)).ToArray()
+            c.Columns.Select(col => new ColumnIndexInfo(col.Name, col.Order)).ToArray(),
+            comment: c.Comment
         )).ToArray();
 
     private static CheckConstraintInfo[] MapCheckConstraints(CheckConstraintInfoRequest[] checks) =>
