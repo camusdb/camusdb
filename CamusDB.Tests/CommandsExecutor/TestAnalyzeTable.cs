@@ -525,6 +525,44 @@ public sealed class TestAnalyzeTable : BaseTest
     }
 
     /// <summary>
+    /// ANALYZE must publish an output column schema through the <see cref="QuerySchemaHolder"/>,
+    /// not just populate the row dictionary. The presentation layer (gRPC / CLI) encodes rows
+    /// positionally from this schema, so an empty schema drops every cell on the wire even though
+    /// the row itself is fully populated — the client then renders a column-less box. This asserts
+    /// the four summary columns (table, status, rows, columns) are declared with the right types.
+    /// </summary>
+    [Test]
+    public async Task AnalyzePublishesOutputSchema()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        await InsertRobotsAsync(executor, database, dbname, count: 3);
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        QuerySchemaHolder schemaHolder = new();
+        (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                txnState: txn,
+                database: dbname,
+                sql: "ANALYZE TABLE robots",
+                parameters: null),
+                schemaOut: schemaHolder);
+
+        await foreach (QueryResultRow _ in cursor) { }
+        await database.Transactions.CommitAsync(txn);
+
+        Assert.AreEqual(4, schemaHolder.Schema.Count,
+            "ANALYZE must publish four output columns (table, status, rows, columns)");
+        Assert.AreEqual("table",   schemaHolder.Schema[0].Name);
+        Assert.AreEqual(ColumnType.String, schemaHolder.Schema[0].Type);
+        Assert.AreEqual("status",  schemaHolder.Schema[1].Name);
+        Assert.AreEqual(ColumnType.String, schemaHolder.Schema[1].Type);
+        Assert.AreEqual("rows",    schemaHolder.Schema[2].Name);
+        Assert.AreEqual(ColumnType.Integer64, schemaHolder.Schema[2].Type);
+        Assert.AreEqual("columns", schemaHolder.Schema[3].Name);
+        Assert.AreEqual(ColumnType.Integer64, schemaHolder.Schema[3].Type);
+    }
+
+    /// <summary>
     /// ANALYZE TABLE (with TABLE keyword) must produce the same result as ANALYZE tablename.
     /// </summary>
     [Test]
