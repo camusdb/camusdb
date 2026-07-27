@@ -78,13 +78,13 @@ internal sealed class TableOpener
             database.Ancestors.Count > 0
                 ? database.Ancestors
                     .Select(a => (
-                        new KvTableStore(database.Kahuna.Kahuna, a.DatabaseId, tableSchema.Id!, tableSchema.Name ?? "", logger),
+                        new KvTableStore(database.Kahuna.Kahuna, a.DatabaseId, tableSchema.Id!, tableSchema.Name ?? "", logger),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
                         a.ForkTimestamp
                     ))
                     .ToArray()
                 : null;
 
-        KvTableStore store = new(database.Kahuna.Kahuna, database.Id, tableSchema.Id!, tableSchema.Name ?? "", logger, ancestorStores);
+        KvTableStore store = new(database.Kahuna.Kahuna, database.Id, tableSchema.Id!, tableSchema.Name ?? "", logger, ancestorStores, database.Name);
 
         // Key-range sharding (opt-in): mark this table's row and eligible index key spaces as
         // key-range routed on the local node and auto-seed their initial whole-space descriptors.

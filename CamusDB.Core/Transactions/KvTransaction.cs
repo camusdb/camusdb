@@ -271,6 +271,15 @@ public sealed class KvTransaction
         lifetimeWatch.ElapsedMilliseconds > maxLifetimeMs;
 
     /// <summary>
+    /// Milliseconds elapsed since the Kahuna session for this transaction opened, or <c>null</c>
+    /// when there is no session to measure (zero-snapshot read-only, or a deferred-start
+    /// transaction whose session has not opened yet). Intended for diagnostics — a long age on a
+    /// conflicting operation is the signal that the transaction, not the contending writer, is the
+    /// one holding locks for too long.
+    /// </summary>
+    public long? AgeMs => lifetimeWatch?.ElapsedMilliseconds;
+
+    /// <summary>
     /// Reserves <paramref name="count"/> mutations against this transaction's budget before the
     /// corresponding writes are issued. Throws <see cref="CamusDBErrorCodes.TransactionMutationLimitExceeded"/>
     /// if the budget would be exceeded; otherwise adds to the running total monotonically.

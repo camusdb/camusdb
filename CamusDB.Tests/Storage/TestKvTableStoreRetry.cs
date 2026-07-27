@@ -27,6 +27,7 @@ using Kommander.Data;
 using Kommander.Time;
 using Kommander.WAL;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -707,6 +708,84 @@ public sealed class TestKvTableStoreRetry
         Assert.That(stub.RangeLockOpIds.Count, Is.EqualTo(3), "two MustRetry retries plus the successful acquire");
         Assert.That(stub.RangeLockOpIds.Distinct().Count(), Is.EqualTo(1),
             "a range-lock retried through transient MustRetry must retain the same operation id");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostics: a conflict that outlives the deadline must name the object and the waiter
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Builds a store whose database and table carry user-facing names, so the conflict messages
+    /// can be asserted against what an operator would actually see in a log.
+    /// </summary>
+    private static async Task<(EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store)> CreateNamedStoreAsync(
+        string tableId, string dbName, string tableName)
+    {
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
+        FaultInjectingKahuna stub = new(node.Kahuna);
+        return (node, stub, new KvTableStore(stub, "testdb", tableId, tableName, null, null, dbName));
+    }
+
+    [Test]
+    public async Task WriteRow_LockWaitDeadline_ReportsDatabaseTableKeyAndTransaction()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) =
+            await CreateNamedStoreAsync("tbl_diag_row", "inventory", "robots");
+        await using EmbeddedKahuna __ = node;
+
+        // Never stops faulting, so the wall-clock deadline — not the retry budget — ends the loop.
+        stub.InjectSetKeyValueFaults = int.MaxValue;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction tx = await BeginTransaction(stub, "diag_row_w");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.InsertRow(tx, rowId, [1, 2, 3]))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
+        Assert.That(ex.Message, Does.Contain("Lock-wait deadline exceeded"));
+        Assert.That(ex.Message, Does.Contain("row write"), "the failing operation is named");
+        Assert.That(ex.Message, Does.Contain("table 'robots'"));
+        Assert.That(ex.Message, Does.Contain("database 'inventory'"));
+        Assert.That(ex.Message, Does.Contain("testdb:tbl_diag_row"), "the raw key prefix ties the message to KV traces");
+        Assert.That(ex.Message, Does.Contain(rowId.ToString()), "the contended row is identified");
+        Assert.That(ex.Message, Does.Contain("diag_row_w"), "the waiting transaction is identified");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task WriteRowsBatch_LockWaitDeadline_ReportsConflictingKeyCount()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) =
+            await CreateNamedStoreAsync("tbl_diag_batch", "inventory", "robots");
+        await using EmbeddedKahuna __ = node;
+
+        List<KvTableStore.RowWrite> batch = Enumerable.Range(0, 5)
+            .Select(i => new KvTableStore.RowWrite
+            {
+                RowId = Generate(),
+                RowData = BranchKvCodec.EncodeValue([(byte)i]),
+            })
+            .ToList();
+
+        stub.InjectSetManyFaults = int.MaxValue;
+
+        KvTransaction tx = await BeginTransaction(stub, "diag_batch_w");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.WriteRowsBatch(tx, batch))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
+        Assert.That(ex.Message, Does.Contain("batched write"));
+        Assert.That(ex.Message, Does.Contain("5 key(s) still conflicting"));
+        Assert.That(ex.Message, Does.Contain("table 'robots'"));
+        Assert.That(ex.Message, Does.Contain("database 'inventory'"));
+        Assert.That(ex.Message, Does.Contain("diag_batch_w"));
 
         await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
     }

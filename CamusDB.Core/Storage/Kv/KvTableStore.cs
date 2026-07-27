@@ -60,6 +60,8 @@ public sealed class KvTableStore
 {
     private readonly IKahuna kahuna;
     private readonly ILogger logger;
+    private readonly string dbId;
+    private readonly string dbName;
     private readonly string tableId;
     private readonly string tableName;
     private readonly string tableKeyPrefix;        // "{dbId}:{tableId}" — shared prefix for row and index keys
@@ -129,6 +131,9 @@ public sealed class KvTableStore
     /// Pass <paramref name="ancestorStores"/> (nearest parent first) when the database is a branch;
     /// read methods will walk the lineage on a miss so inherited rows and index entries are visible
     /// without having been physically copied into the branch namespace.
+    /// <paramref name="dbName"/> and <paramref name="tableName"/> are carried purely for
+    /// diagnostics (lock-conflict and deadline messages name the object a user recognizes);
+    /// they are never part of a KV key, so an empty value only degrades an error message.
     /// </summary>
     public KvTableStore(
         IKahuna kahuna,
@@ -136,7 +141,8 @@ public sealed class KvTableStore
         string tableId,
         string tableName = "",
         ILogger<ICamusDB>? logger = null,
-        (KvTableStore store, HLCTimestamp forkTimestamp)[]? ancestorStores = null)
+        (KvTableStore store, HLCTimestamp forkTimestamp)[]? ancestorStores = null,
+        string dbName = "")
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         ArgumentException.ThrowIfNullOrEmpty(dbId);
@@ -144,6 +150,8 @@ public sealed class KvTableStore
 
         this.kahuna = kahuna;
         this.logger = logger ?? NullLogger<ICamusDB>.Instance;
+        this.dbId = dbId;
+        this.dbName = dbName;
         this.tableId = tableId;
         this.tableName = tableName;
         tableKeyPrefix  = $"{dbId}:{tableId}";
@@ -451,7 +459,10 @@ public sealed class KvTableStore
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        LockWaitDeadlineMessage(tx, $"{mode} range-lock acquisition on {DescribeBucket(bucketPrefix)} over " +
+                                                    $"[{Printable(startKey ?? "-∞")}, {Printable(endKey ?? "+∞")}]"));
                 await Task.Delay(RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -1047,7 +1058,7 @@ public sealed class KvTableStore
         if (ancestorStores.Length > 0)
         {
             // Branch: write a tombstone so the ancestry merge suppresses the inherited row.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "row delete (branch tombstone)", key,
                 (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
@@ -1061,7 +1072,7 @@ public sealed class KvTableStore
         else
         {
             // Root: physical delete — no ancestor namespace to suppress.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "row delete", key,
                 (coordinatorKey, operationId) => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, key, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
@@ -1503,7 +1514,7 @@ public sealed class KvTableStore
         else
             flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "index entry write", kvKey,
             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
@@ -1702,7 +1713,7 @@ public sealed class KvTableStore
                         KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
                             tx, ix.IndexId, ix.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
 
-                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "unique index entry write", kvKey,
                             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                             cancellationToken
                         ).ConfigureAwait(false);
@@ -1803,10 +1814,14 @@ public sealed class KvTableStore
                 return;
 
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    LockWaitDeadlineMessage(tx, "batched exclusive lock acquisition", retry.Select(r => r.Item1).ToList(), retry.Count));
 
             if (++retries >= MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    WriteConflictMessage(tx, "batched exclusive lock acquisition", retry.Select(r => r.Item1).ToList(), retry.Count));
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
 
@@ -1879,10 +1894,14 @@ public sealed class KvTableStore
                 return;
 
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    LockWaitDeadlineMessage(tx, "batched write", retry.Select(i => i.Key ?? "").ToList(), retry.Count));
 
             if (++retries >= MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    WriteConflictMessage(tx, "batched write", retry.Select(i => i.Key ?? "").ToList(), retry.Count));
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
 
@@ -2078,7 +2097,7 @@ public sealed class KvTableStore
                         KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
                             tx, newIx.IndexId, newIx.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
 
-                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+                        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "unique index entry write", kvKey,
                             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                             cancellationToken
                         ).ConfigureAwait(false);
@@ -2222,7 +2241,7 @@ public sealed class KvTableStore
         if (ancestorStores.Length > 0)
         {
             // Branch: write a tombstone so the ancestry merge suppresses the inherited index entry.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "index entry delete (branch tombstone)", kvKey,
                 (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
@@ -2236,7 +2255,7 @@ public sealed class KvTableStore
         else
         {
             // Root: physical delete.
-            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+            (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "index entry delete", kvKey,
                 (coordinatorKey, operationId) => kahuna.LocateAndTryDeleteKeyValue(tx.TransactionId, kvKey, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
@@ -2393,10 +2412,14 @@ public sealed class KvTableStore
                 return;
 
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    LockWaitDeadlineMessage(tx, "batched delete", retry.Select(i => i.Key ?? "").ToList(), retry.Count));
 
             if (++retries >= MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Batch delete conflict on {retry.Count} key(s); a concurrent transaction holds a lock — retry the operation from BeginAsync");
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    WriteConflictMessage(tx, "batched delete", retry.Select(i => i.Key ?? "").ToList(), retry.Count));
 
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
 
@@ -2429,7 +2452,7 @@ public sealed class KvTableStore
 
         byte[] encodedData = BranchKvCodec.EncodeValue(data);
 
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "row write", key,
             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, encodedData, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
@@ -2471,7 +2494,7 @@ public sealed class KvTableStore
 
     private async Task SetTombstoneForTesting(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
-        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx,
+        (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "row tombstone write", key,
             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
@@ -2495,7 +2518,7 @@ public sealed class KvTableStore
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
             return;
 
-        (KeyValueResponseType lockType, _, _, _) = await RetryOnMustRetryRegistered(tx,
+        (KeyValueResponseType lockType, _, _, _) = await RetryOnMustRetryRegistered(tx, "exclusive lock acquisition", key,
             (coordinatorKey, operationId) => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
@@ -2595,13 +2618,194 @@ public sealed class KvTableStore
     //   where MustRetry is a transient 2PC prepare-phase signal, not a lock conflict.
     // -----------------------------------------------------------------------
 
-    private const string LockWaitDeadlineMessage =
-        "Lock-wait deadline exceeded; the operation conflicts with a long-held lock or is in a deadlock — retry the transaction from BeginAsync";
+    /// <summary>
+    /// Builds the lock-wait-deadline error message for <paramref name="operation"/>.
+    ///
+    /// <para>The bare "deadline exceeded" text is useless in a production log: it says a conflict
+    /// happened but not <em>where</em>. This adds the object a user can act on (database and table,
+    /// with the raw <c>{dbId}:{tableId}</c> so the key prefix in KV traces can be matched), the
+    /// contended keys themselves — decoded to an index name where the key is a secondary-index
+    /// entry — and the identity/age/isolation of the waiting transaction, which distinguishes
+    /// "someone else holds a lock" from "this transaction has been open far too long".</para>
+    ///
+    /// <paramref name="conflictingKeys"/> is the total count still unresolved when the deadline
+    /// fired; <paramref name="keys"/> is a sample of them (only the first few are rendered, so a
+    /// 20k-row batch does not produce a 20k-key message).
+    /// </summary>
+    private string LockWaitDeadlineMessage(
+        KvTransaction? tx,
+        string operation,
+        IReadOnlyList<string>? keys = null,
+        int conflictingKeys = 0)
+    {
+        StringBuilder message = new();
+
+        message.Append("Lock-wait deadline exceeded after ")
+               .Append(CamusDBConfig.LockWaitDeadlineMs)
+               .Append(" ms on ")
+               .Append(operation);
+
+        AppendConflictContext(message, tx, keys, conflictingKeys);
+
+        message.Append("; the operation conflicts with a long-held lock or is in a deadlock — retry the transaction from BeginAsync");
+
+        return message.ToString();
+    }
+
+    /// <summary>
+    /// Appends the shared "what was contended and who was waiting" tail used by every conflict
+    /// message: the database and table by user-facing name (falling back to their ids) plus the
+    /// raw <c>{dbId}:{tableId}</c> key prefix so a message can be matched against KV traces, a
+    /// bounded sample of the contended keys, and the waiting transaction's id, isolation/locking
+    /// mode and age.
+    /// </summary>
+    private void AppendConflictContext(
+        StringBuilder message,
+        KvTransaction? tx,
+        IReadOnlyList<string>? keys,
+        int conflictingKeys)
+    {
+        message.Append(" for table '")
+               .Append(string.IsNullOrEmpty(tableName) ? tableId : tableName)
+               .Append("' in database '")
+               .Append(string.IsNullOrEmpty(dbName) ? dbId : dbName)
+               .Append("' (")
+               .Append(tableKeyPrefix)
+               .Append(')');
+
+        if (conflictingKeys > 0)
+            message.Append("; ").Append(conflictingKeys).Append(" key(s) still conflicting");
+
+        if (keys is { Count: > 0 })
+        {
+            message.Append(keys.Count == 1 ? "; key " : "; keys ");
+            for (int i = 0; i < keys.Count && i < MaxReportedConflictKeys; i++)
+            {
+                if (i > 0)
+                    message.Append(", ");
+                message.Append('\'').Append(DescribeKey(keys[i])).Append('\'');
+            }
+            if (keys.Count > MaxReportedConflictKeys)
+                message.Append(", … (").Append(keys.Count - MaxReportedConflictKeys).Append(" more)");
+        }
+
+        if (tx is not null)
+        {
+            message.Append("; transaction ").Append(tx.UniqueId)
+                   .Append(" (").Append(tx.IsolationLevel).Append('/').Append(tx.Locking);
+            if (tx.AgeMs is long age)
+                message.Append(", open ").Append(age).Append(" ms");
+            message.Append(')');
+        }
+    }
+
+    // Cap on how many contended keys a single lock-wait message spells out. A mass UPDATE can
+    // have thousands pending; the count is reported in full, the keys only as a sample.
+    private const int MaxReportedConflictKeys = 3;
+
+    /// <summary>
+    /// Builds the message for a retry-budget exhaustion (as opposed to a wall-clock deadline):
+    /// the operation kept receiving transient conflict responses for the whole retry budget.
+    /// Carries the same diagnostic context as <see cref="LockWaitDeadlineMessage"/> — which
+    /// database/table, which keys, and which transaction was waiting.
+    /// </summary>
+    private string WriteConflictMessage(
+        KvTransaction? tx,
+        string operation,
+        IReadOnlyList<string>? keys = null,
+        int conflictingKeys = 0)
+    {
+        StringBuilder message = new();
+
+        message.Append("Write conflict on ")
+               .Append(operation)
+               .Append(" after ")
+               .Append(MaxKahunaRetries)
+               .Append(" attempts");
+
+        AppendConflictContext(message, tx, keys, conflictingKeys);
+
+        message.Append("; a concurrent transaction holds a lock — retry the operation from BeginAsync");
+
+        return message.ToString();
+    }
+
+    /// <summary>
+    /// Renders a KV key for a human: a secondary-index key becomes
+    /// <c>index &lt;name&gt; entry &lt;encoded key&gt;</c> so the message names the index a user
+    /// declared rather than its opaque immutable id; a row key becomes <c>row &lt;rowId&gt;</c>.
+    /// Anything unrecognized is returned verbatim. Encoded index keys contain control characters
+    /// from <see cref="KeyEncoder"/>'s ordered encoding, so the rendered tail is escaped and
+    /// truncated — it is a locator for a log reader, not a round-trippable value.
+    /// </summary>
+    private string DescribeKey(string key)
+    {
+        if (string.IsNullOrEmpty(key))
+            return key;
+
+        if (key.StartsWith(rowKeyPrefix, StringComparison.Ordinal))
+            return $"row {key[rowKeyPrefix.Length..]}";
+
+        string indexPrefix = $"{tableKeyPrefix}:i:";
+        if (key.StartsWith(indexPrefix, StringComparison.Ordinal))
+        {
+            int slash = key.IndexOf('/', indexPrefix.Length);
+            if (slash > 0)
+            {
+                string indexId = key[indexPrefix.Length..slash];
+                string display = indexIdToDisplayName.TryGetValue(indexId, out string? name) ? name : indexId;
+                return $"index {display} entry {Printable(key[(slash + 1)..])}";
+            }
+        }
+
+        return Printable(key);
+    }
+
+    /// <summary>
+    /// Renders a bucket prefix for a human: the row space becomes <c>rows</c> and an index space
+    /// becomes <c>index &lt;name&gt;</c>. Unrecognized prefixes are returned verbatim.
+    /// </summary>
+    private string DescribeBucket(string bucketPrefix)
+    {
+        if (string.Equals(bucketPrefix, rowBucketPrefix, StringComparison.Ordinal))
+            return "rows";
+
+        string indexPrefix = $"{tableKeyPrefix}:i:";
+        if (bucketPrefix.StartsWith(indexPrefix, StringComparison.Ordinal))
+        {
+            string indexId = bucketPrefix[indexPrefix.Length..];
+            return $"index {(indexIdToDisplayName.TryGetValue(indexId, out string? name) ? name : indexId)}";
+        }
+
+        return bucketPrefix;
+    }
+
+    // Escapes control characters and clips the result so one contended key stays readable on a log line.
+    private static string Printable(string value)
+    {
+        const int maxLength = 64;
+
+        StringBuilder printable = new(Math.Min(value.Length, maxLength) + 4);
+
+        for (int i = 0; i < value.Length && i < maxLength; i++)
+        {
+            char c = value[i];
+            printable.Append(char.IsControl(c) || c > '~' ? '·' : c);
+        }
+
+        if (value.Length > maxLength)
+            printable.Append('…');
+
+        return printable.ToString();
+    }
 
     private static long LockWaitDeadlineTicks()
         => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (CamusDBConfig.LockWaitDeadlineMs / 1000.0));
 
-    private static async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
+    private async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
+        KvTransaction? tx,
+        string operation,
+        string key,
         Func<Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,
         CancellationToken ct)
     {
@@ -2617,7 +2821,7 @@ public sealed class KvTableStore
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage(tx, operation, [key]));
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
@@ -2626,7 +2830,10 @@ public sealed class KvTableStore
         return (type, revision, ts);
     }
 
-    private static async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RetryOnMustRetryLocked(
+    private async Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RetryOnMustRetryLocked(
+        KvTransaction? tx,
+        string operation,
+        string key,
         Func<Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>> fn,
         CancellationToken ct)
     {
@@ -2643,7 +2850,7 @@ public sealed class KvTableStore
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage);
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage(tx, operation, [key]));
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
@@ -2665,22 +2872,26 @@ public sealed class KvTableStore
     // gets its own id (distinct key/digest under one id would be rejected as a duplicate).
     // -----------------------------------------------------------------------
 
-    private static Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryRegistered(
+    private Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryRegistered(
         KvTransaction tx,
+        string operation,
+        string key,
         Func<string, TransactionOperationId, Task<(KeyValueResponseType, long, HLCTimestamp)>> fn,
         CancellationToken ct)
     {
         TransactionOperationId operationId = TransactionOperationId.NewRandom();
-        return RetryOnMustRetryLocked(() => fn(tx.CoordinatorKey, operationId), ct);
+        return RetryOnMustRetryLocked(tx, operation, key, () => fn(tx.CoordinatorKey, operationId), ct);
     }
 
-    private static Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RetryOnMustRetryRegistered(
+    private Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)> RetryOnMustRetryRegistered(
         KvTransaction tx,
+        string operation,
+        string key,
         Func<string, TransactionOperationId, Task<(KeyValueResponseType, string, KeyValueDurability, HLCTimestamp)>> fn,
         CancellationToken ct)
     {
         TransactionOperationId operationId = TransactionOperationId.NewRandom();
-        return RetryOnMustRetryLocked(() => fn(tx.CoordinatorKey, operationId), ct);
+        return RetryOnMustRetryLocked(tx, operation, key, () => fn(tx.CoordinatorKey, operationId), ct);
     }
 
     // -----------------------------------------------------------------------
