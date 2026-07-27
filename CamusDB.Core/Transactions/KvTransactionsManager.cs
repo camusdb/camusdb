@@ -409,6 +409,13 @@ public sealed class KvTransactionsManager : IDisposable
     /// Commits the transaction via Kahuna 2PC.
     /// Throws <see cref="CamusDBException"/> if the transaction was already completed
     /// or if Kahuna aborts the commit.
+    ///
+    /// <para>When a result cache is attached, this also drives the cache write protocol: the frozen
+    /// server-owned modified keyspaces are marked in flight before the commit request, and every exit
+    /// path resolves that mark. A commit and any <b>unknown</b> outcome (unresolved retries, an errored
+    /// or lost response, a cancellation or exception after the first commit request) fence the
+    /// generations and evict the frozen key set, because the write may already be readable on this
+    /// node; only a definite abort leaves cached entries intact.</para>
     /// </summary>
     public async Task<Kommander.Time.HLCTimestamp> CommitAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
@@ -545,7 +552,22 @@ public sealed class KvTransactionsManager : IDisposable
         //                so replaying from BeginAsync is safe → surfaced as CADB0502 (retryable).
         //   Errored    → the handle is unknown/expired and the outcome is unavailable. Do NOT
         //                reinterpret it as a conflict (no auto-replay) → surfaced as CADB0501.
+        //
+        // The result cache splits these on a different axis — "could this write be visible?" rather
+        // than "did it commit?". Committed, MustRetry-exhausted and Errored all fence the affected
+        // keyspaces and evict the frozen modified-key set, because the coordinator can apply a commit
+        // and still fail to report it. Only Aborted (and a failure raised before any commit request)
+        // leaves cached entries in place. Over-evicting costs a re-execution; under-evicting serves
+        // rows that predate a committed write.
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
+
+        // Cache-fencing discriminator: set the instant the first commit request leaves this node.
+        // Before it, any failure is a definite non-commit (nothing was ever asked to commit), so the
+        // in-flight marks can simply be cleared. After it, the outcome may be unknown — the write can
+        // have landed while its response was lost — and every non-committing exit must conservatively
+        // fence and evict instead. See CachePublishGate's write protocol.
+        bool commitRequestIssued = false;
+
         // Time the Kahuna 2PC commit itself — this is the span dominated by WAL fsync latency,
         // so surfacing it in the finalize log makes slow-commit diagnosis (e.g. native fsync cost)
         // directly observable per transaction.
@@ -559,6 +581,7 @@ public sealed class KvTransactionsManager : IDisposable
                 // The coordinator owns the working set: every confirmed write and exclusive point lock
                 // was folded server-side as the operation completed, so commit supplies only the routing
                 // handle.
+                commitRequestIssued = true;
                 (result, string? anchor) = await kahuna.LocateAndCommitTransaction(tx.Handle, cancellationToken)
                     .ConfigureAwait(false);
 
@@ -600,11 +623,17 @@ public sealed class KvTransactionsManager : IDisposable
             {
                 // Non-terminal: outcome unknown, coordinator session still live. Leave the transaction
                 // Finalizing and TRACKED, and leave the coordinator-owned locks in place — the caller
-                // must retry the SAME commit on the SAME handle. Only the cache in-flight mark is
-                // cleared so concurrent probes are not blocked while the resolution is pending.
+                // must retry the SAME commit on the SAME handle.
+                //
+                // For the cache the unknown outcome must be treated as if the write had landed: the
+                // coordinator can apply a commit and still lose the response, so the data may already
+                // be readable on this node. Fence the generations and evict the frozen modified-key
+                // set before clearing the in-flight marks, so no query started after this point can
+                // still be served pre-write rows. If the retry later resolves, it fences the same
+                // frozen set again, which is a no-op.
                 if (markedInFlight)
                 {
-                    _cache!.PublishGate.AbortWrite(keyspaces!);
+                    _cache!.PublishGate.FenceAndInvalidate(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
                     markedInFlight = false;
                 }
                 throw new CamusDBException(
@@ -619,9 +648,16 @@ public sealed class KvTransactionsManager : IDisposable
             // finalize already released the working set (point + range locks, read snapshots).
             tx.Status = KvTransactionStatus.RolledBack;
 
+            // Aborted is a definite non-commit, so cached entries stay valid and only the in-flight
+            // marks are cleared. Errored (and any unexpected response) means the coordinator session
+            // is gone and the outcome is unavailable — the write may have landed, so it is fenced and
+            // evicted exactly like a commit.
             if (markedInFlight)
             {
-                _cache!.PublishGate.AbortWrite(keyspaces!);
+                if (result == KeyValueResponseType.Aborted)
+                    _cache!.PublishGate.AbortWrite(keyspaces!);
+                else
+                    _cache!.PublishGate.FenceAndInvalidate(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
                 markedInFlight = false;
             }
 
@@ -645,10 +681,18 @@ public sealed class KvTransactionsManager : IDisposable
         }
         finally
         {
-            // Safety net: if an unexpected exception escaped the commit body before CommitWrite or
-            // AbortWrite ran, clear the in-flight mark so concurrent probes are not blocked forever.
+            // Safety net: if an unexpected exception or a cancellation escaped the commit body before
+            // the gate was resolved, release the in-flight mark so concurrent probes are not blocked
+            // forever. Which release is correct depends on whether a commit request was ever issued:
+            // before that point nothing could have landed, after it the outcome is unknown and the
+            // entries must be fenced and evicted.
             if (markedInFlight)
-                _cache!.PublishGate.AbortWrite(keyspaces!);
+            {
+                if (commitRequestIssued)
+                    _cache!.PublishGate.FenceAndInvalidate(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
+                else
+                    _cache!.PublishGate.AbortWrite(keyspaces!);
+            }
         }
     }
 

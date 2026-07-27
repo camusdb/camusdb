@@ -165,7 +165,7 @@ For an eligible query, `QueryExecutor` runs this sequence (see `QueryWithCache`)
 1. **Fingerprint.** Build the entry key from the plan's shape id, bound parameters, schema deps, and
    cache options.
 2. **Probe.** Look the fingerprint up. A live (non-expired) entry is a candidate hit.
-   - **Non-strict hit:** yield the stored rows; done.
+   - **Non-strict hit:** check the entry's schema deps are still current, then yield the stored rows.
    - **Strict hit:** validate against live storage (§7). If valid, yield stored rows. If stale,
      evict it, remember that this was a revalidation, and fall through to live execution — the final
      status becomes `stale-revalidated`.
@@ -182,6 +182,16 @@ For an eligible query, `QueryExecutor` runs this sequence (see `QueryWithCache`)
 
 A cancelled or faulted enumeration never publishes: the runner only marks the drain complete after
 the last row, and publish is skipped otherwise. This is the *no partial publish* invariant.
+
+**Single-flight.** Between steps 3 and 4, concurrent requests for the same fingerprint collapse onto
+one execution: the first caller becomes the owner and runs the sequence above, the rest wait. The
+slot carries a *completion signal only* — never rows. When the owner reports that it published, each
+waiter re-runs step 2 for itself; it serves the entry only if its own probe still finds and validates
+it, and executes live otherwise. That indirection is the point: a write can commit and evict the
+entry between the owner's publish and the moment waiters wake, and a waiter is a query that began
+*after* that invalidation, so handing it the owner's materialized rows would serve state older than a
+committed write (and skip the schema/strict checks every other reader performs). A waiter that times
+out, or whose owner failed, simply executes independently.
 
 Why snapshot only the table's **row** bucket, even for an index scan? Because every
 `INSERT`/`UPDATE`/`DELETE` on a table writes the row key, so the row bucket's generation bumps on
@@ -252,9 +262,21 @@ entry would survive. `CachePublishGate` closes this window with two structures p
 
 The protocol:
 
-**Write path** (in `CommitAsync`): mark the modified keyspaces in-flight *before* the Kahuna commit;
-on success, bump their generations and run the cache invalidation *inside the gate's lock*, then
-clear the marks; on rollback or failure, just clear the marks.
+**Write path** (in `CommitAsync`): mark the modified keyspaces in-flight *before* the Kahuna commit,
+then resolve that mark according to what the finalize told us — and the axis is *"could this write be
+visible?"*, not *"did it commit?"*:
+
+| Finalize outcome | What it means | Gate action |
+| --- | --- | --- |
+| `Committed` | terminal success | bump generations, invalidate *inside the gate's lock*, clear marks |
+| `MustRetry` past the retry bound, `Errored`, or a cancellation/exception after a commit request went out | **outcome unknown** — the coordinator can apply a commit and still lose the response, so the rows may already be readable here | same as `Committed`: bump, invalidate, clear |
+| `Aborted`, a confirmed rollback, or any failure *before* the first commit request | definite non-commit | just clear the marks |
+
+Fencing a write that turns out never to have landed costs one re-execution. Skipping the fence for a
+write that did land serves rows older than a committed write — which is the one thing §1 promises
+cannot happen on this node. So the unknown case is resolved conservatively, and if the caller later
+retries the same handle and resolves it, the second fence is a harmless no-op (generations only move
+forward, and the entries are already gone).
 
 **Read path**: snapshot the keyspace generations before executing; if a keyspace is already
 in-flight, bypass; after execution, publish **only** through `TryPublishUnderGeneration`, which — 
@@ -347,7 +369,7 @@ reads.
 | `query_result_cache_max_deps` | `4096` | Total dependency cap per entry; exceeding it bypasses publish. |
 | `query_result_cache_max_point_deps` | `2048` | Point-dep cap per entry; exceeding it drops points (and bypasses strict entries). |
 | `query_result_cache_max_ranges` | `256` | Range-dep cap per entry. |
-| `query_result_cache_singleflight_wait_ms` | `250` | Reserved for a future single-flight gate (de-duplicating concurrent misses of the same entry). Not yet active — concurrent misses currently each compute and race to publish, and the gate keeps that safe. |
+| `query_result_cache_singleflight_wait_ms` | `250` | How long a concurrent miss of the same fingerprint waits for the in-flight owner before executing on its own (§3, *Single-flight*). |
 | `query_result_cache_strict_validation_max_keys` | `10000` | Probe-key budget for strict validation; exceeding it fails closed. |
 | `query_result_cache_sweep_interval_ms` | `10000` | Background TTL-sweep interval. |
 
@@ -391,7 +413,9 @@ Core (`CamusDB.Core/Cache/`):
 - `IQueryResultCache` / `QueryResultCache` / `NullQueryResultCache` — the cache contract, the
   in-memory implementation (LRU, byte accounting, TTL sweep, secondary indexes), and the
   disabled-state stand-in used by tests.
-- `CachePublishGate` / `CacheGenerationToken` — the commit-safe generation fence and in-flight marks.
+- `CachePublishGate` / `CacheGenerationToken` — the commit-safe generation fence and in-flight marks,
+  including the committed-vs-unknown-vs-aborted resolution rules (§6).
+- `SingleFlightSlot` — the per-fingerprint completion signal concurrent misses wait on (§3).
 - `CachedQueryRunner` — wraps execution so publish happens only after a full, successful drain, with
   cap and dependency checks.
 - `QueryDependencyCollector` / `QueryDependencySet` / `DependencyIndex` — dependency capture, the

@@ -63,8 +63,14 @@ namespace CamusDB.Core.Cache;
 ///     invalidation callback, and clears in-flight marks, all inside <c>_writeLock</c>.
 ///   </description></item>
 ///   <item><description>
-///     On rollback or failed commit: <see cref="AbortWrite"/> — clears in-flight marks
-///     without bumping generations. False invalidations are acceptable.
+///     On an <b>unknown</b> outcome — an unresolved finalize retry, a lost/errored response, a
+///     cancellation or exception after a commit request was issued — <see cref="FenceAndInvalidate"/>:
+///     the write may already be visible, so it must be fenced exactly like a commit.
+///   </description></item>
+///   <item><description>
+///     Only on a <b>definite</b> non-commit (coordinator abort, confirmed rollback, or a failure
+///     before any commit request): <see cref="AbortWrite"/> — clears in-flight marks without
+///     bumping generations. False invalidations are acceptable; a stale hit is not.
 ///   </description></item>
 /// </list>
 ///
@@ -170,10 +176,21 @@ public sealed class CachePublishGate
     }
 
     /// <summary>
-    /// Called after a successful Kahuna commit. Inside <c>_writeLock</c>, bumps the generation
-    /// counter for each keyspace, invokes <paramref name="invalidate"/> (so the cache can evict
-    /// stale entries while no concurrent publish can insert a new one), then clears the in-flight
-    /// marks.
+    /// Fences <paramref name="keyspaces"/> against every pre-existing cached result and clears their
+    /// in-flight marks. Inside <c>_writeLock</c>, bumps the generation counter for each keyspace,
+    /// invokes <paramref name="invalidate"/> (so the cache can evict stale entries while no
+    /// concurrent publish can insert a new one), then clears the in-flight marks.
+    ///
+    /// <para>Call this whenever the write <b>may</b> have become visible — that is, both for a
+    /// confirmed commit and for an <b>unknown</b> finalize outcome (an unresolved retry, a lost
+    /// response, a transport error, or an exception raised after a commit request was issued). Only
+    /// a <em>definite</em> non-commit may use <see cref="AbortWrite"/> instead. Fencing a write that
+    /// turns out never to have committed costs a false eviction, which the cache contract permits;
+    /// skipping the fence for a write that did commit serves stale rows, which it does not.</para>
+    ///
+    /// <para>Fencing the same keyspaces twice (e.g. once when a finalize is left unresolved and again
+    /// when the same handle later resolves) is harmless: generations only move forward and evicting
+    /// already-evicted entries is a no-op.</para>
     ///
     /// <para>The <paramref name="invalidate"/> callback is called <em>inside the lock</em>
     /// so eviction and generation bump are atomic with respect to
@@ -187,7 +204,7 @@ public sealed class CachePublishGate
     /// read-path lock is held while <see cref="TryPublishUnderGeneration"/> waits for
     /// <c>_writeLock</c>. Keep the callback short.</para>
     /// </summary>
-    public void CommitWrite(
+    public void FenceAndInvalidate(
         IReadOnlyCollection<string> keyspaces,
         Action<IReadOnlyCollection<string>>? invalidate = null)
     {
@@ -204,10 +221,24 @@ public sealed class CachePublishGate
     }
 
     /// <summary>
-    /// Called after a rollback or failed commit. Clears the in-flight marks without bumping
-    /// generation counters. A rolled-back transaction's writes were never visible, so no
-    /// existing entries need evicting. False invalidations (unnecessary re-executions of
-    /// concurrent misses) are acceptable.
+    /// Confirmed-commit spelling of <see cref="FenceAndInvalidate"/>, kept because a successful
+    /// commit is the common case and reads better at the call site. Identical behavior.
+    /// </summary>
+    public void CommitWrite(
+        IReadOnlyCollection<string> keyspaces,
+        Action<IReadOnlyCollection<string>>? invalidate = null)
+        => FenceAndInvalidate(keyspaces, invalidate);
+
+    /// <summary>
+    /// Called after a <b>definite</b> non-commit: a coordinator abort, a confirmed rollback, or a
+    /// failure raised before any commit request reached the coordinator. Clears the in-flight marks
+    /// without bumping generation counters. Such a transaction's writes were never visible, so no
+    /// existing entries need evicting. False invalidations (unnecessary re-executions of concurrent
+    /// misses) are acceptable.
+    ///
+    /// <para><b>Never use this for an unknown outcome.</b> An unresolved retry, a lost or errored
+    /// response, or an exception after a commit request was issued may all follow a write that
+    /// actually landed; those must go through <see cref="FenceAndInvalidate"/>.</para>
     ///
     /// <para>Does not acquire <c>_writeLock</c> — no cache entry needs to be evicted and
     /// no generation needs updating, so no mutual exclusion with

@@ -166,6 +166,13 @@ internal sealed class QueryExecutor
     /// drain the entry is published through the generation fence (see <see cref="CachePublishGate"/>).
     /// If a write is in-flight for the table's row keyspace the live rows are served without
     /// publishing to avoid a stale-hit window.</para>
+    ///
+    /// <para><b>Single-flight is a completion notification only.</b> Concurrent callers for the same
+    /// fingerprint wait for the owner and then re-run the same probe every other reader runs; they
+    /// never receive the owner's materialized rows. Otherwise a write committing between the owner's
+    /// publish and its signal would leave a waiter — a query that began after that invalidation —
+    /// serving rows older than a committed write, and skipping strict/schema validation while doing
+    /// it. A waiter whose re-probe misses simply executes live.</para>
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> QueryWithCache(
         DatabaseDescriptor database,
@@ -190,68 +197,59 @@ internal sealed class QueryExecutor
         bool wasStaleRevalidated = false;
 
         // ── Cache probe ───────────────────────────────────────────────────────
-        // Fetch entry plus its deps so strict mode can validate before serving.
-        (CachedQueryResult Result, QueryDependencySet Deps)? hitWithDeps =
-            await cache.TryGetWithDepsAsync(database.Id, hint.CacheName, fingerprint, ct).ConfigureAwait(false);
-
-        if (hitWithDeps is { } hd)
+        // Fetch entry plus its deps, validate them, and return the entry only if it is still
+        // serveable. A stale entry is evicted here so the next probe skips re-validation, and the
+        // caller falls through to live execution.
+        //
+        // This runs both on the initial probe and again for a single-flight waiter that the owner
+        // woke: a waiter must reach a served entry through exactly this path — same eviction, same
+        // strict/schema validation — never through a result object handed over by the owner, which
+        // could already have been invalidated by a committed write.
+        async ValueTask<CachedQueryResult?> ProbeCacheAsync()
         {
-            if (hd.Result.HintIsStrict)
-            {
-                // Validate every dep against current KV state. Fail closed when Kahuna is
-                // unavailable or when the probe limit is exceeded.
-                bool valid = _kahuna is not null
-                    && await StrictValidator.ValidateAsync(hd.Result, hd.Deps, database, _kahuna, ct).ConfigureAwait(false);
+            (CachedQueryResult Result, QueryDependencySet Deps)? hitWithDeps =
+                await cache.TryGetWithDepsAsync(database.Id, hint.CacheName, fingerprint, ct).ConfigureAwait(false);
 
-                if (!valid)
-                {
-                    // Stale entry — evict immediately so the next probe skips re-validation.
-                    cache.InvalidateEntry(database.Id, hd.Result.CacheName, fingerprint);
-                    wasStaleRevalidated = true;
-                    // Fall through to live execution below.
-                }
-                else
-                {
-                    if (metaOut is not null)
-                    {
-                        metaOut.Status = QueryCacheStatus.Hit;
-                        metaOut.CacheName = hint.CacheName;
-                        metaOut.CachedAtHlc = hd.Result.CachedAt;
-                        metaOut.AgeMs = hd.Result.CreatedAtMs == 0
-                            ? null : Environment.TickCount64 - hd.Result.CreatedAtMs;
-                    }
-                    foreach (QueryResultRow row in hd.Result.Rows)
-                        yield return row;
-                    yield break;
-                }
-            }
-            else
-            {
-                // Even for non-strict hits, validate schema deps in-memory before serving rows.
-                // This is a cheap lock-free check (no I/O) that closes the DDL publish window:
-                // an in-flight miss that published after a DROP/ALTER invalidation will be
-                // detected here on the very next probe and evicted rather than replayed until TTL.
-                if (!SchemaDepsCurrent(hd.Deps, database))
-                {
-                    cache.InvalidateEntry(database.Id, hd.Result.CacheName, fingerprint);
-                    wasStaleRevalidated = true;
-                    // Fall through to live execution below.
-                }
-                else
-                {
-                    if (metaOut is not null)
-                    {
-                        metaOut.Status = QueryCacheStatus.Hit;
-                        metaOut.CacheName = hint.CacheName;
-                        metaOut.CachedAtHlc = hd.Result.CachedAt;
-                        metaOut.AgeMs = hd.Result.CreatedAtMs == 0
-                            ? null : Environment.TickCount64 - hd.Result.CreatedAtMs;
-                    }
-                    foreach (QueryResultRow row in hd.Result.Rows)
-                        yield return row;
-                    yield break;
-                }
-            }
+            if (hitWithDeps is not { } hd)
+                return null;
+
+            // Strict: validate every dep against current KV state, failing closed when Kahuna is
+            // unavailable or the probe limit is exceeded. Non-strict: validate schema deps in-memory,
+            // a cheap lock-free check that closes the DDL publish window — an in-flight miss that
+            // published after a DROP/ALTER invalidation is caught on the very next probe rather than
+            // replayed until TTL.
+            bool valid = hd.Result.HintIsStrict
+                ? _kahuna is not null
+                    && await StrictValidator.ValidateAsync(hd.Result, hd.Deps, database, _kahuna, ct).ConfigureAwait(false)
+                : SchemaDepsCurrent(hd.Deps, database);
+
+            if (valid)
+                return hd.Result;
+
+            cache.InvalidateEntry(database.Id, hd.Result.CacheName, fingerprint);
+            wasStaleRevalidated = true;
+            return null;
+        }
+
+        void RecordHitMetadata(CachedQueryResult served)
+        {
+            if (metaOut is null)
+                return;
+
+            metaOut.Status = QueryCacheStatus.Hit;
+            metaOut.CacheName = hint.CacheName;
+            metaOut.CachedAtHlc = served.CachedAt;
+            metaOut.AgeMs = served.CreatedAtMs == 0
+                ? null : Environment.TickCount64 - served.CreatedAtMs;
+        }
+
+        CachedQueryResult? hit = await ProbeCacheAsync().ConfigureAwait(false);
+        if (hit is not null)
+        {
+            RecordHitMetadata(hit);
+            foreach (QueryResultRow row in hit.Rows)
+                yield return row;
+            yield break;
         }
 
         // ── Strict-with-no-snapshot bypass ────────────────────────────────────
@@ -277,40 +275,42 @@ internal sealed class QueryExecutor
 
         // ── Single-flight gate ────────────────────────────────────────────────
         // If another concurrent request is already computing this fingerprint, block until it
-        // publishes a result and serve that result directly — avoiding redundant plan execution
-        // under a thundering-herd cold-cache burst. If the wait times out or the owner fails,
-        // fall through and execute independently.
+        // finishes and then take its published entry from the cache — avoiding redundant plan
+        // execution under a thundering-herd cold-cache burst. If the wait times out, the owner
+        // fails, or the published entry is already gone, fall through and execute independently.
         //
-        // The gate is entered BEFORE SnapshotGenerations so a waiter that gets a result never
-        // needs to take a generation snapshot. The owner takes the snapshot and executes normally
-        // in the code that follows.
+        // The gate is entered BEFORE SnapshotGenerations so a waiter that ends up serving a cached
+        // entry never needs to take a generation snapshot. The owner takes the snapshot and executes
+        // normally in the code that follows.
         SingleFlightSlot sfSlot = cache.EnterSingleFlight(fingerprint);
         bool isSingleFlightOwner = sfSlot.IsOwner;
 
         if (!isSingleFlightOwner)
         {
-            // We are a waiter. Block until the owner publishes or the timeout elapses.
-            CachedQueryResult? sfResult = await sfSlot.WaitAsync(
+            // We are a waiter. Block until the owner signals completion or the timeout elapses.
+            bool ownerPublished = await sfSlot.WaitAsync(
                 CamusDBConfig.QueryResultCacheSingleFlightWaitMs, ct).ConfigureAwait(false);
 
-            if (sfResult is not null)
+            if (ownerPublished)
             {
-                // Owner published a good result — serve it directly without touching storage.
-                if (metaOut is not null)
+                // The owner stored an entry — but between its store and this wakeup a write may have
+                // committed and evicted it, and this query began after that invalidation. So re-probe
+                // the cache rather than trusting the owner's materialized rows: serve only what the
+                // probe still finds and validates, and execute live otherwise.
+                CachedQueryResult? sfHit = await ProbeCacheAsync().ConfigureAwait(false);
+
+                if (sfHit is not null)
                 {
-                    metaOut.Status = QueryCacheStatus.Hit;
-                    metaOut.CacheName = hint.CacheName;
-                    metaOut.CachedAtHlc = sfResult.CachedAt;
-                    metaOut.AgeMs = sfResult.CreatedAtMs == 0
-                        ? null : Environment.TickCount64 - sfResult.CreatedAtMs;
+                    RecordHitMetadata(sfHit);
+                    foreach (QueryResultRow row in sfHit.Rows)
+                        yield return row;
+                    yield break;
                 }
-                foreach (QueryResultRow row in sfResult.Rows)
-                    yield return row;
-                yield break;
             }
 
-            // Timeout or owner failure: execute independently. We are not the single-flight
-            // owner, so we must NOT call ExitSingleFlight. The owner will signal when done.
+            // Timeout, owner failure, or an entry that no longer exists: execute independently. We
+            // are not the single-flight owner, so we must NOT call ExitSingleFlight. The owner will
+            // signal when done.
         }
 
         // ── Owner liveness guard ──────────────────────────────────────────────
@@ -338,7 +338,7 @@ internal sealed class QueryExecutor
             // single-flight owner, wake waiters immediately with null so they execute
             // independently rather than blocking until our timeout.
             if (isSingleFlightOwner)
-                cache.ExitSingleFlight(fingerprint, null);
+                cache.ExitSingleFlight(fingerprint, published: false);
 
             if (metaOut is not null)
             {
@@ -378,14 +378,11 @@ internal sealed class QueryExecutor
 
             if (isSingleFlightOwner)
             {
-                // Signal waiters. Pass the published entry when the result was stored so
-                // waiters can serve it directly. Pass null on any failure (generation fence
-                // rejected, byte cap exceeded, drain cancelled) so waiters execute independently.
-                CachedQueryResult? published = null;
-                if (finalStatus == QueryCacheStatus.Miss)
-                    published = await cache.TryGetAsync(database.Id, hint.CacheName, fingerprint, ct)
-                        .ConfigureAwait(false);
-                cache.ExitSingleFlight(fingerprint, published);
+                // Signal waiters: true when an entry was stored, so they re-probe the cache instead
+                // of duplicating this execution; false on any failure (generation fence rejected,
+                // byte cap exceeded, drain cancelled) so they execute independently. Only the flag
+                // crosses over — the rows a waiter serves must come from its own validated probe.
+                cache.ExitSingleFlight(fingerprint, published: finalStatus == QueryCacheStatus.Miss);
             }
 
             if (metaOut is not null)
@@ -410,7 +407,7 @@ internal sealed class QueryExecutor
             // we are the owner, wake waiters with null so they execute independently.
             // No-op when ExitSingleFlight was already called (idempotent _inFlight.Remove).
             if (isSingleFlightOwner)
-                cache.ExitSingleFlight(fingerprint, null);
+                cache.ExitSingleFlight(fingerprint, published: false);
         }
     }
 

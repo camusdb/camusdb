@@ -65,8 +65,8 @@ public sealed class NullQueryResultCache : IQueryResultCache
     /// behavior for the null object.
     /// </summary>
     public SingleFlightSlot EnterSingleFlight(string fingerprint)
-        => new SingleFlightSlot(isOwner: true, Task.FromResult<CachedQueryResult?>(null));
+        => new SingleFlightSlot(isOwner: true, Task.FromResult(false));
 
     /// <summary>No-op: the null cache never registers an in-flight slot.</summary>
-    public void ExitSingleFlight(string fingerprint, CachedQueryResult? result) { }
+    public void ExitSingleFlight(string fingerprint, bool published) { }
 }

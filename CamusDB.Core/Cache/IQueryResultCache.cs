@@ -195,7 +195,7 @@ public interface IQueryResultCache
     /// The first concurrent caller for a given fingerprint becomes the <em>owner</em>
     /// (<see cref="SingleFlightSlot.IsOwner"/> == <c>true</c>); all subsequent concurrent
     /// callers become <em>waiters</em> (<c>IsOwner</c> == <c>false</c>) and should call
-    /// <see cref="SingleFlightSlot.WaitAsync"/> to block until the owner publishes a result.
+    /// <see cref="SingleFlightSlot.WaitAsync"/> to block until the owner publishes an entry.
     ///
     /// <para>The owner <b>must</b> call <see cref="ExitSingleFlight"/> exactly once — on
     /// success or failure — to wake waiters and remove the in-flight registration. Failing to
@@ -213,13 +213,17 @@ public interface IQueryResultCache
     /// <see cref="EnterSingleFlight"/> returned a slot with <see cref="SingleFlightSlot.IsOwner"/>
     /// == <c>true</c>.
     ///
-    /// <para>Pass the published <see cref="CachedQueryResult"/> when the owner successfully
-    /// materialized and stored a result, so waiters can serve it directly. Pass <c>null</c>
-    /// when the owner failed (exception, cancellation, generation fence rejected, byte cap
-    /// exceeded) — waiters will then execute the plan independently.</para>
+    /// <para>Pass <paramref name="published"/> == <c>true</c> when the owner successfully
+    /// materialized and stored an entry, so waiters re-probe the cache instead of duplicating the
+    /// execution. Pass <c>false</c> when the owner failed (exception, cancellation, generation fence
+    /// rejected, byte cap exceeded) — waiters will then execute the plan independently.</para>
+    ///
+    /// <para>The signal is deliberately a flag rather than the result object: an entry published a
+    /// moment ago can be evicted by a write committing before waiters wake, so only a fresh probe
+    /// through the normal read path can decide whether serving it is still correct.</para>
     ///
     /// <para>A no-op when <paramref name="fingerprint"/> is not registered (e.g. after
     /// <see cref="NullQueryResultCache"/> returned an always-owner slot).</para>
     /// </summary>
-    void ExitSingleFlight(string fingerprint, CachedQueryResult? result);
+    void ExitSingleFlight(string fingerprint, bool published);
 }

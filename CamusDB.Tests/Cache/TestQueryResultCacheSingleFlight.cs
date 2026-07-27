@@ -28,12 +28,14 @@ namespace CamusDB.Tests.Cache;
 ///
 /// Validates that concurrent cold-cache requests for the same fingerprint execute the query
 /// plan only once. The first caller (owner) computes and publishes; all concurrent callers
-/// (waiters) block until the owner signals, then serve the owner's result directly. Waiters
-/// that time out before the owner finishes compute independently (no blocked result is
-/// discarded).
+/// (waiters) block until the owner signals, then re-probe the cache and serve the published
+/// entry. Waiters that time out before the owner finishes compute independently (no blocked
+/// result is discarded).
 ///
-/// Also validates that owner cancellation or failure wakes waiters with null (so they
-/// compute independently) rather than blocking them until timeout.
+/// Also validates that owner cancellation or failure wakes waiters with a not-published signal
+/// (so they compute independently) rather than blocking them until timeout, and — the safety
+/// property the re-probe exists for — that a waiter which joins after a committed write evicted
+/// the entry executes live instead of being handed the pre-write rows.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -87,7 +89,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         using var cache = new QueryResultCache(sweepIntervalMs: -1);
         SingleFlightSlot slot = cache.EnterSingleFlight("fp-1");
         Assert.IsTrue(slot.IsOwner, "First caller for a fingerprint must be the owner");
-        cache.ExitSingleFlight("fp-1", null);  // cleanup
+        cache.ExitSingleFlight("fp-1", published: false);  // cleanup
     }
 
     [Test]
@@ -100,7 +102,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         Assert.IsTrue(owner.IsOwner);
         Assert.IsFalse(waiter.IsOwner, "Second concurrent caller must be a waiter");
 
-        cache.ExitSingleFlight("fp-2", null);  // cleanup
+        cache.ExitSingleFlight("fp-2", published: false);  // cleanup
     }
 
     [Test]
@@ -109,16 +111,16 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         using var cache = new QueryResultCache(sweepIntervalMs: -1);
         SingleFlightSlot first = cache.EnterSingleFlight("fp-3");
         Assert.IsTrue(first.IsOwner);
-        cache.ExitSingleFlight("fp-3", null);
+        cache.ExitSingleFlight("fp-3", published: false);
 
         // After exit the in-flight entry is removed; next caller is the owner.
         SingleFlightSlot second = cache.EnterSingleFlight("fp-3");
         Assert.IsTrue(second.IsOwner, "After ExitSingleFlight, next caller must be the owner again");
-        cache.ExitSingleFlight("fp-3", null);
+        cache.ExitSingleFlight("fp-3", published: false);
     }
 
     [Test]
-    public async Task WaitAsync_OwnerSignalsResult_WaiterReceivesResult()
+    public async Task WaitAsync_OwnerSignalsPublished_WaiterIsToldToReprobe()
     {
         using var cache = new QueryResultCache(sweepIntervalMs: -1);
         const string fp = "fp-waiter-success";
@@ -126,23 +128,16 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         SingleFlightSlot owner = cache.EnterSingleFlight(fp);
         SingleFlightSlot waiter = cache.EnterSingleFlight(fp);
 
-        Task<CachedQueryResult?> waitTask = waiter.WaitAsync(5_000, CancellationToken.None);
+        Task<bool> waitTask = waiter.WaitAsync(5_000, CancellationToken.None);
 
-        // Owner signals a result
-        CachedQueryResult result = new(
-            CacheName: "test", DatabaseId: "db", Rows: [],
-            ResultFingerprint: fp, CachedAt: HLCTimestamp.Zero,
-            Status: QueryCacheStatus.Miss);
+        cache.ExitSingleFlight(fp, published: true);
 
-        cache.ExitSingleFlight(fp, result);
-
-        CachedQueryResult? received = await waitTask;
-        Assert.IsNotNull(received, "Waiter must receive the result the owner published");
-        Assert.AreEqual(fp, received!.ResultFingerprint);
+        bool published = await waitTask;
+        Assert.IsTrue(published, "Waiter must be told the owner published so it re-probes the cache");
     }
 
     [Test]
-    public async Task WaitAsync_OwnerFails_WaiterReceivesNull()
+    public async Task WaitAsync_OwnerFails_WaiterIsToldToExecuteLive()
     {
         using var cache = new QueryResultCache(sweepIntervalMs: -1);
         const string fp = "fp-waiter-failure";
@@ -150,17 +145,16 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         SingleFlightSlot owner = cache.EnterSingleFlight(fp);
         SingleFlightSlot waiter = cache.EnterSingleFlight(fp);
 
-        Task<CachedQueryResult?> waitTask = waiter.WaitAsync(5_000, CancellationToken.None);
+        Task<bool> waitTask = waiter.WaitAsync(5_000, CancellationToken.None);
 
-        // Owner signals failure (null)
-        cache.ExitSingleFlight(fp, null);
+        cache.ExitSingleFlight(fp, published: false);
 
-        CachedQueryResult? received = await waitTask;
-        Assert.IsNull(received, "A null signal (owner failure) must make waiter receive null");
+        bool published = await waitTask;
+        Assert.IsFalse(published, "An owner failure must leave the waiter to execute independently");
     }
 
     [Test]
-    public async Task WaitAsync_Timeout_ReturnsNull()
+    public async Task WaitAsync_Timeout_ReturnsFalse()
     {
         using var cache = new QueryResultCache(sweepIntervalMs: -1);
         const string fp = "fp-waiter-timeout";
@@ -169,16 +163,16 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         SingleFlightSlot waiter = cache.EnterSingleFlight(fp);
 
         // Waiter with very short timeout — owner does NOT signal.
-        CachedQueryResult? received = await waiter.WaitAsync(50 /*ms*/, CancellationToken.None);
+        bool published = await waiter.WaitAsync(50 /*ms*/, CancellationToken.None);
 
-        Assert.IsNull(received, "A waiter that times out before the owner signals must receive null");
+        Assert.IsFalse(published, "A waiter that times out before the owner signals must execute independently");
 
         // Cleanup: signal owner so in-flight state is properly cleared.
-        cache.ExitSingleFlight(fp, null);
+        cache.ExitSingleFlight(fp, published: false);
     }
 
     [Test]
-    public async Task WaitAsync_MultipleWaiters_AllReceiveSameResult()
+    public async Task WaitAsync_MultipleWaiters_AllReceiveTheSameSignal()
     {
         using var cache = new QueryResultCache(sweepIntervalMs: -1);
         const string fp = "fp-multi-waiter";
@@ -188,22 +182,16 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         SingleFlightSlot w2 = cache.EnterSingleFlight(fp);
         SingleFlightSlot w3 = cache.EnterSingleFlight(fp);
 
-        Task<CachedQueryResult?>[] waitTasks = [
+        Task<bool>[] waitTasks = [
             w1.WaitAsync(5_000, CancellationToken.None),
             w2.WaitAsync(5_000, CancellationToken.None),
             w3.WaitAsync(5_000, CancellationToken.None),
         ];
 
-        CachedQueryResult result = new(
-            CacheName: "test", DatabaseId: "db", Rows: [],
-            ResultFingerprint: fp, CachedAt: HLCTimestamp.Zero,
-            Status: QueryCacheStatus.Miss);
+        cache.ExitSingleFlight(fp, published: true);
 
-        cache.ExitSingleFlight(fp, result);
-
-        CachedQueryResult?[] received = await Task.WhenAll(waitTasks);
-        Assert.That(received, Has.All.Not.Null, "All waiters must receive the result");
-        Assert.That(received, Has.All.Property("ResultFingerprint").EqualTo(fp));
+        bool[] received = await Task.WhenAll(waitTasks);
+        Assert.That(received, Has.All.True, "All waiters must receive the owner's published signal");
     }
 
     // ── Integration tests: single-flight through the full query path ───────────
@@ -219,13 +207,16 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     ///    <see cref="QueryResultCache.EnterSingleFlight"/> before the real query fires.
     /// 4. Launch the real query in a background task — it probes the cache (miss), hits the
     ///    single-flight gate, and blocks as a waiter.
-    /// 5. Signal the fake owner via <see cref="QueryResultCache.ExitSingleFlight"/> with an
-    ///    injected result whose rows are <em>not in the table</em> (a sentinel value).
+    /// 5. Store an entry under that fingerprint whose rows are <em>not in the table</em> (a
+    ///    sentinel value), then signal the fake owner as having published.
     /// 6. Assert the real query returned the sentinel rows and reported <c>Status = Hit</c>,
-    ///    proving it served the waiter path without executing the plan.
+    ///    proving it re-probed the cache and served the entry rather than executing the plan.
+    ///
+    /// The rows reach the waiter through its own cache probe, never through the slot: the slot
+    /// only carries the published flag.
     /// </summary>
     [Test]
-    public async Task WaiterPath_EndToEnd_ServesOwnerResultWithoutExecutingPlan()
+    public async Task WaiterPath_EndToEnd_ReprobesAndServesPublishedEntryWithoutExecutingPlan()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor exec) = await CreateDatabase();
         await SetupRobotsTable(dbname, db, exec);
@@ -292,14 +283,18 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         Assert.That(_cache.WaiterCount(fp!), Is.GreaterThanOrEqualTo(1),
             "Timed out waiting for the background query to register as a waiter");
 
-        // ── Step 5: signal the fake owner with the sentinel result ────────────
-        _cache.ExitSingleFlight(fp!, injectedResult);
+        // ── Step 5: store the sentinel entry, then signal the fake owner ──────
+        // The entry must exist in the cache before the signal: the waiter re-probes rather than
+        // receiving rows through the slot, so a signal with nothing stored would make it execute
+        // the plan instead.
+        _cache.InjectEntryForTest(injectedResult, QueryDependencySet.Empty);
+        _cache.ExitSingleFlight(fp!, published: true);
 
         // ── Step 6: assert the query returned the injected rows ───────────────
         CacheMetadataHolder queryMeta = await queryTask;
 
         Assert.That(queryMeta.Status, Is.EqualTo(QueryCacheStatus.Hit),
-            "A waiter served by the owner's result must report Status=Hit");
+            "A waiter whose re-probe finds the published entry must report Status=Hit");
 
         Assert.That(collectedRows, Has.Count.EqualTo(1),
             "Exactly the sentinel row must be returned (not the table's two real rows)");
@@ -307,6 +302,96 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
             "The returned row must carry the sentinel column, proving plan was not executed");
         Assert.That(collectedRows[0].Row["sentinel"].StrValue, Is.EqualTo("single-flight-sentinel"),
             "The sentinel value must match what was injected, proving the waiter path served it");
+    }
+
+    /// <summary>
+    /// A query that begins after an entry was invalidated must never be served that entry through
+    /// the single-flight slot.
+    ///
+    /// Ordering (fully deterministic, no timing assumptions):
+    /// 1. an owner occupies the slot and stores an entry carrying sentinel rows;
+    /// 2. the entry is invalidated, as a committed write's cache invalidation would do;
+    /// 3. a new query probes the cache, misses, and joins the slot as a waiter;
+    /// 4. the owner signals that it published.
+    ///
+    /// The waiter learns only that something was published; its own re-probe finds nothing, so it
+    /// executes live and returns current table rows. Handing it the owner's materialized result
+    /// instead would serve rows that predate the write which evicted them.
+    /// </summary>
+    [Test]
+    public async Task WaiterJoiningAfterInvalidation_ExecutesLiveInsteadOfServingEvictedEntry()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor exec) = await CreateDatabase();
+        await SetupRobotsTable(dbname, db, exec);
+
+        const string cacheName = "sf_late_waiter";
+
+        // Discover the fingerprint, then clear the cache.
+        await RunHintedQuery(dbname, exec, cacheName);
+        string? fp = _cache!.GetFirstFingerprintByCacheName(db.Id, cacheName);
+        Assert.IsNotNull(fp, "Fingerprint must be discoverable after a cold miss");
+        _cache.InvalidateEntry(db.Id, cacheName, fp!);
+
+        // Step 1: an owner holds the slot and has stored an entry with rows that cannot come from
+        // the table, so serving them is unambiguous evidence of the detached-result path.
+        SingleFlightSlot ownerSlot = _cache.EnterSingleFlight(fp!);
+        Assert.IsTrue(ownerSlot.IsOwner);
+
+        var sentinelRow = new QueryResultRow(
+            ObjectIdGenerator.Generate(),
+            new Dictionary<string, ColumnValue>
+            {
+                ["sentinel"] = new(ColumnType.String, "pre-invalidation-rows")
+            });
+
+        CachedQueryResult ownerResult = new(
+            CacheName: cacheName,
+            DatabaseId: db.Id,
+            Rows: [sentinelRow],
+            ResultFingerprint: fp!,
+            CachedAt: HLCTimestamp.Zero,
+            Status: QueryCacheStatus.Miss);
+
+        _cache.InjectEntryForTest(ownerResult, QueryDependencySet.Empty);
+
+        // Step 2: a committed write's invalidation removes the entry while the slot is still open.
+        _cache.InvalidateEntry(db.Id, cacheName, fp!);
+        Assert.That(_cache.EntryCount, Is.EqualTo(0),
+            "The entry must be gone before the waiter joins, mirroring a committed write's eviction");
+
+        // Step 3: a new query starts, misses, and joins the open slot as a waiter.
+        var collectedRows = new List<QueryResultRow>();
+        var meta = new CacheMetadataHolder();
+        Task queryTask = Task.Run(async () =>
+        {
+            KvTransaction readTx = KvTransaction.CreateReadOnly();
+            string sql = $"SELECT * FROM robots{{cache={cacheName}}}";
+            (_, IAsyncEnumerable<QueryResultRow> cursor) =
+                await exec.ExecuteSQLQuery(new ExecuteSQLTicket(readTx, dbname, sql, null), meta);
+            await foreach (QueryResultRow row in cursor)
+                collectedRows.Add(row);
+        });
+
+        int pollMs = 0;
+        while (_cache.WaiterCount(fp!) == 0 && pollMs < 5_000)
+        {
+            await Task.Delay(10);
+            pollMs += 10;
+        }
+        Assert.That(_cache.WaiterCount(fp!), Is.GreaterThanOrEqualTo(1),
+            "Timed out waiting for the query to register as a waiter");
+
+        // Step 4: the owner reports success — but its entry no longer exists.
+        _cache.ExitSingleFlight(fp!, published: true);
+
+        await queryTask;
+
+        Assert.That(collectedRows.Any(r => r.Row.ContainsKey("sentinel")), Is.False,
+            "A waiter that joined after the invalidation must not receive the evicted rows");
+        Assert.That(collectedRows, Has.Count.EqualTo(2),
+            "The waiter must execute live and return the table's current rows");
+        Assert.That(meta.Status, Is.Not.EqualTo(QueryCacheStatus.Hit),
+            "Serving a Hit here would mean the waiter trusted an entry that no longer exists");
     }
 
     /// <summary>
@@ -368,8 +453,8 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
         Assert.That(_cache.WaiterCount(fp!), Is.GreaterThanOrEqualTo(1),
             "Timed out waiting for the background query to register as a waiter");
 
-        // Owner fails: signal null.
-        _cache.ExitSingleFlight(fp!, null);
+        // Owner fails: signal that nothing was published.
+        _cache.ExitSingleFlight(fp!, published: false);
 
         // The waiter should have fallen through to independent execution and produced a Miss.
         CacheMetadataHolder result = await queryTask;

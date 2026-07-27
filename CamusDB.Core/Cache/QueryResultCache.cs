@@ -90,10 +90,11 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
 
     private readonly DependencyIndex _depIndex = new();
 
-    // Single-flight: fingerprint → (TCS, waiterCount). The TCS is what owners signal and waiters
+    // Single-flight: fingerprint → (TCS, waiterCount). The TCS carries only "did the owner publish?"
+    // — never the result object, so waiters must re-probe — and is what owners signal and waiters
     // await. waiterCount is incremented each time a non-owner caller picks up the slot; it lets
     // tests poll until at least one waiter is blocking in WaitAsync. Protected by _lock.
-    private readonly Dictionary<string, (TaskCompletionSource<CachedQueryResult?> Tcs, int WaiterCount)> _inFlight =
+    private readonly Dictionary<string, (TaskCompletionSource<bool> Tcs, int WaiterCount)> _inFlight =
         new(StringComparer.Ordinal);
 
     private readonly Timer _sweepTimer;
@@ -661,7 +662,7 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     {
         lock (_lock)
         {
-            if (_inFlight.TryGetValue(fingerprint, out (TaskCompletionSource<CachedQueryResult?> Tcs, int WaiterCount) existing))
+            if (_inFlight.TryGetValue(fingerprint, out (TaskCompletionSource<bool> Tcs, int WaiterCount) existing))
             {
                 // Another request is already computing this fingerprint. Return a distinct waiter
                 // slot backed by the owner's Task so WaitAsync will unblock when ExitSingleFlight
@@ -672,26 +673,28 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
 
             // First caller: become the owner. The TCS stays in _inFlight; ExitSingleFlight
             // removes it and calls TrySetResult to wake all waiters.
-            var tcs = new TaskCompletionSource<CachedQueryResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             _inFlight[fingerprint] = (tcs, 0);
             return new SingleFlightSlot(isOwner: true, tcs.Task);
         }
     }
 
     /// <inheritdoc />
-    public void ExitSingleFlight(string fingerprint, CachedQueryResult? result)
+    public void ExitSingleFlight(string fingerprint, bool published)
     {
-        TaskCompletionSource<CachedQueryResult?>? tcs;
+        TaskCompletionSource<bool>? tcs;
         lock (_lock)
         {
-            if (!_inFlight.Remove(fingerprint, out (TaskCompletionSource<CachedQueryResult?> Tcs, int) entry))
+            if (!_inFlight.Remove(fingerprint, out (TaskCompletionSource<bool> Tcs, int) entry))
                 return;
             tcs = entry.Tcs;
         }
 
         // Signal outside the lock: continuations run asynchronously (RunContinuationsAsynchronously)
-        // so they cannot re-enter _lock on this thread.
-        tcs.TrySetResult(result);
+        // so they cannot re-enter _lock on this thread. Only the flag crosses the boundary — waiters
+        // re-probe the cache themselves, so an entry evicted between publish and this signal cannot
+        // be served to them.
+        tcs.TrySetResult(published);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
