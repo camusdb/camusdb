@@ -21,6 +21,19 @@ initial_partitions: 4      # Raft partition count (>= 1). More partitions spread
 # https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
 # raft_certificate:        # path to PFX for Raft gRPC TLS in cluster mode
 
+# ── Authentication transport security ─────────────────────────────────────────
+# Authentication itself is switched on with the CAMUSDB_AUTH_ENABLED environment variable, and its
+# secrets (token key, bootstrap credentials, node secret) are read only from the environment so they
+# never sit in this file. This flag carries no secret — it is deployment topology — so it lives here.
+#
+# require_tls_when_auth_enabled (default true): with authentication on, reject credential-bearing
+#   requests that arrive over plaintext HTTP/h2c, since a bearer token on the wire is trivially
+#   stolen. Loopback peers are always exempt, so local development needs no certificate. Set false
+#   ONLY when TLS terminates in front of the node (ingress, sidecar, service mesh): that hop is
+#   invisible to the server, so it would otherwise reject every forwarded request. Also settable as
+#   --require-tls-when-auth-enabled true|false, which overrides this value.
+# require_tls_when_auth_enabled: true
+
 # Cluster mode example (uncomment and fill in)
 # mode: cluster
 # node_name: camus-node-1

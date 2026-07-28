@@ -34,6 +34,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `https_port` | `--https-port` | `7141` |
 | `https_certificate` | `--https-certificate` | `""` |
 | `raft_certificate` | `--raft-certificate` | `""` |
+| `require_tls_when_auth_enabled` | `--require-tls-when-auth-enabled` | `true` |
 | `default_isolation_level` | — | `serializable` |
 | `range_lock_expires_ms` | — | `30000` |
 | `range_lock_heartbeat_interval_ms` | — | `10000` |

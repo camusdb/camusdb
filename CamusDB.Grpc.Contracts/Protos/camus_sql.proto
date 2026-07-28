@@ -99,11 +99,39 @@ message ResultRow {
   repeated Value values = 1;
 }
 
-// Streamed query response: exactly one Schema first, then zero or more Rows.
+// Hybrid Logical Clock instant. Mirrors Kommander.Time.HLCTimestamp's (L, C) pair as the
+// response envelope surfaces it — the node dimension N is not part of the cache report.
+message HlcTimestamp {
+  int64  l = 1;
+  uint32 c = 2;
+}
+
+// Cache resolution metadata for a "{cache=name}"-hinted SELECT, mirroring the REST response
+// envelope field-for-field. It is emitted ONLY when the statement entered the cache path, so a
+// client distinguishes "query was not hinted" (message absent) from "hinted and bypassed"
+// (message present with status = "bypass" and a bypass_reason).
+message CacheMetadata {
+  // "hit" | "miss" | "bypass" | "stale-revalidated" | "evicted-before-publish".
+  string status = 1;
+  // Why the cache was bypassed or the entry was not published (e.g. "in-flight-write",
+  // "oversized-result"). Empty when the status carries no bypass reason.
+  string bypass_reason = 2;
+  // Logical cache family name from the hint; always set when this message is emitted.
+  string name = 3;
+  // Instant at which a served entry was computed. Present only on a cache hit.
+  HlcTimestamp cached_at_hlc = 4;
+  // Approximate wall-clock age of a served entry. Present only on a cache hit.
+  optional int64 age_ms = 5;
+}
+
+// Streamed query response: exactly one Schema first, then zero or more Rows, then — only for a
+// cache-hinted statement — one trailing CacheMetadata. The cache verdict is known only after the
+// cursor is fully drained, so it can never precede the rows.
 message QueryStreamMessage {
   oneof payload {
-    ResultSchema schema = 1;
-    ResultRow    row    = 2;
+    ResultSchema  schema         = 1;
+    ResultRow     row            = 2;
+    CacheMetadata cache_metadata = 3;
   }
 }
 
@@ -148,6 +176,9 @@ message QueryComplete {
   int64 causal_token_l = 2;
   int64 causal_token_c = 3;
   int32 causal_token_n = 4;
+  // Present only for a cache-hinted statement — the batch terminator carries the verdict because
+  // it is known only once the cursor has been drained.
+  CacheMetadata cache_metadata = 5;
 }
 
 message BatchExecuteResponse {
@@ -269,6 +300,41 @@ service CamusSql {
   rpc CommitTransaction (TxnHandle)        returns (CommitReply);
   rpc RollbackTransaction(TxnHandle)       returns (RollbackReply);
   rpc Ping              (PingRequest)      returns (PingReply);
+}
+
+// ─── CamusAuth service ────────────────────────────────────────────────────────
+// Credential exchange, mirroring the REST /login and /logout routes. Deliberately a service of its
+// own rather than two more RPCs on CamusSql: these are the ONLY calls that must be reachable without
+// a bearer token (a client has none until Login returns one), so keeping them separate makes the
+// unauthenticated surface explicit instead of hiding an exemption inside the data-plane service.
+
+message LoginRequest {
+  string user     = 1;
+  string password = 2;
+}
+
+message LoginReply {
+  // Opaque bearer token; present it as "Bearer <token>" in the `authorization` call metadata.
+  string token = 1;
+  // Absolute deadline after which the token is rejected — Unix epoch milliseconds, UTC.
+  int64  expires_at_unix_ms = 2;
+  // Whole seconds until that deadline as the SERVER measured it when replying. Redundant with the
+  // absolute value on purpose: a client whose clock disagrees can renew on a monotonic timer.
+  int64  expires_in_seconds = 3;
+}
+
+// The token is taken from the `authorization` metadata, exactly as on every other authenticated call,
+// so it is never duplicated in the message body.
+message LogoutRequest {}
+
+message LogoutReply {}
+
+service CamusAuth {
+  // Exchanges a password for a short-lived bearer token. Refused over a plaintext connection when
+  // authentication requires TLS — a password must never travel in the clear.
+  rpc Login  (LoginRequest)  returns (LoginReply);
+  // Revokes the token presented in the `authorization` metadata. Idempotent.
+  rpc Logout (LogoutRequest) returns (LogoutReply);
 }
 
 // ─── CamusRows service ────────────────────────────────────────────────────────

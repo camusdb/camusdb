@@ -43,4 +43,10 @@ public sealed class ConfigCliOverrides
     public string? HttpsCertificate { get; init; }
 
     public string? RaftCertificate { get; init; }
+
+    /// <summary>
+    /// Null leaves the YAML/default value alone; <c>false</c> lets a node behind a TLS-terminating
+    /// proxy accept forwarded plaintext requests while authentication is on.
+    /// </summary>
+    public bool? RequireTlsWhenAuthEnabled { get; init; }
 }

@@ -240,6 +240,23 @@ public class ConfigDefinition
     public string RaftCertificate { get; set; } = "";
 
     /// <summary>
+    /// When authentication is enabled, refuse credential-bearing requests arriving over a plaintext
+    /// (non-TLS) connection — a bearer token or password on the wire is trivially stolen. Loopback
+    /// peers are exempt either way, so single-host development needs no certificate. Default
+    /// <c>true</c> (secure by default); set <c>false</c> only where TLS terminates in front of the
+    /// node (a sidecar, ingress, or service mesh), because that hop is invisible to the server and it
+    /// would otherwise reject every forwarded request.
+    ///
+    /// <para>Unlike the token key and bootstrap credentials — which are secrets and are read only from
+    /// the environment so they never land in a config file — this is a deployment-topology policy flag
+    /// with no secret value, so it is configurable from YAML and the CLI.</para>
+    ///
+    /// <para>Maps to <c>CamusDBConfig.RequireTlsWhenAuthEnabled</c>. Inert while authentication is
+    /// disabled.</para>
+    /// </summary>
+    public bool RequireTlsWhenAuthEnabled { get; set; } = true;
+
+    /// <summary>
     /// When <c>true</c>, binds a dedicated client-facing gRPC HTTP/2 port (<see cref="GrpcPort"/>)
     /// and registers the <c>CamusSql</c> and <c>CamusRows</c> services plus gRPC reflection.
     /// Defaults to <c>true</c> — the operator must consciously disable the gRPC endpoint.

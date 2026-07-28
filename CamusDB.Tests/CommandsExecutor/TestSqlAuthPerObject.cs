@@ -51,7 +51,7 @@ internal sealed class TestSqlAuthPerObject : BaseTest
     }
 
     private static async Task<Principal> Login(CommandExecutor ex, string u, string p)
-        => await ex.ResolvePrincipalAsync(await ex.LoginAsync(u, p));
+        => await ex.ResolvePrincipalAsync((await ex.LoginAsync(u, p)).Token);
 
     private static Task ServerDdl(CommandExecutor ex, string sql, Principal? p)
         => ex.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: "", sql: sql, parameters: null, principal: p));

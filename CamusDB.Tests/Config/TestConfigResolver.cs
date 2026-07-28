@@ -22,7 +22,15 @@ using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.Tests.Config;
 
+/// <summary>
+/// Merge-precedence tests for YAML / CLI resolution and the process-wide knobs it applies.
+///
+/// <para>Non-parallelizable: applying a config rewrites <b>every</b> static from that one definition,
+/// not just the keys the YAML mentions, so two fixtures applying configs at once clobber each other's
+/// values mid-assertion.</para>
+/// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestConfigResolver
 {
     [Test]

@@ -96,10 +96,11 @@ Both `CamusSql.ExecuteQuery` and `CamusRows.Query` / `CamusRows.QueryById` are *
 and follow one strict shape:
 
 ```
-QueryStreamMessage(schema)     // ALWAYS first, exactly one, even for an empty result
-QueryStreamMessage(row)        // zero or more, in cursor order
+QueryStreamMessage(schema)          // ALWAYS first, exactly one, even for an empty result
+QueryStreamMessage(row)             // zero or more, in cursor order
 QueryStreamMessage(row)
 ...
+QueryStreamMessage(cache_metadata)  // at most one, strictly last — only for a {cache=…}-hinted SELECT
 ```
 
 Rules:
@@ -114,6 +115,12 @@ Rules:
 - **Column type comes from the schema definition, not from row values.** A `NULL` in the first row
   does not weaken the column's declared type — the type in `ColumnSchema` is authoritative. Do not
   infer types from cell values.
+- **A cache verdict, when present, is last.** A `SELECT` carrying a `{cache=name}` hint ends with one
+  `CacheMetadata` message (`status`, `bypass_reason`, `name`, `cached_at_hlc`, `age_ms` — the same
+  values the REST envelope reports). It cannot precede the rows: the server only resolves the verdict
+  once the cursor has drained. An **absent** message means the statement carried no hint, which is
+  distinct from a hinted statement whose verdict was `bypass`. A client that ignores the message still
+  reads a well-formed result, so this is backward compatible.
 - The stream ends by normal gRPC stream completion. (For the batched variant, a `QueryComplete`
   terminator is used instead — see §7.)
 
@@ -217,6 +224,34 @@ interpolation to avoid injection and to carry typed values (dates, uuids, bytes)
 
 ---
 
+## 5b. The `CamusAuth` service (credential exchange)
+
+Only relevant when the server runs with authentication enabled (`CAMUSDB_AUTH_ENABLED=true`). These
+are the **only** RPCs reachable without a bearer token — a client has none until `Login` returns one —
+which is why they are a separate service rather than two more methods on `CamusSql`.
+
+| RPC | Request | Reply | Notes |
+|-----|---------|-------|-------|
+| `Login` | `LoginRequest{user, password}` | `LoginReply{token, expires_at_unix_ms, expires_in_seconds}` | Exchanges a password for a short-lived bearer token. |
+| `Logout` | `LogoutRequest{}` | `LogoutReply{}` | Revokes the token in the `authorization` metadata. Idempotent. |
+
+- **Present the token** on every other call as `authorization: Bearer <token>` call metadata.
+- **Both expiry fields describe the same instant.** `expires_at_unix_ms` is the absolute deadline (UTC
+  epoch milliseconds); `expires_in_seconds` is the same deadline as a duration the *server* measured
+  when replying. Prefer the duration if your clock may disagree with the server's, and renew before it
+  elapses — the server's TTL is configurable, so assuming a lifetime will eventually be wrong.
+- **`Login` is refused over plaintext** when the server requires TLS (`CADB0519` →
+  `FAILED_PRECONDITION`), checked before the credentials are read. A loopback peer is exempt.
+- **Every credential failure is identical** — unknown user, no password, wrong password all return
+  `UNAUTHENTICATED` with `CADB0516` and the same detail, so replies cannot enumerate accounts.
+- **`Logout` always succeeds**, including with no token or an already-revoked one: the requested end
+  state holds either way, and distinguishing them would leak whether a token was valid.
+
+A token minted here is accepted by every node — sessions live in the replicated user catalog — and it
+is the same token the REST `/login` route issues, so the two surfaces are interchangeable.
+
+---
+
 ## 6. The `CamusRows` service (typed CRUD)
 
 For code paths that operate on rows directly without composing SQL:
@@ -294,10 +329,12 @@ Because one `BatchExecute` call carries many ops, per-op metadata that the unary
   ```
   schema           (exactly one, first — even for an empty result)
   row              (zero or more)
-  query_complete   (terminator: total row count + causal token N/L/C)
+  query_complete   (terminator: total row count + causal token N/L/C, plus the cache verdict when hinted)
   ```
   The `QueryComplete` terminator replaces normal stream completion and carries the op's trailing
-  causal token. Thread that token forward like any other (§4.2).
+  causal token. Thread that token forward like any other (§4.2). For a `{cache=…}`-hinted statement it
+  also carries `cache_metadata` — the batched equivalent of the trailing `CacheMetadata` message on
+  the unary stream (§3), absent when the statement carried no hint.
 
 - **A `NON_QUERY` op** produces exactly one `non_query` (`NonQueryReply` with `affected_rows` +
   causal token) for its `request_id`.

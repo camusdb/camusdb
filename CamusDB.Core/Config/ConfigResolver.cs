@@ -69,6 +69,9 @@ public static class ConfigResolver
 
         if (cli.RaftCertificate is not null)
             config.RaftCertificate = cli.RaftCertificate;
+
+        if (cli.RequireTlsWhenAuthEnabled is bool requireTls)
+            config.RequireTlsWhenAuthEnabled = requireTls;
     }
 
     /// <summary>
@@ -155,6 +158,11 @@ public static class ConfigResolver
         CamusDBConfig.QueryResultCacheSingleFlightWaitMs = config.QueryResultCacheSingleflightWaitMs;
         CamusDBConfig.QueryResultCacheStrictValidationMaxKeys = config.QueryResultCacheStrictValidationMaxKeys;
         CamusDBConfig.QueryResultCacheSweepIntervalMs = config.QueryResultCacheSweepIntervalMs;
+
+        // Transport-security policy for authenticated requests. Applied unconditionally: authentication
+        // itself is switched on later from the environment, so this must already hold the operator's
+        // choice by the time the first request is gated.
+        CamusDBConfig.RequireTlsWhenAuthEnabled = config.RequireTlsWhenAuthEnabled;
 
         CamusDBConfig.Kahuna = config.Kahuna;
     }

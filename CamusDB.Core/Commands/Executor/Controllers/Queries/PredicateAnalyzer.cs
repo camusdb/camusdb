@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 
@@ -105,6 +106,82 @@ public static class PredicateAnalyzer
         List<AnalyzedInList> inList = [.. left.InListComparisons, .. right.InListComparisons];
 
         return new PredicateAnalysis(indexable, columnComparisons, residual, inList);
+    }
+
+    /// <summary>
+    /// Rewrites alias-qualified column references (<c>u.usersId</c>) in the analyzed comparisons to
+    /// their bare column names for single base-table queries, using the query's bound
+    /// <see cref="QueryRowNameResolver"/>. The grammar folds qualified names into a single
+    /// <see cref="NodeType.Identifier"/> whose text keeps the alias prefix, and index columns are
+    /// stored unqualified — without this pass no aliased predicate ever matches an index, so every
+    /// aliased single-table query (the shape every ORM generates) silently degrades to a full table
+    /// scan, and under Serializable that scan takes a whole-table shared range lock.
+    ///
+    /// <para>Join and derived-table queries use qualified row keys
+    /// (<see cref="QueryRowNameResolver.UsesQualifiedRowKeys"/>) and keep their own per-table prefix
+    /// handling, so the analysis is returned untouched for them. A reference the resolver rejects
+    /// (unknown alias/column) is also left untouched: binding has already validated the query, so
+    /// this pass must never introduce a new failure mode.</para>
+    /// </summary>
+    public static PredicateAnalysis ResolveQualifiedColumnNames(PredicateAnalysis analysis, QueryRowNameResolver? resolver)
+    {
+        if (resolver is null || resolver.UsesQualifiedRowKeys())
+            return analysis;
+
+        List<AnalyzedComparison>? comparisons = null;
+        for (int i = 0; i < analysis.IndexableComparisons.Count; i++)
+        {
+            AnalyzedComparison original = analysis.IndexableComparisons[i];
+            string? resolved = TryResolveBareColumnName(original.ColumnName, resolver);
+            if (resolved is null)
+                continue;
+
+            comparisons ??= [.. analysis.IndexableComparisons];
+            comparisons[i] = new AnalyzedComparison(resolved, original.Operator, original.Constant, original.Conjunct);
+        }
+
+        List<AnalyzedInList>? inLists = null;
+        for (int i = 0; i < analysis.InListComparisons.Count; i++)
+        {
+            AnalyzedInList original = analysis.InListComparisons[i];
+            string? resolved = TryResolveBareColumnName(original.ColumnName, resolver);
+            if (resolved is null)
+                continue;
+
+            inLists ??= [.. analysis.InListComparisons];
+            inLists[i] = original with { ColumnName = resolved };
+        }
+
+        if (comparisons is null && inLists is null)
+            return analysis;
+
+        return new PredicateAnalysis(
+            comparisons ?? analysis.IndexableComparisons,
+            analysis.ColumnComparisons,
+            analysis.ResidualConjuncts,
+            inLists ?? analysis.InListComparisons);
+    }
+
+    /// <summary>
+    /// Resolves a qualified <c>alias.column</c> reference to its bare column name, or returns null
+    /// when the name is already unqualified, the resolver rejects it, or resolution changes nothing.
+    /// </summary>
+    private static string? TryResolveBareColumnName(string columnName, QueryRowNameResolver resolver)
+    {
+        if (!columnName.Contains('.'))
+            return null;
+
+        try
+        {
+            string resolved = resolver.ResolveRowLookupKey(columnName);
+            return string.Equals(resolved, columnName, StringComparison.Ordinal) ? null : resolved;
+        }
+        catch (CamusDBException)
+        {
+            // Binding already validated the query; an unresolvable reference here (e.g. a filter
+            // synthesized outside the binder) keeps its original name and simply stays un-indexed.
+            return null;
+        }
     }
 
     /// <summary>

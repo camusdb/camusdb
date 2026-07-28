@@ -124,7 +124,7 @@ internal sealed class TestHttpAuth : BaseTest
         TrackDatabase(db, ex);
 
         await ex.EnsureBootstrapSuperuserAsync();
-        Principal root = await ex.ResolvePrincipalAsync(await ex.LoginAsync("root", "root-pw"));
+        Principal root = await ex.ResolvePrincipalAsync((await ex.LoginAsync("root", "root-pw")).Token);
 
         var d = await ex.OpenDatabase(db);
         var tx = await d.Transactions.BeginAsync();
@@ -145,6 +145,50 @@ internal sealed class TestHttpAuth : BaseTest
         Assert.AreEqual("ok", resp.Status);
         Assert.IsNotNull(resp.Token);
         Assert.IsTrue(resp.Token!.StartsWith("camus_"));
+    }
+
+    [Test]
+    public async Task Login_ReportsTokenExpiry()
+    {
+        // A client renews against these fields; without them it must guess a lifetime and guess wrong
+        // whenever an operator shortens AccessTokenTtl.
+        TimeSpan savedTtl = CamusConfig.AccessTokenTtl;
+        try
+        {
+            CamusConfig.AccessTokenTtl = TimeSpan.FromMinutes(3);
+            (_, CommandExecutor ex) = await Setup();
+
+            LoginResponse resp = (LoginResponse)(await LoginRest(ex, "root", "root-pw")).Value!;
+
+            Assert.IsNotNull(resp.ExpiresInSeconds);
+            Assert.That(resp.ExpiresInSeconds!.Value, Is.InRange(150, 180),
+                "The reported TTL must follow the configured one, not a fixed default");
+            Assert.IsNotNull(resp.ExpiresAtUnixMs);
+            Assert.That(resp.ExpiresAtUnixMs!.Value,
+                Is.EqualTo(DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds()).Within(30_000),
+                "The absolute deadline and the TTL must describe the same instant");
+        }
+        finally
+        {
+            CamusConfig.AccessTokenTtl = savedTtl;
+        }
+    }
+
+    [Test]
+    public async Task Logout_ReportsNoExpiry()
+    {
+        (_, CommandExecutor ex) = await Setup();
+        string token = await TokenFor(ex, "root", "root-pw");
+
+        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger)
+        {
+            ControllerContext = Context("", bearer: token, https: true)
+        };
+        LoginResponse resp = (LoginResponse)(await c.Logout()).Value!;
+
+        Assert.AreEqual("ok", resp.Status);
+        Assert.IsNull(resp.ExpiresAtUnixMs, "Logout mints nothing, so it has no expiry to report");
+        Assert.IsNull(resp.ExpiresInSeconds);
     }
 
     [Test]
@@ -264,6 +308,54 @@ internal sealed class TestHttpAuth : BaseTest
         Assert.IsFalse(nextCalled);
     }
 
+    // The transport-wide middleware also fronts the gRPC endpoints, so the gRPC credential-exchange
+    // methods must be exempt from it — a caller has no token until Login returns one, and a middleware
+    // that demanded one would make gRPC authentication impossible to bootstrap.
+
+    [Test]
+    public async Task GrpcLoginRoute_ReachesTheServiceWithoutAToken()
+    {
+        (_, CommandExecutor ex) = await Setup();
+        bool nextCalled = false;
+        AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
+
+        DefaultHttpContext http = MiddlewareContext("/CamusAuth/Login", bearer: null);
+        await mw.Invoke(http, ex);
+
+        Assert.IsTrue(nextCalled, "gRPC login must not require the token it exists to issue");
+        Assert.AreNotEqual(401, http.Response.StatusCode);
+    }
+
+    [Test]
+    public async Task GrpcLogoutRoute_ReachesTheServiceWithoutAToken()
+    {
+        (_, CommandExecutor ex) = await Setup();
+        bool nextCalled = false;
+        AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
+
+        DefaultHttpContext http = MiddlewareContext("/CamusAuth/Logout", bearer: null);
+        await mw.Invoke(http, ex);
+
+        Assert.IsTrue(nextCalled);
+        Assert.AreNotEqual(401, http.Response.StatusCode);
+    }
+
+    [Test]
+    public async Task GrpcDataPlaneRoute_StillRequiresAToken()
+    {
+        // The exemption must be exactly the auth methods — exempting the whole gRPC surface would leave
+        // the data plane open.
+        (_, CommandExecutor ex) = await Setup();
+        bool nextCalled = false;
+        AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
+
+        DefaultHttpContext http = MiddlewareContext("/CamusSql/ExecuteQuery", bearer: null);
+        await mw.Invoke(http, ex);
+
+        Assert.AreEqual(401, http.Response.StatusCode);
+        Assert.IsFalse(nextCalled);
+    }
+
     [Test]
     public async Task Disabled_NoTokenWorks()
     {
@@ -280,5 +372,46 @@ internal sealed class TestHttpAuth : BaseTest
 
         JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", bearer: null, https: false);
         Assert.AreEqual(200, r.StatusCode ?? 200);
+    }
+
+    // The request contexts below have no RemoteIpAddress, so the loopback exemption does not apply and
+    // the TLS requirement is actually exercised.
+
+    [Test]
+    public async Task PlaintextRequest_RefusedWhileTlsIsRequired()
+    {
+        (string db, CommandExecutor ex) = await Setup();
+        CamusConfig.RequireTlsWhenAuthEnabled = true;
+        string token = await TokenFor(ex, "root", "root-pw");
+
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", token, https: false);
+
+        Assert.AreEqual(CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.InsecureTransport), r.StatusCode);
+    }
+
+    [Test]
+    public async Task PlaintextRequest_AllowedOnceTheTlsRequirementIsTurnedOff()
+    {
+        // The deployment shape this exists for: TLS terminates at an ingress/sidecar, so the node itself
+        // only ever sees plaintext on the inside hop and would reject every forwarded request.
+        (string db, CommandExecutor ex) = await Setup();
+        CamusConfig.RequireTlsWhenAuthEnabled = false;
+        string token = await TokenFor(ex, "root", "root-pw");
+
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", token, https: false);
+
+        Assert.AreEqual(200, r.StatusCode ?? 200);
+    }
+
+    [Test]
+    public async Task TurningOffTlsDoesNotTurnOffAuthentication()
+    {
+        // Relaxing the transport requirement must not become a back door: credentials are still required.
+        (string db, CommandExecutor ex) = await Setup();
+        CamusConfig.RequireTlsWhenAuthEnabled = false;
+
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", bearer: null, https: false);
+
+        Assert.AreEqual(401, r.StatusCode);
     }
 }

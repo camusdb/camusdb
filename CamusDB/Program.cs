@@ -326,6 +326,7 @@ if (config.GrpcEnabled)
 {
     app.MapGrpcService<CamusDB.App.Grpc.CamusSqlService>();
     app.MapGrpcService<CamusDB.App.Grpc.CamusRowsService>();
+    app.MapGrpcService<CamusDB.App.Grpc.CamusAuthService>();
 }
 
 // Prometheus scrape endpoint (standalone + diagnostics + prometheus_enabled only). It exposes

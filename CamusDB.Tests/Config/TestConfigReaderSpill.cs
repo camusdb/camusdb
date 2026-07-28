@@ -17,8 +17,13 @@ namespace CamusDB.Tests.Config;
 /// Verifies that the spill-to-disk YAML knobs are parsed, validated, and applied to
 /// <see cref="CamusDBConfig"/> correctly, and that an unknown or misspelled spill key
 /// is rejected at startup rather than silently dropped.
+///
+/// <para>Non-parallelizable: applying a config rewrites <b>every</b> process-wide knob from that one
+/// definition, not just the keys the YAML mentions, so a fixture that applies a config concurrently
+/// with this one would reset the spill values back to their defaults mid-assertion.</para>
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public sealed class TestConfigReaderSpill
 {
     // ── Reader: accepts valid spill config ───────────────────────────────────

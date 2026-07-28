@@ -56,6 +56,10 @@ public sealed class QueryPlanner
         PredicateAnalysis analysis = ticket.AnalyzedWhere is not null
             ? PredicateAnalyzer.Merge(ticket.AnalyzedWhere, PredicateAnalyzer.AnalyzeFilters(ticket.Filters))
             : PredicateAnalyzer.AnalyzeTicket(ticket);
+        // Resolve alias-qualified column references (u.usersId → usersId) before access-path
+        // selection: index columns are stored unqualified, so without this every aliased
+        // single-table predicate fails to match any index and degrades to a full table scan.
+        analysis = PredicateAnalyzer.ResolveQualifiedColumnNames(analysis, ticket.RowNameResolver);
         // Reconcile bare string literals against Uuid columns before access-path selection so the
         // index selector and the bound-absorption check both see a Uuid constant, not a String.
         analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, table);

@@ -58,8 +58,12 @@ public sealed class AuthService
     /// password — throws <see cref="CamusDBErrorCodes.AuthenticationFailed"/> with a uniform shape after
     /// spending comparable work. Rate-limited per (account, <paramref name="source"/>); a login flood
     /// surfaces as <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.
+    ///
+    /// <para>Returns the session's absolute expiry alongside the token: it is the same deadline
+    /// <see cref="ResolvePrincipalAsync"/> later enforces, so a client can renew ahead of it instead of
+    /// guessing a lifetime or waiting for a request to fail.</para>
     /// </summary>
-    public async Task<string> LoginAsync(string user, string password, string source = "")
+    public async Task<LoginResult> LoginAsync(string user, string password, string source = "")
     {
         if (string.IsNullOrEmpty(CamusDBConfig.AccessTokenServerKey))
             throw new CamusDBException(CamusDBErrorCodes.InvalidConfig, "Access token server key is not configured");
@@ -97,6 +101,7 @@ public sealed class AuthService
 
         TokenCodec.MintedToken token = TokenCodec.Mint();
         DateTime now = DateTime.UtcNow;
+        DateTime expiresAt = now.Add(CamusDBConfig.AccessTokenTtl);
         SessionRecord session = new()
         {
             TokenId = token.TokenId,
@@ -105,11 +110,11 @@ public sealed class AuthService
             CredentialEpoch = record.CredentialEpoch,
             AuthorizationEpoch = record.AuthorizationEpoch,
             IssuedAt = now,
-            ExpiresAt = now.Add(CamusDBConfig.AccessTokenTtl),
+            ExpiresAt = expiresAt,
         };
         await catalog.CreateSessionAsync(session).ConfigureAwait(false);
 
-        return token.Bearer;
+        return new LoginResult(token.Bearer, expiresAt);
     }
 
     /// <summary>

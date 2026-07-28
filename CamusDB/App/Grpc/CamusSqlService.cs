@@ -11,6 +11,7 @@ using System.Diagnostics;
 using Grpc.Core;
 using Microsoft.Extensions.Hosting;
 using CamusDB.Core;
+using CamusDB.Core.Cache;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -81,7 +82,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         if (!CamusDBConfig.AuthenticationEnabled)
             return null;
 
-        EnsureSecureTransport(context);
+        GrpcTransportSecurity.EnsureSecureTransport(context);
 
         string? authorization = context.RequestHeaders.GetValue("authorization");
         string? bearer = authorization is not null
@@ -90,39 +91,6 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             : null;
 
         return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Refuses a plaintext gRPC call when authentication is enabled and TLS is required, mirroring the
-    /// REST <c>EnsureSecureTransport</c>. A loopback peer is exempt for single-host development. Skipped
-    /// when the call has no ASP.NET <see cref="HttpContext"/> (e.g. in-process unit tests) since
-    /// transport security cannot be assessed there.
-    /// </summary>
-    private static void EnsureSecureTransport(ServerCallContext context)
-    {
-        if (!CamusDBConfig.AuthenticationEnabled || !CamusDBConfig.RequireTlsWhenAuthEnabled)
-            return;
-
-        HttpContext? http;
-        try
-        {
-            http = context.GetHttpContext();
-        }
-        catch
-        {
-            return; // no ASP.NET HttpContext (e.g. an in-process unit-test call) — cannot assess transport
-        }
-
-        if (http is null || http.Request.IsHttps)
-            return;
-
-        System.Net.IPAddress? remote = http.Connection.RemoteIpAddress;
-        if (remote is not null && System.Net.IPAddress.IsLoopback(remote))
-            return;
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InsecureTransport,
-            "Authentication is enabled and requires a TLS connection");
     }
 
     // ─── ExecuteQuery (server-streaming) ─────────────────────────────────────
@@ -134,6 +102,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// for an empty result set. The autocommit transaction is committed after the last row (its
     /// causal token is appended to the response trailers); a client cancel triggers rollback so no
     /// partial read locks are leaked.
+    ///
+    /// <para>A cache-hinted autocommit statement appends one trailing <c>CacheMetadata</c> message after
+    /// the last row — the verdict exists only once the cursor has drained. It is omitted entirely for an
+    /// unhinted statement, and for the explicit-transaction and database-scoped SHOW paths, which never
+    /// enter the cache; this mirrors the REST envelope, which likewise emits cache fields only on the
+    /// autocommit path.</para>
     /// </summary>
     public override Task ExecuteQuery(
         SqlRequest request,
@@ -173,7 +147,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             (CamusIsolationLevel? reqLevel, _, _) = ParseLevelMode(request);
             bool retry = (reqLevel ?? CamusDBConfig.DefaultIsolationLevel) == CamusIsolationLevel.Serializable;
 
-            HLCTimestamp commitToken = await RunAutocommitQuery(request, sql, sink, retry, principal, ct).ConfigureAwait(false);
+            CacheMetadataHolder cacheMeta = new();
+            HLCTimestamp commitToken = await RunAutocommitQuery(request, sql, sink, retry, principal, cacheMeta, ct).ConfigureAwait(false);
+
+            // Trailing cache verdict, mirroring the REST envelope: written only when the statement went
+            // through the cache path, and necessarily after the last row since the holder is populated
+            // when the cursor drains.
+            if (cacheMeta.CacheName is not null)
+                await responseStream.WriteAsync(new QueryStreamMessage { CacheMetadata = BuildCacheMetadata(cacheMeta) }, ct).ConfigureAwait(false);
 
             if (!commitToken.IsNull())
             {
@@ -188,15 +169,20 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// through <paramref name="sink"/> (always, even for an empty result), then streams each row.
     /// Returns the resolved <see cref="DatabaseDescriptor"/> so an autocommit caller can commit.
     /// Throws domain exceptions unchanged — the RPC boundary maps them.
+    ///
+    /// <para>When <paramref name="cacheMeta"/> is supplied the query executor populates it with the cache
+    /// verdict as the cursor drains, so it is readable only after this method returns — a caller must
+    /// therefore emit it after the last row, never before.</para>
     /// </summary>
     private async Task<DatabaseDescriptor> StreamQueryAsync(
         ExecuteSQLTicket ticket,
         IQueryRowSink sink,
-        CancellationToken ct)
+        CancellationToken ct,
+        CacheMetadataHolder? cacheMeta = null)
     {
         QuerySchemaHolder schemaHolder = new();
         (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) =
-            await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
+            await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
 
         await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
         await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
@@ -247,6 +233,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         IQueryRowSink sink,
         bool retry,
         Principal? principal,
+        CacheMetadataHolder? cacheMeta,
         CancellationToken ct)
     {
         HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
@@ -265,7 +252,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     parameters: ToColumnValueMap(request.Parameters),
                     principal: principal
                 );
-                DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, innerCt).ConfigureAwait(false);
+                DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, innerCt, cacheMeta).ConfigureAwait(false);
                 commitToken = await transactions.CommitAsync(db, tx, innerCt).ConfigureAwait(false);
                 return commitToken;
             }
@@ -712,6 +699,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchQuerySink sink = new(stream, writeLock, requestId);
         NodeAst ast = SQLParserProcessor.Parse(sql);
         HLCTimestamp commitToken = default;
+        CacheMetadataHolder cacheMeta = new();
 
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
         {
@@ -741,7 +729,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: request.Database, sql: sql,
                     parameters: ToColumnValueMap(request.Parameters), principal: principal);
-                DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
+                DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
                 commitToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
             }
             catch
@@ -760,6 +748,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             complete.CausalTokenL = commitToken.L;
             complete.CausalTokenC = (long)(uint)commitToken.C;
         }
+        // Only a cache-hinted statement produces a verdict; leaving it absent tells the client the
+        // query never entered the cache path.
+        if (cacheMeta.CacheName is not null)
+            complete.CacheMetadata = BuildCacheMetadata(cacheMeta);
         await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
         {
             RequestId = requestId,
@@ -1078,6 +1070,31 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// </summary>
     internal static QueryStreamMessage BuildSchema(IReadOnlyList<DerivedColumnSchema> schema)
         => new() { Schema = BuildResultSchema(schema) };
+
+    /// <summary>
+    /// Builds the wire cache verdict from the holder the query executor populated, using the same
+    /// lowercase-kebab strings the REST envelope emits so both transports report identical values.
+    /// Callers must only invoke this when <see cref="CacheMetadataHolder.CacheName"/> is set — an
+    /// absent message is what tells a client the statement never entered the cache path, which is
+    /// distinct from a hinted statement whose verdict was <c>bypass</c>.
+    /// </summary>
+    internal static CacheMetadata BuildCacheMetadata(CacheMetadataHolder meta)
+    {
+        CacheMetadata proto = new()
+        {
+            Status       = CacheMetadataHolder.ToStatusString(meta.Status),
+            BypassReason = CacheMetadataHolder.ToBypassReasonString(meta.BypassReason) ?? "",
+            Name         = meta.CacheName ?? "",
+        };
+
+        if (meta.CachedAtHlc is { } hlc)
+            proto.CachedAtHlc = new HlcTimestamp { L = hlc.L, C = hlc.C };
+
+        if (meta.AgeMs is { } age)
+            proto.AgeMs = age;
+
+        return proto;
+    }
 
     /// <summary>Wraps a positional <c>ResultRow</c> in a unary <c>QueryStreamMessage</c>.</summary>
     internal static QueryStreamMessage BuildRow(

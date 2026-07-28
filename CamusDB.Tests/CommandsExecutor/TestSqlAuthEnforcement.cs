@@ -66,7 +66,7 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
 
     private static async Task<Principal> LoginAsync(CommandExecutor executor, string user, string password)
     {
-        string token = await executor.LoginAsync(user, password);
+        string token = (await executor.LoginAsync(user, password)).Token;
         return await executor.ResolvePrincipalAsync(token);
     }
 
@@ -223,7 +223,7 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         CamusConfig.AuthenticationCacheTtl = TimeSpan.Zero;
 
         await RunDdl(executor, "", "CREATE USER rot IDENTIFIED BY 'old-pw'", root);
-        string token = await executor.LoginAsync("rot", "old-pw");
+        string token = (await executor.LoginAsync("rot", "old-pw")).Token;
         // Token resolves fine now.
         await executor.ResolvePrincipalAsync(token);
 
@@ -240,7 +240,7 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     {
         (_, CommandExecutor executor, _) = await SetupWithSuperuser();
 
-        string token = await executor.LoginAsync("root", "root-password");
+        string token = (await executor.LoginAsync("root", "root-password")).Token;
         await executor.ResolvePrincipalAsync(token);
 
         await executor.LogoutAsync(token);

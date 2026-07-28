@@ -8,6 +8,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core;
+using CamusDB.Core.Auth;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.App.Models;
 using CamusDB.App.Services;
@@ -44,8 +45,12 @@ public sealed class AuthController : CommandsController
                 throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
 
             string source = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
-            string token = await executor.LoginAsync(request.User, request.Password, source).ConfigureAwait(false);
-            return new JsonResult(new LoginResponse("ok", token: token));
+            LoginResult result = await executor.LoginAsync(request.User, request.Password, source).ConfigureAwait(false);
+            return new JsonResult(new LoginResponse("ok", token: result.Token)
+            {
+                ExpiresAtUnixMs  = new DateTimeOffset(result.ExpiresAt, TimeSpan.Zero).ToUnixTimeMilliseconds(),
+                ExpiresInSeconds = result.SecondsUntilExpiry(DateTime.UtcNow),
+            });
         }
         catch (CamusDBException e)
         {

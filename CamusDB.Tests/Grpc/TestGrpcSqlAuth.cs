@@ -88,7 +88,7 @@ internal sealed class TestGrpcSqlAuth : BaseTest
         CamusConfig.AuthenticationEnabled = true;
 
         await serviceExecutor.EnsureBootstrapSuperuserAsync();
-        string rootToken = await serviceExecutor.LoginAsync("root", "root-password");
+        string rootToken = (await serviceExecutor.LoginAsync("root", "root-password")).Token;
 
         string db = "grpcauthdb" + Guid.NewGuid().ToString("n");
         await service.ExecuteDdl(Req("", $"CREATE DATABASE {db}"), Ctx(rootToken));
@@ -138,7 +138,7 @@ internal sealed class TestGrpcSqlAuth : BaseTest
 
         await service.ExecuteDdl(Req("", "CREATE USER reader IDENTIFIED BY 'reader-pw'"), Ctx(rootToken));
         await service.ExecuteDdl(Req("", $"GRANT SELECT ON {db}.* TO reader"), Ctx(rootToken));
-        string readerToken = await serviceExecutor.LoginAsync("reader", "reader-pw");
+        string readerToken = (await serviceExecutor.LoginAsync("reader", "reader-pw")).Token;
 
         // SELECT is granted.
         CapturingStreamWriter<QueryStreamMessage> writer = new();

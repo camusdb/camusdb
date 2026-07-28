@@ -36,9 +36,13 @@ public sealed class AuthenticationMiddleware
     private readonly RequestDelegate next;
 
     // Open to everyone: liveness and the credential-exchange endpoints (which validate their own input).
+    // The gRPC entries are the CamusAuth service's method paths — this middleware sits in front of the
+    // gRPC endpoints too, so without them a client could never obtain the token those endpoints demand.
+    // The proto declares no package, so a method path is "/{service}/{method}".
     private static readonly HashSet<string> Exempt = new(StringComparer.OrdinalIgnoreCase)
     {
         "/ping", "/health", "/login", "/logout",
+        "/CamusAuth/Login", "/CamusAuth/Logout",
     };
 
     // Database lifecycle requires the superuser attribute.

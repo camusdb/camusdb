@@ -144,6 +144,12 @@ Every response to a hinted query carries cache metadata so a client never has to
 
 These fields are omitted entirely for a query with no hint, so existing clients are unaffected.
 
+The same five values are reported over gRPC. There they cannot live in a response envelope — the
+verdict is only known once the cursor has been drained — so they travel as a trailing `CacheMetadata`
+message: appended after the last row on the unary `ExecuteQuery` stream, and carried on the
+`QueryComplete` terminator of a batched `BatchExecute` query. An absent message means the statement
+carried no hint, exactly as an absent `cacheStatus` does on REST.
+
 **Status meanings.** `hit` served stored rows. `miss` executed live and stored a fresh entry.
 `bypass` executed live and stored nothing (the query was ineligible, or a write was in flight).
 `evicted-before-publish` executed live and returned correct rows, but the fresh entry could not be

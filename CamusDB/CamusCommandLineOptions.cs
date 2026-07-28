@@ -61,6 +61,11 @@ public class CamusCommandLineOptions
     [Option("raft-certificate", Required = false, HelpText = "Path to PFX certificate for the Raft gRPC port")]
     public string? RaftCertificate { get; set; }
 
+    [Option("require-tls-when-auth-enabled", Required = false,
+        HelpText = "true|false. When authentication is enabled, refuse credential-bearing requests over plaintext " +
+                   "(default true). Set false only behind a TLS-terminating proxy")]
+    public bool? RequireTlsWhenAuthEnabled { get; set; }
+
     public CamusDB.Core.Config.ConfigCliOverrides ToOverrides()
     {
         IReadOnlyList<string>? peers = InitialCluster?.ToList();
@@ -88,6 +93,7 @@ public class CamusCommandLineOptions
             HttpsPort = HttpsPort,
             HttpsCertificate = HttpsCertificate,
             RaftCertificate = RaftCertificate,
+            RequireTlsWhenAuthEnabled = RequireTlsWhenAuthEnabled,
         };
     }
 }

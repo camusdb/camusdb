@@ -2596,9 +2596,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         return authService;
     }
 
-    /// <summary>Verifies credentials and returns an opaque bearer token (see <see cref="AuthService.LoginAsync"/>).
-    /// <paramref name="source"/> is the caller's origin (e.g. remote IP) for per-source rate limiting.</summary>
-    public Task<string> LoginAsync(string user, string password, string source = "") => RequireAuthService().LoginAsync(user, password, source);
+    /// <summary>Verifies credentials and returns the bearer token plus its absolute expiry
+    /// (see <see cref="AuthService.LoginAsync"/>). <paramref name="source"/> is the caller's origin
+    /// (e.g. remote IP) for per-source rate limiting.</summary>
+    public Task<LoginResult> LoginAsync(string user, string password, string source = "") => RequireAuthService().LoginAsync(user, password, source);
 
     /// <summary>Resolves a bearer token to a <see cref="Principal"/>, or throws AuthenticationFailed.</summary>
     public Task<Principal> ResolvePrincipalAsync(string? bearer) => RequireAuthService().ResolvePrincipalAsync(bearer);

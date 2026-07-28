@@ -58,6 +58,7 @@ public class ConfigReader
         "https_port",
         "https_certificate",
         "raft_certificate",
+        "require_tls_when_auth_enabled",
         "grpc_enabled",
         "grpc_port",
         "grpc_batch_max_in_flight",

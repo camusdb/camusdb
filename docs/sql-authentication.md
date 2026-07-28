@@ -52,7 +52,12 @@ Content-Type: application/json
 { "user": "admin", "password": "…" }
 ```
 ```json
-{ "status": "ok", "token": "camus_<id>.<secret>" }
+{
+  "status": "ok",
+  "token": "camus_<id>.<secret>",
+  "expiresAtUnixMs": 1785270000000,
+  "expiresInSeconds": 900
+}
 ```
 
 Send the token on every subsequent request:
@@ -73,7 +78,13 @@ Content-Type: application/json
   does not yield usable tokens.
 - A password rotation (`ALTER USER`), `DROP USER`, or `/logout` invalidates outstanding tokens.
 - **gRPC** carries the same token in the `authorization` request metadata; errors map to
-  `UNAUTHENTICATED` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED`.
+  `UNAUTHENTICATED` / `PERMISSION_DENIED` / `RESOURCE_EXHAUSTED`. The token itself is obtained from the
+  `CamusAuth` service (`Login` / `Logout`), which mirrors these routes — a gRPC-only deployment does not
+  need the HTTP port open. See `docs/grpc-client-protocol.md` §5b.
+- **The reply reports when the token expires**: `expiresAtUnixMs` (absolute, UTC epoch ms) and
+  `expiresInSeconds` (the same deadline as a server-measured duration). Renew against those rather than
+  assuming a lifetime — `AccessTokenTtl` is configurable, so a hard-coded assumption breaks the moment an
+  operator shortens it.
 
 ### TLS
 
@@ -81,6 +92,25 @@ When auth is enabled, credential-bearing requests over a **plaintext** connectio
 (`RequireTlsWhenAuthEnabled`, default on) — terminate TLS in front of the API. A **loopback** peer is
 exempted so single-host development works without certificates. gRPC should likewise be deployed over
 TLS.
+
+If TLS terminates *in front of* the node — an ingress, sidecar, or service mesh — the node itself only
+ever sees plaintext on the inside hop and would reject every forwarded request. Turn the requirement
+off for that topology, in `config.yml`:
+
+```yml
+require_tls_when_auth_enabled: false
+```
+
+or on the command line, which overrides the YAML value:
+
+```sh
+camusdb --require-tls-when-auth-enabled false
+```
+
+Unlike the token key and bootstrap credentials, this carries no secret, so it is a normal config
+setting rather than an environment variable. Turning it off relaxes **only** the transport check:
+requests still need a valid bearer token, and every grant is still enforced. Do not turn it off on a
+node that is directly reachable by clients — a bearer token in the clear is trivially stolen.
 
 ## 3. Managing users
 
@@ -173,7 +203,7 @@ Beyond the environment variables in §1, these tune the security/performance tra
 | `PasswordHashIterations` | 600,000 | PBKDF2-HMAC-SHA256 work factor (stored per credential, so raising it never breaks existing hashes). |
 | `LoginKdfMaxConcurrency` | 8 | Cap on concurrent password verifications, so a login flood cannot exhaust CPU. |
 | `LoginMaxAttemptsPerMinute` | 20 | Per-account login rate limit (`429` on exceed). |
-| `RequireTlsWhenAuthEnabled` | true | Refuse plaintext credential-bearing requests (loopback exempt). |
+| `RequireTlsWhenAuthEnabled` | true | Refuse plaintext credential-bearing requests (loopback exempt). Settable via `require_tls_when_auth_enabled` in `config.yml` or `--require-tls-when-auth-enabled true\|false`. |
 
 ## 7. Quick start (single host)
 
