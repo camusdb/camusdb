@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Tests for CREATE DATABASE name BRANCH FROM source — SQL syntax, ticket API,
 /// ancestry threading, schema copy, and error paths.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestDatabaseBranch : BaseTest
 {
     private static string NewName() => "db_" + Guid.NewGuid().ToString("n");

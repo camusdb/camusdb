@@ -41,7 +41,6 @@ namespace CamusDB.Tests.Config;
 /// behaviour, not memory usage (a memory reduction is an operational measurement, not a unit assertion).
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestStandaloneRocksDbSharedMemoryBoot
 {
     private static readonly ILoggerFactory LoggerFactory =

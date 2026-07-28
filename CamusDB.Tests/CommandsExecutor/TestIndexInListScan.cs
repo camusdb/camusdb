@@ -34,7 +34,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Planner tests (no actual DB): use <see cref="QueryPlannerTestContext"/> to verify plan shape.
 /// Execution tests: open a real in-memory database to verify result correctness.
 /// </summary>
-[NonParallelizable]
 public class TestIndexInListScan : BaseTest
 {
     // ── Planner-only test harness ─────────────────────────────────────────────

@@ -28,7 +28,6 @@ namespace CamusDB.Tests.Cache;
 /// These tests are pure in-memory: they do not start a database, Kahuna, or Kommander node.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class TestQueryResultCacheBoundaries
 {
     // ─────────────────────────────────────────────────────────────────

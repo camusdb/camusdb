@@ -29,7 +29,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// (String/Id/Bytes) reject descending at DDL. These tests pin the persisted format, the DDL gate,
 /// end-to-end query behavior, and the sort-elision plan shape.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestDescendingIndexOrder : BaseTest
 {
     private const string TableName = "robots";

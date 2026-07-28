@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// must still fetch the sort column from storage even though it is alias-qualified and absent
 /// from the projection, otherwise the sorter cannot find it and the query fails.
 /// </summary>
-[NonParallelizable]
 public sealed class TestOrderByNonProjectedColumn : BaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>

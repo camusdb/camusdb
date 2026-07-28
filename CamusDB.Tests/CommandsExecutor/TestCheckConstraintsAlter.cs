@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// rows satisfy the expression, rejecting an ADD when existing rows violate the new constraint,
 /// dropping a named constraint, and enforcement after add.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCheckConstraintsAlter : BaseTest
 {
     // ── helpers ────────────────────────────────────────────────────────────────

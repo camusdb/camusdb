@@ -33,7 +33,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// after every data key is confirmed gone. When a delete fails, the purge reports incomplete and leaves
 /// the recovery record intact so a later sweep / startup resume finishes it — never abandoning leaked data.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestPurgeVerification : SharedNodeBaseTest
 {
     /// <summary>Wraps a real node but fails every delete of a key under a given prefix, to simulate a partial purge.</summary>

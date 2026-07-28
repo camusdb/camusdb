@@ -34,7 +34,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   E. Fallback — expression GROUP BY, non-indexed column, or nullable column uses hash path.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestGroupByStreaming : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

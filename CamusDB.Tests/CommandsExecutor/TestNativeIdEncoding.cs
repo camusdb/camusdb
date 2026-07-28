@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// layer for equality/range/lookup to still match. It also unlocks descending Id indexes. These tests
 /// exercise the interchange and the descending path end to end.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestNativeIdEncoding : BaseTest
 {
     // Explicit, ordered 24-hex ObjectIds for deterministic assertions.

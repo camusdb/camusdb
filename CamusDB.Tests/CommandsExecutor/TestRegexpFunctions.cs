@@ -30,7 +30,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Also asserts that the Phase-2 set-returning functions (regexp_matches,
 /// regexp_split_to_table) return a clear "not supported" error.
 /// </summary>
-[NonParallelizable]
 public sealed class TestRegexpFunctions : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTable()

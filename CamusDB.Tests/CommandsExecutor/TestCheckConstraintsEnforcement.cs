@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// (SQL three-valued logic: UNKNOWN passes). Also tests <see cref="CheckEvaluator"/> directly
 /// for the operator-level NULL semantics.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCheckConstraintsEnforcement : BaseTest
 {
     // ── helpers ────────────────────────────────────────────────────────────────

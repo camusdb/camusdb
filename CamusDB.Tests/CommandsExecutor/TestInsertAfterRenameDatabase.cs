@@ -30,7 +30,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// verb so a future path cannot quietly reintroduce it.</para>
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 internal sealed class TestInsertAfterRenameDatabase : BaseTest
 {
     private async Task<(string dbname, CommandExecutor executor)> CreateNamedDatabase()

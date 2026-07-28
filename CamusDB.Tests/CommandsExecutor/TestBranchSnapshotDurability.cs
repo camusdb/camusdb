@@ -45,7 +45,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// is what preserves it.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestBranchSnapshotDurability
 {
     private const int RetentionWindow = 2;

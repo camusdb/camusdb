@@ -39,7 +39,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// produces results identical to the expected filter semantics.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class TestPreparedInSet : SharedNodeBaseTest
 {
     // ── value helpers ─────────────────────────────────────────────────────────

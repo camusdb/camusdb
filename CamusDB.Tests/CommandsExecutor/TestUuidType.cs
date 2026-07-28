@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// unique-index enforcement (which exercises the order-preserving key encoding), the gen_uuid_v4 /
 /// gen_uuid_v7 generators, CAST, parameters, and SHOW COLUMNS reporting.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestUuidType : SharedNodeBaseTest
 {
     private const string SampleUuid = "550e8400-e29b-41d4-a716-446655440000";

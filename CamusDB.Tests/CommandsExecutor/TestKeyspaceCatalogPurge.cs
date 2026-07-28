@@ -39,7 +39,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// still eagerly purges on DROP TABLE/INDEX, so these tests inject an orphan entry under a dropped
 /// object's keyspace to exercise the catalog-driven purge path directly.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestKeyspaceCatalogPurge : BaseTest
 {
     private const string TableName = "robots";

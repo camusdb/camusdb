@@ -25,7 +25,6 @@ using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 public class TestExecuteSqlSelect : SharedNodeBaseTest
 {
     private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()

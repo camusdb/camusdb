@@ -44,7 +44,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   </description></item>
 /// </list>
 /// </summary>
-[NonParallelizable]
 public sealed class TestJoinRightSideResidual : SharedNodeBaseTest
 {
     private sealed record Fixture(string DbName, DatabaseDescriptor Database, CommandExecutor Executor);

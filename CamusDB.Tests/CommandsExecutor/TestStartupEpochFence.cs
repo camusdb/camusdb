@@ -21,7 +21,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// live, in-flight fence. Without this, the startup scrub could delete a fence the concurrently-started
 /// reclaimer or an incoming relink just acquired, letting two operations think they hold it.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestStartupEpochFence : BaseTest
 {
     [Test]

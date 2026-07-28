@@ -42,7 +42,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// fixture.</para>
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 internal sealed class TestCommentOnHardening : BaseTest
 {
     private static readonly JsonSerializerOptions JsonOpts = new()

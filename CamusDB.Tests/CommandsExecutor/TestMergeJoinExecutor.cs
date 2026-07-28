@@ -41,7 +41,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   6. Residual non-equi conjunct applied after the merge step.
 ///   7. Multi-column equi-join key.
 /// </summary>
-[NonParallelizable]
 public sealed class TestMergeJoinExecutor : SharedNodeBaseTest
 {
     // ── Fixtures ──────────────────────────────────────────────────────────────

@@ -30,7 +30,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// modified and their values are correct after the optimized locate.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestLocatePartialDecode : BaseTest
 {
     /// <summary>

@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// sub-expressions include aggregate calls (e.g. COALESCE(SUM(x),0), SUM(a)/SUM(b),
 /// SUM(x)+1). These forms require the workspace accumulator path in <see cref="QueryAggregator"/>.
 /// </summary>
-[NonParallelizable]
 public class TestCompoundAggregates : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTable()

@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// End-to-end tests for SHOW BRANCHES FROM and SHOW ANCESTORS FROM through ExecuteSQLQuery.
 /// Both statements are server-level (no database context required) and read from the registry.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestShowBranchTree : BaseTest
 {
     private static string NewName() => "db_" + Guid.NewGuid().ToString("n");

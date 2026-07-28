@@ -35,7 +35,6 @@ namespace CamusDB.Tests.Grpc;
 /// <see cref="CapturingStreamWriter{T}"/> stubs provide the gRPC surface.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class TestGrpcRowsService : BaseTest
 {
     private CamusRowsService rowsService = null!;

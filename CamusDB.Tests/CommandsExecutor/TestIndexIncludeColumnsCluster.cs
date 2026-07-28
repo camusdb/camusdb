@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// staged coordinator/backfill path — the same path a real follower observes over shared KV. Verifies
 /// the include metadata replicates and that covered reads work through the cluster executor.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestIndexIncludeColumnsCluster : SharedNodeBaseTest
 {
     private const string TableName = "orders";

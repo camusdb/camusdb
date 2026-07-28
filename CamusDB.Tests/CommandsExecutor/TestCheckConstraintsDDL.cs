@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// DDL validation (rejects subqueries, aggregates, volatile functions, and unknown columns).
 /// INSERT/UPDATE enforcement is covered by the enforcement test suite.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCheckConstraintsDDL : SharedNodeBaseTest
 {
     // ── helpers ────────────────────────────────────────────────────────────────

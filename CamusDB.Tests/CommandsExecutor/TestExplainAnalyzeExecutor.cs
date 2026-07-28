@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Acceptance tests for EXPLAIN (ANALYZE) — executes the query, collects runtime stats,
 /// and returns one result row per physical plan node with actual counters.
 /// </summary>
-[NonParallelizable]
 public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
 {
     // ── Fixture helpers ───────────────────────────────────────────────────────

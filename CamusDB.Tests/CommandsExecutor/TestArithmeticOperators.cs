@@ -29,7 +29,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Float32 operand mixed with an integer keeps single precision, division by zero is an error, and
 /// non-numeric operands are still rejected. Driven through SQL so the real evaluator path runs.
 /// </summary>
-[NonParallelizable]
 public sealed class TestArithmeticOperators : SharedNodeBaseTest
 {
     private static async Task<List<QueryResultRow>> ExecQuery(

@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// delegates to). Tests prove the wire path by asserting old name rejection and new
 /// name accessibility after each operation.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestRenameSQL : SharedNodeBaseTest
 {
     // ── helpers ──────────────────────────────────────────────────────────────

@@ -38,7 +38,6 @@ namespace CamusDB.Tests.Cache;
 /// the entry executes live instead of being handed the pre-write rows.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
 {
     private QueryResultCache? _cache;

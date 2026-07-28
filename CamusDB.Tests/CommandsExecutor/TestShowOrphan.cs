@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// ids (and former names) of deferred-dropped objects so an operator can feed them to
 /// <c>CREATE ... RELINK TO</c>. Orphans appear after a deferred drop and disappear once recovered.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestShowOrphan : BaseTest
 {
     private async Task<List<QueryResultRow>> ShowOrphanDatabasesAsync(CommandExecutor executor)

@@ -39,7 +39,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// estimated via 1/NDV, not via RangeFraction(v, v) which returns ~0.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestPlanIndexEstimation : BaseTest
 {
     // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -25,7 +25,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Acceptance tests: MaxLength / ArrayElementType plumbing through the full
 /// SQL → AST → ColumnInfo → TableColumnSchema pipeline.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestColumnMetadata : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs)> Setup()

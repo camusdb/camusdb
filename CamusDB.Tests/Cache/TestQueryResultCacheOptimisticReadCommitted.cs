@@ -34,7 +34,6 @@ namespace CamusDB.Tests.Cache;
 /// invalidation consumes the committed modified-key set, not the lock set.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheOptimisticReadCommitted : CommandsExecutor.BaseTest
 {
     private QueryResultCache? _cache;

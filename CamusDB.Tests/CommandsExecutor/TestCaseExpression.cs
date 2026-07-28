@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// short-circuit semantics, only-TRUE-matches, ELSE / no-match-NULL, use in projections, WHERE,
 /// aggregates (both directions), derived tables, and CHECK constraints (enforcement + round-trip).
 /// </summary>
-[NonParallelizable]
 public sealed class TestCaseExpression : SharedNodeBaseTest
 {
     private static async Task<List<QueryResultRow>> ExecQuery(

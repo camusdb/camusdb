@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// forever. Also verifies the reaper leaves actively-used transactions alone and never double-finalizes.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestAbandonedTransactionReaper : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord)> SetupAsync()

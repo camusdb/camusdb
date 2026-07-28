@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// relink must be idempotent by id so a retried recovery never mints a second live name for one
 /// physical keyspace.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestRelinkHardening : BaseTest
 {
     private async Task InsertRow(string dbName, DatabaseDescriptor db, CommandExecutor executor, string sql)

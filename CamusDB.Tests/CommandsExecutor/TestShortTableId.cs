@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Verifies the short base-62 table-id scheme: format, monotonicity, never-reused after DROP,
 /// keyspace disjointness on recreate, key-length shrinkage, and branch-lineage safety.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestShortTableId : BaseTest
 {
     private static readonly string Base62Chars =

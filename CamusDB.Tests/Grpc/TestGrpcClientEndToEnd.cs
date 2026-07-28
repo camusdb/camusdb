@@ -31,7 +31,6 @@ namespace CamusDB.Tests.Grpc;
 /// all pipelined over one <c>BatchExecute</c> stream, with results actually persisted in the engine.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class TestGrpcClientEndToEnd : BaseTest
 {
     private CommandExecutor executor = null!;

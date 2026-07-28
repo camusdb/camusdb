@@ -36,7 +36,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <c>BeginAsync(locking:)</c> path, which the executor-level optimistic tests already cover.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord, CommandExecutor executor)> SetupAsync()

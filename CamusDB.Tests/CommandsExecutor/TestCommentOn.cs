@@ -31,7 +31,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// them.</para>
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 internal sealed class TestCommentOn : BaseTest
 {
     private async Task<(string dbname, CommandExecutor executor)> CreateUsersTable(string createTableSql)

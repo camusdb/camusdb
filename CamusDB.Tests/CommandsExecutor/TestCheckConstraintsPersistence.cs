@@ -30,7 +30,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// constraints survive close/reopen, that the condition AST cache is rebuilt on load,
 /// and that the render→parse→render round-trip is stable.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCheckConstraintsPersistence : BaseTest
 {
     // ── helpers ────────────────────────────────────────────────────────────────

@@ -35,7 +35,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// immediate-physical-purge behavior. These tests assert both the logical detach (name/table gone
 /// from the live catalog) and the physical retention/removal of the underlying KV keys.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestDeferredDrop : SharedNodeBaseTest
 {
     // -----------------------------------------------------------------------

@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// value (String / Id), because otherwise the planner caps the scan with an exclusive [v, next(v))
 /// bound instead — which is why the Int64 case here passed while the String case did not.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCompositePrefixIndexSeek : SharedNodeBaseTest
 {
     private static async Task ExecDdl(

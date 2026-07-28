@@ -43,7 +43,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// response body.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSchemaDdlForwardController
 {
     private static readonly JsonSerializerOptions JsonOpts = new()

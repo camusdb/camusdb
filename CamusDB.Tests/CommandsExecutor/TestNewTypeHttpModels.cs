@@ -31,7 +31,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// (bytes as base64, date/datetime with IsoValue, arrays as JSON arrays), and
 /// end-to-end create/insert/query for each new type via the HTTP DTO → executor path.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestNewTypeHttpModels : SharedNodeBaseTest
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };

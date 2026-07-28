@@ -25,7 +25,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// CONSTRAINT name NOT NULL in CREATE TABLE, ALTER TABLE ALTER COLUMN SET/DROP NOT NULL,
 /// and DROP CONSTRAINT resolving named NOT NULL constraints.
 /// </summary>
-[NonParallelizable]
 public sealed class TestNotNullConstraints : BaseTest
 {
     // ── helpers ────────────────────────────────────────────────────────────────

@@ -43,7 +43,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///      is available vs. the fixed 10% fallback.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestCardinalityEstimator : BaseTest
 {
     // ─────────────────────────────────────────────────────────────────────────

@@ -35,7 +35,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// distinguish a seek from a scan, since both must return the same rows), while the query tests
 /// prove the executor is *correct* when it seeks.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCorrelatedExistsIndexSeek : SharedNodeBaseTest
 {
     private static async Task ExecDdl(

@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// enforcement yet.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 internal sealed class TestSqlAuthentication : BaseTest
 {
     // Database names are referenced by name inside GRANT SQL, so they must be valid bare identifiers

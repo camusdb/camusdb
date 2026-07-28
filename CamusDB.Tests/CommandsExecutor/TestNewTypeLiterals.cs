@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Acceptance tests: literal parsing / coercion for float32, date, datetime, bytes, and CAST.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestNewTypeLiterals : SharedNodeBaseTest
 {
     // ── Setup helpers ─────────────────────────────────────────────────────────

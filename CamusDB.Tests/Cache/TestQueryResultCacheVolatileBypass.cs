@@ -30,7 +30,6 @@ namespace CamusDB.Tests.Cache;
 /// subsequent calls that would otherwise be served from a warm cache.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheVolatileBypass : CommandsExecutor.BaseTest
 {
     private QueryResultCache? _cache;

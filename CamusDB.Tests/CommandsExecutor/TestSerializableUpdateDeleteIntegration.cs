@@ -40,7 +40,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// on the same range receives TransactionConflict.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSerializableUpdateDeleteIntegration : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids)>

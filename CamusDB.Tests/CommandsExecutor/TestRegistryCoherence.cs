@@ -23,7 +23,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// cluster nodes — each keeps its own in-memory cache but shares the Raft-replicated persistent store,
 /// which is exactly the split-brain surface the generation stamp closes.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestRegistryCoherence : BaseTest
 {
     // Cluster mode: two registries stand in for two cluster nodes, so each must run the cross-node

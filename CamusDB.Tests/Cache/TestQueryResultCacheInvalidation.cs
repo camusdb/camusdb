@@ -32,7 +32,6 @@ namespace CamusDB.Tests.Cache;
 /// All tests are pure in-memory — no Kahuna, no embedded node.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheInvalidation
 {
     // ───────────────────────────────────────────────────────────���─────────────

@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <c>IndexBuildInfo</c>, so a resumed DESCENDING covering index would be replicated as ascending,
 /// disagreeing with any descending key encoding an interrupted run had already written.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestIndexIncludeCoordinatorResume : SharedNodeBaseTest
 {
     [Test]

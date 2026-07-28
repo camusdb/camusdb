@@ -33,7 +33,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// reported as a verified purge. It must fall back to a headless purge-by-id so the keyspace is actually
 /// reclaimed, and keep the recovery marker (return false) when it cannot purge.
 /// </summary>
-[NonParallelizable]
 public sealed class TestDropHeadlessPurge : BaseTest
 {
     private static async Task<int> CountKeysUnderAsync(DatabaseDescriptor readVia, string bucket, string keyPrefix)

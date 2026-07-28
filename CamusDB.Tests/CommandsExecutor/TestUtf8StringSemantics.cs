@@ -32,7 +32,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// API rather than SQL literals so the data (a surrogate-pair emoji and an empty string) does not depend
 /// on the SQL lexer accepting those literal forms.
 /// </summary>
-[NonParallelizable]
 public sealed class TestUtf8StringSemantics : SharedNodeBaseTest
 {
     // Includes a supplementary char (😀 = U+1F600, UTF-16 lead unit 0xD83D) and a high BMP char

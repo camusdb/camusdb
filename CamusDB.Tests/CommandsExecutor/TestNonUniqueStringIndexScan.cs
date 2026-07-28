@@ -31,7 +31,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// These tests prove the fix: (1) plan shape changes from full-scan to range-scan,
 /// and (2) query results are identical to the full-scan baseline.
 /// </summary>
-[NonParallelizable]
 public class TestNonUniqueStringIndexScan : BaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>

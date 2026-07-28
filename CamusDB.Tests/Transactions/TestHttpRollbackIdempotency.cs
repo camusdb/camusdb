@@ -29,7 +29,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// success rather than "Unknown transaction". The transaction is already in the state it asked for.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestHttpRollbackIdempotency : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord)> SetupAsync()

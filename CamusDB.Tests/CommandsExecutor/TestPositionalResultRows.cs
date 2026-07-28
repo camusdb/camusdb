@@ -28,7 +28,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// schema for every query shape: single-source SELECT, SELECT *, joins, FROM-less SELECT,
 /// and SHOW commands.
 /// </summary>
-[NonParallelizable]
 public sealed class TestPositionalResultRows : SharedNodeBaseTest
 {
     private static async Task<(IReadOnlyList<DerivedColumnSchema> schema, List<QueryResultRow> rows)> ExecQuery(

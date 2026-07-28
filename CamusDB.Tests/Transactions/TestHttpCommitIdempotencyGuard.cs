@@ -31,7 +31,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <see cref="CamusDBErrorCodes.TransactionAlreadyCompleted"/> instead of racing.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestHttpCommitIdempotencyGuard : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord)> SetupAsync()

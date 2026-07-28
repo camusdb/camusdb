@@ -34,7 +34,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// step) rather than purge the parent unfenced. These tests inject a fence-acquire failure and assert
 /// the parent survives intact.
 /// </summary>
-[NonParallelizable]
 public sealed class TestDropFenceClosed : SharedNodeBaseTest
 {
     /// <summary>Fault fake: makes acquiring the drop-intent fence throw; every other op passes through.</summary>

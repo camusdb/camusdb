@@ -69,6 +69,27 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         this.loadGauge    = loadGauge;
     }
 
+    /// <summary>
+    /// Resolves the authenticated principal from the request's <c>authorization</c> metadata (a
+    /// <c>Bearer</c> token), mirroring the REST bearer resolution. Returns <c>null</c> when
+    /// <see cref="CamusDBConfig.AuthenticationEnabled"/> is off. When on, a missing/invalid/expired
+    /// token throws <see cref="CamusDBErrorCodes.AuthenticationFailed"/> (mapped to the gRPC error
+    /// status at the RPC boundary), so the engine gate never sees a null principal while auth is on.
+    /// </summary>
+    private async Task<Principal?> ResolvePrincipalAsync(ServerCallContext context)
+    {
+        if (!CamusDBConfig.AuthenticationEnabled)
+            return null;
+
+        string? authorization = context.RequestHeaders.GetValue("authorization");
+        string? bearer = authorization is not null
+                         && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? authorization["Bearer ".Length..].Trim()
+            : null;
+
+        return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
+    }
+
     // ─── ExecuteQuery (server-streaming) ─────────────────────────────────────
 
     /// <summary>
@@ -86,6 +107,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeStreamingAsync(async () =>
         {
             CancellationToken ct = context.CancellationToken;
+            Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
             QueryStreamSink sink = new(responseStream);
@@ -97,7 +119,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     txnState: null!,
                     database: request.Database,
                     sql: sql,
-                    parameters: ToColumnValueMap(request.Parameters)
+                    parameters: ToColumnValueMap(request.Parameters),
+                    principal: principal
                 );
                 await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
                 return;
@@ -106,7 +129,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Explicit (caller-supplied) transaction — client owns the lifecycle.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
-                await RunExplicitTxnQuery(request, sql, handle, sink, ct).ConfigureAwait(false);
+                await RunExplicitTxnQuery(request, sql, handle, sink, principal, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -115,7 +138,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             (CamusIsolationLevel? reqLevel, _, _) = ParseLevelMode(request);
             bool retry = (reqLevel ?? CamusDBConfig.DefaultIsolationLevel) == CamusIsolationLevel.Serializable;
 
-            HLCTimestamp commitToken = await RunAutocommitQuery(request, sql, sink, retry, ct).ConfigureAwait(false);
+            HLCTimestamp commitToken = await RunAutocommitQuery(request, sql, sink, retry, principal, ct).ConfigureAwait(false);
 
             if (!commitToken.IsNull())
             {
@@ -152,6 +175,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         string sql,
         TxnHandle handle,
         IQueryRowSink sink,
+        Principal? principal,
         CancellationToken ct)
     {
         KvTransaction? txnState = null;
@@ -162,7 +186,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 txnState: txnState,
                 database: request.Database,
                 sql: sql,
-                parameters: ToColumnValueMap(request.Parameters)
+                parameters: ToColumnValueMap(request.Parameters),
+                principal: principal
             );
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
@@ -186,6 +211,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         string sql,
         IQueryRowSink sink,
         bool retry,
+        Principal? principal,
         CancellationToken ct)
     {
         HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
@@ -201,7 +227,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     txnState: tx,
                     database: request.Database,
                     sql: sql,
-                    parameters: ToColumnValueMap(request.Parameters)
+                    parameters: ToColumnValueMap(request.Parameters),
+                    principal: principal
                 );
                 DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, innerCt).ConfigureAwait(false);
                 commitToken = await transactions.CommitAsync(db, tx, innerCt).ConfigureAwait(false);
@@ -234,6 +261,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeAsync(async () =>
         {
             CancellationToken ct = context.CancellationToken;
+            Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
                 ParseLevelMode(request);
 
@@ -245,7 +273,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     txnState: null!,
                     database: request.Database,
                     sql: request.Sql ?? "",
-                    parameters: ToColumnValueMap(request.Parameters)
+                    parameters: ToColumnValueMap(request.Parameters),
+                    principal: principal
                 );
 
                 await executor.ExecuteNonSQLQuery(dbScopedTicket).ConfigureAwait(false);
@@ -263,7 +292,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         txnState: txnState,
                         database: request.Database,
                         sql: request.Sql ?? "",
-                        parameters: ToColumnValueMap(request.Parameters)
+                        parameters: ToColumnValueMap(request.Parameters),
+                        principal: principal
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     return new NonQueryReply { AffectedRows = result.ModifiedRows };
@@ -290,7 +320,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         txnState: tx,
                         database: request.Database,
                         sql: request.Sql ?? "",
-                        parameters: ToColumnValueMap(request.Parameters)
+                        parameters: ToColumnValueMap(request.Parameters),
+                        principal: principal
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
@@ -325,6 +356,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeAsync(async () =>
         {
             CancellationToken ct = context.CancellationToken;
+            Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
@@ -356,7 +388,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     txnState: txnState!,
                     database: request.Database,
                     sql: sql,
-                    parameters: ToColumnValueMap(request.Parameters)
+                    parameters: ToColumnValueMap(request.Parameters),
+                    principal: principal
                 );
 
                 ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
@@ -420,6 +453,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         using CancellationTokenSource shutdownLinked =
             CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, appLifetime.ApplicationStopping);
         CancellationToken ct = shutdownLinked.Token;
+
+        // Resolve the principal once for the whole stream. When auth is enabled a missing/invalid token
+        // fails the entire batch call here (before any op runs), which is the desired fail-closed shape.
+        Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
+
         SemaphoreSlim writeLock = new(1, 1);
         int maxInFlight = Math.Max(1, CamusDBConfig.GrpcBatchMaxInFlight);
         SemaphoreSlim inFlight = new(maxInFlight, maxInFlight);
@@ -447,12 +485,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 if (handleKey is not null)
                 {
                     Task prev = chains.TryGetValue(handleKey, out Task? p) ? p : Task.CompletedTask;
-                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, startedHandles, ct);
+                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, startedHandles, principal, ct);
                     chains[handleKey] = op;
                 }
                 else
                 {
-                    op = RunBatchOpAsync(req, responseStream, writeLock, startedHandles, ct);
+                    op = RunBatchOpAsync(req, responseStream, writeLock, startedHandles, principal, ct);
                 }
 
                 _ = op.ContinueWith(_ => inFlight.Release(), TaskScheduler.Default);
@@ -509,12 +547,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
         ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        Principal? principal,
         CancellationToken ct)
     {
         // RunBatchOpAsync never throws, so the previous op cannot fault the chain — but await it
         // defensively so a same-handle op only starts once its predecessor has fully completed.
         try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
-        await RunBatchOpAsync(req, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+        await RunBatchOpAsync(req, stream, writeLock, startedHandles, principal, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -526,6 +565,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
         ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        Principal? principal,
         CancellationToken ct)
     {
         // Count each batched op individually (not the long-lived duplex stream) toward the foreground
@@ -552,7 +592,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             switch (req.Kind)
             {
                 case BatchStatementKind.Query:
-                    await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, ct).ConfigureAwait(false);
+                    await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, principal, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Start:
                     await RunBatchStartAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
@@ -566,7 +606,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 case BatchStatementKind.NonQuery:
                 case BatchStatementKind.Unspecified:
                 default:
-                    await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, ct).ConfigureAwait(false);
+                    await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, principal, ct).ConfigureAwait(false);
                     break;
             }
         }
@@ -630,6 +670,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
+        Principal? principal,
         CancellationToken ct)
     {
         string sql = request.Sql ?? "";
@@ -641,7 +682,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: request.Database, sql: sql,
-                parameters: ToColumnValueMap(request.Parameters));
+                parameters: ToColumnValueMap(request.Parameters), principal: principal);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
@@ -650,7 +691,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: request.Database, sql: sql,
-                parameters: ToColumnValueMap(request.Parameters));
+                parameters: ToColumnValueMap(request.Parameters), principal: principal);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else
@@ -664,7 +705,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: request.Database, sql: sql,
-                    parameters: ToColumnValueMap(request.Parameters));
+                    parameters: ToColumnValueMap(request.Parameters), principal: principal);
                 DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
                 commitToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
             }
@@ -696,6 +737,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
+        Principal? principal,
         CancellationToken ct)
     {
         (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
@@ -708,7 +750,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: request.Database, sql: request.Sql ?? "",
-                parameters: ToColumnValueMap(request.Parameters));
+                parameters: ToColumnValueMap(request.Parameters), principal: principal);
             ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
             reply = new NonQueryReply { AffectedRows = result.ModifiedRows };
         }
@@ -722,7 +764,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: request.Database, sql: request.Sql ?? "",
-                    parameters: ToColumnValueMap(request.Parameters));
+                    parameters: ToColumnValueMap(request.Parameters), principal: principal);
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                 token = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;

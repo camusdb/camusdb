@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// scalar/function expressions, aliases, parameters, LIMIT/OFFSET, and the rejected shapes
 /// (SELECT *, aggregates, projection subqueries).
 /// </summary>
-[NonParallelizable]
 public sealed class TestFromlessSelect : SharedNodeBaseTest
 {
     private static async Task<List<QueryResultRow>> ExecQuery(

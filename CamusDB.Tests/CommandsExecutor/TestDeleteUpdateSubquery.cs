@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// evaluation" because only SELECT ran the subquery rewrite; these tests pin the anti-join DELETE
 /// bug plus the semi-join, scalar-SET, and no-op (plain WHERE) paths.
 /// </summary>
-[NonParallelizable]
 public sealed class TestDeleteUpdateSubquery : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupAsync()

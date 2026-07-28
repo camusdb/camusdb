@@ -30,7 +30,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// end-to-end, "rejected ALTER leaves the schema unchanged", NOT NULL surviving reopen, and the
 /// cluster-forwarding DTOs carrying checks and the NOT NULL target column.
 /// </summary>
-[NonParallelizable]
 public sealed class TestCheckConstraintsFixes : BaseTest
 {
     private async Task ExecDDL(CommandExecutor executor, string dbname, string sql)

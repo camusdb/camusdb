@@ -38,7 +38,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <c>TestQueryResultCacheInvalidation.cs</c>, which only exercise cache/gate primitives directly.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheIntegration : BaseTest
 {
     private QueryResultCache? _cache;

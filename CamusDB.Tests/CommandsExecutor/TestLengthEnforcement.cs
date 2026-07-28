@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Acceptance tests: string/bytes length enforcement on INSERT and UPDATE.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestLengthEnforcement : SharedNodeBaseTest
 {
     // ── Setup helpers ─────────────────────────────────────────────────────────

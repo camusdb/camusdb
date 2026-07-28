@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Raft-replicated persistent store, which is exactly the surface the generation stamp closes. Mirrors
 /// <see cref="TestRegistryCoherence"/> for the database registry.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestAuthCatalogCoherence : BaseTest
 {
     // Cluster mode: two catalogs stand in for two cluster nodes, so each must run the cross-node

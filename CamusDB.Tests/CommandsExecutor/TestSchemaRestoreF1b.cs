@@ -43,7 +43,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// in-process cluster tests drive the replicated DDL path end-to-end and confirm that normal
 /// apply + checkpoint persist work correctly without needing a process restart.
 /// </summary>
-[NonParallelizable]
 internal sealed class TestSchemaRestoreF1b : BaseTest
 {
     private const string TableName = "f1b_tbl";

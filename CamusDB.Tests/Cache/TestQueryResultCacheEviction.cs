@@ -26,7 +26,6 @@ namespace CamusDB.Tests.Cache;
 /// entries intact, and are safe to call when the cache is disabled (null).
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheEviction : CommandsExecutor.BaseTest
 {
     private QueryResultCache? _cache;

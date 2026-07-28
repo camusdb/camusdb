@@ -26,7 +26,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// identifiers (database/table/column/index names) are stored in the exact case the user
 /// wrote them, but every reference to them in SQL matches case-insensitively.
 /// </summary>
-[NonParallelizable]
 public class TestCaseInsensitiveIdentifiers : SharedNodeBaseTest
 {
     private async Task RunDdl(CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)

@@ -33,7 +33,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// and RENAME on one must leave the other unaffected.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 internal sealed class TestDatabaseClusterIsolation : SharedNodeBaseTest
 {
     // -----------------------------------------------------------------------

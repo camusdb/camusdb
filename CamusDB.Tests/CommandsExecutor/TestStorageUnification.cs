@@ -40,7 +40,6 @@ using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
-[NonParallelizable]
 internal sealed class TestStorageUnification : BaseTest
 {
     // -----------------------------------------------------------------------

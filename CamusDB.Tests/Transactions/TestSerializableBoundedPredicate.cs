@@ -40,7 +40,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   - A Serializable+RO snapshot sees a consistent view during concurrent bounded mutations.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSerializableBoundedPredicate : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>

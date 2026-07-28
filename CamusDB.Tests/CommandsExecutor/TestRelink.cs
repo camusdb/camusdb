@@ -27,7 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// orphaned (deferred-dropped) database or table under a new name, reusing its preserved id and retained
 /// data. Covers the recovery round-trip plus the error cases (unknown id, name already taken).
 /// </summary>
-[NonParallelizable]
 internal sealed class TestRelink : BaseTest
 {
     private static string NewName() => "db_" + Guid.NewGuid().ToString("n");

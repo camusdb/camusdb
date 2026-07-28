@@ -32,7 +32,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// already-begun transaction — valid before any locks are acquired.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSetTransactionSQL : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>

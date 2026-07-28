@@ -37,7 +37,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// must retain the branch's recovery state instead of destroying a still-registered branch, and an
 /// indeterminate drop-intent read must never be reported as "no drop".
 /// </summary>
-[NonParallelizable]
 public sealed class TestBranchCreateFaultInjection : BaseTest
 {
     /// <summary>

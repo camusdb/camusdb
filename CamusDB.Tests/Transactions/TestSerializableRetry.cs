@@ -31,7 +31,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// is resolved transparently by the helper.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSerializableRetry : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>

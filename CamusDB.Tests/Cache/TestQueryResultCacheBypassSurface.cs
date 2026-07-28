@@ -45,7 +45,6 @@ namespace CamusDB.Tests.Cache;
 /// </list>
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheBypassSurface : CommandsExecutor.BaseTest
 {
     private QueryResultCache? _cache;

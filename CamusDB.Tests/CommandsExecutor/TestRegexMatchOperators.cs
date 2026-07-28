@@ -30,7 +30,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Covers parser, evaluator, CheckEvaluator three-valued NULL semantics,
 /// CheckConditionRenderer round-trip, end-to-end WHERE filtering, and CHECK constraint enforcement.
 /// </summary>
-[NonParallelizable]
 public sealed class TestRegexMatchOperators : BaseTest
 {
     // ── helpers ────────────────────────────────────────────────────────────────

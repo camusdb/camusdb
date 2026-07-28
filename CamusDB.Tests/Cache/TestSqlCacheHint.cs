@@ -29,7 +29,6 @@ namespace CamusDB.Tests.Cache;
 /// touching any database or storage layer.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public class TestSqlCacheHint
 {
     private static SelectQuery ParseSelect(string sql)

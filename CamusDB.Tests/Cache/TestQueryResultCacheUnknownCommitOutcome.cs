@@ -46,7 +46,6 @@ namespace CamusDB.Tests.Cache;
 /// <c>TestQueryResultCacheOptimisticReadCommitted</c>.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheUnknownCommitOutcome
 {
     private const string DatabaseId = "testdb";

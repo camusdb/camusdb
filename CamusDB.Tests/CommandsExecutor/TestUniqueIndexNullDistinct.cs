@@ -24,7 +24,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Unique indexes follow standard SQL / Postgres / MySQL semantics: NULL is not equal to NULL, so a
 /// unique index may hold any number of rows whose indexed column is NULL.
 /// </summary>
-[NonParallelizable]
 public class TestUniqueIndexNullDistinct : SharedNodeBaseTest
 {
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupUsers(bool withIndex = true)
