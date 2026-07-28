@@ -217,6 +217,46 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Returns one row per stored grant for <paramref name="user"/>: the display object
+    /// (<c>*.*</c> / <c>db.*</c> / <c>db.table</c>) and the comma-joined privilege names. These are the
+    /// grants as stored, not the effective (broader-scope-expanded) set. A user with no grants yields
+    /// no rows.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowGrants(string user, IReadOnlyList<GrantRecord> grants)
+    {
+        await Task.CompletedTask;
+
+        foreach (GrantRecord grant in grants)
+        {
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "user", new ColumnValue(ColumnType.String, user) },
+                { "object", new ColumnValue(ColumnType.String, grant.Scope.DisplayObject()) },
+                { "privileges", new ColumnValue(ColumnType.String, FormatPrivileges(grant.Privileges)) }
+            });
+        }
+    }
+
+    /// <summary>Renders a privilege bitmask as an uppercase, comma-separated list (<c>ALL PRIVILEGES</c> when complete).</summary>
+    private static string FormatPrivileges(Privilege privileges)
+    {
+        if (privileges == Privilege.All)
+            return "ALL PRIVILEGES";
+
+        List<string> names = [];
+        if (privileges.HasFlag(Privilege.Select)) names.Add("SELECT");
+        if (privileges.HasFlag(Privilege.Insert)) names.Add("INSERT");
+        if (privileges.HasFlag(Privilege.Update)) names.Add("UPDATE");
+        if (privileges.HasFlag(Privilege.Delete)) names.Add("DELETE");
+        if (privileges.HasFlag(Privilege.CreateTable)) names.Add("CREATE TABLE");
+        if (privileges.HasFlag(Privilege.Drop)) names.Add("DROP");
+        if (privileges.HasFlag(Privilege.Alter)) names.Add("ALTER");
+        if (privileges.HasFlag(Privilege.Index)) names.Add("INDEX");
+        if (privileges.HasFlag(Privilege.Create)) names.Add("CREATE");
+        return string.Join(", ", names);
+    }
+
+    /// <summary>
     /// Returns one row per transitive descendant of <paramref name="target"/> found in
     /// <paramref name="allEntries"/>: depth 1 = direct children, 2 = grandchildren, etc.
     /// An entry is a descendant when <paramref name="target"/>'s id appears in its

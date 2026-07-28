@@ -161,6 +161,30 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string CommentTooLong = "CADB0511";
 
+    /// <summary>
+    /// <c>CREATE USER</c> (without <c>IF NOT EXISTS</c>) named a user that already exists. A permanent
+    /// caller mistake — maps to HTTP 409.
+    /// </summary>
+    public const string UserAlreadyExists = "CADB0512";
+
+    /// <summary>
+    /// <c>ALTER USER</c> / <c>DROP USER</c> / <c>GRANT</c> / <c>REVOKE</c> named a user that does not
+    /// exist. GRANT never implicitly creates a user. Maps to HTTP 404.
+    /// </summary>
+    public const string UserDoesNotExist = "CADB0513";
+
+    /// <summary>
+    /// <c>IDENTIFIED WITH &lt;plugin&gt;</c> named an authentication plugin CamusDB does not support.
+    /// Only <c>sha256_password</c> is accepted today. A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string UnsupportedAuthPlugin = "CADB0514";
+
+    /// <summary>
+    /// A <c>GRANT</c>/<c>REVOKE</c> named a privilege that is not valid (unknown token, or not
+    /// applicable to the object scope). A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string InvalidPrivilege = "CADB0515";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -174,9 +198,13 @@ public static class CamusDBErrorCodes
         CheckConstraintViolation => 400,
         InvalidAsOfSystemTime => 400,
         CommentTooLong => 400,
+        UnsupportedAuthPlugin => 400,
+        InvalidPrivilege => 400,
         OrphanNotFound => 404,
+        UserDoesNotExist => 404,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,
+        UserAlreadyExists => 409,
         _ => 500
     };
 }

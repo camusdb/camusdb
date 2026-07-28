@@ -155,6 +155,15 @@ TGreater        >
 TLessEquals     <=
 TGreaterEquals  >=
 TDot            \.
+TUser           (U|u)(S|s)(E|e)(R|r)
+TIdentified     (I|i)(D|d)(E|e)(N|n)(T|t)(I|i)(F|f)(I|i)(E|e)(D|d)
+TWith           (W|w)(I|i)(T|t)(H|h)
+TGrants         (G|g)(R|r)(A|a)(N|n)(T|t)(S|s)
+TGrant          (G|g)(R|r)(A|a)(N|n)(T|t)
+TRevoke         (R|r)(E|e)(V|v)(O|o)(K|k)(E|e)
+TPrivileges     (P|p)(R|r)(I|i)(V|v)(I|i)(L|l)(E|e)(G|g)(E|e)(S|s)
+TAll            (A|a)(L|l)(L|l)
+TFor            (F|f)(O|o)(R|r)
 
 %{
 
@@ -420,6 +429,24 @@ TDot            \.
 {TNotEquals2} { return (int)Token.TNOTEQUALS; }
 
 {TDot} { return (int)Token.TDOT; }
+
+{TUser} { return (int)Token.TUSER; }
+
+{TIdentified} { return (int)Token.TIDENTIFIED; }
+
+{TWith} { return (int)Token.TWITH; }
+
+{TGrants} { return (int)Token.TGRANTS; }
+
+{TGrant} { return (int)Token.TGRANT; }
+
+{TRevoke} { return (int)Token.TREVOKE; }
+
+{TPrivileges} { return (int)Token.TPRIVILEGES; }
+
+{TAll} { return (int)Token.TALL; }
+
+{TFor} { return (int)Token.TFOR; }
 
 {Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 

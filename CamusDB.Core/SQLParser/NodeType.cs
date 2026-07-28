@@ -277,4 +277,58 @@ public enum NodeType
     /// the per-database schema log.
     /// </summary>
     CommentOnDatabase,
+
+    /// <summary>
+    /// <c>CREATE USER u [IDENTIFIED [WITH plugin] BY secret]</c>. <c>leftAst</c> = user name node;
+    /// <c>rightAst</c> = the password value (<see cref="String"/> or <see cref="Placeholder"/>), or
+    /// null when no password clause was given (user cannot authenticate); <c>extendedOne</c> = the
+    /// plugin identifier node, or null when <c>IDENTIFIED BY</c> defaulted it. Server-level: dispatched
+    /// before any database is opened.
+    /// </summary>
+    CreateUser,
+
+    /// <summary><c>CREATE USER IF NOT EXISTS …</c>. Node layout matches <see cref="CreateUser"/>; a
+    /// pre-existing user is a no-op instead of an error.</summary>
+    CreateUserIfNotExists,
+
+    /// <summary>
+    /// <c>ALTER USER u IDENTIFIED [WITH plugin] BY secret</c> — rotate the password. Node layout
+    /// matches <see cref="CreateUser"/> except <c>rightAst</c> is always present (a password clause is
+    /// required).
+    /// </summary>
+    AlterUser,
+
+    /// <summary><c>DROP USER u</c>. <c>leftAst</c> = user name node. Removes the user and all its
+    /// grants in one catalog transaction.</summary>
+    DropUser,
+
+    /// <summary><c>DROP USER IF EXISTS u</c>. Node layout matches <see cref="DropUser"/>; an unknown
+    /// user is a no-op instead of an error.</summary>
+    DropUserIfExists,
+
+    /// <summary>
+    /// <c>GRANT priv_list ON object TO user</c>. <c>leftAst</c> = a privilege-list chain
+    /// (<see cref="GrantPrivilegeList"/> / <see cref="GrantPrivilege"/>); <c>rightAst</c> = user name
+    /// node; <c>extendedOne</c> = the object identifier node (database name, or dotted <c>db.table</c>),
+    /// null for global; <c>yytext</c> = the scope kind marker (<c>"global"</c> / <c>"database"</c> /
+    /// <c>"table"</c>). Server-level.
+    /// </summary>
+    Grant,
+
+    /// <summary><c>REVOKE priv_list ON object FROM user</c>. Node layout matches <see cref="Grant"/>.</summary>
+    Revoke,
+
+    /// <summary>Leaf carrying one privilege token in <c>yytext</c> (e.g. <c>"select"</c>,
+    /// <c>"create table"</c>, <c>"all"</c>). Built by the privilege grammar rule.</summary>
+    GrantPrivilege,
+
+    /// <summary>Left-recursive cons node joining a privilege list: <c>leftAst</c> = the list so far,
+    /// <c>rightAst</c> = the next <see cref="GrantPrivilege"/>.</summary>
+    GrantPrivilegeList,
+
+    /// <summary>
+    /// <c>SHOW GRANTS [FOR user]</c>. <c>leftAst</c> = the target user name node, or null for the
+    /// current authenticated principal. Server-level query — dispatched before any database is opened.
+    /// </summary>
+    ShowGrants,
 }

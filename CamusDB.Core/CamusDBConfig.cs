@@ -695,6 +695,24 @@ public static class CamusDBConfig
     public const int MaxCommentLength = 65_535;
 
     /// <summary>
+    /// PBKDF2-HMAC-SHA256 iteration count used when hashing a user password
+    /// (<c>CREATE USER … IDENTIFIED …</c> / <c>ALTER USER … IDENTIFIED …</c>). Deliberately high so a
+    /// stolen catalog cannot be brute-forced cheaply; the value in force is stored <b>with</b> each
+    /// credential so raising this later does not invalidate existing hashes (they verify at their own
+    /// stored count and can be upgraded on next login in the enforcement phase). OWASP's current
+    /// PBKDF2-HMAC-SHA256 floor is 600,000.
+    /// </summary>
+    public static int PasswordHashIterations = 600_000;
+
+    /// <summary>
+    /// Upper bound (in UTF-8 bytes) on a supplied password before it is fed to the key-derivation
+    /// function. Caps the work an attacker can force per hash attempt (a multi-megabyte password would
+    /// otherwise turn each verification into a denial-of-service lever). Exceeding it is rejected at
+    /// ticket validation.
+    /// </summary>
+    public const int MaxPasswordBytes = 1024;
+
+    /// <summary>
     /// Number of row ids buffered from a non-covering secondary-index scan before issuing one
     /// <c>GetRowsBatch</c> call. Batching collapses N sequential Kahuna actor round-trips into
     /// one per page, keeping primary-row fetches snapshot-consistent with the scan via the

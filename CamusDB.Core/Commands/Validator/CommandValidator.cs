@@ -30,6 +30,14 @@ public sealed class CommandValidator
 
     private readonly CommentValidator commentValidator = new();
 
+    private readonly CreateUserValidator createUserValidator = new();
+
+    private readonly AlterUserValidator alterUserValidator = new();
+
+    private readonly DropUserValidator dropUserValidator = new();
+
+    private readonly GrantValidator grantValidator = new();
+
     private readonly CloseDatabaseValidator closeDatabaseValidator = new();
 
     private readonly RelinkDatabaseValidator relinkDatabaseValidator = new();
@@ -79,6 +87,26 @@ public sealed class CommandValidator
     public void Validate(CommentTicket ticket)
     {
         commentValidator.Validate(ticket);
+    }
+
+    public void Validate(CreateUserTicket ticket)
+    {
+        createUserValidator.Validate(ticket);
+    }
+
+    public void Validate(AlterUserTicket ticket)
+    {
+        alterUserValidator.Validate(ticket);
+    }
+
+    public void Validate(DropUserTicket ticket)
+    {
+        dropUserValidator.Validate(ticket);
+    }
+
+    public void Validate(GrantTicket ticket)
+    {
+        grantValidator.Validate(ticket);
     }
 
     public void Validate(RenameTableTicket ticket)

@@ -7,6 +7,7 @@
  */
 
 using System.Linq;
+using CamusDB.Core.Auth;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
@@ -136,6 +137,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Initializes the commands executor
     /// </summary>
     private readonly Task<DatabaseRegistry> registryTask;
+
+    // Server-level user/grant catalog, opened against the shared node like the database registry. Null
+    // only when this executor was constructed without a shared node (no auth surface is reachable).
+    private readonly Task<AuthCatalog>? authCatalogTask;
     private readonly bool ownsRegistry;
     private readonly bool isClusterMode;
 
@@ -172,6 +177,10 @@ public sealed class CommandExecutor : IAsyncDisposable
             registryTask = DatabaseRegistry.OpenAsync(sharedNode!, isClusterMode);
             ownsRegistry = true;
         }
+
+        // The auth catalog rides the same shared node and _system/ keyspace as the registry.
+        if (sharedNode is not null)
+            authCatalogTask = AuthCatalog.OpenAsync(sharedNode, isClusterMode);
 
         databaseDescriptors = new();
         databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, registryTask, isClusterMode, cache);
@@ -2440,6 +2449,142 @@ public sealed class CommandExecutor : IAsyncDisposable
         await registry.SetCommentAsync(ticket.DatabaseName, ticket.Comment).ConfigureAwait(false);
     }
 
+    private async Task<AuthCatalog> GetAuthCatalogAsync()
+    {
+        if (authCatalogTask is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Authentication catalog is unavailable (no shared node was configured)");
+
+        return await authCatalogTask.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Creates a server-level user in the shared auth catalog. The cleartext password (if any) is hashed
+    /// here and never persisted or logged; the ticket carries it no further. Server-level — returns no
+    /// descriptor.
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> CreateUser(CreateUserTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        Credential? credential = ticket.Password is null ? null : PasswordHasher.Hash(ticket.Password);
+        await auth.CreateUserAsync(ticket.UserName, credential, ticket.IfNotExists).ConfigureAwait(false);
+
+        return new ExecuteDDLSQLResult(null!, true);
+    }
+
+    /// <summary>Rotates a user's password verifier and advances its credential epoch.</summary>
+    public async Task<ExecuteDDLSQLResult> AlterUser(AlterUserTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        await auth.SetPasswordAsync(ticket.UserName, PasswordHasher.Hash(ticket.Password)).ConfigureAwait(false);
+
+        return new ExecuteDDLSQLResult(null!, true);
+    }
+
+    /// <summary>Drops a user and all its grants in one catalog transaction.</summary>
+    public async Task<ExecuteDDLSQLResult> DropUser(DropUserTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        await auth.DropUserAsync(ticket.UserName, ticket.IfExists).ConfigureAwait(false);
+
+        return new ExecuteDDLSQLResult(null!, true);
+    }
+
+    /// <summary>
+    /// Applies a <c>GRANT</c>/<c>REVOKE</c>. Resolves the grant object's name(s) to immutable ids first
+    /// (a database via the registry; a table by opening the target database's catalog) so the grant is
+    /// bound to the id, not the name, and never resurrects on a dropped-and-recreated object.
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> Grant(GrantTicket ticket)
+    {
+        validator.Validate(ticket);
+
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        GrantScope scope = await ResolveGrantScopeAsync(ticket).ConfigureAwait(false);
+        await auth.GrantAsync(ticket.UserName, scope, ticket.Privileges, ticket.Revoke).ConfigureAwait(false);
+
+        return new ExecuteDDLSQLResult(null!, true);
+    }
+
+    /// <summary>
+    /// Turns a grant ticket's scope names into an id-bound <see cref="GrantScope"/>. The database must
+    /// exist (resolved through the registry); a table scope additionally opens the target database and
+    /// resolves the table's id. Global scope needs no resolution.
+    /// </summary>
+    private async Task<GrantScope> ResolveGrantScopeAsync(GrantTicket ticket)
+    {
+        switch (ticket.ScopeKind)
+        {
+            case GrantScopeKind.Global:
+                return new GrantScope { Kind = GrantScopeKind.Global };
+
+            case GrantScopeKind.Database:
+                {
+                    DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+                    DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(ticket.DatabaseName).ConfigureAwait(false);
+                    if (entry is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.DatabaseDoesntExist,
+                            $"Database '{ticket.DatabaseName}' does not exist");
+
+                    return new GrantScope
+                    {
+                        Kind = GrantScopeKind.Database,
+                        DatabaseId = entry.Id,
+                        DatabaseName = entry.Name,
+                    };
+                }
+
+            case GrantScopeKind.Table:
+                {
+                    DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+                    DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(ticket.DatabaseName).ConfigureAwait(false);
+                    if (entry is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.DatabaseDoesntExist,
+                            $"Database '{ticket.DatabaseName}' does not exist");
+
+                    // Open the TARGET database (not the empty context database) to resolve the table id.
+                    DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+                    using DatabaseUseHandle _ = database.Use();
+                    TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+                    return new GrantScope
+                    {
+                        Kind = GrantScopeKind.Table,
+                        DatabaseId = entry.Id,
+                        DatabaseName = entry.Name,
+                        TableId = table.Id,
+                        TableName = table.Name,
+                    };
+                }
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown grant scope kind {ticket.ScopeKind}");
+        }
+    }
+
+    /// <summary>
+    /// Returns the grants for <paramref name="userName"/> as rows for <c>SHOW GRANTS</c>. Server-level:
+    /// reads the auth catalog and needs no open database.
+    /// </summary>
+    internal async Task<(IReadOnlyList<GrantRecord> Grants, bool UserExists)> ListGrantsForShowAsync(string userName)
+    {
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        UserRecord? user = await auth.TryGetUserAsync(userName).ConfigureAwait(false);
+        if (user is null)
+            return ([], false);
+
+        return (await auth.ListGrantsAsync(userName).ConfigureAwait(false), true);
+    }
+
     /// <summary>
     /// Test-only: resolves a registry entry through <b>this executor's own</b> registry instance,
     /// exercising its cache-coherence path. Exists because cross-node registry behavior is otherwise
@@ -2518,6 +2663,20 @@ public sealed class CommandExecutor : IAsyncDisposable
             await CommentDatabase(databaseCommentTicket).ConfigureAwait(false);
             return default;
         }
+
+        // User and grant DDL are server-level: they live in the shared _system/auth keyspace and open
+        // no database of their own (a table-scoped GRANT opens its target database itself, inside Grant).
+        if (ast.nodeType is NodeType.CreateUser or NodeType.CreateUserIfNotExists)
+            return await CreateUser(sqlExecutor.CreateCreateUserTicket(ticket, ast)).ConfigureAwait(false);
+
+        if (ast.nodeType is NodeType.AlterUser)
+            return await AlterUser(sqlExecutor.CreateAlterUserTicket(ticket, ast)).ConfigureAwait(false);
+
+        if (ast.nodeType is NodeType.DropUser or NodeType.DropUserIfExists)
+            return await DropUser(sqlExecutor.CreateDropUserTicket(ast)).ConfigureAwait(false);
+
+        if (ast.nodeType is NodeType.Grant or NodeType.Revoke)
+            return await Grant(sqlExecutor.CreateGrantTicket(ast)).ConfigureAwait(false);
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
@@ -2901,6 +3060,32 @@ public sealed class CommandExecutor : IAsyncDisposable
             return default;
         }
 
+        // User/grant DDL is server-level, and a client may route it to this no-rows endpoint just as
+        // easily as to /execute-sql-ddl, so it must be reachable here too (mirrors ExecuteDDLSQL).
+        if (ast.nodeType is NodeType.CreateUser or NodeType.CreateUserIfNotExists)
+        {
+            await CreateUser(sqlExecutor.CreateCreateUserTicket(ticket, ast)).ConfigureAwait(false);
+            return default;
+        }
+
+        if (ast.nodeType is NodeType.AlterUser)
+        {
+            await AlterUser(sqlExecutor.CreateAlterUserTicket(ticket, ast)).ConfigureAwait(false);
+            return default;
+        }
+
+        if (ast.nodeType is NodeType.DropUser or NodeType.DropUserIfExists)
+        {
+            await DropUser(sqlExecutor.CreateDropUserTicket(ast)).ConfigureAwait(false);
+            return default;
+        }
+
+        if (ast.nodeType is NodeType.Grant or NodeType.Revoke)
+        {
+            await Grant(sqlExecutor.CreateGrantTicket(ast)).ConfigureAwait(false);
+            return default;
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
@@ -3141,6 +3326,25 @@ public sealed class CommandExecutor : IAsyncDisposable
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowAncestorsSchema;
             return (null!, schemaQuerier.ShowAncestors(target, allEntries));
+        }
+
+        // SHOW GRANTS reads the server-level auth catalog — no database context.
+        if (ast.nodeType == NodeType.ShowGrants)
+        {
+            // Phase 1 has no authenticated principal, so the bare form has no user to default to.
+            if (ast.leftAst is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SHOW GRANTS requires an explicit user in this build; use SHOW GRANTS FOR <user>");
+
+            string grantUser = ast.leftAst.yytext!;
+            (IReadOnlyList<GrantRecord> grants, bool userExists) = await ListGrantsForShowAsync(grantUser).ConfigureAwait(false);
+            if (!userExists)
+                throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{grantUser}' does not exist");
+
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowGrantsSchema;
+            return (null!, schemaQuerier.ShowGrants(grantUser, grants));
         }
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);

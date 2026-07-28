@@ -40,6 +40,7 @@
 %token TINCLUDE
 %token TASOFSYSTEMTIME
 %token TCOMMENT
+%token TUSER TIDENTIFIED TWITH TGRANT TGRANTS TREVOKE TPRIVILEGES TALL TFOR
 
 %%
 
@@ -66,6 +67,11 @@ stat    : select_stmt { $$.n = $1.n; }
         | analyze_stmt { $$.n = $1.n; }
         | evict_cache_stmt { $$.n = $1.n; }
         | comment_stmt { $$.n = $1.n; }
+        | create_user_stmt { $$.n = $1.n; }
+        | alter_user_stmt { $$.n = $1.n; }
+        | drop_user_stmt { $$.n = $1.n; }
+        | grant_stmt { $$.n = $1.n; }
+        | revoke_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -315,6 +321,59 @@ comment_value : string { $$.n = $1.n; $$.s = $1.s; }
               | TNULL { $$.n = null; }
               ;
 
+/* User / privilege DDL. All server-level (no context database). The password value reuses the
+   existing `string`/`placeholder` nonterminals so a network client can bind it as a parameter and
+   keep the cleartext out of the SQL text. rightAst = secret (null = no password), extendedOne =
+   plugin identifier (null = defaulted). */
+create_user_stmt : TCREATE TUSER any_identifier { $$.n = new(NodeType.CreateUser, $3.n, null, null, null, null, null, null, null); }
+                 | TCREATE TUSER any_identifier TIDENTIFIED TWITH any_identifier TBY auth_secret { $$.n = new(NodeType.CreateUser, $3.n, $8.n, $6.n, null, null, null, null, null); }
+                 | TCREATE TUSER any_identifier TIDENTIFIED TBY auth_secret { $$.n = new(NodeType.CreateUser, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TCREATE TUSER TIF TNOT TEXISTS any_identifier { $$.n = new(NodeType.CreateUserIfNotExists, $6.n, null, null, null, null, null, null, null); }
+                 | TCREATE TUSER TIF TNOT TEXISTS any_identifier TIDENTIFIED TWITH any_identifier TBY auth_secret { $$.n = new(NodeType.CreateUserIfNotExists, $6.n, $11.n, $9.n, null, null, null, null, null); }
+                 | TCREATE TUSER TIF TNOT TEXISTS any_identifier TIDENTIFIED TBY auth_secret { $$.n = new(NodeType.CreateUserIfNotExists, $6.n, $9.n, null, null, null, null, null, null); }
+                 ;
+
+alter_user_stmt : TALTER TUSER any_identifier TIDENTIFIED TWITH any_identifier TBY auth_secret { $$.n = new(NodeType.AlterUser, $3.n, $8.n, $6.n, null, null, null, null, null); }
+                | TALTER TUSER any_identifier TIDENTIFIED TBY auth_secret { $$.n = new(NodeType.AlterUser, $3.n, $6.n, null, null, null, null, null, null); }
+                ;
+
+drop_user_stmt : TDROP TUSER any_identifier { $$.n = new(NodeType.DropUser, $3.n, null, null, null, null, null, null, null); }
+               | TDROP TUSER TIF TEXISTS any_identifier { $$.n = new(NodeType.DropUserIfExists, $5.n, null, null, null, null, null, null, null); }
+               ;
+
+/* Scope kind carried in yytext; extendedOne holds the object identifier node (db name, or dotted
+   db.table for the table form), null for the global *.* form. */
+grant_stmt : TGRANT privilege_list TON TMULT TDOT TMULT TTO any_identifier { $$.n = new(NodeType.Grant, $2.n, $8.n, null, null, null, null, null, "global"); }
+           | TGRANT privilege_list TON any_identifier TDOT TMULT TTO any_identifier { $$.n = new(NodeType.Grant, $2.n, $8.n, $4.n, null, null, null, null, "database"); }
+           | TGRANT privilege_list TON any_identifier TTO any_identifier { $$.n = new(NodeType.Grant, $2.n, $6.n, $4.n, null, null, null, null, "table"); }
+           ;
+
+revoke_stmt : TREVOKE privilege_list TON TMULT TDOT TMULT TFROM any_identifier { $$.n = new(NodeType.Revoke, $2.n, $8.n, null, null, null, null, null, "global"); }
+            | TREVOKE privilege_list TON any_identifier TDOT TMULT TFROM any_identifier { $$.n = new(NodeType.Revoke, $2.n, $8.n, $4.n, null, null, null, null, "database"); }
+            | TREVOKE privilege_list TON any_identifier TFROM any_identifier { $$.n = new(NodeType.Revoke, $2.n, $6.n, $4.n, null, null, null, null, "table"); }
+            ;
+
+privilege_list : privilege_list TCOMMA privilege { $$.n = new(NodeType.GrantPrivilegeList, $1.n, $3.n, null, null, null, null, null, null); }
+               | privilege { $$.n = $1.n; }
+               ;
+
+privilege : TSELECT { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "select"); }
+          | TINSERT { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "insert"); }
+          | TUPDATE { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "update"); }
+          | TDELETE { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "delete"); }
+          | TCREATE TTABLE { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "create table"); }
+          | TDROP { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "drop"); }
+          | TALTER { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "alter"); }
+          | TINDEX { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "index"); }
+          | TCREATE { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "create"); }
+          | TALL TPRIVILEGES { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "all"); }
+          | TALL { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "all"); }
+          ;
+
+auth_secret : string { $$.n = $1.n; }
+            | placeholder { $$.n = $1.n; }
+            ;
+
 alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, null, null, null, null, null); }
@@ -385,6 +444,8 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TANCESTORS TFROM any_identifier { $$.n = new(NodeType.ShowAncestors, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TORPHAN TTABLES { $$.n = new(NodeType.ShowOrphanTables, null, null, null, null, null, null, null, null); }
           | TSHOW TORPHAN TDATABASES { $$.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
+          | TSHOW TGRANTS { $$.n = new(NodeType.ShowGrants, null, null, null, null, null, null, null, null); }
+          | TSHOW TGRANTS TFOR any_identifier { $$.n = new(NodeType.ShowGrants, $4.n, null, null, null, null, null, null, null); }
           ;
 
 analyze_stmt : TANALYZE any_identifier

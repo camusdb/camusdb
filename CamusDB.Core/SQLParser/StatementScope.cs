@@ -35,7 +35,14 @@ public static class StatementScope
         NodeType.CreateDatabaseRelink or
         NodeType.DropDatabase or NodeType.DropDatabaseIfExists or
         NodeType.RenameDatabase or
-        NodeType.CommentOnDatabase;
+        NodeType.CommentOnDatabase or
+        // Users and grants are server-level: they name their target in the SQL, touch only the shared
+        // _system/auth keyspace, and return no DatabaseDescriptor — so no transport opens a database
+        // or a transaction for them.
+        NodeType.CreateUser or NodeType.CreateUserIfNotExists or
+        NodeType.AlterUser or
+        NodeType.DropUser or NodeType.DropUserIfExists or
+        NodeType.Grant or NodeType.Revoke;
 
     /// <summary>
     /// True for statements that are valid without a context database — every database-scoped
@@ -48,5 +55,6 @@ public static class StatementScope
             NodeType.ShowDatabases or
             NodeType.ShowBranches or
             NodeType.ShowAncestors or
-            NodeType.ShowOrphanDatabases;
+            NodeType.ShowOrphanDatabases or
+            NodeType.ShowGrants;
 }

@@ -42,6 +42,10 @@ internal sealed class SqlExecutor()
 
     private readonly SQLExecutorCommentCreator sqlExecutorCommentCreator = new();
 
+    private readonly SQLExecutorUserCreator sqlExecutorUserCreator = new();
+
+    private readonly SQLExecutorGrantCreator sqlExecutorGrantCreator = new();
+
     public QueryTicket CreateQueryTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorQueryCreator.CreateQueryTicket(ticket, ast);
@@ -124,6 +128,30 @@ internal sealed class SqlExecutor()
     internal CommentTicket CreateCommentTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorCommentCreator.CreateCommentTicket(ticket, ast);
+    }
+
+    /// <summary>Builds a ticket for <c>CREATE USER</c> (with or without <c>IF NOT EXISTS</c> / auth clause).</summary>
+    internal CreateUserTicket CreateCreateUserTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        return sqlExecutorUserCreator.CreateCreateUserTicket(ticket, ast);
+    }
+
+    /// <summary>Builds a ticket for <c>ALTER USER … IDENTIFIED …</c> (password rotation).</summary>
+    internal AlterUserTicket CreateAlterUserTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        return sqlExecutorUserCreator.CreateAlterUserTicket(ticket, ast);
+    }
+
+    /// <summary>Builds a ticket for <c>DROP USER [IF EXISTS]</c>.</summary>
+    internal DropUserTicket CreateDropUserTicket(NodeAst ast)
+    {
+        return sqlExecutorUserCreator.CreateDropUserTicket(ast);
+    }
+
+    /// <summary>Builds a ticket for <c>GRANT</c>/<c>REVOKE</c>.</summary>
+    internal GrantTicket CreateGrantTicket(NodeAst ast)
+    {
+        return sqlExecutorGrantCreator.CreateGrantTicket(ast);
     }
 
     /// <summary>

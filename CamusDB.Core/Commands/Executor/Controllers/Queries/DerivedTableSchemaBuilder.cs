@@ -62,6 +62,13 @@ internal static class DerivedTableSchemaBuilder
         new("comment", ColumnType.String),
     ];
 
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowGrantsSchema =
+    [
+        new("user",       ColumnType.String),
+        new("object",     ColumnType.String),
+        new("privileges", ColumnType.String),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowBranchesSchema =
     [
         new("database",       ColumnType.String),
