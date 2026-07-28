@@ -43,6 +43,8 @@ internal sealed class TestPersistentRestartUniqueIndex : BaseTest
     private static EmbeddedKahuna NewNode(string storageRoot) =>
         new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "test-restart",
             Storage = "sqlite",
             StoragePath = storageRoot,

@@ -36,6 +36,8 @@ public abstract class SharedNodeBaseTest : BaseTest
     {
         sharedNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = $"test-shared-{Guid.NewGuid():N}",
             Storage = "memory",
             WalStorage = "memory",

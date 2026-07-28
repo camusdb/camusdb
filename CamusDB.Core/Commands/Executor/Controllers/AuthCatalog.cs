@@ -70,8 +70,9 @@ public sealed class AuthCatalog
     private string UserKey(string normalizedName) => $"{keyPrefix}auth/user:{normalizedName}";
     private string GrantKeyPrefix => $"{keyPrefix}auth/grant:";
     private string GrantKey(string normalizedUser, string scopeKey) => $"{keyPrefix}auth/grant:{normalizedUser}:{scopeKey}";
+    private string SessionKeyPrefix => $"{keyPrefix}auth/session:";
     private string SessionKey(string tokenId) => $"{keyPrefix}auth/session:{tokenId}";
-    private string GenerationSequenceKey => $"{keyPrefix}auth/generation";
+    private string GenerationKey => $"{keyPrefix}auth/generation";
 
     private AuthCatalog(IKahuna kahuna, KvTransactionsManager transactions, string keyPrefix, bool isClusterMode)
     {
@@ -169,40 +170,27 @@ public sealed class AuthCatalog
     // Cross-node cache-coherence generation stamp (mirrors DatabaseRegistry)
     // -----------------------------------------------------------------------
 
+    // The coherence generation is a durable KV key incremented WITHIN each mutation's transaction, so it
+    // commits atomically with the change. This is the crash-safety fix: a separate post-commit sequence
+    // bump could be lost to a crash/leader-loss between the two, leaving other nodes permanently unaware
+    // of a committed change (an unbounded stale window). Incrementing in-transaction closes that gap —
+    // if the mutation is durable, so is the generation move.
+
     private async Task<long> ReadGenerationAsync()
     {
-        (SequenceResponseType type, ReadOnlySequenceEntry? entry) = await kahuna.LocateAndGetSequence(
-            GenerationSequenceKey, SequenceDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-
-        return type == SequenceResponseType.Success && entry is not null ? entry.CurrentValue : 0;
+        byte[]? value = await GetAuthValueAsync(GenerationKey).ConfigureAwait(false);
+        return value is { Length: 8 } ? BitConverter.ToInt64(value) : 0;
     }
 
-    private async Task<long> BumpGenerationAsync()
+    /// <summary>Reads the generation under its lock and writes the next value in the same transaction,
+    /// returning the new value. Must be called inside a mutation's transaction so it commits atomically
+    /// with the records changed.</summary>
+    private async Task<long> IncrementGenerationLockedAsync(KvTransaction tx)
     {
-        (SequenceResponseType createType, _) = await kahuna.LocateAndCreateSequence(
-            GenerationSequenceKey, initialValue: 0, increment: 1, maxValue: null,
-            SequenceDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-
-        if (createType is SequenceResponseType.Success or SequenceResponseType.AlreadyExists)
-        {
-            SequenceResponseType nextType;
-            SequenceAllocation allocation = default;
-            int retries = 0;
-            do
-            {
-                if (retries > 0)
-                    await Task.Delay(retries * 10).ConfigureAwait(false);
-
-                (nextType, allocation) = await kahuna.LocateAndNextSequenceValue(
-                    GenerationSequenceKey, null, SequenceDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-            }
-            while (nextType == SequenceResponseType.MustRetry && ++retries < MaxRetries);
-
-            if (nextType == SequenceResponseType.Success)
-                return allocation.Start;
-        }
-
-        return Volatile.Read(ref loadedGeneration);
+        byte[]? current = await LockAndReadAsync(tx, GenerationKey).ConfigureAwait(false);
+        long next = (current is { Length: 8 } ? BitConverter.ToInt64(current) : 0) + 1;
+        await SetKeyLockedAsync(tx, GenerationKey, BitConverter.GetBytes(next), ifAbsent: false).ConfigureAwait(false);
+        return next;
     }
 
     private void AdoptGeneration(long generation)
@@ -354,15 +342,17 @@ public sealed class AuthCatalog
 
             byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.UserRecord);
 
+            long newGen = 0;
             await RunInTransactionAsync(async tx =>
             {
                 bool written = await WriteAuthKey(tx, UserKey(normalized), bytes, ifAbsent: true).ConfigureAwait(false);
                 if (!written)
                     throw new CamusDBException(CamusDBErrorCodes.UserAlreadyExists, $"User '{name}' already exists");
+                newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
             usersByName[normalized] = record;
-            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            AdoptGeneration(newGen);
         }
         finally
         {
@@ -382,22 +372,28 @@ public sealed class AuthCatalog
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (isClusterMode)
-                await RevalidateFromKvLockedAsync(await ReadGenerationAsync().ConfigureAwait(false)).ConfigureAwait(false);
+            UserRecord? updated = null;
+            long newGen = 0;
+            await RunInTransactionAsync(async tx =>
+            {
+                // Authoritative read under the user lock: a user dropped on another node is seen as
+                // absent here and must not be recreated from a stale copy.
+                byte[]? current = await LockAndReadAsync(tx, UserKey(normalized)).ConfigureAwait(false);
+                if (current is null)
+                    throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{name}' does not exist");
 
-            if (!usersByName.TryGetValue(normalized, out UserRecord? existing))
-                throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{name}' does not exist");
+                UserRecord locked = MetaJsonSerializer.Deserialize(current, MetaJsonContext.Default.UserRecord);
+                updated = locked.Copy();
+                updated.Credential = credential;
+                updated.CredentialEpoch = locked.CredentialEpoch + 1;
 
-            UserRecord updated = existing.Copy();
-            updated.Credential = credential;
-            updated.CredentialEpoch = existing.CredentialEpoch + 1;
+                byte[] bytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.UserRecord);
+                await SetKeyLockedAsync(tx, UserKey(normalized), bytes, ifAbsent: false).ConfigureAwait(false);
+                newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
+            }).ConfigureAwait(false);
 
-            byte[] bytes = MetaJsonSerializer.Serialize(updated, MetaJsonContext.Default.UserRecord);
-
-            await RunInTransactionAsync(tx => WriteAuthKeyExpectPresent(tx, UserKey(normalized), bytes)).ConfigureAwait(false);
-
-            usersByName[normalized] = updated;
-            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            usersByName[normalized] = updated!;
+            AdoptGeneration(newGen);
         }
         finally
         {
@@ -417,30 +413,43 @@ public sealed class AuthCatalog
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (isClusterMode)
-                await RevalidateFromKvLockedAsync(await ReadGenerationAsync().ConfigureAwait(false)).ConfigureAwait(false);
+            bool dropped = false;
+            long newGen = 0;
+            await RunInTransactionAsync(async tx =>
+            {
+                // Authoritative existence check under the user lock.
+                byte[]? current = await LockAndReadAsync(tx, UserKey(normalized)).ConfigureAwait(false);
+                if (current is null)
+                    return; // not present — decided below
 
-            if (!usersByName.ContainsKey(normalized))
+                dropped = true;
+
+                // Enumerate the user's grants authoritatively (not from the possibly-stale cache) so a
+                // grant added on another node is not orphaned and inherited by a later same-name user.
+                // Holding the user lock blocks concurrent GrantAsync (which also takes it), so the set
+                // is stable.
+                List<string> grantKeys = await ScanUserGrantKeysAsync(tx, normalized).ConfigureAwait(false);
+                List<string> sessionKeys = await ScanUserSessionKeysAsync(tx, normalized).ConfigureAwait(false);
+
+                await DeleteAuthKey(tx, UserKey(normalized)).ConfigureAwait(false);
+                foreach (string grantKey in grantKeys)
+                    await DeleteAuthKey(tx, grantKey).ConfigureAwait(false);
+                foreach (string sessionKey in sessionKeys)
+                    await DeleteAuthKey(tx, sessionKey).ConfigureAwait(false);
+
+                newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            if (!dropped)
             {
                 if (ifExists)
                     return;
                 throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{name}' does not exist");
             }
 
-            List<string> grantKeys = grantsByUser.TryGetValue(normalized, out ConcurrentDictionary<string, GrantRecord>? map)
-                ? [.. map.Keys]
-                : [];
-
-            await RunInTransactionAsync(async tx =>
-            {
-                await DeleteAuthKey(tx, UserKey(normalized)).ConfigureAwait(false);
-                foreach (string scopeKey in grantKeys)
-                    await DeleteAuthKey(tx, GrantKey(normalized, scopeKey)).ConfigureAwait(false);
-            }).ConfigureAwait(false);
-
             usersByName.TryRemove(normalized, out _);
             grantsByUser.TryRemove(normalized, out _);
-            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            AdoptGeneration(newGen);
         }
         finally
         {
@@ -463,50 +472,66 @@ public sealed class AuthCatalog
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (isClusterMode)
-                await RevalidateFromKvLockedAsync(await ReadGenerationAsync().ConfigureAwait(false)).ConfigureAwait(false);
-
-            if (!usersByName.TryGetValue(normalized, out UserRecord? existingUser))
-                throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{user}' does not exist");
-
-            ConcurrentDictionary<string, GrantRecord> map = GetOrCreateGrantMap(normalized);
-            map.TryGetValue(scopeKey, out GrantRecord? current);
-            Privilege currentMask = current?.Privileges ?? Privilege.None;
-            Privilege newMask = revoke ? currentMask & ~privileges : currentMask | privileges;
-
-            if (newMask == currentMask)
-                return; // no observable change — nothing to persist
-
-            UserRecord updatedUser = existingUser.Copy();
-            updatedUser.AuthorizationEpoch = existingUser.AuthorizationEpoch + 1;
-            byte[] userBytes = MetaJsonSerializer.Serialize(updatedUser, MetaJsonContext.Default.UserRecord);
-
-            GrantRecord? updatedGrant = newMask == Privilege.None ? null : new GrantRecord
-            {
-                User = normalized,
-                Scope = scope,
-                Privileges = newMask,
-            };
-            byte[]? grantBytes = updatedGrant is null
-                ? null
-                : MetaJsonSerializer.Serialize(updatedGrant, MetaJsonContext.Default.GrantRecord);
+            UserRecord? updatedUser = null;
+            GrantRecord? updatedGrant = null;
+            bool grantDeleted = false;
+            bool noChange = false;
+            long newGen = 0;
 
             await RunInTransactionAsync(async tx =>
             {
-                await WriteAuthKeyExpectPresent(tx, UserKey(normalized), userBytes).ConfigureAwait(false);
-                if (grantBytes is null)
-                    await DeleteAuthKey(tx, GrantKey(normalized, scopeKey)).ConfigureAwait(false);
+                // Fixed lock order (user key, then grant key) avoids reverse-order deadlock. Both records
+                // are read UNDER their locks, so the new mask/epoch derive from authoritative values —
+                // two concurrent grants cannot lose an update, and a dropped user is not resurrected.
+                byte[]? userCurrent = await LockAndReadAsync(tx, UserKey(normalized)).ConfigureAwait(false);
+                if (userCurrent is null)
+                    throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{user}' does not exist");
+
+                UserRecord lockedUser = MetaJsonSerializer.Deserialize(userCurrent, MetaJsonContext.Default.UserRecord);
+
+                byte[]? grantCurrent = await LockAndReadAsync(tx, GrantKey(normalized, scopeKey)).ConfigureAwait(false);
+                Privilege currentMask = grantCurrent is null
+                    ? Privilege.None
+                    : MetaJsonSerializer.Deserialize(grantCurrent, MetaJsonContext.Default.GrantRecord).Privileges;
+
+                Privilege newMask = revoke ? currentMask & ~privileges : currentMask | privileges;
+                if (newMask == currentMask)
+                {
+                    noChange = true;
+                    return; // no observable change — nothing to persist
+                }
+
+                updatedUser = lockedUser.Copy();
+                updatedUser.AuthorizationEpoch = lockedUser.AuthorizationEpoch + 1;
+                await SetKeyLockedAsync(tx, UserKey(normalized),
+                    MetaJsonSerializer.Serialize(updatedUser, MetaJsonContext.Default.UserRecord), ifAbsent: false).ConfigureAwait(false);
+
+                if (newMask == Privilege.None)
+                {
+                    await DeleteKeyLockedAsync(tx, GrantKey(normalized, scopeKey)).ConfigureAwait(false);
+                    grantDeleted = true;
+                }
                 else
-                    await WriteAuthKey(tx, GrantKey(normalized, scopeKey), grantBytes, ifAbsent: false).ConfigureAwait(false);
+                {
+                    updatedGrant = new GrantRecord { User = normalized, Scope = scope, Privileges = newMask };
+                    await SetKeyLockedAsync(tx, GrantKey(normalized, scopeKey),
+                        MetaJsonSerializer.Serialize(updatedGrant, MetaJsonContext.Default.GrantRecord), ifAbsent: false).ConfigureAwait(false);
+                }
+
+                newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
-            usersByName[normalized] = updatedUser;
-            if (updatedGrant is null)
+            if (noChange)
+                return;
+
+            usersByName[normalized] = updatedUser!;
+            ConcurrentDictionary<string, GrantRecord> map = GetOrCreateGrantMap(normalized);
+            if (grantDeleted)
                 map.TryRemove(scopeKey, out _);
             else
-                map[scopeKey] = updatedGrant;
+                map[scopeKey] = updatedGrant!;
 
-            AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            AdoptGeneration(newGen);
         }
         finally
         {
@@ -552,15 +577,18 @@ public sealed class AuthCatalog
             byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.UserRecord);
 
             bool created = false;
+            long newGen = 0;
             await RunInTransactionAsync(async tx =>
             {
                 created = await WriteAuthKey(tx, UserKey(normalized), bytes, ifAbsent: true).ConfigureAwait(false);
+                if (created)
+                    newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
             if (created)
             {
                 usersByName[normalized] = record;
-                AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+                AdoptGeneration(newGen);
             }
             return created;
         }
@@ -630,13 +658,75 @@ public sealed class AuthCatalog
         }
     }
 
-    private Task WriteAuthKeyExpectPresent(KvTransaction tx, string key, byte[] value) =>
-        WriteAuthKey(tx, key, value, ifAbsent: false);
+    /// <summary>
+    /// Acquires the exclusive lock on <paramref name="key"/> and returns its current value read <b>under
+    /// that lock</b> within the transaction, or null if absent. This is the authoritative read for a
+    /// read-modify-write: the value cannot change between this read and a subsequent locked write, so
+    /// two nodes cannot lose each other's update and a dropped record cannot be resurrected from a stale
+    /// pre-lock copy.
+    /// </summary>
+    private async Task<byte[]?> LockAndReadAsync(KvTransaction tx, string key)
+    {
+        await AcquireKeyLock(tx, key).ConfigureAwait(false);
+
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            tx.TransactionId, key, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+        return getType == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
+    }
+
+    /// <summary>Scans the authoritative grant keys for <paramref name="normalizedUser"/> within the
+    /// transaction. Callers hold the user-key lock (which grant mutations also take), so the set is
+    /// stable for the duration of a drop.</summary>
+    private async Task<List<string>> ScanUserGrantKeysAsync(KvTransaction tx, string normalizedUser)
+    {
+        string prefix = $"{GrantKeyPrefix}{normalizedUser}:";
+        List<string> keys = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            tx.TransactionId, AuthBucket, null, true, null, true, 1000,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        {
+            if (entry.Value is not null && key.StartsWith(prefix, StringComparison.Ordinal))
+                keys.Add(key);
+        }
+
+        return keys;
+    }
+
+    /// <summary>Scans the session keys belonging to <paramref name="normalizedUser"/> so a drop can
+    /// remove them. Best-effort: a session that survives a race is already unusable (its user record is
+    /// gone, so token resolution fails), this just prevents the storage/metadata leak.</summary>
+    private async Task<List<string>> ScanUserSessionKeysAsync(KvTransaction tx, string normalizedUser)
+    {
+        List<string> keys = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            tx.TransactionId, AuthBucket, null, true, null, true, 1000,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        {
+            if (entry.Value is null || !key.StartsWith(SessionKeyPrefix, StringComparison.Ordinal))
+                continue;
+
+            SessionRecord s = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SessionRecord);
+            if (Normalize(s.User) == normalizedUser)
+                keys.Add(key);
+        }
+
+        return keys;
+    }
 
     private async Task<bool> WriteAuthKey(KvTransaction tx, string key, byte[] value, bool ifAbsent)
     {
         await AcquireKeyLock(tx, key).ConfigureAwait(false);
+        return await SetKeyLockedAsync(tx, key, value, ifAbsent).ConfigureAwait(false);
+    }
 
+    /// <summary>Sets a key whose lock is <b>already held</b> by this transaction (via
+    /// <see cref="LockAndReadAsync"/> or <see cref="AcquireKeyLock"/>). Does not re-acquire the lock.</summary>
+    private async Task<bool> SetKeyLockedAsync(KvTransaction tx, string key, byte[] value, bool ifAbsent)
+    {
         KeyValueFlags flags = ifAbsent ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
         KeyValueResponseType setType;
         int setRetries = 0;
@@ -669,7 +759,12 @@ public sealed class AuthCatalog
     private async Task DeleteAuthKey(KvTransaction tx, string key)
     {
         await AcquireKeyLock(tx, key).ConfigureAwait(false);
+        await DeleteKeyLockedAsync(tx, key).ConfigureAwait(false);
+    }
 
+    /// <summary>Deletes a key whose lock is <b>already held</b> by this transaction. Does not re-acquire.</summary>
+    private async Task DeleteKeyLockedAsync(KvTransaction tx, string key)
+    {
         KeyValueResponseType deleteType;
         int deleteRetries = 0;
         TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();

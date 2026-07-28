@@ -57,6 +57,8 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
     {
         EmbeddedKahuna kahuna = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "query-planner-test",
             Storage = "memory",
             WalStorage = "memory",

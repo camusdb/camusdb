@@ -2490,8 +2490,19 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (principal is null)
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
 
-        // Server-level user/grant administration: superuser only.
-        if (ast.nodeType is NodeType.CreateUser or NodeType.CreateUserIfNotExists or NodeType.AlterUser
+        // ALTER USER: a caller may always change THEIR OWN password; changing another user's requires
+        // superuser. (Principal.UserName is normalized; normalize the AST target to compare.)
+        if (ast.nodeType is NodeType.AlterUser)
+        {
+            string target = ast.leftAst!.yytext!.ToLowerInvariant();
+            if (principal.IsSuperuser || string.Equals(target, principal.UserName, StringComparison.Ordinal))
+                return;
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege, "Changing another user's password requires a superuser");
+        }
+
+        // Other server-level user/grant administration: superuser only.
+        if (ast.nodeType is NodeType.CreateUser or NodeType.CreateUserIfNotExists
             or NodeType.DropUser or NodeType.DropUserIfExists or NodeType.Grant or NodeType.Revoke)
         {
             if (!principal.CanAdministerUsers)
@@ -2515,22 +2526,41 @@ public sealed class CommandExecutor : IAsyncDisposable
             or NodeType.ShowOrphanDatabases or NodeType.ShowGrants)
             return;
 
-        // In-database statements: require the mapped privilege on the context database.
-        Privilege? required = MapRequiredPrivilege(ast.nodeType);
-        if (required is null)
-            return; // no privilege required (transaction control, cache eviction, etc.)
-
-        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
-        if (!registry.TryResolveId(ticket.DatabaseName, out string databaseId))
+        // CREATE TABLE is checked at DATABASE scope here — the table does not exist yet, so it cannot
+        // be a per-table grant target, and the check must happen before the table is created (not at
+        // the post-create re-open). A db.* / global CreateTable grant (or superuser) passes.
+        if (ast.nodeType is NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink)
         {
-            // Unknown database — let the normal open path surface the not-found error.
+            DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+            if (registry.TryResolveId(ticket.DatabaseName, out string createDbId)
+                && !principal.HasPrivilege(Privilege.CreateTable, createDbId, tableId: null))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege,
+                    $"Missing CreateTable privilege on database '{ticket.DatabaseName}'");
+            }
             return;
         }
 
-        if (!principal.HasPrivilege(required.Value, databaseId, tableId: null))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InsufficientPrivilege,
-                $"Missing {required.Value} privilege on database '{ticket.DatabaseName}'");
+        // Every other in-database statement is enforced PER TABLE at the resolution chokepoint
+        // (TableOpener.Open), which sees every referenced table — including join and subquery sources
+        // that never reach this statement-level gate. The ambient AuthorizationContext set by the
+        // entry point carries the principal and the statement's required privilege down to it.
+    }
+
+    /// <summary>
+    /// Publishes the request's principal and the statement's required privilege to the ambient
+    /// <see cref="AuthorizationContext"/> so the per-table check in <c>TableOpener.Open</c> can consult
+    /// them. Must be called <b>synchronously</b> from the entry method (a synchronous
+    /// <see cref="AsyncLocal{T}"/> write flows to the caller's execution context and thus down to the
+    /// table-open callees; a write inside an awaited method would not). Cleared to defaults when auth
+    /// is off so no stale scope from a pooled context leaks in.
+    /// </summary>
+    private void SetAuthorizationScope(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        AuthorizationContext.Current = CamusDBConfig.AuthenticationEnabled
+            ? new AuthorizationScope(ticket.Principal, MapRequiredPrivilege(ast.nodeType))
+            : default;
     }
 
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
@@ -2566,8 +2596,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         return authService;
     }
 
-    /// <summary>Verifies credentials and returns an opaque bearer token (see <see cref="AuthService.LoginAsync"/>).</summary>
-    public Task<string> LoginAsync(string user, string password) => RequireAuthService().LoginAsync(user, password);
+    /// <summary>Verifies credentials and returns an opaque bearer token (see <see cref="AuthService.LoginAsync"/>).
+    /// <paramref name="source"/> is the caller's origin (e.g. remote IP) for per-source rate limiting.</summary>
+    public Task<string> LoginAsync(string user, string password, string source = "") => RequireAuthService().LoginAsync(user, password, source);
 
     /// <summary>Resolves a bearer token to a <see cref="Principal"/>, or throws AuthenticationFailed.</summary>
     public Task<Principal> ResolvePrincipalAsync(string? bearer) => RequireAuthService().ResolvePrincipalAsync(bearer);
@@ -2759,6 +2790,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
+        SetAuthorizationScope(ticket, ast);
         await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(
@@ -3176,6 +3208,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         using System.Diagnostics.Activity? executeSpan = ServerDiagnostics.StartSpan(ServerDiagnostics.Spans.Execute);
         executeSpan?.SetTag("statement", MapStatementFamily(ast.nodeType));
 
+        SetAuthorizationScope(ticket, ast);
         await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         // DROP/RENAME DATABASE do not require an open database context — dispatch before Open so
@@ -3435,6 +3468,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
+        SetAuthorizationScope(ticket, ast);
         await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         // SHOW DATABASES does not require a database context — resolve the registry and return.
@@ -3482,13 +3516,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         // SHOW GRANTS reads the server-level auth catalog — no database context.
         if (ast.nodeType == NodeType.ShowGrants)
         {
-            // Phase 1 has no authenticated principal, so the bare form has no user to default to.
-            if (ast.leftAst is null)
+            // `SHOW GRANTS` (no FOR) defaults to the authenticated caller. Without a principal (auth
+            // disabled) there is no "current user", so the bare form needs an explicit FOR.
+            string? grantUser = ast.leftAst?.yytext ?? ticket.Principal?.UserName;
+            if (grantUser is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    "SHOW GRANTS requires an explicit user in this build; use SHOW GRANTS FOR <user>");
+                    "SHOW GRANTS without FOR requires an authenticated session; use SHOW GRANTS FOR <user>");
 
-            string grantUser = ast.leftAst.yytext!;
             (IReadOnlyList<GrantRecord> grants, bool userExists) = await ListGrantsForShowAsync(grantUser).ConfigureAwait(false);
             if (!userExists)
                 throw new CamusDBException(CamusDBErrorCodes.UserDoesNotExist, $"User '{grantUser}' does not exist");

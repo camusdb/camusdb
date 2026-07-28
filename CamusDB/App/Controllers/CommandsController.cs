@@ -47,10 +47,40 @@ public abstract class CommandsController : ControllerBase
     /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/> (HTTP 401) — the engine gate then never sees
     /// a null principal while auth is enabled.
     /// </summary>
+    /// <summary>
+    /// Refuses a credential-bearing request over a plaintext connection when authentication is enabled
+    /// and <see cref="CamusDBConfig.RequireTlsWhenAuthEnabled"/> is set, so a bearer token or password
+    /// is never accepted in the clear. A loopback peer is exempted for single-host development. A no-op
+    /// when auth or the TLS requirement is off.
+    /// </summary>
+    protected void EnsureSecureTransport()
+    {
+        if (!CamusDBConfig.AuthenticationEnabled || !CamusDBConfig.RequireTlsWhenAuthEnabled)
+            return;
+
+        if (Request.IsHttps)
+            return;
+
+        System.Net.IPAddress? remote = HttpContext.Connection.RemoteIpAddress;
+        if (remote is not null && System.Net.IPAddress.IsLoopback(remote))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsecureTransport,
+            "Authentication is enabled and requires a TLS (HTTPS) connection");
+    }
+
     protected async Task<Principal?> ResolveRequestPrincipalAsync()
     {
         if (!CamusDBConfig.AuthenticationEnabled)
             return null;
+
+        // The transport-wide AuthenticationMiddleware already authenticated the request and stashed the
+        // principal — reuse it rather than resolving the token a second time.
+        if (HttpContext.Items.TryGetValue("camus.principal", out object? stashed) && stashed is Principal cached)
+            return cached;
+
+        EnsureSecureTransport();
 
         string authorization = Request.Headers.Authorization.ToString();
         string? bearer = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)

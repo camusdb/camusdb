@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core;
+using CamusDB.Core.Auth;
 using System.Text.Json;
 using System.Diagnostics;
 using CamusDB.App.Models;
@@ -63,7 +64,7 @@ public sealed class ExecuteSQLController : CommandsController
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
-            Log.LogExecutingSql(logger, sql);
+            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(sql));
 
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
@@ -236,7 +237,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             sql = request.Sql ?? "";
             ast = SQLParserProcessor.Parse(sql);
-            Log.LogExecutingSql(logger, sql);
+            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(sql));
         }
         catch (Exception e)
         {
@@ -429,7 +430,7 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
-            Log.LogExecutingSql(logger, request.Sql ?? "");
+            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(request.Sql ?? ""));
 
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
@@ -536,7 +537,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            Log.LogRequestBody(logger, body);
+            Log.LogRequestBody(logger, SqlCredentialRedactor.Redact(body));
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)

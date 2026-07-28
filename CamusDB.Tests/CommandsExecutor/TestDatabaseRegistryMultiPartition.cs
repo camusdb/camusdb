@@ -50,6 +50,8 @@ internal sealed class TestDatabaseRegistryMultiPartition
 
         sharedNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-mp-test",
             Storage = "memory",
             WalStorage = "memory",
@@ -94,6 +96,8 @@ internal sealed class TestDatabaseRegistryMultiPartition
 
         EmbeddedKahuna coldNode = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-coldopen-test",
             Storage = "memory",
             WalStorage = "memory",

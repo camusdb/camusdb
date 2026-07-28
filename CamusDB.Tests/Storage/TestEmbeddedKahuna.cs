@@ -386,6 +386,8 @@ public sealed class TestEmbeddedKahuna
         return new(
             new EmbeddedKahunaOptions
             {
+                ReadIOThreads = 1,
+                WriteIOThreads = 1,
                 NodeName = nodeName,
                 NodeId = nodeId,
                 Host = "localhost",

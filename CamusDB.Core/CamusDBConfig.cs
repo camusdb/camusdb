@@ -775,6 +775,31 @@ public static class CamusDBConfig
     public static int AuthenticationCacheMaxEntries = 10_000;
 
     /// <summary>
+    /// Upper bound on the login rate-limiter's tracked (account, source) keys. Beyond it the limiter
+    /// purges expired windows and, if still full, fails login closed — so a flood of unique account or
+    /// source values cannot grow memory without bound.
+    /// </summary>
+    public static int LoginRateLimitMaxEntries = 100_000;
+
+    /// <summary>
+    /// When authentication is enabled, refuse credential-bearing requests that arrive over a plaintext
+    /// (non-TLS) connection, since a bearer token or password on the wire is trivially stolen. A
+    /// loopback peer is exempted so single-host development works without certificates. Default
+    /// <c>true</c> (secure by default); set false only for a trusted network where TLS is terminated
+    /// elsewhere.
+    /// </summary>
+    public static bool RequireTlsWhenAuthEnabled = true;
+
+    /// <summary>
+    /// Shared secret authenticating node-to-node cluster forwarding routes (<c>/internal/*</c>) when
+    /// authentication is enabled, so a public user cannot drive them. Sourced from an external secret /
+    /// environment, common to every node. When authentication is enabled and this is empty, the
+    /// internal routes are refused (fail-closed) — they must be configured before a cluster runs with
+    /// auth on.
+    /// </summary>
+    public static string NodeSecret = "";
+
+    /// <summary>
     /// Number of row ids buffered from a non-covering secondary-index scan before issuing one
     /// <c>GetRowsBatch</c> call. Batching collapses N sequential Kahuna actor round-trips into
     /// one per page, keeping primary-row fetches snapshot-consistent with the scan via the

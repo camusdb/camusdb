@@ -202,6 +202,13 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string TooManyAuthAttempts = "CADB0518";
 
+    /// <summary>
+    /// A credential-bearing request arrived over a plaintext (non-TLS) connection while authentication
+    /// is enabled and TLS is required. Refused so a token/password is never accepted in the clear.
+    /// Maps to HTTP 400.
+    /// </summary>
+    public const string InsecureTransport = "CADB0519";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -217,6 +224,7 @@ public static class CamusDBErrorCodes
         CommentTooLong => 400,
         UnsupportedAuthPlugin => 400,
         InvalidPrivilege => 400,
+        InsecureTransport => 400,
         AuthenticationFailed => 401,
         InsufficientPrivilege => 403,
         OrphanNotFound => 404,

@@ -25,6 +25,10 @@ public static class TokenCodec
     private const int TokenIdBytes = 16;
     private const int SecretBytes = 32;
 
+    // Generous upper bounds on each base64url part, so a malformed oversized token is rejected cheaply
+    // before any string/HMAC allocation. 16/32 random bytes encode to ~22/~43 chars; 64 leaves slack.
+    private const int MaxPartChars = 64;
+
     public readonly record struct MintedToken(string Bearer, string TokenId, string Secret);
 
     /// <summary>Generates a fresh token. Both halves come from <see cref="RandomNumberGenerator"/>.</summary>
@@ -44,7 +48,8 @@ public static class TokenCodec
         tokenId = "";
         secret = "";
 
-        if (string.IsNullOrEmpty(bearer) || !bearer.StartsWith(Prefix, StringComparison.Ordinal))
+        if (string.IsNullOrEmpty(bearer) || bearer.Length > Prefix.Length + 2 * MaxPartChars + 1
+            || !bearer.StartsWith(Prefix, StringComparison.Ordinal))
             return false;
 
         string body = bearer[Prefix.Length..];
@@ -54,7 +59,7 @@ public static class TokenCodec
 
         tokenId = body[..dot];
         secret = body[(dot + 1)..];
-        return tokenId.Length > 0 && secret.Length > 0;
+        return tokenId.Length is > 0 and <= MaxPartChars && secret.Length is > 0 and <= MaxPartChars;
     }
 
     /// <summary>Keyed HMAC-SHA256 of <c>tokenId + secret</c> — the value stored per session.</summary>

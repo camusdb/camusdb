@@ -48,6 +48,8 @@ public sealed class TestDatabaseOpener : BaseTest
     {
         await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "test-cluster-opener",
             Storage = "memory",
             WalStorage = "memory",

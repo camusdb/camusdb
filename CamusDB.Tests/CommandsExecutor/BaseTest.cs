@@ -77,6 +77,8 @@ public abstract class BaseTest
         {
             testNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
             {
+                ReadIOThreads = 1,
+                WriteIOThreads = 1,
                 NodeName = $"test-{Guid.NewGuid():N}",
                 Storage = "memory",
                 WalStorage = "memory",

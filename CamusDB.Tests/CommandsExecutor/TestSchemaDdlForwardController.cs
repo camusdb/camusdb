@@ -59,6 +59,8 @@ public sealed class TestSchemaDdlForwardController
     {
         node = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = $"ctrl-test-{Guid.NewGuid():N}",
             Storage = "memory",
             WalStorage = "memory",

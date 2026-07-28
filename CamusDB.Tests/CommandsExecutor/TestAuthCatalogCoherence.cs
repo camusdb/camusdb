@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 
+using CamusDB.Core;
 using CamusDB.Core.Auth;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -120,5 +121,95 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
 
         Assert.AreEqual(Privilege.Select, (await b.ListGrantsAsync(user)).Single().Privileges,
             "a revoke on another node must be reflected after revalidation");
+    }
+
+    /// <summary>H4 — a user dropped on node A must not be resurrected by an ALTER on node B whose cache
+    /// still shows the user. The locked authoritative read must see the user gone.</summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropThenAlterOnStaleNode_DoesNotResurrectUser()
+    {
+        (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
+
+        string user = "coh_" + Guid.NewGuid().ToString("n");
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x"), ifNotExists: false);
+        Assert.IsNotNull(await b.TryGetUserAsync(user)); // warm B's cache with the user
+
+        await a.DropUserAsync(user, ifExists: false);
+
+        // B's cache still shows the user, but the locked read must see it dropped.
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await b.SetPasswordAsync(user, PasswordHasher.Hash("new")))!;
+        Assert.AreEqual(CamusDBErrorCodes.UserDoesNotExist, ex.Code);
+
+        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, isClusterMode: true);
+        Assert.IsNull(await c.TryGetUserAsync(user), "the dropped user must stay gone");
+    }
+
+    /// <summary>H4 — a GRANT on a stale node must not resurrect a dropped user.</summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropThenGrantOnStaleNode_DoesNotResurrectUser()
+    {
+        (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
+
+        string user = "coh_" + Guid.NewGuid().ToString("n");
+        await a.CreateUserAsync(user, null, ifNotExists: false);
+        Assert.IsNotNull(await b.TryGetUserAsync(user));
+
+        await a.DropUserAsync(user, ifExists: false);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await b.GrantAsync(user, DbScope("db1"), Privilege.Select, revoke: false))!;
+        Assert.AreEqual(CamusDBErrorCodes.UserDoesNotExist, ex.Code);
+    }
+
+    /// <summary>H11 — DROP USER must remove that user's sessions, not just the user and grant keys.</summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropUser_RemovesSessions()
+    {
+        (AuthCatalog a, _) = await TwoNodesAsync();
+
+        string user = "coh_" + Guid.NewGuid().ToString("n");
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x"), ifNotExists: false);
+
+        SessionRecord session = new()
+        {
+            TokenId = "tok" + Guid.NewGuid().ToString("n"),
+            User = user,
+            SecretMac = [1, 2, 3],
+            IssuedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddMinutes(15),
+        };
+        await a.CreateSessionAsync(session);
+        Assert.IsNotNull(await a.TryGetSessionAsync(session.TokenId));
+
+        await a.DropUserAsync(user, ifExists: false);
+
+        Assert.IsNull(await a.TryGetSessionAsync(session.TokenId),
+            "DROP USER must delete the user's sessions");
+    }
+
+    /// <summary>H3 — two nodes granting different privileges to the same (user, scope) must not lose an
+    /// update: the second grant reads the first's committed mask under lock and unions onto it.</summary>
+    [Test]
+    [NonParallelizable]
+    public async Task ConcurrentGrantsFromTwoNodes_DoNotLoseUpdate()
+    {
+        (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
+
+        string user = "coh_" + Guid.NewGuid().ToString("n");
+        await a.CreateUserAsync(user, null, ifNotExists: false);
+        Assert.IsEmpty(await b.ListGrantsAsync(user)); // warm B (user present, no grants)
+
+        await a.GrantAsync(user, DbScope("db1"), Privilege.Select, revoke: false);
+
+        // B's cache still shows no grant, but its locked read must see A's committed Select and union.
+        await b.GrantAsync(user, DbScope("db1"), Privilege.Insert, revoke: false);
+
+        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, isClusterMode: true);
+        Assert.AreEqual(Privilege.Select | Privilege.Insert, (await c.ListGrantsAsync(user)).Single().Privileges,
+            "both nodes' grants must survive — no lost update");
     }
 }

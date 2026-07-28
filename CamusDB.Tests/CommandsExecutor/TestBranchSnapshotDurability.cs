@@ -68,6 +68,8 @@ public sealed class TestBranchSnapshotDurability
 
         node = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = $"snaptest-{Guid.NewGuid():N}",
             Storage = "memory",
             WalStorage = "memory",

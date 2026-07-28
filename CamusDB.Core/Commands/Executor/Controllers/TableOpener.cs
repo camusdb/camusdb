@@ -62,6 +62,23 @@ internal sealed class TableOpener
 
         TableSchema tableSchema = catalogs.GetTableSchema(database, tableName);
 
+        // Per-table privilege enforcement. This is the universal chokepoint for a table access — every
+        // top-level, join, subquery, semi-join, DML, DDL, and EXPLAIN path resolves its descriptor here
+        // — so the check must live in Open (which runs on every access), not LoadTable (cache miss only).
+        // The required privilege and principal ride the ambient AuthorizationContext set by the request
+        // entry point. A superuser and any broader-scope (global / db.*) grant pass via HasPrivilege.
+        if (CamusDBConfig.AuthenticationEnabled)
+        {
+            AuthorizationScope scope = AuthorizationContext.Current;
+            if (scope.Principal is not null && scope.RequiredPrivilege is { } required
+                && !scope.Principal.HasPrivilege(required, database.Id, tableSchema.Id))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege,
+                    $"Missing {required} privilege on table '{database.Name}.{tableName}'");
+            }
+        }
+
         AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
                                                         tableSchema.Name ?? "",
                                                         (_) => new(() => LoadTable(database, tableSchema))

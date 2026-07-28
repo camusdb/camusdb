@@ -52,6 +52,8 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
 
         node = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = $"test-multipart-{System.Guid.NewGuid():N}",
             Storage = "sqlite",
             StoragePath = storageRoot,

@@ -81,6 +81,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         if (!CamusDBConfig.AuthenticationEnabled)
             return null;
 
+        EnsureSecureTransport(context);
+
         string? authorization = context.RequestHeaders.GetValue("authorization");
         string? bearer = authorization is not null
                          && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
@@ -88,6 +90,39 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             : null;
 
         return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses a plaintext gRPC call when authentication is enabled and TLS is required, mirroring the
+    /// REST <c>EnsureSecureTransport</c>. A loopback peer is exempt for single-host development. Skipped
+    /// when the call has no ASP.NET <see cref="HttpContext"/> (e.g. in-process unit tests) since
+    /// transport security cannot be assessed there.
+    /// </summary>
+    private static void EnsureSecureTransport(ServerCallContext context)
+    {
+        if (!CamusDBConfig.AuthenticationEnabled || !CamusDBConfig.RequireTlsWhenAuthEnabled)
+            return;
+
+        HttpContext? http;
+        try
+        {
+            http = context.GetHttpContext();
+        }
+        catch
+        {
+            return; // no ASP.NET HttpContext (e.g. an in-process unit-test call) — cannot assess transport
+        }
+
+        if (http is null || http.Request.IsHttps)
+            return;
+
+        System.Net.IPAddress? remote = http.Connection.RemoteIpAddress;
+        if (remote is not null && System.Net.IPAddress.IsLoopback(remote))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsecureTransport,
+            "Authentication is enabled and requires a TLS connection");
     }
 
     // ─── ExecuteQuery (server-streaming) ─────────────────────────────────────

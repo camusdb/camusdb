@@ -42,6 +42,8 @@ public sealed class TestKahunaKeyRoundTrip
     private static EmbeddedKahunaNode CreateNode() =>
         new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1

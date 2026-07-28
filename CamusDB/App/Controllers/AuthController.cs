@@ -36,11 +36,15 @@ public sealed class AuthController : CommandsController
 
         try
         {
+            // A password must never travel over a plaintext connection.
+            EnsureSecureTransport();
+
             LoginRequest? request = await JsonSerializer.DeserializeAsync<LoginRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
             if (request is null || string.IsNullOrEmpty(request.User) || request.Password is null)
                 throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
 
-            string token = await executor.LoginAsync(request.User, request.Password).ConfigureAwait(false);
+            string source = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
+            string token = await executor.LoginAsync(request.User, request.Password, source).ConfigureAwait(false);
             return new JsonResult(new LoginResponse("ok", token: token));
         }
         catch (CamusDBException e)

@@ -251,6 +251,40 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     }
 
     [Test]
+    public async Task ShowGrants_NoFor_ReturnsOwnGrants()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+        await RunDdl(executor, "", "CREATE USER viewer IDENTIFIED BY 'v-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO viewer", root);
+        Principal viewer = await LoginAsync(executor, "viewer", "v-pw");
+
+        // SHOW GRANTS with no FOR defaults to the caller.
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(txnState: null!, database: "", sql: "SHOW GRANTS", parameters: null, principal: viewer));
+        List<QueryResultRow> rows = new();
+        await foreach (QueryResultRow row in cursor) rows.Add(row);
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual("viewer", rows[0].Row["user"].StrValue);
+    }
+
+    [Test]
+    public async Task SelfPasswordChange_Allowed_OthersDenied()
+    {
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+        await RunDdl(executor, "", "CREATE USER selfie IDENTIFIED BY 'old-pw'", root);
+        Principal selfie = await LoginAsync(executor, "selfie", "old-pw");
+
+        // A non-superuser may change their OWN password.
+        await RunDdl(executor, "", "ALTER USER selfie IDENTIFIED BY 'new-pw'", selfie);
+
+        // But not someone else's.
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, "", "ALTER USER root IDENTIFIED BY 'hijack'", selfie))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+    }
+
+    [Test]
     public async Task BootstrapFailsClosed_WhenNoSecret()
     {
         CamusConfig.AccessTokenServerKey = "test-server-key";

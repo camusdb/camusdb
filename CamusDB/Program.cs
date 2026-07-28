@@ -348,6 +348,10 @@ app.UseStaticFiles();
 // SQL/API work (autocommit statements the explicit-transaction coordinator does not see).
 app.UseMiddleware<CamusDB.App.Services.ForegroundRequestGaugeMiddleware>();
 
+// Transport-wide authentication: rejects unauthenticated requests to every data/DDL/transaction route
+// (not just /execute-sql-*) when auth is enabled, and publishes the principal for per-table enforcement.
+app.UseMiddleware<CamusDB.App.Middleware.AuthenticationMiddleware>();
+
 app.MapControllers();
 
 app.UseRouting();
@@ -394,6 +398,8 @@ CamusDBConfig.BootstrapSuperuser =
     Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "";
 CamusDBConfig.BootstrapSuperuserPassword =
     Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "";
+CamusDBConfig.NodeSecret =
+    Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "";
 
 // Seed the bootstrap superuser when auth is enabled and the catalog is empty; fail-closed (refuse to
 // start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.

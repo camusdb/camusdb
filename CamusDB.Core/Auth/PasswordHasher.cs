@@ -70,6 +70,12 @@ public static class PasswordHasher
             || credential.Hash.Length == 0 || credential.Iterations <= 0)
             return false;
 
+        // Reject an oversized password BEFORE the KDF, so an attacker-sized login input cannot turn one
+        // verification into a CPU/allocation denial-of-service lever (the /login path reaches Verify
+        // with attacker-controlled input).
+        if (Encoding.UTF8.GetByteCount(password) > CamusDBConfig.MaxPasswordBytes)
+            return false;
+
         byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
         byte[] candidate = Rfc2898DeriveBytes.Pbkdf2(
             passwordBytes, credential.Salt, credential.Iterations, HashAlgorithmName.SHA256, credential.Hash.Length);

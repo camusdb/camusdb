@@ -44,6 +44,8 @@ internal sealed class TestDatabaseBranchAncestry
 
         sharedNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "ancestry-test",
             Storage = "memory",
             WalStorage = "memory",
@@ -277,6 +279,8 @@ internal sealed class TestDatabaseBranchAncestry
         // TryResolveEntryAsync on r2 must fall back to Kahuna and return the full entry.
         await using EmbeddedKahuna node = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "ancestry-fallback-test-" + Guid.NewGuid().ToString("n"),
             Storage = "memory",
             WalStorage = "memory",

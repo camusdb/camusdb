@@ -43,6 +43,8 @@ internal sealed class TestDatabaseRegistry
 
         sharedNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-test",
             Storage = "memory",
             WalStorage = "memory",
@@ -562,6 +564,8 @@ internal sealed class TestDatabaseRegistry
     {
         await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-cluster-test",
             Storage = "memory",
             WalStorage = "memory",
@@ -592,6 +596,8 @@ internal sealed class TestDatabaseRegistry
     {
         await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-fallback-test",
             Storage = "memory",
             WalStorage = "memory",
@@ -645,6 +651,8 @@ internal sealed class TestDatabaseRegistry
     {
         await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-cas-test-" + Guid.NewGuid().ToString("n"),
             Storage = "memory",
             WalStorage = "memory",
@@ -696,6 +704,8 @@ internal sealed class TestDatabaseRegistry
     {
         await using EmbeddedKahuna clusterNode = new(new EmbeddedKahunaOptions
         {
+            ReadIOThreads = 1,
+            WriteIOThreads = 1,
             NodeName = "registry-rename-cas-test-" + Guid.NewGuid().ToString("n"),
             Storage = "memory",
             WalStorage = "memory",
