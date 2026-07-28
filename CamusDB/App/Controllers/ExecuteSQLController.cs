@@ -43,6 +43,25 @@ public sealed class ExecuteSQLController : CommandsController
         return dtos;
     }
 
+    // The credential redaction runs only when the log level is enabled, so it is not "expensive and
+    // unnecessary". CA1873's guard recognition does not extend to the source-generated Log.* form, so
+    // it is suppressed here rather than on every call site.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1873",
+        Justification = "Redaction is guarded by IsEnabled; analyzer does not recognize the source-generated Log method.")]
+    private void LogExecutingSqlRedacted(string sql)
+    {
+        if (logger.IsEnabled(LogLevel.Debug))
+            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(sql));
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1873",
+        Justification = "Redaction is guarded by IsEnabled; analyzer does not recognize the source-generated Log method.")]
+    private void LogRequestBodyRedacted(string body)
+    {
+        if (logger.IsEnabled(LogLevel.Information))
+            Log.LogRequestBody(logger, SqlCredentialRedactor.Redact(body));
+    }
+
     [HttpPost]
     [Route("/execute-sql-query")]
     public async Task<JsonResult> ExecuteSQLQuery()
@@ -64,7 +83,7 @@ public sealed class ExecuteSQLController : CommandsController
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
-            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(sql));
+            LogExecutingSqlRedacted(sql);
 
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
@@ -237,7 +256,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             sql = request.Sql ?? "";
             ast = SQLParserProcessor.Parse(sql);
-            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(sql));
+            LogExecutingSqlRedacted(sql);
         }
         catch (Exception e)
         {
@@ -430,7 +449,7 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
-            Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(request.Sql ?? ""));
+            LogExecutingSqlRedacted(request.Sql ?? "");
 
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
@@ -537,7 +556,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            Log.LogRequestBody(logger, SqlCredentialRedactor.Redact(body));
+            LogRequestBodyRedacted(body);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)

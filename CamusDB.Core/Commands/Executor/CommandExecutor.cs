@@ -2631,7 +2631,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             CamusDBConfig.BootstrapSuperuser,
             PasswordHasher.Hash(CamusDBConfig.BootstrapSuperuserPassword)).ConfigureAwait(false);
 
-        if (created)
+        if (created && logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Bootstrap superuser '{User}' created", CamusDBConfig.BootstrapSuperuser);
     }
 
