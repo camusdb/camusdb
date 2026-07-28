@@ -20,11 +20,24 @@ public readonly struct ExecuteSQLTicket
 
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
-    public ExecuteSQLTicket(KvTransaction txnState, string database, string sql, Dictionary<string, ColumnValue>? parameters)
+    /// <summary>
+    /// The authenticated caller, resolved by the transport from a bearer token and used by the
+    /// privilege gate. Null when authentication is disabled (the default) — the gate then does nothing.
+    /// A null principal with authentication <b>enabled</b> is rejected as unauthenticated.
+    /// </summary>
+    public Principal? Principal { get; }
+
+    public ExecuteSQLTicket(
+        KvTransaction txnState,
+        string database,
+        string sql,
+        Dictionary<string, ColumnValue>? parameters,
+        Principal? principal = null)
     {
         TxnState = txnState;
         DatabaseName = database;
         Sql = sql;
         Parameters = parameters;
+        Principal = principal;
     }
 }

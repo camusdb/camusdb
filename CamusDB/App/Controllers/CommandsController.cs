@@ -10,6 +10,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using CamusDB.App.Models;
 using CamusDB.App.Services;
@@ -37,6 +38,26 @@ public abstract class CommandsController : ControllerBase
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         };
+    }
+
+    /// <summary>
+    /// Resolves the authenticated principal for the current request from the <c>Authorization: Bearer</c>
+    /// header. Returns <c>null</c> when <see cref="CamusDBConfig.AuthenticationEnabled"/> is off (no auth
+    /// in force). When on, a missing/invalid/expired token throws
+    /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/> (HTTP 401) — the engine gate then never sees
+    /// a null principal while auth is enabled.
+    /// </summary>
+    protected async Task<Principal?> ResolveRequestPrincipalAsync()
+    {
+        if (!CamusDBConfig.AuthenticationEnabled)
+            return null;
+
+        string authorization = Request.Headers.Authorization.ToString();
+        string? bearer = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? authorization["Bearer ".Length..].Trim()
+            : null;
+
+        return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
     }
 
     protected async Task<(bool NewTransaction, KvTransaction Tx)> BeginOrResumeAsync(

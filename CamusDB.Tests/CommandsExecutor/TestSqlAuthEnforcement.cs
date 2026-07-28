@@ -1,0 +1,270 @@
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using NUnit.Framework;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+using CamusDB.Core;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+using CamusConfig = CamusDB.Core.CamusDBConfig;
+
+namespace CamusDB.Tests.CommandsExecutor;
+
+/// <summary>
+/// End-to-end Phase 2 authentication + privilege enforcement, driven through the real
+/// <see cref="CommandExecutor"/> entry points. Enforcement lives in the engine (keyed off the ticket's
+/// <see cref="Principal"/>); authentication (login → token → principal) is exercised via the executor's
+/// auth service, so no HTTP transport is needed. The auth config flag is toggled per test and reset in
+/// teardown.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+internal sealed class TestSqlAuthEnforcement : BaseTest
+{
+    private bool savedEnabled;
+    private string savedServerKey = "";
+    private string savedBootstrapUser = "";
+    private string savedBootstrapPassword = "";
+    private TimeSpan savedCacheTtl;
+
+    [SetUp]
+    public void SaveAuthConfig()
+    {
+        savedEnabled = CamusConfig.AuthenticationEnabled;
+        savedServerKey = CamusConfig.AccessTokenServerKey;
+        savedBootstrapUser = CamusConfig.BootstrapSuperuser;
+        savedBootstrapPassword = CamusConfig.BootstrapSuperuserPassword;
+        savedCacheTtl = CamusConfig.AuthenticationCacheTtl;
+    }
+
+    [TearDown]
+    public void RestoreAuthConfig()
+    {
+        CamusConfig.AuthenticationEnabled = savedEnabled;
+        CamusConfig.AccessTokenServerKey = savedServerKey;
+        CamusConfig.BootstrapSuperuser = savedBootstrapUser;
+        CamusConfig.BootstrapSuperuserPassword = savedBootstrapPassword;
+        CamusConfig.AuthenticationCacheTtl = savedCacheTtl;
+    }
+
+    private static void EnableAuth()
+    {
+        CamusConfig.AccessTokenServerKey = "test-server-key";
+        CamusConfig.BootstrapSuperuser = "root";
+        CamusConfig.BootstrapSuperuserPassword = "root-password";
+        CamusConfig.AuthenticationEnabled = true;
+    }
+
+    private static async Task<Principal> LoginAsync(CommandExecutor executor, string user, string password)
+    {
+        string token = await executor.LoginAsync(user, password);
+        return await executor.ResolvePrincipalAsync(token);
+    }
+
+    private static Task RunDdl(CommandExecutor executor, string dbname, string sql, Principal? principal)
+        => executor.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: dbname, sql: sql, parameters: null, principal: principal));
+
+    private static async Task RunTxnDdl(CommandExecutor executor, string dbname, string sql, Principal? principal)
+    {
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname, sql, null, principal));
+        await db.Transactions.CommitAsync(tx);
+    }
+
+    private static async Task RunQuery(CommandExecutor executor, string dbname, string sql, Principal? principal)
+    {
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null, principal));
+        await foreach (QueryResultRow _ in cursor) { }
+        await db.Transactions.CommitAsync(tx);
+    }
+
+    private static async Task RunNonQuery(CommandExecutor executor, string dbname, string sql, Principal? principal)
+    {
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null, principal));
+        await db.Transactions.CommitAsync(tx);
+    }
+
+    // Builds a database with a superuser (bootstrapped) and a table, all before/with auth as noted.
+    private async Task<(string dbname, CommandExecutor executor, Principal root)> SetupWithSuperuser()
+    {
+        EnableAuth();
+
+        // CreateDatabase is a direct API call (not a SQL statement), so it bypasses the SQL gate — fine
+        // for test setup. Use a letter-prefixed name so it is a valid bare identifier in SQL.
+        CommandExecutor executor = CreateCommandExecutor();
+        string dbname = "authdb" + Guid.NewGuid().ToString("n");
+        await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
+        TrackDatabase(dbname, executor);
+
+        await executor.EnsureBootstrapSuperuserAsync();
+        Principal root = await LoginAsync(executor, "root", "root-password");
+
+        await RunTxnDdl(executor, dbname, "CREATE TABLE items (id int64 PRIMARY KEY NOT NULL, name string NOT NULL)", root);
+        return (dbname, executor, root);
+    }
+
+    [Test]
+    public async Task Disabled_NoPrincipalRequired()
+    {
+        // Auth off (default in teardown state): statements run with no principal, as before Phase 2.
+        CamusConfig.AuthenticationEnabled = false;
+
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await RunTxnDdl(executor, dbname, "CREATE TABLE t (id int64 PRIMARY KEY NOT NULL)", principal: null);
+        await RunQuery(executor, dbname, "SELECT id FROM t", principal: null);
+        Assert.Pass();
+    }
+
+    [Test]
+    public async Task Enabled_NullPrincipalRejected()
+    {
+        (string dbname, CommandExecutor executor, _) = await SetupWithSuperuser();
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunQuery(executor, dbname, "SELECT id FROM items", principal: null))!;
+        Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ex.Code);
+    }
+
+    [Test]
+    public async Task WrongPassword_AuthenticationFailed()
+    {
+        (_, CommandExecutor executor, _) = await SetupWithSuperuser();
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.LoginAsync("root", "wrong-password"))!;
+        Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ex.Code);
+    }
+
+    [Test]
+    public async Task Superuser_CanAdministerAndAccess()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        // Superuser bypasses every check: create a user, grant, select, insert.
+        await RunDdl(executor, "", "CREATE USER app IDENTIFIED BY 'app-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO app", root);
+        await RunQuery(executor, dbname, "SELECT id FROM items", root);
+    }
+
+    [Test]
+    public async Task GrantedUser_SelectAllowed_InsertDenied()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER reader IDENTIFIED BY 'reader-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO reader", root);
+
+        Principal reader = await LoginAsync(executor, "reader", "reader-pw");
+
+        // SELECT is granted.
+        await RunQuery(executor, dbname, "SELECT id FROM items", reader);
+
+        // INSERT is not.
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunNonQuery(executor, dbname, "INSERT INTO items (id, name) VALUES (1, 'x')", reader))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+    }
+
+    [Test]
+    public async Task NonSuperuser_CannotAdministerUsers()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER plain IDENTIFIED BY 'plain-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT, INSERT ON {dbname}.* TO plain", root);
+        Principal plain = await LoginAsync(executor, "plain", "plain-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, "", "CREATE USER sneaky IDENTIFIED BY 'x'", plain))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+    }
+
+    [Test]
+    public async Task RevokedPrivilege_StopsWorking()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER svc IDENTIFIED BY 'svc-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO svc", root);
+
+        // A token obtained now must reflect a later revoke within the cache TTL; use a fresh login
+        // after the revoke to get the current authorization snapshot.
+        await RunDdl(executor, "", $"REVOKE SELECT ON {dbname}.* FROM svc", root);
+        Principal svc = await LoginAsync(executor, "svc", "svc-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunQuery(executor, dbname, "SELECT id FROM items", svc))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+    }
+
+    [Test]
+    public async Task PasswordRotation_InvalidatesToken()
+    {
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        // Force authoritative validation on every resolve so the old token is checked against the
+        // catalog immediately (the default 1s cache would otherwise serve it until the TTL elapses —
+        // that documented staleness bound is covered by the token-cache tests, not here).
+        CamusConfig.AuthenticationCacheTtl = TimeSpan.Zero;
+
+        await RunDdl(executor, "", "CREATE USER rot IDENTIFIED BY 'old-pw'", root);
+        string token = await executor.LoginAsync("rot", "old-pw");
+        // Token resolves fine now.
+        await executor.ResolvePrincipalAsync(token);
+
+        // Superuser rotates rot's password → credential epoch advances → old token invalid.
+        await RunDdl(executor, "", "ALTER USER rot IDENTIFIED BY 'new-pw'", root);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ResolvePrincipalAsync(token))!;
+        Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ex.Code);
+    }
+
+    [Test]
+    public async Task Logout_InvalidatesToken()
+    {
+        (_, CommandExecutor executor, _) = await SetupWithSuperuser();
+
+        string token = await executor.LoginAsync("root", "root-password");
+        await executor.ResolvePrincipalAsync(token);
+
+        await executor.LogoutAsync(token);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ResolvePrincipalAsync(token))!;
+        Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ex.Code);
+    }
+
+    [Test]
+    public async Task BootstrapFailsClosed_WhenNoSecret()
+    {
+        CamusConfig.AccessTokenServerKey = "test-server-key";
+        CamusConfig.BootstrapSuperuser = "";
+        CamusConfig.BootstrapSuperuserPassword = "";
+        CamusConfig.AuthenticationEnabled = true;
+
+        CommandExecutor executor = CreateCommandExecutor();
+        string dbname = "authdb" + Guid.NewGuid().ToString("n");
+        await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
+        TrackDatabase(dbname, executor);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.EnsureBootstrapSuperuserAsync())!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidConfig, ex.Code);
+    }
+}

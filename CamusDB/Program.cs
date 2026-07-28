@@ -383,6 +383,25 @@ await camus.Initialize();
 
 CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
 
+// Authentication configuration is sourced from the environment / secret provider, never config.yml
+// (a plaintext key or bootstrap password in config.yml would be a leak). The flag defaults off, so a
+// deployment that sets nothing keeps today's unauthenticated behavior.
+CamusDBConfig.AuthenticationEnabled = string.Equals(
+    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase);
+CamusDBConfig.AccessTokenServerKey =
+    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? CamusDBConfig.AccessTokenServerKey;
+CamusDBConfig.BootstrapSuperuser =
+    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "";
+CamusDBConfig.BootstrapSuperuserPassword =
+    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "";
+
+// Seed the bootstrap superuser when auth is enabled and the catalog is empty; fail-closed (refuse to
+// start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.
+await commandExecutor.EnsureBootstrapSuperuserAsync();
+
+// The bootstrap password was only needed to seed the first hash — drop it from process memory.
+CamusDBConfig.BootstrapSuperuserPassword = "";
+
 // Give the background auto-analyze scheduler a foreground-load signal so it backs off under load:
 // explicit transactions plus in-flight autocommit data requests.
 {

@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 27/07/2026 8:23:07 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 27/07/2026 8:23:07 PM>
+// DateTime: 27/07/2026 11:25:13 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 27/07/2026 11:25:13 PM>
 
 // options: no-lines gplex
 
@@ -38,7 +38,7 @@ internal enum Token {error=2,EOF=3,TOR=4,TAND=5,TNOT=6,
     TBRANCH=109,TBRANCHES=110,TANCESTORS=111,TEVICT=112,TFORCE=113,TRELINK=114,
     TORPHAN=115,TCASE=116,TWHEN=117,TTHEN=118,TELSE=119,TEND=120,
     TINCLUDE=121,TASOFSYSTEMTIME=122,TCOMMENT=123,TUSER=124,TIDENTIFIED=125,TWITH=126,
-    TGRANT=127,TGRANTS=128,TREVOKE=129,TPRIVILEGES=130,TALL=131,TFOR=132};
+    TGRANT=127,TGRANTS=128,TREVOKE=129,TPRIVILEGES=130,TFOR=131};
 
 internal partial struct ValueType
 { 
@@ -825,7 +825,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     states[716] = new State(new int[]{84,717,86,718});
     states[717] = new State(-178);
     states[718] = new State(-179);
-    states[719] = new State(new int[]{132,720,3,-180});
+    states[719] = new State(new int[]{131,720,3,-180});
     states[720] = new State(new int[]{30,92,75,94},new int[]{-49,721,-138,90,-82,91,-139,93});
     states[721] = new State(new int[]{26,88,3,-181});
     states[722] = new State(new int[]{30,92,75,94},new int[]{-49,723,-138,90,-82,91,-139,93});
@@ -884,7 +884,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     states[775] = new State(-24);
     states[776] = new State(-25);
     states[777] = new State(-26);
-    states[778] = new State(new int[]{35,795,47,796,44,797,46,798,50,799,73,801,71,802,70,803,131,804},new int[]{-60,779,-61,806});
+    states[778] = new State(new int[]{35,795,47,796,44,797,46,798,50,799,73,801,71,802,70,803,30,804},new int[]{-60,779,-61,806});
     states[779] = new State(new int[]{95,780,34,793});
     states[780] = new State(new int[]{22,781,30,92,75,94},new int[]{-49,786,-138,90,-82,91,-139,93});
     states[781] = new State(new int[]{26,782});
@@ -899,7 +899,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     states[790] = new State(new int[]{26,88,3,-107});
     states[791] = new State(new int[]{30,92,75,94},new int[]{-49,792,-138,90,-82,91,-139,93});
     states[792] = new State(new int[]{26,88,3,-108});
-    states[793] = new State(new int[]{35,795,47,796,44,797,46,798,50,799,73,801,71,802,70,803,131,804},new int[]{-61,794});
+    states[793] = new State(new int[]{35,795,47,796,44,797,46,798,50,799,73,801,71,802,70,803,30,804},new int[]{-61,794});
     states[794] = new State(-112);
     states[795] = new State(-114);
     states[796] = new State(-115);
@@ -914,7 +914,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     states[805] = new State(-123);
     states[806] = new State(-113);
     states[807] = new State(-27);
-    states[808] = new State(new int[]{35,795,47,796,44,797,46,798,50,799,73,801,71,802,70,803,131,804},new int[]{-60,809,-61,806});
+    states[808] = new State(new int[]{35,795,47,796,44,797,46,798,50,799,73,801,71,802,70,803,30,804},new int[]{-60,809,-61,806});
     states[809] = new State(new int[]{95,810,34,793});
     states[810] = new State(new int[]{22,811,30,92,75,94},new int[]{-49,816,-138,90,-82,91,-139,93});
     states[811] = new State(new int[]{26,812});
@@ -1054,8 +1054,8 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     rules[120] = new Rule(-61, new int[]{71});
     rules[121] = new Rule(-61, new int[]{70});
     rules[122] = new Rule(-61, new int[]{50});
-    rules[123] = new Rule(-61, new int[]{131,130});
-    rules[124] = new Rule(-61, new int[]{131});
+    rules[123] = new Rule(-61, new int[]{30,130});
+    rules[124] = new Rule(-61, new int[]{30});
     rules[125] = new Rule(-59, new int[]{-40});
     rules[126] = new Rule(-59, new int[]{-42});
     rules[127] = new Rule(-14, new int[]{71,51,-49,72,-49,-62});
@@ -1112,7 +1112,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     rules[178] = new Rule(-15, new int[]{80,115,84});
     rules[179] = new Rule(-15, new int[]{80,115,86});
     rules[180] = new Rule(-15, new int[]{80,128});
-    rules[181] = new Rule(-15, new int[]{80,128,132,-49});
+    rules[181] = new Rule(-15, new int[]{80,128,131,-49});
     rules[182] = new Rule(-21, new int[]{108,-49});
     rules[183] = new Rule(-21, new int[]{108,51,-49});
     rules[184] = new Rule(-22, new int[]{112,30,29});
@@ -1804,11 +1804,11 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
       case 122: // privilege -> TCREATE
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "create"); }
         break;
-      case 123: // privilege -> TALL, TPRIVILEGES
-{ CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "all"); }
+      case 123: // privilege -> TIDENTIFIER, TPRIVILEGES
+{ CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s); }
         break;
-      case 124: // privilege -> TALL
-{ CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "all"); }
+      case 124: // privilege -> TIDENTIFIER
+{ CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
         break;
       case 125: // auth_secret -> string
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }

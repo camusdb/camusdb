@@ -141,6 +141,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     // Server-level user/grant catalog, opened against the shared node like the database registry. Null
     // only when this executor was constructed without a shared node (no auth surface is reachable).
     private readonly Task<AuthCatalog>? authCatalogTask;
+
+    // Authentication orchestration (login/token/principal). Non-null exactly when authCatalogTask is.
+    private readonly AuthService? authService;
     private readonly bool ownsRegistry;
     private readonly bool isClusterMode;
 
@@ -180,7 +183,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         // The auth catalog rides the same shared node and _system/ keyspace as the registry.
         if (sharedNode is not null)
+        {
             authCatalogTask = AuthCatalog.OpenAsync(sharedNode, isClusterMode);
+            authService = new AuthService(authCatalogTask);
+        }
 
         databaseDescriptors = new();
         databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, registryTask, isClusterMode, cache);
@@ -2460,6 +2466,145 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
+    /// The authorization gate. A no-op when <see cref="CamusDBConfig.AuthenticationEnabled"/> is off
+    /// (the default). When on, it rejects an unauthenticated request and then checks the parsed
+    /// statement against the caller's privileges before any lock or mutation:
+    /// <list type="bullet">
+    ///   <item>user/grant administration and database lifecycle DDL require the superuser attribute;</item>
+    ///   <item>server-level <c>SHOW</c> statements are allowed to any authenticated caller;</item>
+    ///   <item>an in-database statement requires its mapped privilege at the context database's scope
+    ///     (a <c>db.*</c> or global grant satisfies it).</item>
+    /// </list>
+    ///
+    /// <para><b>Scope note:</b> enforcement is at the database scope. Table-scoped grants
+    /// (<c>db.table</c>) and per-object checks for join / subquery / <c>INSERT … SELECT</c> sources are
+    /// a deliberate follow-up; the current gate fails <em>closed</em> (a table-only grant is denied a
+    /// database-wide check, never over-permitted).</para>
+    /// </summary>
+    private async Task EnforceAsync(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        if (!CamusDBConfig.AuthenticationEnabled)
+            return;
+
+        Principal? principal = ticket.Principal;
+        if (principal is null)
+            throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
+
+        // Server-level user/grant administration: superuser only.
+        if (ast.nodeType is NodeType.CreateUser or NodeType.CreateUserIfNotExists or NodeType.AlterUser
+            or NodeType.DropUser or NodeType.DropUserIfExists or NodeType.Grant or NodeType.Revoke)
+        {
+            if (!principal.CanAdministerUsers)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "User administration requires a superuser");
+            return;
+        }
+
+        // Database lifecycle DDL: superuser only (finer database-create privileges are future work).
+        if (ast.nodeType is NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists
+            or NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists
+            or NodeType.CreateDatabaseRelink or NodeType.DropDatabase or NodeType.DropDatabaseIfExists
+            or NodeType.RenameDatabase or NodeType.CommentOnDatabase)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Database administration requires a superuser");
+            return;
+        }
+
+        // Server-level introspection: any authenticated caller may run these.
+        if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
+            or NodeType.ShowOrphanDatabases or NodeType.ShowGrants)
+            return;
+
+        // In-database statements: require the mapped privilege on the context database.
+        Privilege? required = MapRequiredPrivilege(ast.nodeType);
+        if (required is null)
+            return; // no privilege required (transaction control, cache eviction, etc.)
+
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        if (!registry.TryResolveId(ticket.DatabaseName, out string databaseId))
+        {
+            // Unknown database — let the normal open path surface the not-found error.
+            return;
+        }
+
+        if (!principal.HasPrivilege(required.Value, databaseId, tableId: null))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege,
+                $"Missing {required.Value} privilege on database '{ticket.DatabaseName}'");
+    }
+
+    /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
+    private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
+    {
+        NodeType.Select => Privilege.Select,
+        NodeType.Insert => Privilege.Insert,
+        NodeType.Update => Privilege.Update,
+        NodeType.Delete => Privilege.Delete,
+        NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink => Privilege.CreateTable,
+        NodeType.DropTable or NodeType.DropTableIfExists => Privilege.Drop,
+        NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists
+            or NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists
+            or NodeType.AlterTableDropIndex => Privilege.Index,
+        NodeType.AlterTableAddColumn or NodeType.AlterTableDropColumn or NodeType.AlterTableRenameTo
+            or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex
+            or NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableDropConstraint
+            or NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull
+            or NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey
+            or NodeType.AlterTableSetSetting or NodeType.AnalyzeTable
+            or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,
+        NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
+            or NodeType.ShowDatabase or NodeType.ShowOrphanTables => Privilege.Select,
+        _ => null,
+    };
+
+    private AuthService RequireAuthService()
+    {
+        if (authService is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Authentication service is unavailable (no shared node was configured)");
+        return authService;
+    }
+
+    /// <summary>Verifies credentials and returns an opaque bearer token (see <see cref="AuthService.LoginAsync"/>).</summary>
+    public Task<string> LoginAsync(string user, string password) => RequireAuthService().LoginAsync(user, password);
+
+    /// <summary>Resolves a bearer token to a <see cref="Principal"/>, or throws AuthenticationFailed.</summary>
+    public Task<Principal> ResolvePrincipalAsync(string? bearer) => RequireAuthService().ResolvePrincipalAsync(bearer);
+
+    /// <summary>Revokes the presented token (logout).</summary>
+    public Task LogoutAsync(string? bearer) => RequireAuthService().LogoutAsync(bearer);
+
+    /// <summary>
+    /// If <see cref="CamusDBConfig.AuthenticationEnabled"/> is on, ensures the catalog has at least one
+    /// user by seeding the configured bootstrap superuser when it is empty. Fails startup (fail-closed)
+    /// when auth is enabled, the catalog is empty, and no bootstrap secret was supplied — never opens an
+    /// unauthenticated administration window. A no-op when auth is disabled or a user already exists.
+    /// </summary>
+    public async Task EnsureBootstrapSuperuserAsync()
+    {
+        if (!CamusDBConfig.AuthenticationEnabled || authCatalogTask is null)
+            return;
+
+        AuthCatalog catalog = await GetAuthCatalogAsync().ConfigureAwait(false);
+        if (await catalog.UserCountAsync().ConfigureAwait(false) > 0)
+            return;
+
+        if (string.IsNullOrEmpty(CamusDBConfig.BootstrapSuperuser) || string.IsNullOrEmpty(CamusDBConfig.BootstrapSuperuserPassword))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidConfig,
+                "Authentication is enabled with an empty user catalog but no bootstrap superuser is configured; " +
+                "refusing to start without an administrator (set the bootstrap superuser secret).");
+
+        bool created = await catalog.TryBootstrapSuperuserAsync(
+            CamusDBConfig.BootstrapSuperuser,
+            PasswordHasher.Hash(CamusDBConfig.BootstrapSuperuserPassword)).ConfigureAwait(false);
+
+        if (created)
+            logger.LogInformation("Bootstrap superuser '{User}' created", CamusDBConfig.BootstrapSuperuser);
+    }
+
+    /// <summary>
     /// Creates a server-level user in the shared auth catalog. The cleartext password (if any) is hashed
     /// here and never persisted or logged; the ticket carries it no further. Server-level — returns no
     /// descriptor.
@@ -2613,6 +2758,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+
+        await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(
             ServerDiagnostics.Tags.Operation.Ddl, ServerDiagnostics.Tags.Statement.Other);
@@ -3029,6 +3176,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         using System.Diagnostics.Activity? executeSpan = ServerDiagnostics.StartSpan(ServerDiagnostics.Spans.Execute);
         executeSpan?.SetTag("statement", MapStatementFamily(ast.nodeType));
 
+        await EnforceAsync(ticket, ast).ConfigureAwait(false);
+
         // DROP/RENAME DATABASE do not require an open database context — dispatch before Open so
         // we don't accidentally load the descriptor we're about to destroy or rename.
         if (ast.nodeType is NodeType.DropDatabase or NodeType.DropDatabaseIfExists)
@@ -3285,6 +3434,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+
+        await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         // SHOW DATABASES does not require a database context — resolve the registry and return.
         if (ast.nodeType == NodeType.ShowDatabases)

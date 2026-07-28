@@ -61,6 +61,7 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(UserRecord))]
 [JsonSerializable(typeof(GrantScope))]
 [JsonSerializable(typeof(GrantRecord))]
+[JsonSerializable(typeof(SessionRecord))]
 [JsonSerializable(typeof(OrphanDatabaseRecord))]
 [JsonSerializable(typeof(OrphanTableRecord))]
 [JsonSerializable(typeof(TableStatistics))]

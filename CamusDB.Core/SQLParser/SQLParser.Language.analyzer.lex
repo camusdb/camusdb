@@ -162,7 +162,6 @@ TGrants         (G|g)(R|r)(A|a)(N|n)(T|t)(S|s)
 TGrant          (G|g)(R|r)(A|a)(N|n)(T|t)
 TRevoke         (R|r)(E|e)(V|v)(O|o)(K|k)(E|e)
 TPrivileges     (P|p)(R|r)(I|i)(V|v)(I|i)(L|l)(E|e)(G|g)(E|e)(S|s)
-TAll            (A|a)(L|l)(L|l)
 TFor            (F|f)(O|o)(R|r)
 
 %{
@@ -443,8 +442,6 @@ TFor            (F|f)(O|o)(R|r)
 {TRevoke} { return (int)Token.TREVOKE; }
 
 {TPrivileges} { return (int)Token.TPRIVILEGES; }
-
-{TAll} { return (int)Token.TALL; }
 
 {TFor} { return (int)Token.TFOR; }
 

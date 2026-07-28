@@ -40,7 +40,7 @@
 %token TINCLUDE
 %token TASOFSYSTEMTIME
 %token TCOMMENT
-%token TUSER TIDENTIFIED TWITH TGRANT TGRANTS TREVOKE TPRIVILEGES TALL TFOR
+%token TUSER TIDENTIFIED TWITH TGRANT TGRANTS TREVOKE TPRIVILEGES TFOR
 
 %%
 
@@ -366,8 +366,11 @@ privilege : TSELECT { $$.n = new(NodeType.GrantPrivilege, null, null, null, null
           | TALTER { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "alter"); }
           | TINDEX { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "index"); }
           | TCREATE { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "create"); }
-          | TALL TPRIVILEGES { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "all"); }
-          | TALL { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "all"); }
+          /* ALL / ALL PRIVILEGES: 'all' is deliberately NOT a reserved keyword (it is a legal column
+             name and appears in EVICT CACHE ALL), so it arrives as an identifier and the creator
+             validates its text. */
+          | TIDENTIFIER TPRIVILEGES { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, $1.s); }
+          | TIDENTIFIER { $$.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, $1.s); }
           ;
 
 auth_secret : string { $$.n = $1.n; }

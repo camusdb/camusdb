@@ -32,6 +32,13 @@ public sealed class UserRecord
     /// <summary>Advances on every grant/revoke affecting this user; forces a privilege reload.</summary>
     public long AuthorizationEpoch { get; set; }
 
+    /// <summary>
+    /// True for the bootstrap superuser: bypasses every privilege check and is the only identity
+    /// allowed to administer users/grants. Deliberately a distinct attribute, not an <c>ALL</c> grant,
+    /// so it cannot be conferred by <c>GRANT</c> — it is set only by the one-time bootstrap.
+    /// </summary>
+    public bool IsSuperuser { get; set; }
+
     /// <summary>UTC timestamp the user was created.</summary>
     public DateTime CreatedAt { get; set; }
 
@@ -48,6 +55,7 @@ public sealed class UserRecord
         },
         CredentialEpoch = CredentialEpoch,
         AuthorizationEpoch = AuthorizationEpoch,
+        IsSuperuser = IsSuperuser,
         CreatedAt = CreatedAt,
     };
 }

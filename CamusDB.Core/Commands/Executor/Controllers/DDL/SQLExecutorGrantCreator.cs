@@ -58,8 +58,13 @@ internal sealed class SQLExecutorGrantCreator : SQLExecutorBaseCreator
         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unexpected privilege node: " + node.nodeType);
     }
 
-    private static Privilege MapPrivilege(string token) => token switch
+    private static Privilege MapPrivilege(string rawToken)
     {
+        // Keyword-based privileges carry a fixed lowercase marker; ALL/ALL PRIVILEGES arrives as an
+        // identifier in its original case, so normalize before matching.
+        string token = rawToken.ToLowerInvariant();
+        return token switch
+        {
         "select" => Privilege.Select,
         "insert" => Privilege.Insert,
         "update" => Privilege.Update,
@@ -70,8 +75,9 @@ internal sealed class SQLExecutorGrantCreator : SQLExecutorBaseCreator
         "index" => Privilege.Index,
         "create" => Privilege.Create,
         "all" => Privilege.All,
-        _ => throw new CamusDBException(CamusDBErrorCodes.InvalidPrivilege, "Unknown privilege: " + token),
+        _ => throw new CamusDBException(CamusDBErrorCodes.InvalidPrivilege, "Unknown privilege: " + rawToken),
     };
+    }
 
     /// <summary>Splits a required <c>db.table</c> reference; rejects a bare or over-qualified name.</summary>
     private static (string DatabaseName, string TableName) SplitQualified(string name)

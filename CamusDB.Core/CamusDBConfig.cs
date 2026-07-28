@@ -713,6 +713,68 @@ public static class CamusDBConfig
     public const int MaxPasswordBytes = 1024;
 
     /// <summary>
+    /// Master switch for SQL authentication and authorization. When <c>false</c> (the default and the
+    /// state of every existing deployment), no credentials are required and no privilege checks run —
+    /// the auth catalog is inert metadata and behavior is exactly as before Phase 2. When <c>true</c>,
+    /// requests must present a valid bearer token and every statement is privilege-checked; the server
+    /// refuses to start with auth enabled and an empty catalog unless a bootstrap secret is supplied
+    /// (fail-closed — never an open admin window).
+    /// </summary>
+    public static bool AuthenticationEnabled = false;
+
+    /// <summary>
+    /// One-time bootstrap superuser name, read from an external secret provider / environment at
+    /// startup (never a plaintext password in <c>config.yml</c>). Empty when unset. Paired with
+    /// <see cref="BootstrapSuperuserPassword"/>: on first start with an empty catalog they create
+    /// exactly one superuser via a transactional create-if-absent; once any user exists the bootstrap
+    /// values are ignored with a warning.
+    /// </summary>
+    public static string BootstrapSuperuser = "";
+
+    /// <summary>Bootstrap superuser cleartext password from the external secret. Empty when unset. Used
+    /// once at first start and never persisted in cleartext — see <see cref="BootstrapSuperuser"/>.</summary>
+    public static string BootstrapSuperuserPassword = "";
+
+    /// <summary>
+    /// Server-side key used to HMAC access-token secrets before they are stored in the session
+    /// catalog, so a catalog leak does not yield usable tokens. Common to every cluster node, sourced
+    /// from an external secret/environment, never stored in the catalog. When empty (auth disabled or
+    /// unconfigured) tokens are not issued. A future key id enables rotation.
+    /// </summary>
+    public static string AccessTokenServerKey = "";
+
+    /// <summary>
+    /// Absolute lifetime of an access token. Short by design — there is no sliding expiry or refresh
+    /// token initially; re-login is the refresh. Expired tokens are rejected with
+    /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/>.
+    /// </summary>
+    public static TimeSpan AccessTokenTtl = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Maximum staleness of a per-node authorization cache hit. A token/privilege snapshot cached on
+    /// one node is trusted for at most this long before it revalidates the credential/authorization
+    /// epochs against the catalog, so a revoke on another node takes effect within this bound. Set to
+    /// zero to force an authoritative lookup on every request (immediate revocation, higher cost).
+    /// </summary>
+    public static TimeSpan AuthenticationCacheTtl = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Maximum number of password-verification (PBKDF2) operations allowed to run concurrently across
+    /// all logins. Bounds the CPU an attacker can tie up with a login flood, since each verification is
+    /// deliberately expensive. Excess logins queue briefly; sustained saturation surfaces as
+    /// <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.
+    /// </summary>
+    public static int LoginKdfMaxConcurrency = 8;
+
+    /// <summary>Maximum failed-or-succeeded login attempts per normalized account per rolling minute
+    /// before further attempts are rejected with <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.</summary>
+    public static int LoginMaxAttemptsPerMinute = 20;
+
+    /// <summary>Upper bound on the per-node authenticated-principal cache size, so random/invalid token
+    /// ids cannot grow it without bound.</summary>
+    public static int AuthenticationCacheMaxEntries = 10_000;
+
+    /// <summary>
     /// Number of row ids buffered from a non-covering secondary-index scan before issuing one
     /// <c>GetRowsBatch</c> call. Batching collapses N sequential Kahuna actor round-trips into
     /// one per page, keeping primary-row fetches snapshot-consistent with the scan via the

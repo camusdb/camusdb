@@ -58,6 +58,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, _) = ParseRequestLevelMode(request);
 
+            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
 
@@ -73,7 +75,8 @@ public sealed class ExecuteSQLController : CommandsController
                     txnState: null!,
                     database: request.DatabaseName ?? "",
                     sql: sql,
-                    parameters: request.Parameters
+                    parameters: request.Parameters,
+                        principal: principal
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                 List<QueryResultRow> rows = [];
@@ -95,7 +98,8 @@ public sealed class ExecuteSQLController : CommandsController
                         txnState: txnState,
                         database: request.DatabaseName ?? "",
                         sql: sql,
-                        parameters: request.Parameters
+                        parameters: request.Parameters,
+                        principal: principal
                     );
                     List<QueryResultRow> rows = [];
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
@@ -131,7 +135,8 @@ public sealed class ExecuteSQLController : CommandsController
                         txnState: tx,
                         database: request.DatabaseName ?? "",
                         sql: sql,
-                        parameters: request.Parameters
+                        parameters: request.Parameters,
+                        principal: principal
                     );
                     // Fully buffer the decoded, transaction-independent rows, THEN commit — so a
                     // serializable retry can restart cleanly (no bytes are written until the
@@ -215,6 +220,7 @@ public sealed class ExecuteSQLController : CommandsController
         ExecuteSQLRequest? request;
         string sql;
         NodeAst ast;
+        Principal? principal = null;
 
         // Setup phase: anything that throws here happens before a single byte is on the wire, so it
         // can still be reported as a normal JSON error response with the correct HTTP status code.
@@ -223,6 +229,10 @@ public sealed class ExecuteSQLController : CommandsController
             request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, ct).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
+
+            // Resolve the principal in the setup phase so an auth failure is a clean 401 before any
+            // stream bytes are written.
+            principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
             sql = request.Sql ?? "";
             ast = SQLParserProcessor.Parse(sql);
@@ -251,7 +261,8 @@ public sealed class ExecuteSQLController : CommandsController
                     txnState: null!,
                     database: request.DatabaseName ?? "",
                     sql: sql,
-                    parameters: request.Parameters
+                    parameters: request.Parameters,
+                        principal: principal
                 );
                 (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
             }
@@ -265,7 +276,8 @@ public sealed class ExecuteSQLController : CommandsController
                         txnState: txnState,
                         database: request.DatabaseName ?? "",
                         sql: sql,
-                        parameters: request.Parameters
+                        parameters: request.Parameters,
+                        principal: principal
                     );
                     (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                 }
@@ -287,7 +299,8 @@ public sealed class ExecuteSQLController : CommandsController
                         txnState: tx,
                         database: request.DatabaseName ?? "",
                         sql: sql,
-                        parameters: request.Parameters
+                        parameters: request.Parameters,
+                        principal: principal
                     );
                     (DatabaseDescriptor? db, int count) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                     total = count;
@@ -418,6 +431,8 @@ public sealed class ExecuteSQLController : CommandsController
 
             Log.LogExecutingSql(logger, request.Sql ?? "");
 
+            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+
             (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2) = ParseRequestLevelMode(request);
 
             // Clients route no-rows statements to whichever endpoint they use for non-SELECT SQL,
@@ -429,7 +444,8 @@ public sealed class ExecuteSQLController : CommandsController
                     txnState: null!,
                     database: request.DatabaseName ?? "",
                     sql: request.Sql ?? "",
-                    parameters: request.Parameters
+                    parameters: request.Parameters,
+                        principal: principal
                 );
 
                 await executor.ExecuteNonSQLQuery(dbScopedTicket).ConfigureAwait(false);
@@ -447,7 +463,8 @@ public sealed class ExecuteSQLController : CommandsController
                         txnState: txnState,
                         database: request.DatabaseName ?? "",
                         sql: request.Sql ?? "",
-                        parameters: request.Parameters
+                        parameters: request.Parameters,
+                        principal: principal
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
@@ -474,7 +491,8 @@ public sealed class ExecuteSQLController : CommandsController
                         txnState: tx,
                         database: request.DatabaseName ?? "",
                         sql: request.Sql ?? "",
-                        parameters: request.Parameters
+                        parameters: request.Parameters,
+                        principal: principal
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken2 = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
@@ -524,6 +542,8 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
 
+            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+
             KvTransaction? txnState = null;
             bool newTransaction = false;
 
@@ -552,7 +572,8 @@ public sealed class ExecuteSQLController : CommandsController
                     txnState: txnState!,
                     database: request.DatabaseName ?? "",
                     sql: sql,
-                    parameters: request.Parameters
+                    parameters: request.Parameters,
+                        principal: principal
                 );
 
                 ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);

@@ -185,6 +185,23 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string InvalidPrivilege = "CADB0515";
 
+    /// <summary>
+    /// Authentication failed: no/invalid/expired bearer token, unknown user, wrong password, or a
+    /// disabled account. Deliberately indistinguishable across those causes to avoid account
+    /// enumeration. Maps to HTTP 401.
+    /// </summary>
+    public const string AuthenticationFailed = "CADB0516";
+
+    /// <summary>
+    /// The caller is authenticated but lacks the privilege the statement requires. Maps to HTTP 403.
+    /// </summary>
+    public const string InsufficientPrivilege = "CADB0517";
+
+    /// <summary>
+    /// Too many authentication attempts (login rate limit / global KDF saturation). Maps to HTTP 429.
+    /// </summary>
+    public const string TooManyAuthAttempts = "CADB0518";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -200,11 +217,14 @@ public static class CamusDBErrorCodes
         CommentTooLong => 400,
         UnsupportedAuthPlugin => 400,
         InvalidPrivilege => 400,
+        AuthenticationFailed => 401,
+        InsufficientPrivilege => 403,
         OrphanNotFound => 404,
         UserDoesNotExist => 404,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,
         UserAlreadyExists => 409,
+        TooManyAuthAttempts => 429,
         _ => 500
     };
 }

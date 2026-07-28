@@ -70,6 +70,7 @@ public sealed class AuthCatalog
     private string UserKey(string normalizedName) => $"{keyPrefix}auth/user:{normalizedName}";
     private string GrantKeyPrefix => $"{keyPrefix}auth/grant:";
     private string GrantKey(string normalizedUser, string scopeKey) => $"{keyPrefix}auth/grant:{normalizedUser}:{scopeKey}";
+    private string SessionKey(string tokenId) => $"{keyPrefix}auth/session:{tokenId}";
     private string GenerationSequenceKey => $"{keyPrefix}auth/generation";
 
     private AuthCatalog(IKahuna kahuna, KvTransactionsManager transactions, string keyPrefix, bool isClusterMode)
@@ -324,7 +325,7 @@ public sealed class AuthCatalog
     /// unless <paramref name="ifNotExists"/> (then a no-op). <paramref name="credential"/> is null for a
     /// passwordless user.
     /// </summary>
-    public async Task CreateUserAsync(string name, Credential? credential, bool ifNotExists)
+    public async Task CreateUserAsync(string name, Credential? credential, bool ifNotExists, bool isSuperuser = false)
     {
         string normalized = Normalize(name);
 
@@ -347,6 +348,7 @@ public sealed class AuthCatalog
                 Credential = credential,
                 CredentialEpoch = 0,
                 AuthorizationEpoch = 0,
+                IsSuperuser = isSuperuser,
                 CreatedAt = DateTime.UtcNow,
             };
 
@@ -510,6 +512,102 @@ public sealed class AuthCatalog
         {
             writeSem.Release();
         }
+    }
+
+    /// <summary>Number of users currently known (cache read; reconciles in cluster mode).</summary>
+    public async Task<int> UserCountAsync()
+    {
+        await EnsureCoherentAsync().ConfigureAwait(false);
+        return usersByName.Count;
+    }
+
+    /// <summary>
+    /// Creates the bootstrap superuser iff the catalog currently has <b>no</b> users, via a
+    /// transactional create-if-absent so concurrent node startups yield exactly one winner without
+    /// overwriting a password. Returns true if this call created it. When any user already exists it is
+    /// a no-op returning false — the operator's own accounts are never overwritten by the bootstrap
+    /// secret.
+    /// </summary>
+    public async Task<bool> TryBootstrapSuperuserAsync(string name, Credential credential)
+    {
+        ArgumentNullException.ThrowIfNull(credential);
+        string normalized = Normalize(name);
+
+        await writeSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (isClusterMode)
+                await RevalidateFromKvLockedAsync(await ReadGenerationAsync().ConfigureAwait(false)).ConfigureAwait(false);
+
+            if (usersByName.Count > 0)
+                return false;
+
+            UserRecord record = new()
+            {
+                Name = name,
+                Credential = credential,
+                IsSuperuser = true,
+                CreatedAt = DateTime.UtcNow,
+            };
+            byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.UserRecord);
+
+            bool created = false;
+            await RunInTransactionAsync(async tx =>
+            {
+                created = await WriteAuthKey(tx, UserKey(normalized), bytes, ifAbsent: true).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            if (created)
+            {
+                usersByName[normalized] = record;
+                AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            }
+            return created;
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sessions (opaque bearer tokens; looked up on demand, not cached in memory)
+    // -----------------------------------------------------------------------
+
+    /// <summary>Persists a login session under its token id. Fails if the id somehow already exists.</summary>
+    public async Task CreateSessionAsync(SessionRecord session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        byte[] bytes = MetaJsonSerializer.Serialize(session, MetaJsonContext.Default.SessionRecord);
+        await RunInTransactionAsync(async tx =>
+        {
+            bool written = await WriteAuthKey(tx, SessionKey(session.TokenId), bytes, ifAbsent: true).ConfigureAwait(false);
+            if (!written)
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Session token id collision");
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads a session directly from KV by token id (no cache) — a token issued on another node
+    /// is visible immediately. Returns null when absent.</summary>
+    public async Task<SessionRecord?> TryGetSessionAsync(string tokenId)
+    {
+        byte[]? value = await GetAuthValueAsync(SessionKey(tokenId)).ConfigureAwait(false);
+        return value is null ? null : MetaJsonSerializer.Deserialize(value, MetaJsonContext.Default.SessionRecord);
+    }
+
+    /// <summary>Deletes a session (logout / revoke). Idempotent.</summary>
+    public async Task DeleteSessionAsync(string tokenId)
+    {
+        await RunInTransactionAsync(tx => DeleteAuthKey(tx, SessionKey(tokenId))).ConfigureAwait(false);
+    }
+
+    private async Task<byte[]?> GetAuthValueAsync(string key)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, key, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+        return type == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
     }
 
     // -----------------------------------------------------------------------
