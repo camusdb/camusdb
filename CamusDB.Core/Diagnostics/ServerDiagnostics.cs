@@ -223,7 +223,11 @@ public static class ServerDiagnostics
             public const string Begin = "begin";
             public const string Commit = "commit";
             public const string Rollback = "rollback";
-            public static readonly IReadOnlyList<string> All = new[] { Query, NonQuery, Ddl, Begin, Commit, Rollback };
+            /// <summary>Registering a prepared statement — one per statement, not per execution.</summary>
+            public const string Prepare = "prepare";
+            /// <summary>Releasing a prepared statement.</summary>
+            public const string Close = "close";
+            public static readonly IReadOnlyList<string> All = new[] { Query, NonQuery, Ddl, Begin, Commit, Rollback, Prepare, Close };
         }
 
         public static class Statement

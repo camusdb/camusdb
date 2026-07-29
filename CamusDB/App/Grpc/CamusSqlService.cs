@@ -116,6 +116,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeStreamingAsync(async () =>
         {
             CancellationToken ct = context.CancellationToken;
+            RejectStatementId(request, "ExecuteQuery");
             Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
@@ -283,6 +284,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeAsync(async () =>
         {
             CancellationToken ct = context.CancellationToken;
+            RejectStatementId(request, "ExecuteNonQuery");
             Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
                 ParseLevelMode(request);
@@ -378,6 +380,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeAsync(async () =>
         {
             CancellationToken ct = context.CancellationToken;
+            RejectStatementId(request, "ExecuteDdl");
             Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             string sql = request.Sql ?? "";
             NodeAst ast = SQLParserProcessor.Parse(sql);
@@ -487,14 +490,20 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // Per-txn-handle serial chains so same-handle ops run strictly in arrival order. The chain is
         // per stream (this call): it orders only same-handle ops that arrive here, which is why the
         // client must pin all of a transaction's ops to one stream — see the client routing contract.
-        Dictionary<string, Task> chains = new();
+        // Keyed by the raw (pt, counter) pair rather than a formatted string so no per-op key string
+        // is allocated on the multiplexed hot path.
+        Dictionary<(long Pt, uint Counter), Task> chains = new();
         List<Task> ops = new();
 
         // Transactions begun by a batched START on this stream but not yet finalized. A stream that
         // ends (normally or by cancellation) without a matching COMMIT/ROLLBACK must not leak an open
         // transaction, so any survivor here is rolled back on teardown. Written from concurrent op
-        // handlers, hence concurrent.
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles = new();
+        // handlers, hence concurrent. The key IS the handle pair; the bool value carries nothing.
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles = new();
+
+        // Statements prepared by ops on this stream. A local of the call, so it is freed with the
+        // call — a stream that ends for any reason takes its handles with it.
+        StreamPreparedStatements prepared = new();
 
         try
         {
@@ -502,17 +511,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 await inFlight.WaitAsync(ct).ConfigureAwait(false);   // backpressure
 
-                string? handleKey = HandleKey(req.Request?.TxnHandle);
+                (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
                 Task op;
-                if (handleKey is not null)
+                if (handleKey is { } hk)
                 {
-                    Task prev = chains.TryGetValue(handleKey, out Task? p) ? p : Task.CompletedTask;
-                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, startedHandles, principal, ct);
-                    chains[handleKey] = op;
+                    Task prev = chains.TryGetValue(hk, out Task? p) ? p : Task.CompletedTask;
+                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
+                    chains[hk] = op;
                 }
                 else
                 {
-                    op = RunBatchOpAsync(req, responseStream, writeLock, startedHandles, principal, ct);
+                    op = RunBatchOpAsync(req, responseStream, writeLock, startedHandles, prepared, principal, ct);
                 }
 
                 _ = op.ContinueWith(_ => inFlight.Release(), TaskScheduler.Default);
@@ -541,15 +550,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// cancellation token because it must still run when the stream's token is already cancelled.
     /// </summary>
     private async Task RollbackStartedSurvivorsAsync(
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles)
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles)
     {
-        foreach (KeyValuePair<string, (long pt, uint counter)> entry in startedHandles.ToArray())
+        foreach (KeyValuePair<(long Pt, uint Counter), bool> entry in startedHandles.ToArray())
         {
             if (!startedHandles.TryRemove(entry.Key, out _))
                 continue;
             try
             {
-                KvTransaction tx = transactions.GetState(entry.Value.pt, entry.Value.counter);
+                KvTransaction tx = transactions.GetState(entry.Key.Pt, entry.Key.Counter);
                 await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             }
             catch
@@ -559,8 +568,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
     }
 
-    private static string? HandleKey(TxnHandle? handle)
-        => handle is { TxnIdPt: > 0 } h ? $"{h.TxnIdPt}:{h.TxnIdCounter}" : null;
+    private static (long Pt, uint Counter)? HandleKey(TxnHandle? handle)
+        => handle is { TxnIdPt: > 0 } h ? (h.TxnIdPt, h.TxnIdCounter) : null;
 
     /// <summary>Chains a batch op after the previous op for the same handle so they run in order.</summary>
     private async Task RunBatchOpAfterAsync(
@@ -568,14 +577,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchExecuteRequest req,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
+        StreamPreparedStatements prepared,
         Principal? principal,
         CancellationToken ct)
     {
         // RunBatchOpAsync never throws, so the previous op cannot fault the chain — but await it
         // defensively so a same-handle op only starts once its predecessor has fully completed.
         try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
-        await RunBatchOpAsync(req, stream, writeLock, startedHandles, principal, ct).ConfigureAwait(false);
+        await RunBatchOpAsync(req, stream, writeLock, startedHandles, prepared, principal, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -586,7 +596,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchExecuteRequest req,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
+        StreamPreparedStatements prepared,
         Principal? principal,
         CancellationToken ct)
     {
@@ -614,7 +625,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             switch (req.Kind)
             {
                 case BatchStatementKind.Query:
-                    await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, principal, ct).ConfigureAwait(false);
+                    await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, prepared, principal, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.Prepare:
+                    await RunBatchPrepareAsync(req.RequestId, request, stream, writeLock, prepared, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.Close:
+                    await RunBatchCloseAsync(req.RequestId, request, stream, writeLock, prepared, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Start:
                     await RunBatchStartAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
@@ -628,7 +645,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 case BatchStatementKind.NonQuery:
                 case BatchStatementKind.Unspecified:
                 default:
-                    await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, principal, ct).ConfigureAwait(false);
+                    await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, prepared, principal, ct).ConfigureAwait(false);
                     break;
             }
         }
@@ -677,6 +694,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchStatementKind.Start => ServerDiagnostics.Tags.Operation.Begin,
         BatchStatementKind.Commit => ServerDiagnostics.Tags.Operation.Commit,
         BatchStatementKind.Rollback => ServerDiagnostics.Tags.Operation.Rollback,
+        BatchStatementKind.Prepare => ServerDiagnostics.Tags.Operation.Prepare,
+        BatchStatementKind.Close => ServerDiagnostics.Tags.Operation.Close,
         _ => ServerDiagnostics.Tags.Operation.NonQuery,
     };
 
@@ -692,20 +711,21 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
+        StreamPreparedStatements prepared,
         Principal? principal,
         CancellationToken ct)
     {
-        string sql = request.Sql ?? "";
+        ResolvedStatement resolved = ResolveStatement(request, prepared);
+        string sql = resolved.Sql;
         BatchQuerySink sink = new(stream, writeLock, requestId);
-        NodeAst ast = SQLParserProcessor.Parse(sql);
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
 
-        if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
+        if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
         {
             ExecuteSQLTicket ticket = new(
-                txnState: null!, database: request.Database, sql: sql,
-                parameters: ToColumnValueMap(request.Parameters), principal: principal);
+                txnState: null!, database: resolved.Database, sql: sql,
+                parameters: resolved.Parameters, principal: principal);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
@@ -713,8 +733,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Explicit transaction — the client owns the lifecycle, so no commit and no auto-rollback.
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             ExecuteSQLTicket ticket = new(
-                txnState: txnState, database: request.Database, sql: sql,
-                parameters: ToColumnValueMap(request.Parameters), principal: principal);
+                txnState: txnState, database: resolved.Database, sql: sql,
+                parameters: resolved.Parameters, principal: principal);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else
@@ -723,12 +743,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // retryable conflict propagates and is reported as BatchError for the client to replay.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, ct).ConfigureAwait(false);
+                resolved.Database, promote: true, causalToken, ct).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
-                    txnState: tx, database: request.Database, sql: sql,
-                    parameters: ToColumnValueMap(request.Parameters), principal: principal);
+                    txnState: tx, database: resolved.Database, sql: sql,
+                    parameters: resolved.Parameters, principal: principal);
                 DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
                 commitToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
             }
@@ -764,9 +784,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
+        StreamPreparedStatements prepared,
         Principal? principal,
         CancellationToken ct)
     {
+        ResolvedStatement resolved = ResolveStatement(request, prepared);
         (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
             ParseLevelMode(request);
         NonQueryReply reply;
@@ -776,22 +798,22 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Explicit transaction — client owns commit/rollback.
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             ExecuteSQLTicket ticket = new(
-                txnState: txnState, database: request.Database, sql: request.Sql ?? "",
-                parameters: ToColumnValueMap(request.Parameters), principal: principal);
+                txnState: txnState, database: resolved.Database, sql: resolved.Sql,
+                parameters: resolved.Parameters, principal: principal);
             ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
             reply = new NonQueryReply { AffectedRows = result.ModifiedRows };
         }
         else
         {
             KvTransaction tx = await transactions.StartAsync(
-                request.Database, reqLevel, reqMode, reqLocking, cancellationToken: ct).ConfigureAwait(false);
+                resolved.Database, reqLevel, reqMode, reqLocking, cancellationToken: ct).ConfigureAwait(false);
             int rows;
             HLCTimestamp token;
             try
             {
                 ExecuteSQLTicket ticket = new(
-                    txnState: tx, database: request.Database, sql: request.Sql ?? "",
-                    parameters: ToColumnValueMap(request.Parameters), principal: principal);
+                    txnState: tx, database: resolved.Database, sql: resolved.Sql,
+                    parameters: resolved.Parameters, principal: principal);
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                 token = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;
@@ -827,7 +849,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
         (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) =
@@ -841,7 +863,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             TxnIdPt      = tx.ClientId.L,
             TxnIdCounter = (uint)tx.ClientId.C,
         };
-        startedHandles[$"{handle.TxnIdPt}:{handle.TxnIdCounter}"] = (handle.TxnIdPt, handle.TxnIdCounter);
+        startedHandles[(handle.TxnIdPt, handle.TxnIdCounter)] = true;
 
         await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
         {
@@ -861,7 +883,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
         if (request.TxnHandle is not { TxnIdPt: > 0 } handle)
@@ -869,7 +891,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
         HLCTimestamp token = await transactions.CommitTrackedAsync(txnState, ct).ConfigureAwait(false);
-        startedHandles.TryRemove($"{handle.TxnIdPt}:{handle.TxnIdCounter}", out _);
+        startedHandles.TryRemove((handle.TxnIdPt, handle.TxnIdCounter), out _);
 
         CommitReply reply = new();
         if (!token.IsNull())
@@ -892,7 +914,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         SqlRequest request,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
-        ConcurrentDictionary<string, (long pt, uint counter)> startedHandles,
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
         if (request.TxnHandle is not { TxnIdPt: > 0 } handle)
@@ -902,7 +924,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // transaction back, which is precisely when a client sends ROLLBACK. The handle is dropped
         // either way so teardown does not try again.
         await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, ct).ConfigureAwait(false);
-        startedHandles.TryRemove($"{handle.TxnIdPt}:{handle.TxnIdCounter}", out _);
+        startedHandles.TryRemove((handle.TxnIdPt, handle.TxnIdCounter), out _);
 
         await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
         {
@@ -1177,6 +1199,123 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         foreach (KeyValuePair<string, Value> kv in protoMap)
             result[kv.Key] = GrpcValueCodec.FromProto(kv.Value);
         return result;
+    }
+
+    // ─── Prepared statements ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// What a batched op executes, after either reading it off the request (inline) or recovering it
+    /// from a prepared statement. Carrying <see cref="RootType"/> is the point of the indirection:
+    /// the routing decisions below need the statement's root node, and an inline request can only
+    /// answer that by parsing the SQL again on every single request.
+    /// </summary>
+    private readonly record struct ResolvedStatement(
+        string Database,
+        string Sql,
+        Dictionary<string, ColumnValue>? Parameters,
+        NodeType RootType);
+
+    /// <summary>Cached delegate so binding a prepared execution allocates no closure per op.</summary>
+    private static readonly Func<Value, ColumnValue> FromProtoValue = GrpcValueCodec.FromProto;
+
+    /// <summary>
+    /// Resolves one batched op to the (database, sql, parameters, root node) it executes.
+    ///
+    /// <para>An inline request behaves exactly as before, parse included. A prepared request instead
+    /// reuses the string instances captured at PREPARE time and the root node recorded then, so it
+    /// performs <b>no parse at all</b> at this layer — which is most of the point of the feature.
+    /// Past this method the two are indistinguishable, and everything downstream (tickets, txn
+    /// handling, cache hints, retry taxonomy) is untouched.</para>
+    /// </summary>
+    private static ResolvedStatement ResolveStatement(SqlRequest request, StreamPreparedStatements prepared)
+    {
+        if (request.StatementId == 0)
+        {
+            if (request.PositionalParameters.Count > 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "'positional_parameters' requires a 'statement_id'; an inline request binds by name");
+
+            string sql = request.Sql ?? "";
+            return new ResolvedStatement(
+                request.Database, sql, ToColumnValueMap(request.Parameters), SQLParserProcessor.Parse(sql).nodeType);
+        }
+
+        PreparedStatementBinder.ValidateNoInlineFields(
+            hasSql: !string.IsNullOrEmpty(request.Sql),
+            hasDatabase: !string.IsNullOrEmpty(request.Database),
+            hasParameters: request.Parameters.Count > 0);
+
+        PreparedStatement statement = prepared.Resolve(request.StatementId);
+
+        return new ResolvedStatement(
+            statement.Database,
+            statement.Sql,
+            PreparedStatementBinder.Bind(statement, request.PositionalParameters, FromProtoValue),
+            statement.RootNodeType);
+    }
+
+    /// <summary>
+    /// Registers a statement on this stream and replies with its id and the parameter names in
+    /// binding order. Parsing happens here, once, so a statement that cannot be parsed fails at
+    /// registration rather than surprising whichever execution happens to be first.
+    /// </summary>
+    private async Task RunBatchPrepareAsync(
+        int requestId,
+        SqlRequest request,
+        IServerStreamWriter<BatchExecuteResponse> stream,
+        SemaphoreSlim writeLock,
+        StreamPreparedStatements prepared,
+        CancellationToken ct)
+    {
+        if (request.StatementId != 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "PREPARE must not carry a 'statement_id'");
+
+        PreparedStatement statement = PreparedStatementBinder.Create(request.Database, request.Sql ?? "");
+        int id = prepared.Add(statement);
+
+        PrepareReply reply = new() { StatementId = id };
+        reply.ParameterNames.AddRange(statement.ParameterNames);
+
+        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        {
+            RequestId    = requestId,
+            PrepareReply = reply,
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Releases a prepared statement. Idempotent — closing an id that is unknown or already closed
+    /// reports success, because the caller's requested end state holds either way and a client
+    /// cleaning up after a fault should not have to tell the two apart.
+    /// </summary>
+    private async Task RunBatchCloseAsync(
+        int requestId,
+        SqlRequest request,
+        IServerStreamWriter<BatchExecuteResponse> stream,
+        SemaphoreSlim writeLock,
+        StreamPreparedStatements prepared,
+        CancellationToken ct)
+    {
+        prepared.Remove(request.StatementId);
+
+        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        {
+            RequestId  = requestId,
+            CloseReply = new CloseReply(),
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Rejects a prepared-statement id on a unary RPC. A handle is scoped to the duplex stream that
+    /// minted it, and a unary call has no such stream, so accepting the field would mean inventing a
+    /// second, server-global lifetime that nothing frees.
+    /// </summary>
+    private static void RejectStatementId(SqlRequest request, string rpc)
+    {
+        if (request.StatementId != 0 || request.PositionalParameters.Count > 0)
+            throw PreparedStatementBinder.NotSupportedHere($"the unary {rpc} RPC — use BatchExecute");
     }
 }
 

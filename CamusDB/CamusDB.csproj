@@ -24,6 +24,12 @@
     <Folder Include="Data\" />
     <Folder Include="Config\" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Lets tests reach host-internal types (e.g. the per-stream prepared-statement store) to
+         exercise boundaries that are impractical through the public surface alone. -->
+    <InternalsVisibleTo Include="CamusDB.Tests" />
+  </ItemGroup>
   
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj">

@@ -69,11 +69,13 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
     // ─── Public enqueue surface ───────────────────────────────────────────────
 
-    public Task<QueryResult> EnqueueQueryAsync(SqlRequest request, int? slotIndex, CancellationToken ct)
-        => EnqueueAsync<QueryResult>(BatchStatementKind.Query, BatchOpKind.Query, request, slotIndex, ct);
+    public Task<QueryResult> EnqueueQueryAsync(
+        SqlRequest request, int? slotIndex, CancellationToken ct, long? expectedTransportId = null)
+        => EnqueueAsync<QueryResult>(BatchStatementKind.Query, BatchOpKind.Query, request, slotIndex, ct, expectedTransportId);
 
-    public Task<NonQueryResult> EnqueueNonQueryAsync(SqlRequest request, int? slotIndex, CancellationToken ct)
-        => EnqueueAsync<NonQueryResult>(BatchStatementKind.NonQuery, BatchOpKind.NonQuery, request, slotIndex, ct);
+    public Task<NonQueryResult> EnqueueNonQueryAsync(
+        SqlRequest request, int? slotIndex, CancellationToken ct, long? expectedTransportId = null)
+        => EnqueueAsync<NonQueryResult>(BatchStatementKind.NonQuery, BatchOpKind.NonQuery, request, slotIndex, ct, expectedTransportId);
 
     public Task<TxnHandle> EnqueueStartAsync(SqlRequest request, int slotIndex, CancellationToken ct)
         => EnqueueAsync<TxnHandle>(BatchStatementKind.Start, BatchOpKind.Start, request, slotIndex, ct);
@@ -86,7 +88,18 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             .ConfigureAwait(false);
 
     private async Task<T> EnqueueAsync<T>(
-        BatchStatementKind kind, BatchOpKind opKind, SqlRequest request, int? slotIndex, CancellationToken ct)
+        BatchStatementKind kind, BatchOpKind opKind, SqlRequest request, int? slotIndex, CancellationToken ct,
+        long? expectedTransportId = null)
+        => (await EnqueueTrackedAsync<T>(kind, opKind, request, slotIndex, ct, expectedTransportId).ConfigureAwait(false)).Result;
+
+    /// <summary>
+    /// Enqueues an op and also reports the transport it was written to. PREPARE needs that: the id it
+    /// mints is only valid on the stream that carried the PREPARE, so caching the id we <em>hoped</em>
+    /// to write to — rather than the one we did — would make every entry a guess.
+    /// </summary>
+    private async Task<(T Result, long TransportId)> EnqueueTrackedAsync<T>(
+        BatchStatementKind kind, BatchOpKind opKind, SqlRequest request, int? slotIndex, CancellationToken ct,
+        long? expectedTransportId = null)
     {
         int slot = slotIndex ?? NextRoundRobin();
         int id = Interlocked.Increment(ref requestIdSeq);
@@ -113,11 +126,138 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         pending[id] = op;
 
         BatchExecuteRequest wire = new() { RequestId = id, Kind = kind, Request = request };
-        inbox.Enqueue(new QueuedItem(wire, slot, op));
+        inbox.Enqueue(new QueuedItem(wire, slot, op, expectedTransportId));
         TryStartPump();
 
         object? result = await op.Promise.Task.ConfigureAwait(false);
-        return (T)result!;
+        return ((T)result!, op.TransportId);
+    }
+
+    // ─── Prepared statements ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns this slot's registration for the statement, preparing it first if the slot has none
+    /// for its <b>current</b> transport.
+    ///
+    /// <para>This lives on the batcher rather than on the caller because only the batcher can read a
+    /// slot's current transport id and write the follow-up op through the same path; a cache kept
+    /// anywhere else would be comparing against an id it cannot keep in step.</para>
+    ///
+    /// <para>Concurrent callers racing to prepare the same statement share one in-flight registration
+    /// (the dictionary holds the task, not the result), so the server is not asked to register the
+    /// same SQL twice — harmless if it happened, but it would waste a handle from the caller's cap.</para>
+    /// </summary>
+    public async Task<PreparedSlotEntry> EnsurePreparedAsync(
+        int slotIndex, PreparedStatementKey key, CancellationToken ct)
+    {
+        Slot slot = slots[slotIndex];
+
+        while (true)
+        {
+            if (slot.Prepared.TryGetValue(key, out Task<PreparedSlotEntry>? existing))
+            {
+                PreparedSlotEntry entry;
+                try
+                {
+                    entry = await existing.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Whoever created it already reported the failure to its own caller; drop the
+                    // poisoned entry and take a fresh turn rather than failing every later execution.
+                    slot.Prepared.TryRemove(new KeyValuePair<PreparedStatementKey, Task<PreparedSlotEntry>>(key, existing));
+                    continue;
+                }
+
+                if (entry.TransportId == slot.Transport?.Id)
+                    return entry;
+
+                // The slot's stream was rebuilt since this was registered — the handle died with it.
+                slot.Prepared.TryRemove(new KeyValuePair<PreparedStatementKey, Task<PreparedSlotEntry>>(key, existing));
+                continue;
+            }
+
+            TaskCompletionSource<PreparedSlotEntry> promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!slot.Prepared.TryAdd(key, promise.Task))
+                continue;   // lost the race; the winner's registration is the one to use.
+
+            try
+            {
+                (PrepareReply reply, long transportId) = await EnqueueTrackedAsync<PrepareReply>(
+                    BatchStatementKind.Prepare, BatchOpKind.Prepare,
+                    new SqlRequest { Database = key.Database, Sql = key.Sql }, slotIndex, ct).ConfigureAwait(false);
+
+                PreparedSlotEntry entry = new(transportId, reply.StatementId, reply.ParameterNames.ToArray());
+                promise.SetResult(entry);
+                return entry;
+            }
+            catch (Exception ex)
+            {
+                slot.Prepared.TryRemove(new KeyValuePair<PreparedStatementKey, Task<PreparedSlotEntry>>(key, promise.Task));
+                promise.TrySetException(ex);
+                _ = promise.Task.Exception;   // observed here; the throw below is what callers see.
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forgets a slot's registration for a statement, but only if it is still the one the caller was
+    /// using — so a concurrent re-prepare that already succeeded is not thrown away by a straggler
+    /// reacting to the old entry.
+    /// </summary>
+    public void InvalidatePrepared(int slotIndex, PreparedStatementKey key, PreparedSlotEntry stale)
+    {
+        Slot slot = slots[slotIndex];
+
+        if (slot.Prepared.TryGetValue(key, out Task<PreparedSlotEntry>? existing)
+            && existing.IsCompletedSuccessfully
+            && existing.Result.StatementId == stale.StatementId
+            && existing.Result.TransportId == stale.TransportId)
+        {
+            slot.Prepared.TryRemove(new KeyValuePair<PreparedStatementKey, Task<PreparedSlotEntry>>(key, existing));
+        }
+    }
+
+    /// <summary>
+    /// Removes every slot registration for a statement and returns them <b>as tasks</b>, for a caller
+    /// that is disposing it and must release the server-side handles.
+    ///
+    /// <para>In-flight registrations are returned too, not just finished ones. That is what makes
+    /// disposal complete: a registration still in progress would otherwise mint a handle after
+    /// disposal had already removed the only reference to it, leaking it until the stream ends. The
+    /// caller awaits each task and closes whatever id it produced.</para>
+    /// </summary>
+    public IReadOnlyList<(int SlotIndex, Task<PreparedSlotEntry> Registration)> TakePrepared(PreparedStatementKey key)
+    {
+        List<(int, Task<PreparedSlotEntry>)> taken = new();
+
+        foreach (Slot slot in slots)
+        {
+            if (slot.Prepared.TryRemove(key, out Task<PreparedSlotEntry>? registration))
+                taken.Add((slot.Index, registration));
+        }
+
+        return taken;
+    }
+
+    /// <summary>
+    /// Releases a prepared statement on one slot. Best-effort by contract: the stream may already be
+    /// gone, in which case the server has freed the handle anyway, so a failure here is not worth
+    /// reporting to the caller.
+    /// </summary>
+    public async Task ClosePreparedAsync(int slotIndex, PreparedSlotEntry entry, CancellationToken ct)
+    {
+        try
+        {
+            await EnqueueAsync<object?>(
+                BatchStatementKind.Close, BatchOpKind.Close,
+                new SqlRequest { StatementId = entry.StatementId }, slotIndex, ct, entry.TransportId).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Stream already gone, or the handle was released with it — nothing to do.
+        }
     }
 
     // ─── Pump ─────────────────────────────────────────────────────────────────
@@ -171,6 +311,14 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             Slot slot = slots[item.SlotIndex];
             IBatchTransport transport = slot.Transport
                 ?? throw new InvalidOperationException("Transport slot is not connected");
+
+            // A prepared execution names a handle that exists only on the stream it was registered
+            // on. This is the last moment the two can be compared — check any earlier and the stream
+            // could still be rebuilt in between — so refuse here rather than send an op that the
+            // server can only answer with "unknown statement".
+            if (item.ExpectedTransportId is long expected && transport.Id != expected)
+                throw new PreparedStatementStaleException();
+
             item.Op.TransportId = transport.Id;
 
             await slot.WriteLock.WaitAsync(shutdown.Token).ConfigureAwait(false);
@@ -256,6 +404,12 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             case BatchExecuteResponse.PayloadOneofCase.RollbackReply:
                 Complete(op, null);
                 break;
+            case BatchExecuteResponse.PayloadOneofCase.PrepareReply:
+                Complete(op, resp.PrepareReply);
+                break;
+            case BatchExecuteResponse.PayloadOneofCase.CloseReply:
+                Complete(op, null);
+                break;
             case BatchExecuteResponse.PayloadOneofCase.Error:
                 Fault(op, new CamusGrpcException(resp.Error.Code, resp.Error.Message));
                 break;
@@ -311,10 +465,19 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         public readonly int Index;
         public readonly SemaphoreSlim WriteLock = new(1, 1);
         public volatile IBatchTransport? Transport;
+
+        /// <summary>
+        /// Statements registered on this slot, keyed by (database, sql). The value is the in-flight
+        /// or finished registration rather than the result, so concurrent first-executions of the
+        /// same statement await one PREPARE instead of each sending their own.
+        /// </summary>
+        public readonly ConcurrentDictionary<PreparedStatementKey, Task<PreparedSlotEntry>> Prepared = new();
+
         public Slot(int index) => Index = index;
     }
 
-    private readonly record struct QueuedItem(BatchExecuteRequest Request, int SlotIndex, PendingOp Op);
+    private readonly record struct QueuedItem(
+        BatchExecuteRequest Request, int SlotIndex, PendingOp Op, long? ExpectedTransportId);
 
     /// <summary>One in-flight op awaiting its terminal response, plus the accumulator a QUERY needs.</summary>
     private sealed class PendingOp

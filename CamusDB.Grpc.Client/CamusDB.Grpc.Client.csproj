@@ -25,6 +25,9 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>CamusDB.Tests</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>CamusDB.MicroBenchmarks</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

@@ -150,7 +150,7 @@ internal sealed class TestCommentOnHardening : BaseTest
         CommandExecutor executor, string? databaseName, string sql, bool ddlEndpoint)
     {
         HttpTransactionCoordinator txCoord = new(executor);
-        ExecuteSQLController controller = new(executor, txCoord, Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ICamusDB>(SharedLoggerFactory));
+        ExecuteSQLController controller = new(executor, txCoord, new PreparedStatementRegistry(), Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ICamusDB>(SharedLoggerFactory));
 
         string body = JsonSerializer.Serialize(new { databaseName, sql }, JsonOpts);
         byte[] bodyBytes = Encoding.UTF8.GetBytes(body);

@@ -209,6 +209,32 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string InsecureTransport = "CADB0519";
 
+    /// <summary>
+    /// The prepared statement handle named by the request is not registered on this node: it was
+    /// closed, it expired after sitting idle, it was prepared on a different node or on a different
+    /// gRPC stream, or it belongs to a different principal.
+    ///
+    /// <para>This is <b>not</b> a fatal error and does not indicate a broken client. Handles are
+    /// deliberately node-local and session-scoped, so an unknown handle is a routine event after an
+    /// idle period, a server restart, a stream rebuild, or a request that a load balancer sent to
+    /// another node. The correct client response is to prepare the statement again and replay the
+    /// execution once.</para>
+    ///
+    /// <para>Existence and ownership failures share this one code and message on purpose: a distinct
+    /// "not yours" error would let a caller probe which handles exist. Maps to HTTP 404.</para>
+    /// </summary>
+    public const string UnknownPreparedStatement = "CADB0520";
+
+    /// <summary>
+    /// The caller holds more live prepared statements than the configured cap allows.
+    ///
+    /// <para>Deliberately a refusal rather than an eviction: silently dropping the least recently
+    /// used handle would make a correct client's next execution fail at an unpredictable moment, so
+    /// the server refuses the new registration and asks the caller to close what it no longer needs.
+    /// Maps to HTTP 429.</para>
+    /// </summary>
+    public const string PreparedStatementLimitExceeded = "CADB0521";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -229,6 +255,8 @@ public static class CamusDBErrorCodes
         InsufficientPrivilege => 403,
         OrphanNotFound => 404,
         UserDoesNotExist => 404,
+        UnknownPreparedStatement => 404,
+        PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,
         UserAlreadyExists => 409,

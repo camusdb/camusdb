@@ -93,7 +93,7 @@ internal sealed class TestHttpAuth : BaseTest
 
     private async Task<JsonResult> QueryRest(CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
     {
-        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), Logger)
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(), Logger)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https)
         };
@@ -102,7 +102,7 @@ internal sealed class TestHttpAuth : BaseTest
 
     private async Task<JsonResult> NonQueryRest(CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
     {
-        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), Logger)
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(), Logger)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https)
         };

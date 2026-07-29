@@ -483,22 +483,42 @@ internal static class DerivedTableSchemaBuilder
                 if (!SchemaElementStateRules.IsReadable(column))
                     continue;
 
-                if (lookupKey == column.Name ||
-                    lookupKey == QueryRowNameResolver.FormatQualifiedKey(source.Alias, column.Name))
+                if (lookupKey == column.Name || MatchesQualifiedKey(lookupKey, source.Alias, column.Name))
                     return column.Type;
             }
         }
 
-        foreach (BoundDerivedTableSource source in innerBound.DerivedSources)
+        if (innerBound.DerivedSources.Count > 0)
         {
-            if (source.HasColumn(lookupKey))
-                return source.GetColumnType(lookupKey);
+            bool isQualified = TrySplitQualified(originalIdentifier, out _, out string bareName);
 
-            if (TrySplitQualified(originalIdentifier, out _, out string bareName) && source.HasColumn(bareName))
-                return source.GetColumnType(bareName);
+            foreach (BoundDerivedTableSource source in innerBound.DerivedSources)
+            {
+                if (source.HasColumn(lookupKey))
+                    return source.GetColumnType(lookupKey);
+
+                if (isQualified && source.HasColumn(bareName))
+                    return source.GetColumnType(bareName);
+            }
         }
 
         return ColumnType.String;
+    }
+
+    /// <summary>
+    /// Allocation-free equivalent of <c>lookupKey == QueryRowNameResolver.FormatQualifiedKey(alias, columnName)</c>:
+    /// an ordinal comparison against the <c>{alias}.{column}</c> form without materializing the qualified
+    /// string. This runs once per scanned source column for every identifier projection on every query, so
+    /// building the candidate key just to compare it dominated the schema-derivation allocation profile.
+    /// </summary>
+    private static bool MatchesQualifiedKey(string lookupKey, string alias, string columnName)
+    {
+        if (lookupKey.Length != alias.Length + 1 + columnName.Length)
+            return false;
+
+        return lookupKey[alias.Length] == '.'
+            && lookupKey.AsSpan(0, alias.Length).SequenceEqual(alias)
+            && lookupKey.AsSpan(alias.Length + 1).SequenceEqual(columnName);
     }
 
     private static bool TrySplitQualified(string identifier, out string alias, out string columnName)

@@ -392,7 +392,31 @@ of work — a fresh `START` (new handle) followed by all its statements and a ne
 the one failed op. A `commit_reply` that fails with `CADB0509` (finalize unresolved) is the
 exception: re-send the *same* `COMMIT` for the *same* handle (the finalize gate makes that safe).
 
-### 7.6 Server write-serialization note (informational)
+### 7.6 Prepared statements — `PREPARE` / `CLOSE`
+
+`BATCH_STATEMENT_KIND_PREPARE` registers `(SqlRequest.database, SqlRequest.sql)` on **this stream**
+and replies with a `PrepareReply { statement_id, parameter_names[] }`. A later `QUERY` / `NON_QUERY`
+op sets `SqlRequest.statement_id` and sends `repeated Value positional_parameters` instead of `sql`,
+`database`, and the `parameters` map: value *i* binds to `parameter_names[i]` (names are verbatim,
+`@` included, distinct, in first-occurrence order). `BATCH_STATEMENT_KIND_CLOSE` frees one id and is
+idempotent.
+
+Rules:
+
+- **Await the `PrepareReply` before sending anything that references the id** — same contract as
+  `START`. Ops run concurrently, so an execution sent earlier may arrive first.
+- Sending `statement_id` *and* any of `sql` / `database` / `parameters` is refused
+  (`CADB0400`), rather than resolved by a precedence rule.
+- `positional_parameters` without a `statement_id` is refused; the count must equal the declared
+  parameter count exactly.
+- A handle is valid **only on the stream that minted it**. After a stream is rebuilt, executions fail
+  with `CADB0520` — prepare again and replay. The server never migrates handles.
+- Only `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `SHOW …` may be prepared; DDL and the unary RPCs
+  reject `statement_id`.
+
+Full semantics, limits, and the REST equivalent: [prepared-statements.md](prepared-statements.md).
+
+### 7.7 Server write-serialization note (informational)
 
 gRPC forbids concurrent writes to one stream, so the server serializes all its `WriteAsync` calls
 onto the batch response stream behind a single lock while still dispatching op *execution*
@@ -493,6 +517,7 @@ Use this as an acceptance list when building a client:
 - The ready-made **.NET client** for this protocol: [grpc-dotnet-client.md](grpc-dotnet-client.md)
   (`CamusDB.Grpc.Client`). Use it if you're on .NET rather than implementing the wire contract yourself.
 - Message shapes (source of truth): [`CamusDB.Grpc.Contracts/Protos/camus_sql.proto`](../CamusDB.Grpc.Contracts/Protos/camus_sql.proto)
+- Prepared statements on both transports (§7.6 in full): [prepared-statements.md](prepared-statements.md)
 - Data types & the compact-raw encoding: [data-types.md](data-types.md)
 - Isolation, locking, and transaction modes: [transactions-locking-and-isolation.md](transactions-locking-and-isolation.md)
 - The retry contract the error model mirrors: [serializable-retry-contract.md](serializable-retry-contract.md)

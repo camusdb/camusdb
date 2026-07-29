@@ -18,6 +18,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
+    <ProjectReference Include="..\CamusDB.Grpc.Contracts\CamusDB.Grpc.Contracts.csproj" />
+    <ProjectReference Include="..\CamusDB.Grpc.Client\CamusDB.Grpc.Client.csproj" />
   </ItemGroup>
 
 </Project>

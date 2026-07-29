@@ -292,7 +292,7 @@ public sealed class TestCompiledRowCodec
         CompiledRowCodec codec = CodecFor(0, Col("n", ColumnType.Integer64), Col("s", ColumnType.String));
         byte[] payload = Enc(codec, ValueSlot.FromLong(ColumnType.Integer64, 1), ValueSlot.FromString("abc"));
 
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(payload[..3]));
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(payload[..3]))!;
         Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
     }
 
@@ -303,7 +303,7 @@ public sealed class TestCompiledRowCodec
         CompiledRowCodec v5 = CodecFor(5, Col("n", ColumnType.Integer64));
         byte[] payload = Enc(v0, ValueSlot.FromLong(ColumnType.Integer64, 1));
 
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => v5.ValidateFrame(payload));
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => v5.ValidateFrame(payload))!;
         Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
     }
 
@@ -318,7 +318,7 @@ public sealed class TestCompiledRowCodec
         byte[] longer = new byte[payload.Length + 1];
         payload.CopyTo(longer, 0);
 
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(longer));
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(longer))!;
         Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
     }
 
@@ -330,7 +330,7 @@ public sealed class TestCompiledRowCodec
         byte[] padded = new byte[payload.Length + 4];
         payload.CopyTo(padded, 0);
 
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(padded));
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(padded))!;
         Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
     }
 
@@ -338,7 +338,7 @@ public sealed class TestCompiledRowCodec
     public void Encode_RejectsWrongValueCount()
     {
         CompiledRowCodec codec = CodecFor(0, Col("a", ColumnType.Integer64), Col("b", ColumnType.Integer64));
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => Enc(codec, ValueSlot.FromLong(ColumnType.Integer64, 1)));
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => Enc(codec, ValueSlot.FromLong(ColumnType.Integer64, 1)))!;
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
     }
 
@@ -348,9 +348,9 @@ public sealed class TestCompiledRowCodec
     [Test]
     public void DecodeArrayBlob_ShortBlob_Rejected()
     {
-        CamusDBException ex = Assert.Throws<CamusDBException>(
+        CamusDBException? ex = Assert.Throws<CamusDBException>(
             () => CompiledRowCodec.DecodeArrayBlob(new byte[] { 1, 2, 3 }, ColumnType.Integer64));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 
     [TestCase(0x80000000u)]   // negative when cast to int
@@ -360,9 +360,9 @@ public sealed class TestCompiledRowCodec
     {
         byte[] blob = new byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(blob, count);
-        CamusDBException ex = Assert.Throws<CamusDBException>(
+        CamusDBException? ex = Assert.Throws<CamusDBException>(
             () => CompiledRowCodec.DecodeArrayBlob(blob, ColumnType.Integer64));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 
     [TestCase(0x80000000u)]
@@ -372,16 +372,16 @@ public sealed class TestCompiledRowCodec
     {
         byte[] blob = new byte[8];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(blob, count);
-        CamusDBException ex = Assert.Throws<CamusDBException>(
+        CamusDBException? ex = Assert.Throws<CamusDBException>(
             () => CompiledRowCodec.DecodeArrayBlob(blob, ColumnType.String));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 
     [Test]
     public void ValidateFrame_ShorterThanHeader_RejectedNotFrameworkException([Values(0, 1, 2, 3)] int length)
     {
         CompiledRowCodec codec = CodecFor(0, Col("n", ColumnType.Integer64));
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(new byte[length]));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        CamusDBException? ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(new byte[length]));
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 }

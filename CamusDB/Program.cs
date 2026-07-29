@@ -216,6 +216,10 @@ if (config.IsClusterMode)
 builder.Services.AddSingleton<HttpTransactionCoordinator>();
 builder.Services.AddSingleton<CamusDB.App.Services.ForegroundRequestGauge>();
 
+// Holds the statements REST clients prepared. Node-local by construction — a handle minted here is
+// meaningless on another node, which is why clients must re-prepare on CADB0520.
+builder.Services.AddSingleton<CamusDB.App.Services.PreparedStatementRegistry>();
+
 // Opt-in OpenTelemetry export (standalone only). Subscribes to the CamusDB.Server meter/activity
 // source plus the embedded dependency meters ("Kahuna", "Kommander") and standard runtime/ASP.NET
 // signals, so a workload run can attribute time to server handler, execution, commit, and the
@@ -258,6 +262,10 @@ if (diagnosticsActive)
 // Reclaims abandoned explicit transactions (client opened one and never committed/rolled back) so
 // their locks — renewed forever by the range-lock heartbeat — cannot be held indefinitely.
 builder.Services.AddHostedService<AbandonedTransactionReaper>();
+
+// Drops prepared statements a REST client stopped using. A gRPC handle dies with its stream; a REST
+// handle has no such event, so an idle timeout is what keeps abandoned ones from accumulating.
+builder.Services.AddHostedService<PreparedStatementReaper>();
 
 if (config.IsClusterMode)
 {

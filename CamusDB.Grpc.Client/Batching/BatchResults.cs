@@ -19,6 +19,8 @@ internal enum BatchOpKind
     Start,
     Commit,
     Rollback,
+    Prepare,
+    Close,
 }
 
 /// <summary>

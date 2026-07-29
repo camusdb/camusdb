@@ -155,7 +155,25 @@ enum BatchStatementKind {
   BATCH_STATEMENT_KIND_START       = 3;   // begin a transaction — reply carries the TxnHandle
   BATCH_STATEMENT_KIND_COMMIT      = 4;   // commit request.txn_handle — reply carries the causal token
   BATCH_STATEMENT_KIND_ROLLBACK    = 5;   // roll back request.txn_handle
+  // Prepared statements, scoped to THIS stream. PREPARE registers SqlRequest.database +
+  // SqlRequest.sql and replies with an id plus the parameter names in binding order; later QUERY /
+  // NON_QUERY ops execute by that id and send values positionally, so neither the SQL nor the
+  // parameter names travel again. CLOSE frees one id (SqlRequest.statement_id).
+  BATCH_STATEMENT_KIND_PREPARE     = 6;
+  BATCH_STATEMENT_KIND_CLOSE       = 7;
 }
+
+// PREPARE terminator. The client MUST await this reply before sending any op that references the
+// id — exactly the contract START has — so an execution can never race its own registration.
+message PrepareReply {
+  int32 statement_id = 1;
+  // Distinct placeholder names in binding order, verbatim INCLUDING the leading '@':
+  // positional_parameters[i] binds to parameter_names[i] on every execution of this statement.
+  repeated string parameter_names = 2;
+}
+
+// CLOSE terminator. Closing an unknown id succeeds — the requested end state already holds.
+message CloseReply {}
 
 message BatchExecuteRequest {
   int32              request_id = 1;   // echoed on every response for this op
@@ -192,6 +210,8 @@ message BatchExecuteResponse {
     TxnHandle     start_reply    = 7;   // START: terminator — the server-minted handle
     CommitReply   commit_reply   = 8;   // COMMIT: terminator — causal token
     RollbackReply rollback_reply = 9;   // ROLLBACK: terminator
+    PrepareReply  prepare_reply  = 10;  // PREPARE: terminator — id + parameter names
+    CloseReply    close_reply    = 11;  // CLOSE: terminator
   }
 }
 
@@ -249,6 +269,16 @@ message SqlRequest {
   int64 causal_token_l = 8;
   int64 causal_token_c = 9;
   int32 causal_token_n = 10;
+
+  // Prepared execution: when > 0, `sql`, `database` and `parameters` MUST be absent — the statement
+  // id already names all three, and sending both is an error rather than a precedence rule.
+  // 0 = classic inline request, unchanged semantics. Valid only on BatchExecute ops (the id is
+  // scoped to a stream); the unary RPCs reject it.
+  int32 statement_id = 11;
+
+  // Ordinal parameter values for a prepared execution; index i binds to parameter_names[i] from the
+  // PREPARE reply. The count must equal the declared parameter count exactly.
+  repeated Value positional_parameters = 12;
 }
 
 message NonQueryReply {

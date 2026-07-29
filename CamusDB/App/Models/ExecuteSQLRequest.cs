@@ -24,6 +24,29 @@ public sealed class ExecuteSQLRequest
     public Dictionary<string, ColumnValue>? Parameters { get; set; }
 
     /// <summary>
+    /// Optional prepared-statement handle from <c>/prepare-sql-statement</c>.
+    ///
+    /// <para>When set, <see cref="Sql"/>, <see cref="DatabaseName"/> and <see cref="Parameters"/>
+    /// must be absent — the handle already names all three, and sending both is refused rather than
+    /// resolved by a precedence rule — and <see cref="PositionalParameters"/> supplies the values.
+    /// Everything else on this request (transaction, isolation, locking, causal token) behaves
+    /// exactly as it does for an inline statement.</para>
+    ///
+    /// <para>A handle that is unknown, expired, prepared on another node, or owned by another
+    /// principal fails with <c>CADB0520</c> (HTTP 404). That is a routine outcome, not a client bug:
+    /// prepare the statement again and replay the execution once.</para>
+    /// </summary>
+    public string? StatementId { get; set; }
+
+    /// <summary>
+    /// Values for a prepared execution, in the order the prepare reply published in
+    /// <c>parameterNames</c>. The element encoding is identical to a value of the
+    /// <see cref="Parameters"/> map, so a client reuses its existing value serialization unchanged.
+    /// The count must equal the declared parameter count exactly.
+    /// </summary>
+    public List<ColumnValue>? PositionalParameters { get; set; }
+
+    /// <summary>
     /// Optional isolation level for the autocommit transaction begun by this request.
     /// Accepted values (case-insensitive): <c>"ReadCommitted"</c>, <c>"Serializable"</c>.
     /// Ignored when <c>TxnIdPT</c> resumes an existing transaction.

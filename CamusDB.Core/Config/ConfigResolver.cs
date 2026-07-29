@@ -110,6 +110,15 @@ public static class ConfigResolver
         CamusDBConfig.MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs;
         CamusDBConfig.TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs;
         CamusDBConfig.TransactionReaperIntervalMs = config.TransactionReaperIntervalMs;
+        CamusDBConfig.PreparedStatementIdleTimeoutMs = config.PreparedStatementIdleTimeoutMs;
+        CamusDBConfig.PreparedStatementSweepIntervalMs = config.PreparedStatementSweepIntervalMs;
+        CamusDBConfig.GrpcMaxPreparedStatementsPerStream = config.GrpcMaxPreparedStatementsPerStream;
+        CamusDBConfig.RestMaxPreparedStatementsPerPrincipal = config.RestMaxPreparedStatementsPerPrincipal;
+        CamusDBConfig.RestMaxPreparedStatements = config.RestMaxPreparedStatements;
+        CamusDBConfig.MaxPreparedStatementBytes = config.MaxPreparedStatementBytes;
+        CamusDBConfig.RestMaxPreparedStatementBytes = config.RestMaxPreparedStatementBytes;
+        CamusDBConfig.RestMaxPreparedStatementBytesPerPrincipal = config.RestMaxPreparedStatementBytesPerPrincipal;
+        CamusDBConfig.GrpcMaxPreparedStatementBytesPerStream = config.GrpcMaxPreparedStatementBytesPerStream;
         CamusDBConfig.LockEscalationThreshold = config.LockEscalationThreshold;
         CamusDBConfig.LockWaitDeadlineMs = config.LockWaitDeadlineMs;
 

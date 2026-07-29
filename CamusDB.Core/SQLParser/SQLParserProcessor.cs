@@ -42,10 +42,25 @@ public static class SQLParserProcessor
     /// </summary>
     public static NodeAst Parse(string sql)
     {
+        Interlocked.Increment(ref parses);
         sqlParser sqlParser = new();
         NodeAst ast = sqlParser.Parse(sql);
         return ast;
     }
+
+    private static long parses;
+
+    /// <summary>
+    /// How many times SQL text has actually been lexed and parsed in this process, counting only real
+    /// parses — a cache hit does not advance it.
+    ///
+    /// <para>Useful because parses are not all attributable to statement execution: a transport that
+    /// parses a statement merely to decide how to route it pays a full uncached parse per request,
+    /// which no cache-hit-ratio metric reveals. Comparing this counter across two shapes of the same
+    /// workload is what makes such a cost visible, and what keeps a later refactor from quietly
+    /// reintroducing one.</para>
+    /// </summary>
+    public static long TotalParses => Interlocked.Read(ref parses);
 
     /// <summary>
     /// Parses a bare SQL condition expression (e.g. <c>price &gt; 0</c>) and returns its
@@ -82,6 +97,7 @@ public static class SQLParserProcessor
             return cached!;
         }
 
+        Interlocked.Increment(ref parses);
         long start = System.Diagnostics.Stopwatch.GetTimestamp();
         sqlParser sqlParser = new();
         NodeAst ast = sqlParser.Parse(sql);

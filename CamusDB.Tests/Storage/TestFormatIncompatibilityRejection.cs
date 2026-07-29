@@ -94,8 +94,8 @@ public sealed class TestFormatIncompatibilityRejection
     public void ShorterThanHeaderRow_RejectedWithSystemSpaceCorrupt([Values(0, 1, 2, 3)] int length)
     {
         TableSchema schema = MakeSchema(0, Col("n", ColumnType.Integer64));
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => RowEncoder.Decode(schema, RowId, new byte[length]));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        CamusDBException? ex = Assert.Throws<CamusDBException>(() => RowEncoder.Decode(schema, RowId, new byte[length]));
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 
     [Test]
@@ -116,8 +116,8 @@ public sealed class TestFormatIncompatibilityRejection
         byte[] payload = codec.Encode(new[] { ValueSlot.FromLong(ColumnType.Integer64, 7), ValueSlot.FromString("abc") });
 
         // Chop the payload — the one-shot frame check must reject it before any unchecked read.
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(payload.AsSpan(0, payload.Length - 2)));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        CamusDBException? ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(payload.AsSpan(0, payload.Length - 2)));
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 
     [Test]
@@ -131,7 +131,7 @@ public sealed class TestFormatIncompatibilityRejection
         byte[] payload = v0.Encode(new[] { ValueSlot.FromLong(ColumnType.Integer64, 1) });
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload, 1); // claim version 1
 
-        CamusDBException ex = Assert.Throws<CamusDBException>(() => v1.ValidateFrame(payload));
-        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex.Code);
+        CamusDBException? ex = Assert.Throws<CamusDBException>(() => v1.ValidateFrame(payload));
+        Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
 }

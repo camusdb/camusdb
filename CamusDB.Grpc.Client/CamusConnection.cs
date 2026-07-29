@@ -53,6 +53,28 @@ public sealed class CamusConnection : IAsyncDisposable
     public Task<NonQueryResult> ExecuteNonQueryAsync(string database, string sql, CancellationToken cancellationToken = default)
         => batcher.EnqueueNonQueryAsync(new SqlRequest { Database = database, Sql = sql }, slotIndex: null, cancellationToken);
 
+    // ─── Prepared statements ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Registers a statement so later executions send only its values, not the SQL and not the
+    /// parameter names.
+    ///
+    /// <para>The registration is performed eagerly on one stream so the caller learns the parameter
+    /// order immediately and a malformed statement fails here rather than at some later execution.
+    /// The other streams in the pool register lazily, on first use — see
+    /// <see cref="CamusPreparedStatement"/> for why a statement cannot simply hold one handle.</para>
+    /// </summary>
+    public async Task<CamusPreparedStatement> PrepareAsync(
+        string database, string sql, CancellationToken cancellationToken = default)
+    {
+        int slot = batcher.ReserveSlot();
+        PreparedStatementKey key = new(database, sql);
+        PreparedSlotEntry entry = await batcher
+            .EnsurePreparedAsync(slot, key, cancellationToken).ConfigureAwait(false);
+
+        return new CamusPreparedStatement(batcher, key, entry.ParameterNames);
+    }
+
     /// <summary>DDL over the unary RPC (not batchable). Requires a real connection.</summary>
     public async Task<DdlReply> ExecuteDdlAsync(string database, string sql, CancellationToken cancellationToken = default)
     {

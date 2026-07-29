@@ -311,6 +311,41 @@ public class ConfigDefinition
     /// <summary>Reaper sweep interval in milliseconds. Must be &gt; 0. Default 30 000 (30 s).</summary>
     public int TransactionReaperIntervalMs { get; set; } = 30_000;
 
+    /// <summary>
+    /// Idle timeout in milliseconds for a REST prepared statement before the reaper drops it.
+    /// &lt;= 0 disables reaping, leaving handles alive until closed or the process exits. gRPC handles
+    /// are unaffected — they die with their stream. Default 600 000 (10 min).
+    /// </summary>
+    public int PreparedStatementIdleTimeoutMs { get; set; } = 600_000;
+
+    /// <summary>Prepared-statement reaper sweep interval in milliseconds. Default 60 000 (1 min).</summary>
+    public int PreparedStatementSweepIntervalMs { get; set; } = 60_000;
+
+    /// <summary>Live prepared statements one BatchExecute stream may hold. 0 = unbounded. Default 512.</summary>
+    public int GrpcMaxPreparedStatementsPerStream { get; set; } = 512;
+
+    /// <summary>Live REST prepared statements one principal may hold. 0 = unbounded. Default 512.</summary>
+    public int RestMaxPreparedStatementsPerPrincipal { get; set; } = 512;
+
+    /// <summary>Live REST prepared statements a node holds in total. 0 = unbounded. Default 8192.</summary>
+    public int RestMaxPreparedStatements { get; set; } = 8192;
+
+    /// <summary>
+    /// Largest single statement (database + SQL + parameter names, UTF-16 bytes) that may be
+    /// prepared on either transport. 0 = unlimited. This is what makes the count caps bound memory.
+    /// Default 65536 (64 KiB).
+    /// </summary>
+    public int MaxPreparedStatementBytes { get; set; } = 65_536;
+
+    /// <summary>Retained REST prepared-statement bytes per node. 0 = unlimited. Default 64 MiB.</summary>
+    public long RestMaxPreparedStatementBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>Retained REST prepared-statement bytes per principal. 0 = unlimited. Default 8 MiB.</summary>
+    public long RestMaxPreparedStatementBytesPerPrincipal { get; set; } = 8L * 1024 * 1024;
+
+    /// <summary>Retained prepared-statement bytes per BatchExecute stream. 0 = unlimited. Default 8 MiB.</summary>
+    public long GrpcMaxPreparedStatementBytesPerStream { get; set; } = 8L * 1024 * 1024;
+
     /// <summary>Per-bucket shared-point-lock count before whole-bucket escalation. Default 50.</summary>
     public int LockEscalationThreshold { get; set; } = 50;
 
@@ -573,6 +608,34 @@ public class ConfigDefinition
 
         if (TransactionReaperIntervalMs <= 0)
             throw Invalid($"'transaction_reaper_interval_ms' must be > 0, got {TransactionReaperIntervalMs}");
+
+        // Prepared-statement knobs. The sweep interval must be positive: the reaper would otherwise
+        // have to invent a value, and a typo like -1 would silently become a scan loop rather than the
+        // startup error it is. Caps and budgets use 0 for "unbounded", so a negative value is a typo
+        // that would read as unbounded and silently disable the limit the operator meant to set.
+        if (PreparedStatementSweepIntervalMs <= 0)
+            throw Invalid($"'prepared_statement_sweep_interval_ms' must be > 0, got {PreparedStatementSweepIntervalMs}");
+
+        if (GrpcMaxPreparedStatementsPerStream < 0)
+            throw Invalid($"'grpc_max_prepared_statements_per_stream' must be >= 0 (0 = unbounded), got {GrpcMaxPreparedStatementsPerStream}");
+
+        if (RestMaxPreparedStatementsPerPrincipal < 0)
+            throw Invalid($"'rest_max_prepared_statements_per_principal' must be >= 0 (0 = unbounded), got {RestMaxPreparedStatementsPerPrincipal}");
+
+        if (RestMaxPreparedStatements < 0)
+            throw Invalid($"'rest_max_prepared_statements' must be >= 0 (0 = unbounded), got {RestMaxPreparedStatements}");
+
+        if (MaxPreparedStatementBytes < 0)
+            throw Invalid($"'max_prepared_statement_bytes' must be >= 0 (0 = unlimited), got {MaxPreparedStatementBytes}");
+
+        if (RestMaxPreparedStatementBytes < 0)
+            throw Invalid($"'rest_max_prepared_statement_bytes' must be >= 0 (0 = unlimited), got {RestMaxPreparedStatementBytes}");
+
+        if (RestMaxPreparedStatementBytesPerPrincipal < 0)
+            throw Invalid($"'rest_max_prepared_statement_bytes_per_principal' must be >= 0 (0 = unlimited), got {RestMaxPreparedStatementBytesPerPrincipal}");
+
+        if (GrpcMaxPreparedStatementBytesPerStream < 0)
+            throw Invalid($"'grpc_max_prepared_statement_bytes_per_stream' must be >= 0 (0 = unlimited), got {GrpcMaxPreparedStatementBytesPerStream}");
 
         if (SpillThresholdRows <= 0)
             throw Invalid($"'spill_threshold_rows' must be > 0, got {SpillThresholdRows}");

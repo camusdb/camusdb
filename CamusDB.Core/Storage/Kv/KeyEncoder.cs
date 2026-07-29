@@ -165,18 +165,34 @@ public static class KeyEncoder
     /// </summary>
     public static bool TryEncode(CompositeColumnValue composite, OrderType[]? directions, out string encoded)
     {
+        if (!CanEncode(composite))
+        {
+            encoded = string.Empty;
+            return false;
+        }
+
+        encoded = Encode(composite, directions);
+        return true;
+    }
+
+    /// <summary>
+    /// Allocation-free encodability check: true when every value of <paramref name="composite"/> can be
+    /// encoded — i.e. every <see cref="ColumnType.Id"/> value is a valid 24-hex ObjectId. This is the
+    /// validation half of <see cref="TryEncode"/>, exposed separately so a read-path caller composing a
+    /// larger key (bucket prefix + encoded key) can validate first and then write the encoding straight
+    /// into one final <c>string.Create</c> buffer via <see cref="Measure"/>/<see cref="Write"/>, instead
+    /// of allocating an intermediate encoded string only to interpolate it into a second one.
+    /// </summary>
+    public static bool CanEncode(CompositeColumnValue composite)
+    {
         ArgumentNullException.ThrowIfNull(composite);
 
         foreach (ColumnValue value in composite.Values)
         {
             if (value.Type == ColumnType.Id && !IsEncodableObjectId(value.StrValue))
-            {
-                encoded = string.Empty;
                 return false;
-            }
         }
 
-        encoded = Encode(composite, directions);
         return true;
     }
 

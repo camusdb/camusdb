@@ -83,6 +83,26 @@ initial_partitions: 4      # Raft partition count (>= 1). More partitions spread
 # transaction_idle_timeout_ms: 300000     # idle cutoff before rollback; <= 0 disables the reaper
 # transaction_reaper_interval_ms: 30000   # sweep interval; must be > 0
 
+# Prepared statements. A gRPC handle dies with the BatchExecute stream that minted it, so it needs
+# no timeout — only a per-stream cap. A REST handle has no such event to end it (HTTP connections are
+# pooled, multiplexed and load-balanced), so it is scoped to this node and to the principal that
+# prepared it, with an idle timeout as the backstop for clients that never close what they prepared.
+# Exceeding a cap refuses the new PREPARE (CADB0521) rather than evicting a handle a client still
+# holds. See docs/prepared-statements.md.
+# Counting statements does not bound memory on its own — a cap of 512 permits 512 times whatever the
+# largest request happens to be — so a per-statement size limit and retained-byte budgets bound the
+# per-entry term as well. All of these are validated at startup: a negative value is a startup error,
+# not a silently-unbounded limit.
+# prepared_statement_idle_timeout_ms: 600000        # REST idle cutoff; <= 0 disables reaping
+# prepared_statement_sweep_interval_ms: 60000       # reaper sweep interval; must be > 0
+# grpc_max_prepared_statements_per_stream: 512      # per BatchExecute stream; 0 = unbounded
+# rest_max_prepared_statements_per_principal: 512   # per principal on this node; 0 = unbounded
+# rest_max_prepared_statements: 8192                # node-wide across principals; 0 = unbounded
+# max_prepared_statement_bytes: 65536               # largest single statement, either transport
+# grpc_max_prepared_statement_bytes_per_stream: 8388608       # 8 MiB retained per stream
+# rest_max_prepared_statement_bytes_per_principal: 8388608    # 8 MiB retained per principal
+# rest_max_prepared_statement_bytes: 67108864                 # 64 MiB retained per node
+
 # ── Schema and transaction limits ─────────────────────────────────────────────
 # max_index_columns: max key + INCLUDE columns in one index; <= 0 disables. Default 32.
 # max_index_include_tuple_bytes: max encoded bytes of one index entry's key + INCLUDE tuple, checked

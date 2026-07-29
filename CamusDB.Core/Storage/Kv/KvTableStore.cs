@@ -3142,16 +3142,18 @@ public sealed class KvTableStore
     }
 
     // Read-path variant: returns false when the key cannot be encoded (an invalid Id value that no
-    // stored row can equal), so a point lookup treats it as a miss instead of throwing.
+    // stored row can equal), so a point lookup treats it as a miss instead of throwing. Validation is
+    // allocation-free and the key is composed by BuildUniqueIndexKey in a single string.Create — no
+    // intermediate encoded-key string interpolated into a second string on the per-lookup hot path.
     private bool TryBuildUniqueIndexKey(string indexId, CompositeColumnValue key, out string kvKey)
     {
-        if (!KeyEncoder.TryEncode(key, DirectionsOf(indexId), out string encoded))
+        if (!KeyEncoder.CanEncode(key))
         {
             kvKey = string.Empty;
             return false;
         }
 
-        kvKey = $"{tableKeyPrefix}:i:{indexId}/{encoded}";
+        kvKey = BuildUniqueIndexKey(indexId, key);
         return true;
     }
 

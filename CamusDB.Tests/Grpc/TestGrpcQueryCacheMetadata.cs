@@ -195,6 +195,62 @@ public sealed class TestGrpcQueryCacheMetadata : BaseTest
     }
 
     [Test]
+    public async Task BatchQuery_PreparedCacheHint_MissThenHit_ReportedOnTerminator()
+    {
+        string db = await CreateOrdersDatabaseAsync();
+
+        // A prepared execution reuses the SQL instance captured at registration, so the hint — which
+        // rides that text — must resolve exactly as it does inline. If the prepared path ever stopped
+        // handing the executor the same statement, the second run would miss instead of hit.
+        ChannelAsyncStreamReader<BatchExecuteRequest> reader = new();
+        ObservingStreamWriter<BatchExecuteResponse> writer = new();
+        Task server = service.BatchExecute(reader, writer, Ctx());
+
+        reader.Push(new BatchExecuteRequest
+        {
+            RequestId = 1,
+            Kind = BatchStatementKind.Prepare,
+            Request = new SqlRequest { Database = db, Sql = "SELECT * FROM orders{cache=grpc_prepared}" },
+        });
+
+        BatchExecuteResponse prepared = await writer.WaitFor(
+            m => m.RequestId == 1 && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.PrepareReply);
+        int statementId = prepared.PrepareReply.StatementId;
+
+        async Task<QueryComplete> ExecuteAsync(int requestId)
+        {
+            reader.Push(new BatchExecuteRequest
+            {
+                RequestId = requestId,
+                Kind = BatchStatementKind.Query,
+                Request = new SqlRequest { StatementId = statementId },
+            });
+
+            BatchExecuteResponse terminator = await writer.WaitFor(m =>
+                m.RequestId == requestId && m.PayloadCase is
+                    BatchExecuteResponse.PayloadOneofCase.QueryComplete or
+                    BatchExecuteResponse.PayloadOneofCase.Error);
+
+            Assert.That(terminator.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.QueryComplete),
+                terminator.Error?.Message);
+            return terminator.QueryComplete;
+        }
+
+        QueryComplete cold = await ExecuteAsync(2);
+        QueryComplete warm = await ExecuteAsync(3);
+
+        reader.Complete();
+        await server;
+
+        Assert.That(cold.CacheMetadata, Is.Not.Null, "a prepared hinted query must still report a verdict");
+        Assert.That(cold.CacheMetadata.Status, Is.EqualTo("miss"));
+        Assert.That(cold.CacheMetadata.Name, Is.EqualTo("grpc_prepared"));
+
+        Assert.That(warm.CacheMetadata, Is.Not.Null);
+        Assert.That(warm.CacheMetadata.Status, Is.EqualTo("hit"));
+    }
+
+    [Test]
     public async Task BatchQuery_NoCacheHint_TerminatorHasNoCacheMetadata()
     {
         string db = await CreateOrdersDatabaseAsync();

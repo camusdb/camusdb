@@ -57,6 +57,23 @@ foreach (ResultRow row in result.Rows)
 - Autocommit calls run **concurrently** — fire many and `await Task.WhenAll` them; they pipeline over
   the pool.
 
+## Prepared statements
+
+Register a parameterized statement once and execute it with values only — the SQL and the parameter
+names stop travelling per execution, and the server stops re-parsing the statement to route it:
+
+```csharp
+await using CamusPreparedStatement insert = await conn.PrepareAsync(
+    "mydb", "INSERT INTO items (id, name) VALUES (gen_id(), @name)");
+
+await insert.ExecuteNonQueryAsync(["widget"]);
+await insert.ExecuteNonQueryAsync(["gadget"]);
+```
+
+Values bind by ordinal against `insert.ParameterNames`. The statement re-registers itself
+transparently when a pooled stream is rebuilt, so handles and streams never surface to the caller.
+See [prepared-statements.md](prepared-statements.md).
+
 ## DDL
 
 DDL is **not** batched — it goes over the unary RPC — but the API is the same shape:

@@ -30,9 +30,62 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class ExecuteSQLController : CommandsController
 {
-    public ExecuteSQLController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
-    {
+    private readonly PreparedStatementRegistry preparedStatements;
 
+    public ExecuteSQLController(
+        CommandExecutor executor,
+        HttpTransactionCoordinator transactions,
+        PreparedStatementRegistry preparedStatements,
+        ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    {
+        this.preparedStatements = preparedStatements;
+    }
+
+    /// <summary>
+    /// What a request executes, after either reading it off the body (inline) or recovering it from
+    /// a prepared statement. <see cref="RootType"/> is what makes the indirection worth having: the
+    /// handlers below need the statement's root node to route it, and an inline request can only
+    /// answer that by parsing the SQL again — uncached — on every single request.
+    /// </summary>
+    private readonly record struct ResolvedSql(
+        string Database,
+        string Sql,
+        Dictionary<string, ColumnValue>? Parameters,
+        NodeType RootType);
+
+    /// <summary>
+    /// Resolves one request to the (database, sql, parameters, root node) it executes.
+    ///
+    /// <para>Call this <b>once</b>, outside any serializable retry body. Re-resolving inside a retry
+    /// would let a concurrent close or an idle expiry turn a retryable conflict into an
+    /// unknown-statement failure part-way through a replay.</para>
+    /// </summary>
+    private ResolvedSql Resolve(ExecuteSQLRequest request, Principal? principal)
+    {
+        if (string.IsNullOrEmpty(request.StatementId))
+        {
+            if (request.PositionalParameters is { Count: > 0 })
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "'positionalParameters' requires a 'statementId'; an inline request binds by name");
+
+            string sql = request.Sql ?? "";
+            return new ResolvedSql(
+                request.DatabaseName ?? "", sql, request.Parameters, SQLParserProcessor.Parse(sql).nodeType);
+        }
+
+        PreparedStatementBinder.ValidateNoInlineFields(
+            hasSql: !string.IsNullOrEmpty(request.Sql),
+            hasDatabase: !string.IsNullOrEmpty(request.DatabaseName),
+            hasParameters: request.Parameters is { Count: > 0 });
+
+        PreparedStatement statement = preparedStatements.Resolve(principal, request.StatementId);
+
+        return new ResolvedSql(
+            statement.Database,
+            statement.Sql,
+            PreparedStatementBinder.Bind(statement, request.PositionalParameters, static value => value),
+            statement.RootNodeType);
     }
 
     private static List<ColumnSchemaDto> ToColumnDtos(IReadOnlyList<DerivedColumnSchema> schema)
@@ -80,22 +133,24 @@ public sealed class ExecuteSQLController : CommandsController
 
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
-            string sql = request.Sql ?? "";
-            NodeAst ast = SQLParserProcessor.Parse(sql);
+            // Resolved once, before any retry body: a prepared handle must not be re-looked-up
+            // mid-replay, where a concurrent close would turn a conflict into a 404.
+            ResolvedSql resolved = Resolve(request, principal);
+            string sql = resolved.Sql;
 
             LogExecutingSqlRedacted(sql);
 
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
-            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-                              or NodeType.ShowOrphanDatabases)
+            if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
+                                   or NodeType.ShowOrphanDatabases)
             {
                 QuerySchemaHolder schemaHolder = new();
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
-                    database: request.DatabaseName ?? "",
+                    database: resolved.Database,
                     sql: sql,
-                    parameters: request.Parameters,
+                    parameters: resolved.Parameters,
                         principal: principal
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
@@ -116,9 +171,9 @@ public sealed class ExecuteSQLController : CommandsController
                     QuerySchemaHolder schemaHolder = new();
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
-                        database: request.DatabaseName ?? "",
+                        database: resolved.Database,
                         sql: sql,
-                        parameters: request.Parameters,
+                        parameters: resolved.Parameters,
                         principal: principal
                     );
                     List<QueryResultRow> rows = [];
@@ -147,15 +202,15 @@ public sealed class ExecuteSQLController : CommandsController
             async Task AutocommitBody(CancellationToken ct)
             {
                 KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    request.DatabaseName ?? "", promote: true, request.CausalToken, ct).ConfigureAwait(false);
+                    resolved.Database, promote: true, request.CausalToken, ct).ConfigureAwait(false);
                 try
                 {
                     QuerySchemaHolder schemaHolder = new();
                     ExecuteSQLTicket ticket = new(
                         txnState: tx,
-                        database: request.DatabaseName ?? "",
+                        database: resolved.Database,
                         sql: sql,
-                        parameters: request.Parameters,
+                        parameters: resolved.Parameters,
                         principal: principal
                     );
                     // Fully buffer the decoded, transaction-independent rows, THEN commit — so a
@@ -239,7 +294,7 @@ public sealed class ExecuteSQLController : CommandsController
 
         ExecuteSQLRequest? request;
         string sql;
-        NodeAst ast;
+        ResolvedSql resolved;
         Principal? principal = null;
 
         // Setup phase: anything that throws here happens before a single byte is on the wire, so it
@@ -254,8 +309,11 @@ public sealed class ExecuteSQLController : CommandsController
             // stream bytes are written.
             principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
-            sql = request.Sql ?? "";
-            ast = SQLParserProcessor.Parse(sql);
+            // Resolving a prepared handle belongs in the setup phase: an unknown or expired handle
+            // must fail before the 200 header goes out, so it stays a clean JSON 404 instead of an
+            // in-band trailer error the client can only discover at the end of the stream.
+            resolved = Resolve(request, principal);
+            sql = resolved.Sql;
             LogExecutingSqlRedacted(sql);
         }
         catch (Exception e)
@@ -274,14 +332,14 @@ public sealed class ExecuteSQLController : CommandsController
         {
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no database
             // context or transaction.
-            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-                              or NodeType.ShowOrphanDatabases)
+            if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
+                                   or NodeType.ShowOrphanDatabases)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
-                    database: request.DatabaseName ?? "",
+                    database: resolved.Database,
                     sql: sql,
-                    parameters: request.Parameters,
+                    parameters: resolved.Parameters,
                         principal: principal
                 );
                 (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
@@ -294,9 +352,9 @@ public sealed class ExecuteSQLController : CommandsController
                 {
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
-                        database: request.DatabaseName ?? "",
+                        database: resolved.Database,
                         sql: sql,
-                        parameters: request.Parameters,
+                        parameters: resolved.Parameters,
                         principal: principal
                     );
                     (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
@@ -312,14 +370,14 @@ public sealed class ExecuteSQLController : CommandsController
             else
             {
                 KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    request.DatabaseName ?? "", promote: true, request.CausalToken, ct).ConfigureAwait(false);
+                    resolved.Database, promote: true, request.CausalToken, ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
                         txnState: tx,
-                        database: request.DatabaseName ?? "",
+                        database: resolved.Database,
                         sql: sql,
-                        parameters: request.Parameters,
+                        parameters: resolved.Parameters,
                         principal: principal
                     );
                     (DatabaseDescriptor? db, int count) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
@@ -449,22 +507,25 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
-            LogExecutingSqlRedacted(request.Sql ?? "");
-
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+
+            // Resolved once, before the retry body below — see Resolve.
+            ResolvedSql resolved = Resolve(request, principal);
+
+            LogExecutingSqlRedacted(resolved.Sql);
 
             (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2) = ParseRequestLevelMode(request);
 
             // Clients route no-rows statements to whichever endpoint they use for non-SELECT SQL,
             // so a database-scoped statement can arrive here as easily as at /execute-sql-ddl. It
             // returns no descriptor, so it must bypass both the transaction and the commit below.
-            if (StatementScope.IsDatabaseScopedMutation(SQLParserProcessor.Parse(request.Sql ?? "").nodeType))
+            if (StatementScope.IsDatabaseScopedMutation(resolved.RootType))
             {
                 ExecuteSQLTicket dbScopedTicket = new(
                     txnState: null!,
-                    database: request.DatabaseName ?? "",
-                    sql: request.Sql ?? "",
-                    parameters: request.Parameters,
+                    database: resolved.Database,
+                    sql: resolved.Sql,
+                    parameters: resolved.Parameters,
                         principal: principal
                 );
 
@@ -481,9 +542,9 @@ public sealed class ExecuteSQLController : CommandsController
                     txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
-                        database: request.DatabaseName ?? "",
-                        sql: request.Sql ?? "",
-                        parameters: request.Parameters,
+                        database: resolved.Database,
+                        sql: resolved.Sql,
+                        parameters: resolved.Parameters,
                         principal: principal
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
@@ -504,14 +565,14 @@ public sealed class ExecuteSQLController : CommandsController
 
             async Task AutocommitDmlBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.StartAsync(request.DatabaseName ?? "", reqLevel2, reqMode2, reqLocking2, cancellationToken: ct).ConfigureAwait(false);
+                KvTransaction tx = await transactions.StartAsync(resolved.Database, reqLevel2, reqMode2, reqLocking2, cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
                         txnState: tx,
-                        database: request.DatabaseName ?? "",
-                        sql: request.Sql ?? "",
-                        parameters: request.Parameters,
+                        database: resolved.Database,
+                        sql: resolved.Sql,
+                        parameters: resolved.Parameters,
                         principal: principal
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
@@ -561,6 +622,11 @@ public sealed class ExecuteSQLController : CommandsController
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
+
+            // DDL cannot be prepared: schema statements are one-shot, so a handle would buy nothing
+            // and would need a lifetime nothing here can give it.
+            if (!string.IsNullOrEmpty(request.StatementId) || request.PositionalParameters is { Count: > 0 })
+                throw PreparedStatementBinder.NotSupportedHere("/execute-sql-ddl");
 
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 

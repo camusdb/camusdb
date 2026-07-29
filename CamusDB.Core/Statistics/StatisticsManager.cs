@@ -52,8 +52,11 @@ public sealed class StatisticsManager
         // true once the Kahuna base has been merged into RowCount.
         public bool Loaded;
 
-        // CAS one-shot guard: 0=no load attempted yet, 1=load in progress or done.
-        public int LoadAttempted;
+        // Serializes the Kahuna base load for this table. A concurrent caller waits for the
+        // in-flight load instead of returning early: returning while Loaded is still false would
+        // let the caller mutate and flush an entry whose base has not been merged yet, and
+        // FlushInternalAsync silently drops writes for a not-yet-loaded entry.
+        public readonly SemaphoreSlim LoadLock = new(1, 1);
 
         // Environment.TickCount64 of the last completed flush. 0 = never flushed.
         public long LastFlushTicks;
@@ -656,42 +659,13 @@ public sealed class StatisticsManager
         }
     }
 
-    /// <summary>Loads persisted statistics from Kahuna for the given table ID into the cache.</summary>
-    public async Task LoadByIdAsync(DatabaseDescriptor database, string tableId)
-    {
-        string key = CacheKey(database.Id, tableId);
-        if (_cache.TryGetValue(key, out Entry? existing) && existing.Loaded)
-            return;
-
-        try
-        {
-            Entry entry = _cache.GetOrAdd(key, _ => new Entry());
-
-            if (Interlocked.CompareExchange(ref entry.LoadAttempted, 1, 0) != 0)
-                return;
-
-            TableStatistics? loaded = await LoadFromKahunaByIdAsync(database, tableId).ConfigureAwait(false);
-
-            if (loaded is not null)
-            {
-                MergeBaseIntoEntry(entry, loaded.RowCount >= 0 ? loaded.RowCount : 0);
-                MergeIndexCounts(entry, loaded.IndexEntryCounts);
-                MergeColumnStats(entry, loaded.ColumnStats);
-                MergeHistograms(entry, loaded.Histograms);
-                MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
-                MergeStaleness(entry, loaded.MutationsSinceAnalyze, loaded.LastAnalyzedAt);
-            }
-
-            entry.Loaded = true;
-        }
-        catch (Exception ex)
-        {
-            if (_cache.TryGetValue(key, out Entry? failed))
-                Interlocked.Exchange(ref failed.LoadAttempted, 0);
-
-            _logger.LogWarning(ex, "Stats load failed for table id {TableId}", tableId);
-        }
-    }
+    /// <summary>
+    /// Loads persisted statistics from Kahuna for the given table ID into the cache. Awaiting this
+    /// guarantees the entry is loaded (or the load failed and was logged) — a caller that races an
+    /// already-running load waits for it rather than proceeding against an unloaded entry.
+    /// </summary>
+    public Task LoadByIdAsync(DatabaseDescriptor database, string tableId)
+        => EnsureLoadedAsync(database, tableId, tableId);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Internal tracking helpers
@@ -998,21 +972,35 @@ public sealed class StatisticsManager
         }
     }
 
-    private async Task LoadAndCacheAsync(DatabaseDescriptor database, TableDescriptor table)
+    private Task LoadAndCacheAsync(DatabaseDescriptor database, TableDescriptor table)
+        => EnsureLoadedAsync(database, table.Id, table.Name);
+
+    /// <summary>
+    /// Merges the persisted Kahuna base into the cached entry and marks it <c>Loaded</c>, at most
+    /// once per table. Concurrent callers serialize on the entry's load lock and the losers see
+    /// <c>Loaded == true</c> when they acquire it, so every caller that awaits this observes a
+    /// loaded entry — an early return while a load is still in flight would let ANALYZE overwrite
+    /// and flush stats that <see cref="FlushInternalAsync"/> then drops (it skips unloaded entries),
+    /// and would make every getter report "no statistics" until the background load happened to
+    /// finish. A failed load leaves the entry unloaded so the next caller retries.
+    /// </summary>
+    private async Task EnsureLoadedAsync(DatabaseDescriptor database, string tableId, string tableLabel)
     {
-        string key = CacheKey(database.Id, table.Id);
+        string key = CacheKey(database.Id, tableId);
 
         if (_cache.TryGetValue(key, out Entry? existing) && existing.Loaded)
             return;
 
+        Entry entry = _cache.GetOrAdd(key, _ => new Entry());
+
+        await entry.LoadLock.WaitAsync().ConfigureAwait(false);
+
         try
         {
-            Entry entry = _cache.GetOrAdd(key, _ => new Entry());
-
-            if (Interlocked.CompareExchange(ref entry.LoadAttempted, 1, 0) != 0)
+            if (entry.Loaded)
                 return;
 
-            TableStatistics? loaded = await LoadFromKahunaAsync(database, table).ConfigureAwait(false);
+            TableStatistics? loaded = await LoadFromKahunaByIdAsync(database, tableId).ConfigureAwait(false);
 
             if (loaded is not null)
             {
@@ -1028,15 +1016,13 @@ public sealed class StatisticsManager
         }
         catch (Exception ex)
         {
-            if (_cache.TryGetValue(key, out Entry? failed))
-                Interlocked.Exchange(ref failed.LoadAttempted, 0);
-
-            _logger.LogWarning(ex, "Stats load failed for table {Table}", table.Name);
+            _logger.LogWarning(ex, "Stats load failed for table {Table}", tableLabel);
+        }
+        finally
+        {
+            entry.LoadLock.Release();
         }
     }
-
-    private Task<TableStatistics?> LoadFromKahunaAsync(DatabaseDescriptor database, TableDescriptor table)
-        => LoadFromKahunaByIdAsync(database, table.Id);
 
     private async Task<TableStatistics?> LoadFromKahunaByIdAsync(DatabaseDescriptor database, string tableId)
     {

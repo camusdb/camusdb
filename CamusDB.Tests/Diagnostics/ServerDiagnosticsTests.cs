@@ -180,7 +180,7 @@ public sealed class ServerDiagnosticsTests
         // The allowed values are a small, reviewed set — this fails if someone widens a vocabulary
         // without updating the test (a proxy guard against unbounded-cardinality tags).
         Assert.That(ServerDiagnostics.Tags.Operation.All,
-            Is.EquivalentTo(new[] { "query", "non_query", "ddl", "begin", "commit", "rollback" }));
+            Is.EquivalentTo(new[] { "query", "non_query", "ddl", "begin", "commit", "rollback", "prepare", "close" }));
         Assert.That(ServerDiagnostics.Tags.Statement.All,
             Is.EquivalentTo(new[] { "select", "insert", "update", "delete", "other" }));
         Assert.That(ServerDiagnostics.Tags.Outcome.All,

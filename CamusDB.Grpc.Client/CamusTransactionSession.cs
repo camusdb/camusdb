@@ -53,6 +53,32 @@ public sealed class CamusTransactionSession
         return result;
     }
 
+    /// <summary>
+    /// Runs a prepared statement inside this transaction. The statement registers itself on the
+    /// session's reserved slot on first use, so the execution stays on the one stream the server
+    /// orders this transaction's ops on.
+    /// </summary>
+    public async Task<QueryResult> ExecuteQueryAsync(
+        CamusPreparedStatement statement, IReadOnlyList<object?> values, CancellationToken cancellationToken = default)
+    {
+        EnsureLive();
+        QueryResult result = await statement
+            .ExecuteQueryAsync(slot, ResumeHandle(), values, cancellationToken).ConfigureAwait(false);
+        Advance(result.Token);
+        return result;
+    }
+
+    /// <inheritdoc cref="ExecuteQueryAsync(CamusPreparedStatement, IReadOnlyList{object?}, CancellationToken)"/>
+    public async Task<NonQueryResult> ExecuteNonQueryAsync(
+        CamusPreparedStatement statement, IReadOnlyList<object?> values, CancellationToken cancellationToken = default)
+    {
+        EnsureLive();
+        NonQueryResult result = await statement
+            .ExecuteNonQueryAsync(slot, ResumeHandle(), values, cancellationToken).ConfigureAwait(false);
+        Advance(result.Token);
+        return result;
+    }
+
     public async Task CommitAsync(CancellationToken cancellationToken = default)
     {
         EnsureLive();
@@ -86,15 +112,20 @@ public sealed class CamusTransactionSession
     /// already observed.
     /// </summary>
     private SqlRequest BuildRequest(string sql)
+        => new() { Database = database, Sql = sql, TxnHandle = ResumeHandle() };
+
+    /// <summary>
+    /// The handle to resume this transaction with, carrying the session's latest causal token (all
+    /// three of N/L/C, per the protocol) so the server continues from what the session has already
+    /// observed. A prepared execution needs the same handle without the inline database and SQL,
+    /// which the statement id already stands for.
+    /// </summary>
+    private TxnHandle ResumeHandle() => new()
     {
-        TxnHandle resumed = new()
-        {
-            TxnIdPt      = handle.TxnIdPt,
-            TxnIdCounter = handle.TxnIdCounter,
-            CausalTokenN = token.N,
-            CausalTokenL = token.L,
-            CausalTokenC = token.C,
-        };
-        return new SqlRequest { Database = database, Sql = sql, TxnHandle = resumed };
-    }
+        TxnIdPt      = handle.TxnIdPt,
+        TxnIdCounter = handle.TxnIdCounter,
+        CausalTokenN = token.N,
+        CausalTokenL = token.L,
+        CausalTokenC = token.C,
+    };
 }

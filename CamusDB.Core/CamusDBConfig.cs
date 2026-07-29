@@ -468,6 +468,76 @@ public static class CamusDBConfig
     public static int GrpcBatchMaxInFlight = 64;
 
     /// <summary>
+    /// Maximum live prepared statements one <c>CamusSql.BatchExecute</c> stream may register.
+    /// <c>0</c> = unbounded. Exceeding it fails the PREPARE with
+    /// <see cref="CamusDBErrorCodes.PreparedStatementLimitExceeded"/> rather than evicting an
+    /// existing handle, so a client's live handles never stop working underneath it. Default: 512.
+    /// </summary>
+    public static int GrpcMaxPreparedStatementsPerStream = 512;
+
+    /// <summary>
+    /// Maximum live REST prepared statements one principal may hold on this node. <c>0</c> =
+    /// unbounded. Default: 512.
+    /// </summary>
+    public static int RestMaxPreparedStatementsPerPrincipal = 512;
+
+    /// <summary>
+    /// Maximum live REST prepared statements this node will hold across all principals. <c>0</c> =
+    /// unbounded. Guards a single node against a fleet of clients each holding its per-principal
+    /// cap. Default: 8192.
+    /// </summary>
+    public static int RestMaxPreparedStatements = 8192;
+
+    /// <summary>
+    /// How long a REST prepared statement may sit unused before the reaper drops it, in
+    /// milliseconds. <c>0</c> disables reaping, so entries then live until they are closed or the
+    /// process exits.
+    ///
+    /// <para>REST has no connection-scoped session the server can trust — connections are pooled,
+    /// HTTP/2-multiplexed and load-balanced — so this idle timeout is the backstop for clients that
+    /// never close what they prepared. Expiry is also checked on lookup, so an entry that outlives
+    /// its timeout between sweeps is never executed. Default: 600000 (10 minutes).</para>
+    /// </summary>
+    public static int PreparedStatementIdleTimeoutMs = 600_000;
+
+    /// <summary>
+    /// Interval between REST prepared-statement reaper sweeps, in milliseconds. Default: 60000.
+    /// </summary>
+    public static int PreparedStatementSweepIntervalMs = 60_000;
+
+    /// <summary>
+    /// Largest statement, in bytes of retained text (database + SQL + parameter names, UTF-16), that
+    /// may be prepared on either transport. <c>0</c> = unlimited.
+    ///
+    /// <para>Counting statements is not the same as bounding memory: a cap of 512 statements permits
+    /// 512 × whatever the transport's maximum request size happens to be. This limit is what makes
+    /// the count caps meaningful, by bounding the per-entry term. A statement over it is rejected as
+    /// invalid input rather than as a quota failure — no amount of closing other statements would
+    /// make it fit. Default: 65536 (64 KiB), which is far above any realistic parameterized
+    /// statement.</para>
+    /// </summary>
+    public static int MaxPreparedStatementBytes = 65_536;
+
+    /// <summary>
+    /// Total retained prepared-statement text this node will hold for REST clients, in bytes.
+    /// <c>0</c> = unlimited. Default: 67108864 (64 MiB).
+    /// </summary>
+    public static long RestMaxPreparedStatementBytes = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// Retained prepared-statement text one REST principal may hold, in bytes. <c>0</c> = unlimited.
+    /// Matters most when authentication is disabled, since every caller then shares one anonymous
+    /// principal. Default: 8388608 (8 MiB).
+    /// </summary>
+    public static long RestMaxPreparedStatementBytesPerPrincipal = 8L * 1024 * 1024;
+
+    /// <summary>
+    /// Retained prepared-statement text one <c>BatchExecute</c> stream may hold, in bytes.
+    /// <c>0</c> = unlimited. Default: 8388608 (8 MiB).
+    /// </summary>
+    public static long GrpcMaxPreparedStatementBytesPerStream = 8L * 1024 * 1024;
+
+    /// <summary>
     /// Maximum number of row + secondary-index mutations a single read-write transaction may
     /// accumulate, mirroring Cloud Spanner's per-commit mutation cap.
     ///
