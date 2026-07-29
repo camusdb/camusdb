@@ -1,8 +1,9 @@
 CamusDB
 =======
-CamusDB is an open-source NewSQL distributed database. It combines a familiar SQL interface with a Raft-based distributed storage layer, supports multi-node clusters with automatic leader election and partition routing, and exposes both a JSON/HTTP API and a gRPC API. The project is alpha-quality, APIs and storage formats may change between versions.
 
-**This is an alpha project. Do not use it in production.**
+CamusDB is an open-source NewSQL distributed database written in C# on .NET. It pairs a familiar SQL interface with a Raft-replicated, transactional key-value storage layer, and makes a few deliberately opinionated choices: **serializable isolation and strong consistency are the default**, not an opt-in; databases can be **branched copy-on-write like code**; and **dropped objects are recoverable** instead of instantly destroyed.
+
+**This is an alpha project. Do not use it in production.** APIs and storage formats may change between versions.
 
 [![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
 
@@ -10,9 +11,67 @@ CamusDB is an open-source NewSQL distributed database. It combines a familiar SQ
 
 ![camus-cli](https://media.giphy.com/media/vqs2XqX5mAxC4Ln0FO/giphy.gif)
 
+Why CamusDB?
+------------
+
+### Serializable and consistent by default
+
+Most databases default to weaker isolation levels and ask you to opt in to correctness. CamusDB inverts that: **every transaction is serializable unless you ask for less.** Pessimistic two-phase locking with range/predicate locks blocks phantoms, wait-die scheduling avoids deadlocks, and reads run against consistent snapshots. Cross-partition writes are coordinated with two-phase commit on top of Raft consensus, so a committed write is durable and replicated. If a workload genuinely doesn't need serializability, read-committed is available per transaction (`SET TRANSACTION`) or as a process default — but you have to say so.
+
+### Database branching (copy-on-write forks)
+
+Fork a database the way you branch code:
+
+```sql
+CREATE DATABASE staging BRANCH FROM prod;
+```
+
+The branch is created instantly and shares the parent's bytes until it diverges — no row data is copied, only a small amount of schema metadata. Reads on the branch see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold, so a long-lived branch keeps reading its parent as-of the fork instant even under heavy parent churn. Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. See [Database Branching](#database-branching) below.
+
+### Recover dropped objects
+
+`DROP DATABASE` and `DROP TABLE` don't immediately destroy data. The object is unlinked (orphaned) and physically deleted only after a retention window, so an accidental drop can be undone while the data still exists:
+
+```sql
+SHOW ORPHAN TABLES;                     -- list recoverable objects
+CREATE TABLE users RELINK TO '<id>';    -- bring one back under a (new) name
+```
+
+A background reclaimer garbage-collects orphans once their retention window elapses.
+
+### Time machine (`AS OF SYSTEM TIME`)
+
+Read a table as it existed at a point in the past — the storage layer is multi-version, so prior revisions of every key are retained and queryable:
+
+```sql
+SELECT * FROM leaderboard AS OF SYSTEM TIME '-10s';                        -- 10 seconds ago
+SELECT * FROM accounts    AS OF SYSTEM TIME '2026-07-19 20:00:00+00:00';  -- an exact instant
+```
+
+The whole statement — every scanned table, join, and subquery — reads one consistent historical snapshot, lock-free and without blocking writers. Beyond debugging ("what did this row look like before the deploy?"), it's a recovery tool: rows deleted or overwritten by mistake can be read back from just before the bad statement and re-inserted, as long as the storage layer still retains that history. See [Time-Travel Reads](#time-travel-reads) below.
+
+### Query result-set caching
+
+Opt any read into an in-memory, per-node result cache with an inline hint — no external cache tier, no manual invalidation for same-node writes:
+
+```sql
+SELECT id, total FROM orders {cache=recent_orders, ttl=30s} WHERE status = 1;
+```
+
+The cache is correct before it is fast: a committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Cross-node staleness is bounded by a per-entry TTL, or eliminated per-hit with `strict` validation. See [Query Result Cache](#query-result-cache) below.
+
+### Native .NET
+
+CamusDB's engine is written in modern C# on .NET — the SQL parser, the query planner and operators, the transaction layer, and the embedded [Kahuna](https://github.com/kahunakv/kahuna) storage node all run in a single .NET process (with RocksDB underneath for persistence). Because the engine itself is pure .NET, extending it means writing ordinary C#: bring your own NuGet libraries and custom business logic directly into the database layer without crossing a language boundary or fighting a foreign extension API. Reading and debugging the engine is equally direct, and it runs on any platform .NET 10 supports. Clients talk to it over a JSON/HTTP API or a gRPC API with a .NET client library.
+
 Features
 --------
-- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
+- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, prepared statements, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
+- **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
+- **Copy-on-write database branching** — fork a database instantly with `CREATE DATABASE feature_x BRANCH FROM prod`; inspect the tree with `SHOW BRANCHES FROM db` and `SHOW ANCESTORS FROM db`.
+- **Recovering dropped objects** — deferred physical deletion with `RELINK TO '<id>'` recovery, `SHOW ORPHAN DATABASES` / `SHOW ORPHAN TABLES`, and a background reclaimer.
+- **Time-travel reads** — `SELECT … AS OF SYSTEM TIME '-10s'` (or an absolute UTC timestamp / epoch ms) runs the whole statement against a consistent historical snapshot; lock-free, never blocks writers, usable to read back accidentally deleted or overwritten rows while their history is retained.
+- **Query result cache** — opt-in per query via `{cache=…}` hints, with TTL, `strict` per-hit validation, and `EVICT CACHE` statements; same-node writes invalidate dependent entries before they become visible.
 - **Aggregation** — COUNT, SUM, AVG, MIN, MAX with GROUP BY and HAVING filters.
 - **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, regex match operators (~, ~*, !~, !~*), BETWEEN, IS NULL, IN, NOT IN, scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
 - **Scalar functions** — string, math, date/time, cast, object id, regex, and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
@@ -20,13 +79,10 @@ Features
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
 - **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, per-column ascending/descending ordered indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); there is no magic creation. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
-- **Copy-on-write database branching** — fork a database instantly with `CREATE DATABASE feature_x BRANCH FROM prod`. The branch shares the parent's data until it diverges (no row data is copied), reads see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Inspect the tree with `SHOW BRANCHES FROM db` and `SHOW ANCESTORS FROM db`. Ideal for cheap staging clones, schema-migration dry-runs, and per-PR ephemeral databases. See [Database Branching](#database-branching) below.
 - **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, and `SHOW CREATE TABLE`.
-- **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
 - **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
-- **Recovering dropped objects** — `DROP DATABASE`/`DROP TABLE` defer physical deletion: the object is unlinked (orphaned) rather than immediately erased, so it can be recovered while its data still exists by relinking under a new name (`CREATE DATABASE new RELINK TO '<id>'`, `CREATE TABLE new RELINK TO '<id>'`). List recoverable objects with `SHOW ORPHAN DATABASES` / `SHOW ORPHAN TABLES`; a background reclaimer garbage-collects orphans once their retention window elapses.
 - **Multi-platform** — runs on any platform supported by .NET 10.
 
 Column Types
@@ -171,6 +227,40 @@ DROP DATABASE staging;
 Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold — so a long-lived branch keeps reading its parent as of the fork instant even under heavy parent churn.
 
 See [docs/database-branching.md](docs/database-branching.md) for a full developer/operator reference: the ancestry model and read lineage, the copy-on-write overlay and tombstones, frozen-view durability, crash-recovery, and operator guidance (metrics, config knobs, limitations).
+
+Recovering Dropped Objects
+--------------------------
+
+`DROP DATABASE`/`DROP TABLE` defer physical deletion: the object is unlinked (orphaned) rather than immediately erased, so it can be recovered while its data still exists by relinking under a new name.
+
+```sql
+DROP TABLE users;                        -- unlinks; data survives for the retention window
+
+SHOW ORPHAN TABLES;                      -- list recoverable tables (with ids and drop time)
+SHOW ORPHAN DATABASES;                   -- likewise for databases
+
+CREATE TABLE users RELINK TO '<id>';     -- recover a dropped table under a name
+CREATE DATABASE app RELINK TO '<id>';    -- recover a dropped database
+```
+
+A background reclaimer garbage-collects orphans once their retention window elapses; until then, a drop is reversible.
+
+Time-Travel Reads
+-----------------
+
+Append `AS OF SYSTEM TIME` to a `SELECT` and the whole statement — every scanned table, join, and subquery — reads a single consistent historical snapshot instead of the latest committed data. The storage layer is multi-version: each key retains prior revisions tagged with the HLC timestamp at which they committed, so a historical read simply pins its snapshot to a past instant. Historical reads are lock-free and never block writers.
+
+```sql
+-- Relative offset into the past (units: ms, s, m, h, d)
+SELECT * FROM leaderboard AS OF SYSTEM TIME '-10s';
+
+-- Absolute UTC instant (also accepts epoch milliseconds or a bound parameter)
+SELECT * FROM accounts AS OF SYSTEM TIME '2026-07-19 20:00:00+00:00' WHERE id = 9910;
+```
+
+This doubles as a fine-grained recovery tool: after an accidental `DELETE` or a bad `UPDATE`, query the table as of just before the mistake and re-insert what was lost — no backup restore needed, as long as the storage layer still retains that history (by default all persisted revisions are kept; tightening revision retention narrows the window).
+
+`AS OF SYSTEM TIME` is limited to autocommit read-only statements (it is rejected inside explicit transactions, and there is no historical `UPDATE`/`DELETE`), and only past instants are accepted. See [docs/time-travel-reads.md](docs/time-travel-reads.md) for the full reference: syntax and accepted value forms, snapshot semantics, restrictions, and retention behavior.
 
 Query Result Cache
 ------------------
