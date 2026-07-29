@@ -7,6 +7,7 @@
  */
 
 using Kommander.Time;
+using CamusDB.Core.Serializer;
 
 namespace CamusDB.Core.Catalogs.Models;
 
@@ -44,4 +45,31 @@ public sealed class SchemaChangeLogEntry
     /// deterministic IDs assigned once by the proposer.
     /// </summary>
     public byte[] Payload { get; set; } = [];
+
+    /// <summary>
+    /// Memoized deserialized form of <see cref="Payload"/>. A single apply touches the payload
+    /// several times (idempotency check, delta apply, table-name resolution, checkpoint persist),
+    /// and each used to pay a full deserialization; the cache makes those after the first free.
+    /// Private field, so serialization (which walks public properties only) never sees it.
+    /// </summary>
+    private object? decodedPayload;
+
+    /// <summary>
+    /// Returns the deserialized payload, decoding <see cref="Payload"/> at most once per instance.
+    /// Safe to share the cached object across readers: <see cref="Payload"/> is immutable after the
+    /// entry is decoded, and no apply/idempotency path mutates the payload object (appliers copy
+    /// its fields into schema-owned objects). A benign race may decode twice; last write wins.
+    /// </summary>
+    public T GetPayload<T>() where T : new()
+    {
+        if (decodedPayload is T cached)
+            return cached;
+
+        T payload = Serializator.Unserialize<T>(Payload);
+        if (payload is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid payload for schema operation '{Op}'");
+
+        decodedPayload = payload;
+        return payload;
+    }
 }

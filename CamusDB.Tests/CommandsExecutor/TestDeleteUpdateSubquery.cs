@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 
 using CamusDB.Core;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -152,5 +153,61 @@ public sealed class TestDeleteUpdateSubquery : SharedNodeBaseTest
         Assert.AreEqual(1, deleted);
         List<QueryResultRow> rows = await ExecQuery(database, executor, dbname, "SELECT id FROM sessions");
         CollectionAssert.AreEqual(new List<long> { 1, 2, 4 }, RemainingSessionIds(rows));
+    }
+
+    /// <summary>
+    /// A subquery result is substituted back into the predicate as a synthesized string *token*, so
+    /// the value has to be re-quoted rather than wrapped in bare delimiters. A value containing a
+    /// doubled delimiter is the case that exposes the difference: wrapped bare it decodes back as a
+    /// single delimiter, one character short, and the rewritten predicate then matches the wrong row
+    /// (or none). Driven through the real DELETE path because the corruption is invisible below it.
+    /// </summary>
+    [TestCase("a\"\"b", TestName = "SubqueryValue_DoubledDoubleQuote")]
+    [TestCase("a''b", TestName = "SubqueryValue_DoubledSingleQuote")]
+    [TestCase("say \"hi\"", TestName = "SubqueryValue_EmbeddedDoubleQuotes")]
+    [TestCase("it's", TestName = "SubqueryValue_EmbeddedSingleQuote")]
+    [TestCase("back\\slash", TestName = "SubqueryValue_Backslash")]
+    public async Task ScalarSubqueryValueWithQuotesSubstitutesExactly(string awkward)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE TABLE needle (id int64 primary key, tag string(64) not null)");
+        await ExecDdl(database, executor, dbname,
+            "CREATE TABLE haystack (id int64 primary key, tag string(64) not null)");
+
+        // The awkward value is inserted as a bound parameter, so nothing about this setup depends on
+        // the literal syntax under test.
+        Dictionary<string, ColumnValue> parameters = new() { { "@tag", new ColumnValue(ColumnType.String, awkward) } };
+
+        await ExecNonQueryWithParams(database, executor, dbname,
+            "INSERT INTO needle (id, tag) VALUES (1, @tag)", parameters);
+        await ExecNonQueryWithParams(database, executor, dbname,
+            "INSERT INTO haystack (id, tag) VALUES (1, @tag), (2, 'other')", parameters);
+
+        // The scalar subquery yields the awkward value; the rewrite must reproduce it exactly, so
+        // exactly the matching row is deleted.
+        int deleted = await ExecNonQuery(database, executor, dbname,
+            "DELETE FROM haystack WHERE tag = (SELECT tag FROM needle WHERE id = 1)");
+
+        Assert.AreEqual(1, deleted, $"the rewritten predicate did not reproduce {awkward}");
+
+        List<QueryResultRow> rows = await ExecQuery(database, executor, dbname, "SELECT id FROM haystack");
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(2, rows[0].Row["id"].LongValue, "the wrong row was deleted");
+    }
+
+    private static async Task<int> ExecNonQueryWithParams(
+        DatabaseDescriptor database,
+        CommandExecutor executor,
+        string dbname,
+        string sql,
+        Dictionary<string, ColumnValue> parameters)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: parameters);
+        ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket);
+        await database.Transactions.CommitAsync(tx);
+        return result.ModifiedRows;
     }
 }

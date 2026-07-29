@@ -319,7 +319,7 @@ public static class PlanRenderer
             NodeType.Float => expr.yytext ?? "?",
             NodeType.Bool => expr.yytext ?? "?",
             NodeType.Null => "NULL",
-            NodeType.String => $"'{StripOuterQuotes(expr.yytext ?? "")}'",
+            NodeType.String => SqlStringLiteral.Quote(SqlStringLiteral.Decode(expr.yytext ?? "")),
             NodeType.ObjectIdLiteral => expr.yytext ?? "?",
             NodeType.Placeholder => expr.yytext ?? "?",
             NodeType.ExprAllFields => "*",
@@ -407,7 +407,10 @@ public static class PlanRenderer
     private static string RenderColumnValue(ColumnValue v) =>
         v.Type switch
         {
-            CamusDB.Core.Catalogs.Models.ColumnType.String => $"'{v.StrValue}'",
+            // Quoted through the shared codec, not interpolated: a value containing a quote would
+            // otherwise render as a malformed literal ('it's') and a control character would be
+            // emitted raw into the plan text.
+            CamusDB.Core.Catalogs.Models.ColumnType.String => SqlStringLiteral.Quote(v.StrValue ?? ""),
             CamusDB.Core.Catalogs.Models.ColumnType.Id => v.StrValue ?? "?",
             CamusDB.Core.Catalogs.Models.ColumnType.Integer64 => v.LongValue.ToString(CultureInfo.InvariantCulture),
             CamusDB.Core.Catalogs.Models.ColumnType.Float64 => v.FloatValue.ToString(CultureInfo.InvariantCulture),
@@ -422,10 +425,4 @@ public static class PlanRenderer
         return RenderExpr(target);
     }
 
-    private static string StripOuterQuotes(string raw)
-    {
-        if (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\''))
-            return raw[1..^1];
-        return raw.Trim('"');
-    }
 }

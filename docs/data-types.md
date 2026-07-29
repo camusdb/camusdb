@@ -99,8 +99,8 @@ Current (v1) limitations:
 - **Element type must be scalar.** Nested arrays (`array(array(...))`) are rejected.
 - **Arrays are not indexable.** An `array` column cannot appear in a `PRIMARY KEY` or any index — doing
   so is rejected at `CREATE TABLE` time.
-- **No inline SQL array literal.** You cannot write an array constant in a SQL statement. Array values
-  are written through the parameter / HTTP path only (a JSON array bound to an `array` column).
+- **Nested arrays are rejected**, in a literal as well as a declaration — `ColumnValue` models exactly
+  one element type.
 - Elements may be `NULL` regardless of the declared element type.
 
 ---
@@ -121,12 +121,63 @@ How a value is written depends on the path. **The SQL literal form and the JSON 
 | `oid` | quoted ObjectId string | `'652b...'` |
 | `date` | quoted `yyyy-MM-dd` | `'2026-03-15'` |
 | `datetime` | quoted ISO-8601 UTC | `'2026-03-15T12:00:00Z'` |
-| `bytes` | **`0x`-prefixed hex** | `0xDEADBEEF` |
-| `array(T)` | — (not supported inline) | use a parameter |
+| `bytes` | **`X'…'` hex string** | `X'DEADBEEF'` |
+| `array(T)` | `ARRAY[…]` | `ARRAY[1, 2, 3]` |
 
 Numeric literals are parsed with the invariant culture (`.` is always the decimal separator,
 independent of server locale). Date/datetime strings are parsed as UTC; a value with no timezone is
 assumed to be UTC. Unparseable date/datetime/bytes literals raise `InvalidInput`.
+
+#### String literals
+
+There are two forms, following PostgreSQL.
+
+**Plain — `'…'` or `"…"`.** No escape processing at all. A backslash is an ordinary character, and
+the only special sequence is a doubled delimiter. Use this for essentially everything, including
+regex patterns and Windows paths:
+
+```sql
+SELECT * FROM t WHERE name ~ '(\d+)';        -- pattern is (\d+), no doubling
+INSERT INTO t (path) VALUES ('C:\Users');    -- stores C:\Users
+SELECT 'it''s';                              -- stores it's
+SELECT 'say "hi"';                           -- the other delimiter needs no escaping
+```
+
+**Escape — `E'…'` or `E"…"`.** A backslash introduces an escape, which is how control characters get
+a spelling:
+
+| Escape | Meaning |
+|--------|---------|
+| `\\` | backslash |
+| `\'` `\"` | quote (or double the delimiter: `''`) |
+| `\n` `\r` `\t` `\0` `\a` `\b` `\f` `\v` | control characters |
+| `\NNN` | character from three octal digits |
+| `\xHH` | character from two hex digits |
+| `\uHHHH` `\UHHHHHHHH` | Unicode code point |
+
+```sql
+COMMENT ON TABLE t IS E'line1\nline2';       -- stores an embedded newline
+```
+
+An unrecognized escape yields the character itself, so `E'\d'` is `d` — which is exactly why regex
+patterns belong in the plain form. A truncated numeric escape (`E'\x4'`) or an unpaired surrogate
+raises `InvalidInput`.
+
+Every value has a literal form, so anything that can be stored can also be emitted by
+`SHOW CREATE TABLE` and read back unchanged. The server emits the plain form and falls back to
+`E'…'` only when the value contains a control character.
+
+A bytes literal is written `X'4D5A'` (or lowercase `x'…'`); `X''` is the empty byte string, and an
+odd number of hex digits is an error. Note that a bare `0xFF` is an **integer** literal, not bytes —
+it keeps that meaning, which is why bytes got their own syntax. The legacy form of passing bytes as a
+string whose text starts with `0x` still coerces on insert, but only where the target column type is
+known; `X'…'` carries its type on its own.
+
+An array literal is written `ARRAY[a, b, c]`. Its element type is inferred from the first non-NULL
+element and every other element must agree, so `ARRAY[1, 'two']` is an error. Elements coerce to the
+column's declared element type the same way scalars do, so `ARRAY[1, 2]` is accepted by an
+`array(float64)` column. `ARRAY[]` is empty and adopts the column's element type. Nested arrays
+(`ARRAY[ARRAY[1]]`) are rejected.
 
 `CAST` works for all scalar types, e.g. `CAST('2026-01-01' AS date)`, `CAST(x AS float32)`,
 `CAST('0xFF00' AS bytes)`.

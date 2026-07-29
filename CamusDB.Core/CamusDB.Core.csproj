@@ -6,7 +6,10 @@
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <NoWarn>$(NoWarn);NU1903</NoWarn>
+    <!-- CS0436: the vendored gplex buffer types (QUT.GplexBuffers) are also embedded in
+         Kahuna.Core. The generated scanner references CodePageHandling under the unicode
+         option, and the compiler correctly prefers our source copy; the clash is benign. -->
+    <NoWarn>$(NoWarn);NU1903;CS0436</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

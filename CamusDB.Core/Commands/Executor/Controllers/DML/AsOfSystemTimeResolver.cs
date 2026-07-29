@@ -165,18 +165,7 @@ internal static class AsOfSystemTimeResolver
     }
 
     private static string StripQuotes(string? raw)
-    {
-        if (string.IsNullOrEmpty(raw))
-            return "";
-
-        if (raw.Length >= 2 &&
-            ((raw[0] == '\'' && raw[^1] == '\'') || (raw[0] == '"' && raw[^1] == '"')))
-        {
-            return raw.Substring(1, raw.Length - 2);
-        }
-
-        return raw;
-    }
+        => string.IsNullOrEmpty(raw) ? "" : SqlStringLiteral.Decode(raw);
 
     private static CamusDBException Invalid(string message) =>
         new(CamusDBErrorCodes.InvalidAsOfSystemTime, message);

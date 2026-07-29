@@ -107,12 +107,32 @@ public sealed class ExecuteSQLController : CommandsController
             Log.LogExecutingSql(logger, SqlCredentialRedactor.Redact(sql));
     }
 
+    /// <summary>
+    /// Logs a deserialized request, never the raw body.
+    ///
+    /// <para>The raw JSON must not be logged even through <see cref="SqlCredentialRedactor"/>: that
+    /// helper reads SQL, and a JSON document is not SQL. JSON doubles a backslash, so an
+    /// <c>E'a\'tail'</c> password arrives as <c>E'a\\'tail'</c> and the escape rules terminate the
+    /// literal one quote early, leaving real password text in the log. Worse, the body also carries
+    /// <c>parameters</c>, and <c>IDENTIFIED BY @p</c> is a supported form — so a bound password is
+    /// present in the body with no literal for any SQL-aware redactor to find.</para>
+    ///
+    /// <para>Only the SQL is logged, redacted; parameter values are never logged — a value is only
+    /// identifiable as a credential by the statement it binds to, so no value is safe to log here.
+    /// Their count is logged instead, which is what diagnostics actually need.</para>
+    /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1873",
         Justification = "Redaction is guarded by IsEnabled; analyzer does not recognize the source-generated Log method.")]
-    private void LogRequestBodyRedacted(string body)
+    private void LogRequestRedacted(ExecuteSQLRequest? request)
     {
-        if (logger.IsEnabled(LogLevel.Information))
-            Log.LogRequestBody(logger, SqlCredentialRedactor.Redact(body));
+        if (!logger.IsEnabled(LogLevel.Information))
+            return;
+
+        int parameterCount = (request?.Parameters?.Count ?? 0) + (request?.PositionalParameters?.Count ?? 0);
+
+        Log.LogRequestBody(
+            logger,
+            $"db={request?.DatabaseName ?? ""} params={parameterCount} sql={SqlCredentialRedactor.Redact(request?.Sql)}");
     }
 
     [HttpPost]
@@ -617,9 +637,10 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
 
-            LogRequestBodyRedacted(body);
-
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+
+            LogRequestRedacted(request);
+
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQL-DDL request is not valid");
 

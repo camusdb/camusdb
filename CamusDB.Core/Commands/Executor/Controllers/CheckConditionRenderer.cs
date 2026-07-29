@@ -79,9 +79,9 @@ internal static class CheckConditionRenderer
                 return;
 
             case NodeType.String:
-                // yytext carries the source form including its outer quotes; normalize to a single
-                // quoted literal with doubled interior quotes so it re-lexes to the same string.
-                sb.Append('\'').Append(StripOuterQuotes(expr.yytext ?? "").Replace("'", "''")).Append('\'');
+                // yytext carries the source form including its outer quotes; decode it and re-emit in
+                // the canonical single-quoted form so it re-lexes to the same string.
+                sb.Append(SqlStringLiteral.Quote(SqlStringLiteral.Decode(expr.yytext ?? "")));
                 return;
 
             // ── comparisons ─────────────────────────────────────────────────────
@@ -251,9 +251,6 @@ internal static class CheckConditionRenderer
         NodeType.TypeUuid      => "uuid",
         _ => throw Unsupported(typeNode),
     };
-
-    private static string StripOuterQuotes(string s) =>
-        s.Length >= 2 && s[0] == '\'' && s[^1] == '\'' ? s[1..^1] : s;
 
     private static CamusDBException Unsupported(NodeAst expr) => new(
         CamusDBErrorCodes.InvalidInput,

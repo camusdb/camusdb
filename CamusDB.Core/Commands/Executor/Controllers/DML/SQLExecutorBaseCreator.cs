@@ -211,23 +211,68 @@ internal abstract class SQLExecutorBaseCreator
     };
 
     /// <summary>
-    /// Decodes a string-literal token (<see cref="NodeType.String"/> <c>yytext</c>) into its value:
-    /// strips the outer quote and collapses a doubled quote of the same kind to a single one
-    /// (<c>''</c> → <c>'</c> inside a single-quoted string, <c>""</c> → <c>"</c> inside a double-quoted
-    /// string — the MySQL/SQL-standard escape the lexer emits as a doubled quote). Other characters,
-    /// including backslashes, are preserved verbatim (there is no backslash-escape decoding). A value
-    /// that needs the other quote kind carries it literally, since only the delimiter quote is doubled.
+    /// Decodes a string-literal token (<see cref="NodeType.String"/> <c>yytext</c>) into its value.
+    /// Delegates to <see cref="SqlStringLiteral.Decode"/>, which owns the dialect's escape rules and
+    /// is the exact inverse of <see cref="SqlStringLiteral.Quote"/>.
     /// </summary>
-    internal static string UnquoteStringLiteral(string raw)
+    internal static string UnquoteStringLiteral(string raw) => SqlStringLiteral.Decode(raw);
+
+    /// <summary>
+    /// Evaluates an <c>ARRAY[…]</c> literal.
+    ///
+    /// <para>The element type is inferred from the first non-NULL element, and
+    /// <see cref="ColumnValue.FromArray"/> then rejects any element that disagrees — a mixed-type
+    /// list has no single element type and would otherwise be stored under whichever type happened to
+    /// come first. An empty <c>ARRAY[]</c> carries <see cref="ColumnType.Null"/> as its element type,
+    /// meaning "not yet known"; the coercion applied against the target column adopts the declared
+    /// element type. Nested arrays are rejected because <see cref="ColumnValue"/> models exactly one
+    /// element type and cannot represent them.</para>
+    /// </summary>
+    private static ColumnValue EvalArrayLiteral(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters)
     {
-        if (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '"' || raw[0] == '\''))
+        List<ColumnValue> elements = new();
+        CollectArrayElements(expr.leftAst, row, parameters, elements);
+
+        ColumnType elementType = ColumnType.Null;
+
+        foreach (ColumnValue element in elements)
         {
-            char quote = raw[0];
-            string inner = raw[1..^1];
-            return quote == '\'' ? inner.Replace("''", "'") : inner.Replace("\"\"", "\"");
+            if (element.Type == ColumnType.Array)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Nested arrays are not supported; an array element must be a scalar or NULL");
+
+            if (elementType == ColumnType.Null && element.Type != ColumnType.Null)
+                elementType = element.Type;
         }
 
-        return raw.Trim('"');
+        return ColumnValue.FromArray(elementType, elements);
+    }
+
+    /// <summary>
+    /// Flattens the left-leaning <see cref="NodeType.ExprList"/> tree the grammar builds for an array
+    /// literal into evaluated elements, in source order.
+    /// </summary>
+    private static void CollectArrayElements(
+        NodeAst? node,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        List<ColumnValue> elements)
+    {
+        if (node is null)
+            return;
+
+        if (node.nodeType == NodeType.ExprList)
+        {
+            CollectArrayElements(node.leftAst, row, parameters, elements);
+            CollectArrayElements(node.rightAst, row, parameters, elements);
+            return;
+        }
+
+        elements.Add(EvalExpr(node, row, parameters));
     }
 
     public static ColumnValue EvalExpr(
@@ -253,6 +298,12 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.String:
                 return new ColumnValue(ColumnType.String, UnquoteStringLiteral(expr.yytext!));
+
+            case NodeType.BytesLiteral:
+                return new ColumnValue(SqlStringLiteral.DecodeBytes(expr.yytext!));
+
+            case NodeType.ArrayLiteral:
+                return EvalArrayLiteral(expr, row, parameters);
 
             case NodeType.Bool:
                 if (!bool.TryParse(expr.yytext!, out bool boolValue))

@@ -66,6 +66,28 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public EmbeddedKahuna Kahuna { get; }
 
+    // Lazily resolved by SchemaLogPartition. 0 means "not yet resolved" — it is the reserved
+    // partition and EmbeddedKahuna.SchemaLogPartition never returns it. Benign race: concurrent
+    // resolvers compute the same value.
+    private int _schemaLogPartition;
+
+    /// <summary>
+    /// The single Raft partition that carries all schema-log traffic for this database, resolved
+    /// once and cached. The schema-apply subscription compares every incoming entry's partition
+    /// against this value to skip deserializing entries that cannot belong to this database —
+    /// with many databases open, most replicated schema entries arrive on other partitions.
+    /// </summary>
+    public int SchemaLogPartition
+    {
+        get
+        {
+            int partition = _schemaLogPartition;
+            if (partition == 0)
+                _schemaLogPartition = partition = Kahuna.SchemaLogPartition(Id);
+            return partition;
+        }
+    }
+
     public KvTransactionsManager Transactions { get; }
 
     public SemaphoreSlim SchemaDdlSemaphore { get; } = new(1, 1);

@@ -48,7 +48,10 @@ internal static class ColumnValueAstBuilder
                 extendedThree: null,
                 extendedFour: null,
                 extendedFive: null,
-                yytext: $"\"{value.StrValue}\""),
+                // Must go through the shared quoter: yytext is a source *token*, not a value, and a
+                // hand-wrapped one silently corrupts anything the decoder treats as special (a
+                // doubled delimiter collapses to one character on the way back).
+                yytext: SqlStringLiteral.Quote(value.StrValue ?? "")),
             ColumnType.Id => new NodeAst(
                 NodeType.ObjectIdLiteral,
                 leftAst: null,
@@ -73,7 +76,7 @@ internal static class ColumnValueAstBuilder
                     extendedThree: null,
                     extendedFour: null,
                     extendedFive: null,
-                    yytext: $"\"{value.ToGuid():D}\""),
+                    yytext: SqlStringLiteral.Quote(value.ToGuid().ToString("D"))),
                 rightAst: NodeAst.TypeUuid,
                 extendedOne: null,
                 extendedTwo: null,

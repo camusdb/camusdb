@@ -56,24 +56,24 @@ Single quotes inside the text are escaped by doubling them, as in any string lit
 COMMENT ON COLUMN users.email IS 'The user''s email';   -- stores: The user's email
 ```
 
-### Characters a comment cannot contain
+### Characters a comment can contain
 
-`SHOW CREATE TABLE` must emit DDL that parses back to the identical comment, and CamusDB's string
-literals have no backslash-escape decoding — the lexer treats a backslash plus the next character as
-one unit and passes both through unchanged. Two shapes therefore have no representation and are
-rejected when the comment is set:
+Any character. `SHOW CREATE TABLE` must emit DDL that parses back to the identical comment, and every
+value now has a literal form, so there is nothing that can be stored but not re-emitted. Quotes,
+backslashes, newlines, tabs, and NUL all round-trip:
 
-- a backslash immediately before a quote, or at the very end of the comment (it would escape the
-  closing quote and the literal would never terminate);
-- raw control characters such as a newline or tab.
+```sql
+COMMENT ON TABLE t IS 'C:\Users\data';          -- backslashes are ordinary characters
+COMMENT ON TABLE t IS E'line1\nline2';          -- E'…' for control characters
+COMMENT ON TABLE t IS 'x''); DROP TABLE t; --'; -- stored and re-emitted as inert text
+```
 
-Quotes themselves are fine anywhere — they are doubled on output and undoubled on input, so a comment
-like `x'); DROP TABLE t; --` is stored and re-emitted as ordinary text. Backslashes are fine too, as
-long as they are not adjacent to a quote: `C:\Users\data` is accepted.
+A comment containing a control character is re-emitted in the `E'…'` form; everything else comes back
+in the plain form, exactly as it reads. See [string literals](data-types.md#string-literals) for both
+forms.
 
-The same limitation applies to string `DEFAULT` values, which are not currently guarded — a default
-containing a newline or a trailing backslash produces `SHOW CREATE TABLE` output that does not
-re-parse.
+The same applies to string `DEFAULT` values, which previously had no guard at all and could produce
+`SHOW CREATE TABLE` output that did not re-parse.
 
 ## Reading comments back
 
@@ -154,7 +154,7 @@ identifier it emits.
 | Database is not registered                                | `DatabaseDoesntExist`                   |
 | Unqualified `COMMENT ON COLUMN` / `COMMENT ON INDEX`      | `InvalidInput`                          |
 | `COMMENT ON INDEX` targeting the primary key              | `InvalidInput`                          |
-| Comment with a control character, or a backslash before a quote / at the end | `InvalidInput`      |
+| `E'…'` comment literal with a truncated `\x`/`\u` escape, an out-of-range `\U`, or an unpaired surrogate | `InvalidInput` |
 
 The length bound exists because comments ride the replicated per-table metadata blob; an unbounded
 comment would inflate every schema checkpoint and every schema-log entry.

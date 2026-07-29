@@ -26,6 +26,7 @@
    their precedence makes that resolution explicit and removes the warnings without changing any parse. */
 %left TIS TIN TDOT
 
+%token TBYTESLIT LBRACKET RBRACKET
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
@@ -691,6 +692,7 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
 
 default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | float { $$.n = $1.n; $$.s = $1.s; }
+             | bytes { $$.n = $1.n; $$.s = $1.s; }
              | string { $$.n = $1.n; $$.s = $1.s; }
              | bool { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }
@@ -926,6 +928,8 @@ group_paren_expr : LPAREN condition RPAREN { $$.n = $2.n; $$.s = $2.s; }
 
 simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
 			| int { $$.n = $1.n; $$.s = $1.s; }
+            | bytes { $$.n = $1.n; $$.s = $1.s; }
+            | array_literal { $$.n = $1.n; $$.s = $1.s; }
             | float { $$.n = $1.n; $$.s = $1.s; }
             | string { $$.n = $1.n; $$.s = $1.s; }
             | bool { $$.n = $1.n; $$.s = $1.s; }
@@ -962,6 +966,17 @@ float    : TFLOAT { $$.n = new(NodeType.Float, null, null, null, null, null, nul
 
 string  : TSTRING { $$.n = new(NodeType.String, null, null, null, null, null, null, null, $$.s); }
         ;
+
+bytes   : TBYTESLIT { $$.n = new(NodeType.BytesLiteral, null, null, null, null, null, null, null, $$.s); }
+        ;
+
+array_literal : TTYPE_ARRAY LBRACKET RBRACKET { $$.n = new(NodeType.ArrayLiteral, null, null, null, null, null, null, null, null); }
+              | TTYPE_ARRAY LBRACKET array_element_list RBRACKET { $$.n = new(NodeType.ArrayLiteral, $3.n, null, null, null, null, null, null, null); }
+              ;
+
+array_element_list : array_element_list TCOMMA simple_expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+                   | simple_expr { $$.n = $1.n; $$.s = $1.s; }
+                   ;
 
 bool    : TTRUE { $$.n = NodeAst.True; }
         | TFALSE { $$.n = NodeAst.False; }

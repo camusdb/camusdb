@@ -707,7 +707,9 @@ public static class PredicateAnalyzer
                 extendedThree: null,
                 extendedFour: null,
                 extendedFive: null,
-                yytext: $"\"{value.StrValue}\""),
+                // Must go through the shared quoter: yytext is a source *token*, not a value, and a
+                // hand-wrapped one silently corrupts anything the decoder treats as special.
+                yytext: SqlStringLiteral.Quote(value.StrValue ?? "")),
             ColumnType.Id => new NodeAst(
                 NodeType.ObjectIdLiteral,
                 leftAst: null,

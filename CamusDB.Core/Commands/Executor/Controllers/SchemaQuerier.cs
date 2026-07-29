@@ -11,6 +11,7 @@ using System.Text;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 
@@ -95,8 +96,9 @@ internal sealed class SchemaQuerier
             ColumnType.Float32 => new ColumnValue(ColumnType.String, ((float)column.DefaultValue.FloatValue).ToString(CultureInfo.InvariantCulture)),
             // Date/DateTime render as their ISO-8601 form (yyyy-MM-dd / round-trip "o").
             ColumnType.Date or ColumnType.DateTime => new ColumnValue(ColumnType.String, column.DefaultValue.IsoValue!),
-            // Bytes render as a 0x-hex literal, matching the SQL bytes-literal syntax.
-            ColumnType.Bytes => new ColumnValue(ColumnType.String, "0x" + Convert.ToHexString(column.DefaultValue.BytesValue ?? [])),
+            // Bytes render as an X'…' hex-string literal, matching the SQL bytes-literal syntax.
+            // (A bare 0x… form would read back as an integer literal, not bytes.)
+            ColumnType.Bytes => new ColumnValue(ColumnType.String, SqlStringLiteral.QuoteBytes(column.DefaultValue.BytesValue ?? [])),
             ColumnType.Uuid => new ColumnValue(ColumnType.String, column.DefaultValue.UuidValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
         };
@@ -503,12 +505,12 @@ internal sealed class SchemaQuerier
     /// <paramref name="comment"/> is null.
     ///
     /// <para>The null check is what keeps <c>IS NULL</c> and <c>IS ''</c> observably different: an
-    /// absent comment emits no clause at all, while an empty one emits <c>COMMENT ''</c>. Embedded
-    /// single quotes are doubled so the emitted DDL re-parses to the identical text — the
-    /// round-trip through the extended CREATE TABLE grammar depends on it.</para>
+    /// absent comment emits no clause at all, while an empty one emits <c>COMMENT ''</c>. The text is
+    /// escaped so the emitted DDL re-parses to the identical comment — the round-trip through the
+    /// extended CREATE TABLE grammar depends on it.</para>
     /// </summary>
     private static string GetSQLComment(string? comment)
-        => comment is null ? "" : $" COMMENT '{comment.Replace("'", "''")}'";
+        => comment is null ? "" : " COMMENT " + RenderStringLiteral(comment);
 
     /// <summary>
     /// Renders the trailing <c>DEFAULT(...)</c> clause for a column definition in
@@ -536,19 +538,17 @@ internal sealed class SchemaQuerier
             ColumnType.Float64 => d.FloatValue.ToString(CultureInfo.InvariantCulture),
             ColumnType.Float32 => ((float)d.FloatValue).ToString(CultureInfo.InvariantCulture),
             ColumnType.Date or ColumnType.DateTime => "'" + d.IsoValue! + "'",
-            ColumnType.Bytes => "0x" + Convert.ToHexString(d.BytesValue ?? []),
+            ColumnType.Bytes => SqlStringLiteral.QuoteBytes(d.BytesValue ?? []),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render default for type: " + d.Type),
         };
         return $" DEFAULT({literal})";
     }
 
     /// <summary>
-    /// Renders a string value as a re-parseable single-quoted SQL string literal, doubling any embedded
-    /// single quote (<c>'</c> → <c>''</c>) — the escape the lexer accepts. A double quote inside a
-    /// single-quoted literal is taken verbatim, so no escaping is needed for it; a backslash is also
-    /// preserved as-is. This round-trips any value, including one containing both quote characters.
+    /// Renders a string value as a re-parseable single-quoted SQL string literal. Delegates to
+    /// <see cref="SqlStringLiteral.Quote"/> so that every value round-trips — including one holding
+    /// control characters, a trailing backslash, or both quote characters.
     /// </summary>
-    private static string RenderStringLiteral(string value) =>
-        "'" + value.Replace("'", "''") + "'";
+    private static string RenderStringLiteral(string value) => SqlStringLiteral.Quote(value);
 
 }

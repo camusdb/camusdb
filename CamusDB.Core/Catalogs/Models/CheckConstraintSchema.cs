@@ -13,7 +13,7 @@ namespace CamusDB.Core.Catalogs.Models;
 
 /// <summary>
 /// Persisted definition of a <c>CHECK</c> constraint. The expression is stored as a
-/// human-readable SQL text string (produced by <c>PlanRenderer.RenderExpr</c>) so it can be
+/// human-readable SQL text string (produced by <c>CheckConditionRenderer</c>) so it can be
 /// shown in <c>SHOW CREATE TABLE</c> output and re-parsed on table-open. The parsed AST is
 /// a transient, per-load cache — never persisted — rebuilt lazily by <c>CatalogsManager</c>
 /// after the JSON checkpoint is loaded.
@@ -33,7 +33,7 @@ public sealed class CheckConstraintSchema
 
     /// <summary>
     /// SQL text of the condition, produced by rendering the parsed AST via
-    /// <c>PlanRenderer.RenderExpr</c>. This is the persisted form; re-parsed to
+    /// <c>CheckConditionRenderer</c>. This is the persisted form; re-parsed to
     /// <see cref="ParsedCondition"/> at table-open time.
     /// </summary>
     public string Expression { get; set; } = "";

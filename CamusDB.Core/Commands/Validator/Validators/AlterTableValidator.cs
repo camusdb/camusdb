@@ -25,7 +25,11 @@ internal sealed class AlterTableValidator : ValidatorBase
 
         // Covers ADD COLUMN … COMMENT '…'; other operations carry no comment and pass a null.
         ValidateCommentLength(ticket.Column.Comment, $"Column '{ticket.Column.Name}'");
-        ValidateCommentIsRepresentable(ticket.Column.Comment, $"Column '{ticket.Column.Name}'");
+
+        // ADD COLUMN … DEFAULT(…) is the other way a default enters the schema, and it must meet the
+        // same type/length rules as one declared at CREATE TABLE.
+        if (ticket.Operation is AlterTableOperation.AddColumn)
+            ValidateColumnDefault(ticket.Column, $"Column '{ticket.Column.Name}'");
 
         if (ticket.Operation == AlterTableOperation.RenameColumn)
         {

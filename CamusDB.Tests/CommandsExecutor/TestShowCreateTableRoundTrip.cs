@@ -502,4 +502,185 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
         Assert.AreEqual(1, rows.Count);
         Assert.AreEqual("it's", rows[0].Row["tag"].StrValue, "single-quote default value must survive the round-trip");
     }
+
+    /// <summary>
+    /// A bytes value written as an <c>X'…'</c> literal must reach a BYTES column with its type intact,
+    /// and a bytes DEFAULT must render in the same form so the emitted DDL re-creates it. Previously
+    /// bytes had no literal at all: a value travelled as a string whose text happened to start with
+    /// <c>0x</c> and relied on String→Bytes coercion at the destination, so the type was not
+    /// recoverable from the SQL itself.
+    /// </summary>
+    [Test]
+    public async Task BytesLiteral_InsertsAndRoundTripsThroughShowCreateTable()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE blobs (id int64 PRIMARY KEY NOT NULL, payload bytes DEFAULT(X'0102'))");
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: dbname,
+            sql: "INSERT INTO blobs (id, payload) VALUES (1, X'DEADBEEF'), (2, X'')",
+            parameters: null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SELECT id, payload FROM blobs ORDER BY id");
+
+        Assert.AreEqual(2, rows.Count);
+        Assert.AreEqual(ColumnType.Bytes, rows[0].Row["payload"].Type, "the literal must carry its own type");
+        CollectionAssert.AreEqual(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF }, rows[0].Row["payload"].BytesValue);
+        CollectionAssert.AreEqual(System.Array.Empty<byte>(), rows[1].Row["payload"].BytesValue);
+
+        // The DEFAULT must re-emit as X'…' and the emitted DDL must re-execute.
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE blobs");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.That(ddl, Does.Contain("X'0102'"), $"bytes default must render as a bytes literal: {ddl}");
+
+        await DdlAsync(executor, db, dbname, ddl.Replace("`blobs`", "`blobs2`"));
+
+        KvTransaction tx2 = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx2, database: dbname, sql: "INSERT INTO blobs2 (id) VALUES (9)", parameters: null));
+        await db.Transactions.CommitAsync(tx2);
+
+        List<QueryResultRow> defRows = await QueryAsync(executor, db, dbname, "SELECT payload FROM blobs2 WHERE id = 9");
+        CollectionAssert.AreEqual(new byte[] { 0x01, 0x02 }, defRows[0].Row["payload"].BytesValue,
+            "the re-parsed DEFAULT must reproduce the original bytes");
+    }
+
+    /// <summary>
+    /// <c>ARRAY[…]</c> must reach an array column with the declared element type. Arrays previously
+    /// had no SQL literal at all — a value could only be supplied as a bound parameter — so this is
+    /// the first path by which array data can be written in SQL text.
+    /// </summary>
+    [Test]
+    public async Task ArrayLiteral_InsertsAndReadsBack()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE arrs (id int64 PRIMARY KEY NOT NULL, tags array(int64), names array(string))");
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: dbname,
+            sql: "INSERT INTO arrs (id, tags, names) VALUES (1, ARRAY[1, 2, 3], ARRAY['a', 'b'])",
+            parameters: null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SELECT id, tags, names FROM arrs");
+
+        Assert.AreEqual(1, rows.Count);
+        ColumnValue tags = rows[0].Row["tags"];
+        Assert.AreEqual(ColumnType.Array, tags.Type);
+        Assert.AreEqual(ColumnType.Integer64, tags.ArrayElementType);
+        Assert.AreEqual(3, tags.ArrayValues!.Count);
+        Assert.AreEqual(2L, tags.ArrayValues[1].LongValue);
+
+        ColumnValue names = rows[0].Row["names"];
+        Assert.AreEqual(ColumnType.String, names.ArrayElementType);
+        Assert.AreEqual("b", names.ArrayValues![1].StrValue);
+    }
+
+    /// <summary>
+    /// An empty <c>ARRAY[]</c> has no element type of its own, and a NULL element carries none
+    /// either; both must take the column's declared type rather than being stored as untyped.
+    /// Integer elements must also widen into a float column, exactly as a scalar would.
+    /// </summary>
+    [Test]
+    public async Task ArrayLiteral_EmptyNullAndWideningAdoptTheColumnElementType()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE arrs2 (id int64 PRIMARY KEY NOT NULL, tags array(int64), ratios array(float64))");
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: dbname,
+            sql: "INSERT INTO arrs2 (id, tags, ratios) VALUES (1, ARRAY[], ARRAY[1, 2]), (2, ARRAY[NULL, 5], ARRAY[1.5])",
+            parameters: null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SELECT id, tags, ratios FROM arrs2 ORDER BY id");
+
+        Assert.AreEqual(0, rows[0].Row["tags"].ArrayValues!.Count, "ARRAY[] must store as an empty array");
+        Assert.AreEqual(ColumnType.Integer64, rows[0].Row["tags"].ArrayElementType, "empty array must adopt the column element type");
+
+        // Integer literals widen into a float64 array, as they do for a scalar float64 column.
+        Assert.AreEqual(ColumnType.Float64, rows[0].Row["ratios"].ArrayElementType);
+        Assert.AreEqual(1.0d, rows[0].Row["ratios"].ArrayValues![0].FloatValue, 0.0001);
+
+        ColumnValue withNull = rows[1].Row["tags"];
+        Assert.AreEqual(2, withNull.ArrayValues!.Count);
+        Assert.AreEqual(ColumnType.Null, withNull.ArrayValues[0].Type, "a NULL element stays NULL");
+        Assert.AreEqual(5L, withNull.ArrayValues[1].LongValue);
+    }
+
+    /// <summary>
+    /// A mixed-type list has no single element type, and a nested array cannot be modelled by
+    /// <c>ColumnValue</c> at all — both must fail loudly rather than storing whichever type happened
+    /// to appear first.
+    /// </summary>
+    [TestCase("ARRAY[1, 'two']", TestName = "ArrayLiteral_MixedTypesRejected")]
+    [TestCase("ARRAY[ARRAY[1]]", TestName = "ArrayLiteral_NestedRejected")]
+    public async Task ArrayLiteral_InvalidShapesAreRejected(string literal)
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE arrs3 (id int64 PRIMARY KEY NOT NULL, tags array(int64))");
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx, database: dbname,
+                sql: $"INSERT INTO arrs3 (id, tags) VALUES (1, {literal})",
+                parameters: null)))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+    }
+
+    /// <summary>
+    /// The literal path and the bound-parameter path must produce the same stored value. Arrays were
+    /// parameter-only before this literal existed, so the parameter path is the reference
+    /// implementation — a literal that stored something subtly different (element type, ordering,
+    /// NULL handling) would be a silent divergence between two ways of writing the same row.
+    /// </summary>
+    [Test]
+    public async Task ArrayLiteral_MatchesTheBoundParameterPath()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE arrs4 (id int64 PRIMARY KEY NOT NULL, tags array(int64))");
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: dbname,
+            sql: "INSERT INTO arrs4 (id, tags) VALUES (1, ARRAY[7, NULL, 9])", parameters: null));
+
+        ColumnValue bound = ColumnValue.FromArray(ColumnType.Integer64, new List<ColumnValue>
+        {
+            new(ColumnType.Integer64, 7L), ColumnValue.Null, new(ColumnType.Integer64, 9L),
+        });
+
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: dbname,
+            sql: "INSERT INTO arrs4 (id, tags) VALUES (2, @t)",
+            parameters: new Dictionary<string, ColumnValue> { { "@t", bound } }));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SELECT id, tags FROM arrs4 ORDER BY id");
+
+        ColumnValue viaLiteral = rows[0].Row["tags"];
+        ColumnValue viaParameter = rows[1].Row["tags"];
+
+        Assert.AreEqual(viaParameter.ArrayElementType, viaLiteral.ArrayElementType);
+        Assert.AreEqual(viaParameter.ArrayValues!.Count, viaLiteral.ArrayValues!.Count);
+        Assert.AreEqual(0, viaLiteral.CompareTo(viaParameter), "literal and parameter paths must store the same value");
+    }
 }

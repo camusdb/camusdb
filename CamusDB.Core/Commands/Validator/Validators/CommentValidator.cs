@@ -33,6 +33,5 @@ internal sealed class CommentValidator : ValidatorBase
 
         // Null is legal — it is how a comment is removed — so only a present value is checked.
         ValidateCommentLength(ticket.Comment, "Comment");
-        ValidateCommentIsRepresentable(ticket.Comment, "Comment");
     }
 }

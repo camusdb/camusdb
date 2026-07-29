@@ -6,6 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
+using CamusDB.Core.CommandsExecutor.Models;
+
 namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal abstract class ValidatorBase
@@ -54,59 +58,62 @@ internal abstract class ValidatorBase
                 $"{subject} comment is {comment.Length} characters, exceeding the maximum of {maxLen}");
     }
 
+
     /// <summary>
-    /// Rejects comment text that cannot be re-emitted as a SQL string literal and read back unchanged.
+    /// Validates a column's constant <c>DEFAULT</c> against the column it belongs to: the value must
+    /// be convertible to the column's type, and a String/Bytes default must respect the same length
+    /// bound a row value would.
     ///
-    /// <para>Quote characters are <b>not</b> the problem — the emitter doubles <c>'</c>, which the
-    /// lexer and <c>UnquoteStringLiteral</c> undo exactly, so a value containing quotes (including a
-    /// deliberate <c>'); DROP TABLE …</c> payload) round-trips as inert text. The problem is that this
-    /// dialect has no escape <em>decoding</em>: the lexer treats backslash-plus-any-character as one
-    /// unit and hands it through verbatim, and its string body excludes raw control characters
-    /// outright. So two shapes have no representation at all:</para>
-    /// <list type="bullet">
-    ///   <item>a backslash that would end up adjacent to a quote — the backslash swallows the quote
-    ///     and the literal never closes, spilling the rest of the statement into the parser as
-    ///     top-level tokens;</item>
-    ///   <item>a raw control character (newline, tab, NUL …) — no production accepts one.</item>
-    /// </list>
+    /// <para>This runs at the <em>ticket</em> layer on purpose. The SQL path coerces the default while
+    /// building the ticket, but the HTTP/gRPC path copies <c>DefaultValue</c> straight into
+    /// <see cref="ColumnInfo"/>, so nothing checked its type or size before it was persisted into the
+    /// table schema, replicated through the schema log, and written into every checkpoint. A bound
+    /// enforced only on the SQL path bounds nothing; validating the ticket covers both entry
+    /// points.</para>
     ///
-    /// <para>Storing such a value would make <c>SHOW CREATE TABLE</c> emit DDL that does not parse,
-    /// breaking the round-trip guarantee and putting attacker-influenced text outside the quotes.
-    /// Refusing it up front is the containment: the stored set is exactly the emittable set.</para>
-    ///
-    /// <para>The same limitation applies to string <c>DEFAULT</c> values, which predate this check and
-    /// are not covered by it — see the notes in the COMMENT ON spec.</para>
+    /// <para>The length bound deliberately matches <c>RowInserter.EnforceLengthBound</c> — a default
+    /// that a plain <c>INSERT</c> of the same value would reject must not become storable by being
+    /// declared as a default instead.</para>
     /// </summary>
-    protected static void ValidateCommentIsRepresentable(string? comment, string subject)
+    protected static void ValidateColumnDefault(ColumnInfo column, string subject)
     {
-        if (string.IsNullOrEmpty(comment))
+        ColumnValue? defaultValue = column.Default;
+
+        if (defaultValue is null || defaultValue.Type == ColumnType.Null)
             return;
 
-        for (int i = 0; i < comment.Length; i++)
+        ColumnValue coerced;
+
+        try
         {
-            char ch = comment[i];
+            coerced = CastScalarFunctions.CoerceToColumnType(defaultValue, column.Type);
+        }
+        catch (CamusDBException)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"{subject} has a DEFAULT of type {defaultValue.Type}, which cannot be converted to the column type {column.Type}");
+        }
 
-            if (char.IsControl(ch))
+        if (column.Type == ColumnType.String)
+        {
+            int max = column.MaxLength ?? CamusDBConfig.DefaultStringMaxLength;
+            int length = (coerced.StrValue ?? "").Length;
+
+            if (length > max)
                 throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"{subject} comment contains a control character (U+{(int)ch:X4}) at position {i}, " +
-                    "which cannot be represented in a SQL string literal");
+                    CamusDBErrorCodes.ValueTooLong,
+                    $"{subject} has a DEFAULT that is too long (max {max}, got {length})");
+        }
+        else if (column.Type == ColumnType.Bytes)
+        {
+            int max = column.MaxLength ?? CamusDBConfig.DefaultBytesMaxLength;
+            int length = (coerced.BytesValue ?? []).Length;
 
-            if (ch != '\\')
-                continue;
-
-            if (i == comment.Length - 1)
+            if (length > max)
                 throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"{subject} comment ends with a backslash, which would escape the closing quote " +
-                    "when the comment is rendered back as SQL");
-
-            char next = comment[i + 1];
-            if (next is '\'' or '"')
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"{subject} comment contains a backslash immediately before a quote at position {i}, " +
-                    "which would escape that quote when the comment is rendered back as SQL");
+                    CamusDBErrorCodes.ValueTooLong,
+                    $"{subject} has a DEFAULT that is too long (max {max}, got {length})");
         }
     }
 

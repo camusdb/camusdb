@@ -20,7 +20,7 @@ public sealed class CheckConstraintInfo
     public string Name { get; }
 
     /// <summary>
-    /// Rendered SQL text of the condition (from <c>PlanRenderer.RenderExpr</c>).
+    /// Rendered SQL text of the condition (from <c>CheckConditionRenderer</c>).
     /// Stored verbatim in <c>CheckConstraintSchema.Expression</c>.
     /// </summary>
     public string Expression { get; }

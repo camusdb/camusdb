@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ServerGarbageCollection>true</ServerGarbageCollection>
-    <Version>0.9.1</Version>
+    <Version>0.9.2</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>

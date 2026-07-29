@@ -15,6 +15,22 @@ public enum NodeType
     String,
     Bool,
     Null,
+
+    /// <summary>
+    /// An <c>X'4D5A'</c> hex-string literal, carrying its source token in <c>yytext</c>. Distinct
+    /// from <see cref="String"/> because the type is recoverable from the literal itself: a bytes
+    /// value written as a string would depend on String→Bytes coercion at the destination, which
+    /// only works where a target column type is known.
+    /// </summary>
+    BytesLiteral,
+
+    /// <summary>
+    /// An <c>ARRAY[…]</c> literal. <c>leftAst</c> is the element list — an
+    /// <see cref="ExprList"/> tree for two or more elements, the element node itself for exactly one,
+    /// and <c>null</c> for the empty <c>ARRAY[]</c>, whose element type can only come from the target
+    /// column.
+    /// </summary>
+    ArrayLiteral,
     ObjectIdLiteral,
     Identifier,
     IdentifierList,

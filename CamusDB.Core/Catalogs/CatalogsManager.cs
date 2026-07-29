@@ -1397,14 +1397,7 @@ public sealed class CatalogsManager
     }
 
     private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
-    {
-        T payload = Serializator.Unserialize<T>(entry.Payload);
-
-        if (payload is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid payload for schema operation '{entry.Op}'");
-
-        return payload;
-    }
+        => entry.GetPayload<T>();
 
     private static TableSchema ApplyCreateTable(Schema schema, SchemaCreateTablePayload payload)
     {

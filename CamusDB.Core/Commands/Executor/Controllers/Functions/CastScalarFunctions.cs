@@ -108,7 +108,41 @@ internal static class CastScalarFunctions
     /// caught by the row encoder or constraint layer).
     /// </summary>
     internal static ColumnValue CoerceToColumnType(ColumnValue value, TableColumnSchema column)
-        => CoerceToColumnType(value, column.Type);
+        => column.Type == ColumnType.Array && column.ArrayElementType is { } elementType
+            ? CoerceArrayToElementType(value, elementType)
+            : CoerceToColumnType(value, column.Type);
+
+    /// <summary>
+    /// Adapts an array value to a column's declared element type.
+    ///
+    /// <para>This overload exists because the type-only overload cannot do it: an array's target is
+    /// <c>array(T)</c>, and <c>T</c> lives on the column schema, not in <see cref="ColumnType"/>. An
+    /// <c>ARRAY[…]</c> literal infers its element type from its first non-NULL element, so
+    /// <c>ARRAY[1, 2]</c> written into an <c>array(float64)</c> column arrives as Integer64 elements
+    /// and has to widen — the same implicit conversion a scalar column would apply. An empty
+    /// <c>ARRAY[]</c> arrives with element type <see cref="ColumnType.Null"/> ("unknown") and simply
+    /// adopts the declared type here.</para>
+    /// </summary>
+    private static ColumnValue CoerceArrayToElementType(ColumnValue value, ColumnType elementType)
+    {
+        if (value.Type != ColumnType.Array)
+            return value;
+
+        IReadOnlyList<ColumnValue> elements = value.ArrayValues ?? [];
+
+        if (elements.Count == 0)
+            return ColumnValue.FromArray(elementType, []);
+
+        if (value.ArrayElementType == elementType)
+            return value;
+
+        List<ColumnValue> coerced = new(elements.Count);
+
+        foreach (ColumnValue element in elements)
+            coerced.Add(CoerceToColumnType(element, elementType));
+
+        return ColumnValue.FromArray(elementType, coerced);
+    }
 
     /// <summary>
     /// Coerces a value to a target column type using the same narrow set of implicit conversions as

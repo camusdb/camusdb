@@ -3,7 +3,7 @@
 %visibility internal
 %tokentype Token
 
-%option stack, minimize, parser, verbose, persistbuffer, noembedbuffers
+%option stack, minimize, parser, verbose, persistbuffer, noembedbuffers, unicode
 
 %x BLOCKCOMMENT
 
@@ -118,6 +118,8 @@ TTransaction    (T|t)(R|r)(A|a)(N|n)(S|s)(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 TEvict          (E|e)(V|v)(I|i)(C|c)(T|t)
 LParen          \(
 RParen          \)
+LBracket        \[
+RBracket        \]
 LBrace          \{
 RBrace          \}
 Eol             (\r\n?|\n)
@@ -136,8 +138,13 @@ OctEsc          \\{OctDig}{3}
 HexEsc          \\x{HexDig}{2}
 UniEsc          \\u{HexDig}{4}
 UNIESC          \\U{HexDig}{8}
-String          \"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\"\")*\"
-StringSingle    \'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\'\')*\'
+RawChs          [^\"\a\b\f\n\r\t\v\0]
+RawChs2         [^\'\a\b\f\n\r\t\v\0]
+String          \"({RawChs}|\"\")*\"
+StringSingle    \'({RawChs2}|\'\')*\'
+EscString       (E|e)\"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\"\")*\"
+EscStringSingle (E|e)\'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\'\')*\'
+BytesLiteral    (X|x)\'{HexDig}*\'
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
 Placeholder     (@)([a-zA-Z0-9_]+)
@@ -176,6 +183,12 @@ TFor            (F|f)(O|o)(R|r)
 
 {Decimal}		{ yylval.s = yytext; return (int)Token.TFLOAT; }
 
+{BytesLiteral}	{ yylval.s = yytext; return (int)Token.TBYTESLIT; }
+
+{EscString}		{ yylval.s = yytext; return (int)Token.TSTRING; }
+
+{EscStringSingle}  { yylval.s = yytext; return (int)Token.TSTRING; }
+
 {String}		{ yylval.s = yytext; return (int)Token.TSTRING; }
 
 {StringSingle}  { yylval.s = yytext; return (int)Token.TSTRING; }
@@ -185,6 +198,10 @@ TFor            (F|f)(O|o)(R|r)
 {LParen} { return (int)Token.LPAREN; }
 
 {RParen} { return (int)Token.RPAREN; }
+
+{LBracket} { return (int)Token.LBRACKET; }
+
+{RBracket} { return (int)Token.RBRACKET; }
 
 {LBrace} { return (int)Token.LBRACE; }
 

@@ -58,7 +58,12 @@ public sealed class SchemaReplicator
 
         IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
-            (_, bytes) => RestoreAsync(database, bytes),
+            // Restore entries on another partition cannot belong to this database — skip them
+            // without paying the entry deserialization (RestoreAsync re-checks entry.Database
+            // for other databases sharing this partition).
+            (partitionId, bytes) => partitionId == database.SchemaLogPartition
+                ? RestoreAsync(database, bytes)
+                : Task.FromResult(true),
             db: database.Id,
             onRestoreFinished: () => OnSchemaRestoreFinishedAsync(database)
         );
@@ -103,6 +108,13 @@ public sealed class SchemaReplicator
     {
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(bytes);
+
+        // All of this database's schema traffic rides its single schema-log partition, so an
+        // entry on any other partition cannot belong to it — skip before paying the entry
+        // deserialization. The entry.Database check below still filters other databases that
+        // hash to the same partition.
+        if (partitionId != database.SchemaLogPartition)
+            return true;
 
         SchemaChangeLogEntry entry = DecodeEntry(bytes);
 
@@ -424,14 +436,7 @@ public sealed class SchemaReplicator
     }
 
     private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
-    {
-        T payload = Serializator.Unserialize<T>(entry.Payload);
-
-        if (payload is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid payload for schema operation '{entry.Op}'");
-
-        return payload;
-    }
+        => entry.GetPayload<T>();
 
     internal static Schema CloneSchema(Schema schema)
     {

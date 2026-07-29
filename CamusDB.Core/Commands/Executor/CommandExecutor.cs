@@ -3382,10 +3382,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.EvictCache:
                 {
-                    string rawName = ast.yytext ?? string.Empty;
-                    string cacheName = rawName.Length >= 2 && rawName[0] == rawName[^1] && (rawName[0] == '\'' || rawName[0] == '"')
-                        ? rawName[1..^1]
-                        : rawName;
+                    string cacheName = SqlStringLiteral.Decode(ast.yytext ?? string.Empty);
                     // Normalize to lowercase to match the hint grammar's ToLowerInvariant on identifier tokens.
                     database.Cache?.InvalidateCacheName(database.Id, cacheName.ToLowerInvariant());
                     return new(database, null!, 0);
@@ -3931,12 +3928,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     private static string? UnquoteLikePattern(string? raw)
-    {
-        if (raw is null) return null;
-        if (raw.Length >= 2 && raw[0] == raw[^1] && (raw[0] == '\'' || raw[0] == '"'))
-            return raw[1..^1];
-        return raw;
-    }
+        => raw is null ? null : SqlStringLiteral.Decode(raw);
 
     private static void PinSchemaVersions(
         DatabaseDescriptor database,

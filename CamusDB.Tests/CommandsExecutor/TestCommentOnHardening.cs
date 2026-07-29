@@ -556,6 +556,14 @@ internal sealed class TestCommentOnHardening : BaseTest
     [TestCase("'; SELECT 1; --", TestName = "Escaping_LeadingQuotePayload")]
     [TestCase("tick ` backtick", TestName = "Escaping_Backtick")]
     [TestCase("a\\b", TestName = "Escaping_InteriorBackslash")]
+    [TestCase("path\\", TestName = "Escaping_TrailingBackslash")]
+    [TestCase("a\\'b", TestName = "Escaping_BackslashBeforeSingleQuote")]
+    [TestCase("a\\\"b", TestName = "Escaping_BackslashBeforeDoubleQuote")]
+    [TestCase("a\\'b\\\"c", TestName = "Escaping_BackslashBeforeBothQuoteKinds")]
+    [TestCase("line1\nline2", TestName = "Escaping_Newline")]
+    [TestCase("a\tb", TestName = "Escaping_Tab")]
+    [TestCase("nul\0byte", TestName = "Escaping_Nul")]
+    [TestCase("bell\a vtab\v end", TestName = "Escaping_ControlCharacters")]
     public async Task CommentWithQuotesRoundTripsAsInertText(string comment)
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
@@ -576,51 +584,32 @@ internal sealed class TestCommentOnHardening : BaseTest
     }
 
     /// <summary>
-    /// Values that this dialect cannot represent in a string literal are refused up front, rather than
-    /// stored and later emitted as DDL that does not parse. A backslash adjacent to a quote would
-    /// escape it and spill the remainder of the statement outside the literal; raw control characters
-    /// have no representation at all.
-    /// </summary>
-    [TestCase("path\\", TestName = "Unrepresentable_TrailingBackslash")]
-    [TestCase("a\\'b", TestName = "Unrepresentable_BackslashBeforeSingleQuote")]
-    [TestCase("a\\\"b", TestName = "Unrepresentable_BackslashBeforeDoubleQuote")]
-    [TestCase("line1\nline2", TestName = "Unrepresentable_Newline")]
-    [TestCase("a\tb", TestName = "Unrepresentable_Tab")]
-    public async Task UnrepresentableCommentIsRejected(string comment)
-    {
-        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-        await ExecuteDdl(executor, dbname, "CREATE TABLE t (id oid PRIMARY KEY NOT NULL)");
-
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.Comment(new CommentTicket(CommentTarget.Table, dbname, "t", null, comment)))!;
-
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
-
-        // Nothing was stored, so SHOW CREATE TABLE still emits parseable DDL.
-        DatabaseDescriptor database = await executor.OpenDatabase(dbname);
-        Assert.IsNull(database.Schema.Tables["t"].Comment);
-    }
-
-    /// <summary>
-    /// The same guard must apply to the inline CREATE TABLE position, not just COMMENT ON — otherwise
-    /// the check is trivially bypassed by declaring the comment at create time.
+    /// The inline CREATE TABLE position must escape a comment the same way COMMENT ON does — otherwise
+    /// a value that survives one entry point produces unparseable DDL from the other.
     /// </summary>
     [Test]
-    public async Task UnrepresentableInlineCommentIsRejected()
+    public async Task InlineCommentWithBackslashRoundTrips()
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
 
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.CreateTable(new CreateTableTicket(
-                databaseName: dbname,
-                tableName: "t",
-                columns: [new ColumnInfo("id", ColumnType.Id, notNull: true)],
-                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
-                ifNotExists: false,
-                checkConstraints: null,
-                comment: "ends with a backslash \\")))!;
+        const string comment = "ends with a backslash \\";
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "t",
+            columns: [new ColumnInfo("id", ColumnType.Id, notNull: true)],
+            constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+            ifNotExists: false,
+            checkConstraints: null,
+            comment: comment));
+
+        string ddl = await ShowCreateTableAsync(executor, dbname, "t");
+
+        await ExecuteDdl(executor, dbname, "DROP TABLE t");
+        await ExecuteDdl(executor, dbname, ddl);
+
+        DatabaseDescriptor database = await executor.OpenDatabase(dbname);
+        Assert.AreEqual(comment, database.Schema.Tables["t"].Comment);
     }
 
     /// <summary>

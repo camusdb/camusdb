@@ -216,7 +216,7 @@ public sealed class SchemaCheckConstraintPayload
     public string ConstraintName { get; set; } = "";
 
     /// <summary>
-    /// SQL text of the condition, rendered by <c>PlanRenderer.RenderExpr</c>. Empty string for
+    /// SQL text of the condition, rendered by <c>CheckConditionRenderer</c>. Empty string for
     /// Drop operations (the constraint is identified by name alone).
     /// </summary>
     public string Expression { get; set; } = "";
