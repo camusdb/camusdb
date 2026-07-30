@@ -30,13 +30,25 @@ internal sealed class SchemaQuerier
         this.catalogs = catalogsManager;
     }
 
-    internal async IAsyncEnumerable<QueryResultRow> ShowTables(DatabaseDescriptor database, string? pattern = null)
+    /// <summary>
+    /// Lists the tables of <paramref name="database"/>, optionally narrowed by a LIKE
+    /// <paramref name="pattern"/>.
+    ///
+    /// <para>When <paramref name="principal"/> is non-null (authentication is on) a table is listed
+    /// only if the caller holds at least one privilege on it — a table id the caller has no grant for
+    /// is omitted rather than rejected, so the statement never reveals the existence of a table the
+    /// caller cannot touch. A null principal (authentication disabled) lists everything.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowTables(DatabaseDescriptor database, string? pattern = null, Principal? principal = null)
     {
         await Task.CompletedTask;
 
         foreach (KeyValuePair<string, TableSchema> table in database.Schema.Tables)
         {
             if (pattern is not null && !LikeMatch(table.Key, pattern))
+                continue;
+
+            if (principal is not null && !principal.HasAnyPrivilege(database.Id, table.Value.Id))
                 continue;
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
@@ -264,10 +276,18 @@ internal sealed class SchemaQuerier
     /// An entry is a descendant when <paramref name="target"/>'s id appears in its
     /// <see cref="DatabaseRegistryEntry.Ancestors"/> list. Rows are ordered depth-ascending then
     /// database-name ascending.
+    ///
+    /// <para>When <paramref name="principal"/> is non-null (authentication is on) a descendant is listed
+    /// only if the caller holds a grant reaching into it, and the <c>parent</c> column is blanked when
+    /// the parent database itself is not visible — a branch the caller may use must not disclose the
+    /// name of one it may not. Depths stay relative to <paramref name="target"/> in the real tree, so a
+    /// filtered-out intermediate branch leaves a gap in the depth sequence rather than renumbering the
+    /// rows around it.</para>
     /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ShowBranches(
         IReadOnlyList<DatabaseRegistryEntry> allEntries,
-        DatabaseRegistryEntry target)
+        DatabaseRegistryEntry target,
+        Principal? principal = null)
     {
         await Task.CompletedTask;
 
@@ -298,7 +318,11 @@ internal sealed class SchemaQuerier
 
         foreach ((int depth, DatabaseRegistryEntry e) in descendants)
         {
+            if (principal is not null && !principal.CanSeeDatabase(e.Id))
+                continue;
+
             string parentName = e.Ancestors.Count > 0 && idToName.TryGetValue(e.Ancestors[0].DatabaseId, out string? pn)
+                && (principal is null || principal.CanSeeDatabase(e.Ancestors[0].DatabaseId))
                 ? pn : "";
             string forkTs = e.Ancestors.Count > 0
                 ? e.Ancestors[0].ForkTimestamp.ToString()
@@ -320,10 +344,17 @@ internal sealed class SchemaQuerier
     /// <see cref="DatabaseRegistryEntry.Ancestors"/> list, ordered by depth ascending (nearest parent
     /// first). A root database (no ancestors) returns an empty result set. Ancestor names are
     /// resolved from the id-to-name map built from <paramref name="allEntries"/>.
+    ///
+    /// <para>When <paramref name="principal"/> is non-null (authentication is on) an ancestor is listed
+    /// only if the caller holds a grant reaching into it. Both the name and the id are withheld for a
+    /// filtered ancestor — the id is a usable handle (<c>CREATE DATABASE … RELINK TO</c>), so the row is
+    /// dropped whole rather than blanked. Depth remains the true position in the chain, which is why a
+    /// filtered ancestor shows up as a gap in the sequence.</para>
     /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ShowAncestors(
         DatabaseRegistryEntry target,
-        IReadOnlyList<DatabaseRegistryEntry> allEntries)
+        IReadOnlyList<DatabaseRegistryEntry> allEntries,
+        Principal? principal = null)
     {
         await Task.CompletedTask;
 
@@ -334,6 +365,10 @@ internal sealed class SchemaQuerier
         for (int i = 0; i < target.Ancestors.Count; i++)
         {
             DatabaseBranchAncestor anc = target.Ancestors[i];
+
+            if (principal is not null && !principal.CanSeeDatabase(anc.DatabaseId))
+                continue;
+
             idToName.TryGetValue(anc.DatabaseId, out string? ancestorName);
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
@@ -346,13 +381,25 @@ internal sealed class SchemaQuerier
         }
     }
 
-    internal async IAsyncEnumerable<QueryResultRow> ShowDatabases(IReadOnlyList<DatabaseRegistryEntry> entries, string? pattern = null)
+    /// <summary>
+    /// Lists the registered databases, optionally narrowed by a LIKE <paramref name="pattern"/>.
+    ///
+    /// <para>When <paramref name="principal"/> is non-null (authentication is on) a database is listed
+    /// only if the caller holds a grant reaching into it — global, on the database, or on any single
+    /// table inside it (see <see cref="Principal.CanSeeDatabase"/>). A caller with no grants sees an
+    /// empty list instead of an error, so the statement does not disclose the names of databases it
+    /// filtered out. A null principal (authentication disabled) lists everything.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowDatabases(IReadOnlyList<DatabaseRegistryEntry> entries, string? pattern = null, Principal? principal = null)
     {
         await Task.CompletedTask;
 
         foreach (DatabaseRegistryEntry entry in entries)
         {
             if (pattern is not null && !LikeMatch(entry.Name, pattern))
+                continue;
+
+            if (principal is not null && !principal.CanSeeDatabase(entry.Id))
                 continue;
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)

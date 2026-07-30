@@ -2471,7 +2471,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// statement against the caller's privileges before any lock or mutation:
     /// <list type="bullet">
     ///   <item>user/grant administration and database lifecycle DDL require the superuser attribute;</item>
-    ///   <item>server-level <c>SHOW</c> statements are allowed to any authenticated caller;</item>
+    ///   <item>server-level <c>SHOW</c> statements are allowed to any authenticated caller — the
+    ///     catalog listings (<c>SHOW DATABASES</c>/<c>BRANCHES</c>/<c>ANCESTORS</c>, and
+    ///     <c>SHOW TABLES</c> below) are not rejected but <em>filtered</em> to the objects the caller has
+    ///     a grant on, see <see cref="VisibilityPrincipal"/>. The branch statements additionally report a
+    ///     non-visible target database as non-existent;</item>
     ///   <item>an in-database statement requires its mapped privilege at the context database's scope
     ///     (a <c>db.*</c> or global grant satisfies it).</item>
     /// </list>
@@ -2562,6 +2566,19 @@ public sealed class CommandExecutor : IAsyncDisposable
             ? new AuthorizationScope(ticket.Principal, MapRequiredPrivilege(ast.nodeType))
             : default;
     }
+
+    /// <summary>
+    /// The principal whose grants should filter a catalog listing (<c>SHOW TABLES</c>,
+    /// <c>SHOW DATABASES</c>, <c>SHOW BRANCHES</c>, <c>SHOW ANCESTORS</c>), or null when no filtering
+    /// applies.
+    ///
+    /// <para>Null when authentication is disabled, which keeps the unauthenticated deployment listing
+    /// every object as before. With authentication on the ticket always carries a principal — a null
+    /// one was already rejected by <see cref="EnforceAsync"/> before this is reached — so the
+    /// null-propagation here is only a safety net, never a way to opt out of filtering.</para>
+    /// </summary>
+    private static Principal? VisibilityPrincipal(ExecuteSQLTicket ticket)
+        => CamusDBConfig.AuthenticationEnabled ? ticket.Principal : null;
 
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
     private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
@@ -3476,7 +3493,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             string? dbPattern = UnquoteLikePattern(ast.leftAst?.yytext);
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowDatabasesSchema;
-            return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern));
+            return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern, VisibilityPrincipal(ticket)));
         }
 
         // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.
@@ -3495,7 +3512,13 @@ public sealed class CommandExecutor : IAsyncDisposable
             string targetName = ast.leftAst!.yytext!;
             DatabaseRegistry reg = await registryTask.ConfigureAwait(false);
             DatabaseRegistryEntry? target = await reg.TryResolveEntryAsync(targetName).ConfigureAwait(false);
-            if (target is null)
+            Principal? branchPrincipal = VisibilityPrincipal(ticket);
+
+            // A database the caller has no grant on is reported as non-existent, deliberately using the
+            // same error as a name that really is unregistered: an "insufficient privilege" here would
+            // confirm the database exists, which is exactly what naming an arbitrary database in
+            // SHOW BRANCHES / SHOW ANCESTORS would otherwise be used to probe for.
+            if (target is null || (branchPrincipal is not null && !branchPrincipal.CanSeeDatabase(target.Id)))
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseDoesntExist,
                     $"Database '{targetName}' does not exist");
@@ -3504,11 +3527,11 @@ public sealed class CommandExecutor : IAsyncDisposable
             {
                 if (schemaOut is not null)
                     schemaOut.Schema = DerivedTableSchemaBuilder.ShowBranchesSchema;
-                return (null!, schemaQuerier.ShowBranches(allEntries, target));
+                return (null!, schemaQuerier.ShowBranches(allEntries, target, branchPrincipal));
             }
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowAncestorsSchema;
-            return (null!, schemaQuerier.ShowAncestors(target, allEntries));
+            return (null!, schemaQuerier.ShowAncestors(target, allEntries, branchPrincipal));
         }
 
         // SHOW GRANTS reads the server-level auth catalog — no database context.
@@ -3629,7 +3652,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowTablesSchema;
                     string? tablePattern = UnquoteLikePattern(ast.leftAst?.yytext);
-                    return (database, schemaQuerier.ShowTables(database, tablePattern));
+                    return (database, schemaQuerier.ShowTables(database, tablePattern, VisibilityPrincipal(ticket)));
                 }
 
             case NodeType.ShowOrphanTables:

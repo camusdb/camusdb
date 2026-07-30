@@ -182,14 +182,33 @@ With auth enabled, every statement is checked before it runs:
   scope. A denial is `403 Insufficient privilege`.
 - **User / database administration** — `CREATE/ALTER/DROP USER`, `GRANT`/`REVOKE`, and database
   lifecycle DDL require superuser.
+- **Catalog visibility** — `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES` and `SHOW ANCESTORS` are
+  *filtered*, not rejected: they list only the objects the caller can reach, so a name is never
+  disclosed to someone who holds no grant on it. A caller with no grants gets an empty result rather
+  than an error (erroring would itself confirm that an object exists).
+  - A **table** is listed when the caller holds *any* privilege on it — `INSERT`-only is enough to see
+    the name. A `db.*` or `*.*` grant lists every table in scope; superuser lists everything.
+  - A **database** is listed when the caller holds a grant reaching into it: global, on the database,
+    or on any single table inside it. Seeing the database name does not widen what `SHOW TABLES` then
+    lists inside it.
+  - A `LIKE` pattern and the visibility filter both apply — the pattern never widens the result.
+  - `SHOW BRANCHES FROM db` / `SHOW ANCESTORS FROM db` name an arbitrary database, so a **target** the
+    caller cannot see is reported as `DatabaseDoesntExist` — the same error as a name that really is
+    unregistered, rather than a privilege error that would confirm it exists. The listed rows are then
+    filtered the same way: a non-visible descendant or ancestor is omitted, and `SHOW BRANCHES` blanks
+    the `parent` column when the parent database is not visible. Depths stay the true position in the
+    real branch tree, so a filtered level shows up as a gap in the sequence rather than renumbering the
+    surviving rows.
+  - With authentication disabled all four statements list everything, as before.
 
 ### Known behaviors and limitations (all fail-closed)
 
 - An `UPDATE` / `DELETE` whose subquery reads another table currently requires the **write** privilege
   on that read table rather than `SELECT` — over-restrictive, never over-permissive.
-- `SHOW TABLES` / `SHOW DATABASE` and a `FROM`-less `SELECT` open no table and are allowed to any
-  authenticated caller (they expose only names/existence; `SHOW COLUMNS` / `SHOW CREATE TABLE` still
-  require `SELECT` on the specific table).
+- `SHOW DATABASE` (the singular, current-database form), `SHOW ORPHAN DATABASES`,
+  `SHOW ORPHAN TABLES`, and a `FROM`-less `SELECT` open no table and are still allowed to any
+  authenticated caller, unfiltered (they expose only names/existence; `SHOW COLUMNS` /
+  `SHOW CREATE TABLE` still require `SELECT` on the specific table).
 - Delegated administration (`GRANT OPTION`-style) is not implemented — administration is superuser-only.
 
 ## 6. Configuration knobs
