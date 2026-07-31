@@ -155,6 +155,12 @@ public static class ConfigResolver
         CamusDBConfig.MaxMutationsPerTransaction = config.MaxMutationsPerTransaction;
         CamusDBConfig.BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs;
 
+        // Mirror the effective Kahuna PITR retention window (seconds) into the process-wide config so
+        // the restore window guard can reject a target time older than now - window without re-reading
+        // the embedded node's options. Falls back to Kahuna's 1-hour default when the kahuna block
+        // leaves it unset, matching EmbeddedKahunaOptions.PitrWindow.
+        CamusDBConfig.PitrWindowSeconds = config.Kahuna.PitrWindowSeconds ?? 3600;
+
         CamusDBConfig.QueryResultCacheEnabled = config.QueryResultCacheEnabled;
         CamusDBConfig.QueryResultCacheDefaultTtlMs = config.QueryResultCacheDefaultTtlMs;
         CamusDBConfig.QueryResultCacheMaxEntries = config.QueryResultCacheMaxEntries;

@@ -116,7 +116,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType, HLCTimestamp, string, KeyValueDurability)> TryPrepareMutations(HLCTimestamp transactionId, HLCTimestamp commitId, string key, KeyValueDurability durability, long routedGeneration = 0, string? recordAnchorKey = null) => inner.TryPrepareMutations(transactionId, commitId, key, durability, routedGeneration, recordAnchorKey);
         public virtual Task<(KeyValueResponseType, long)> TryCommitMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => inner.TryCommitMutations(transactionId, key, proposalTicketId, durability);
         public virtual Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => inner.TryRollbackMutations(transactionId, key, proposalTicketId, durability);
-        public virtual Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters) => inner.TryExecuteTransactionScript(script, hash, parameters);
+        public virtual Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal) => inner.TryExecuteTransactionScript(script, hash, parameters, priority);
         public virtual Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => inner.GetByBucket(transactionId, prefixKeyName, readTimestamp, durability);
         public virtual Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => inner.ScanByPrefix(prefixKeyName, readTimestamp, durability);
         public virtual Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) => inner.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
@@ -140,6 +140,8 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => inner.TriggerAutoSplitAsync(ct);
         public virtual Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => inner.TriggerAutoMergeAsync(ct);
         public virtual bool IsBackupConfigured => inner.IsBackupConfigured;
+        public virtual bool IsRemoteRestoreAllowed => inner.IsRemoteRestoreAllowed;
+        public virtual Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun, CancellationToken ct = default) => inner.RunBackupGarbageCollectionAsync(dryRun, ct);
         public virtual Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken ct = default) => inner.TakeFullBackupAsync(ct);
         public virtual Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken ct = default) => inner.TakeIncrementalBackupAsync(parentBackupId, ct);
         public virtual Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken ct = default) => inner.TakeCoordinatedBackupAsync(ct);

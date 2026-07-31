@@ -44,6 +44,28 @@ public sealed class CommandValidator
 
     private readonly RelinkTableValidator relinkTableValidator = new();
 
+    private readonly TakeBackupValidator takeBackupValidator = new();
+
+    private readonly RestoreBackupValidator restoreBackupValidator = new();
+
+    public void Validate(TakeBackupTicket ticket)
+    {
+        takeBackupValidator.Validate(ticket);
+    }
+
+    public void Validate(RestoreBackupTicket ticket)
+    {
+        restoreBackupValidator.Validate(ticket);
+    }
+
+    public void Validate(GetBackupChainTicket ticket)
+    {
+        if (ticket.LeafBackupId == Guid.Empty)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "A backup-chain lookup requires a non-empty backup id");
+    }
+
     public void Validate(CreateDatabaseTicket ticket)
     {
         createDatabaseValidator.Validate(ticket);

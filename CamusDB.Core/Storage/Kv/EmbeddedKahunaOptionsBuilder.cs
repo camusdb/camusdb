@@ -209,6 +209,36 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.RocksdbSharedMemtableBudgetMb is int memtableBudget)
             baseline.RocksDbSharedMemtableBudgetMb = memtableBudget;
 
+        if (kahuna.BackupDir is not null)
+            baseline.BackupDir = kahuna.BackupDir;
+
+        if (kahuna.PitrWindowSeconds is int pitrWindow)
+            baseline.PitrWindow = TimeSpan.FromSeconds(pitrWindow);
+
+        if (kahuna.BaseSnapshotIntervalSeconds is int baseSnapshot)
+            baseline.BaseSnapshotInterval = TimeSpan.FromSeconds(baseSnapshot);
+
+        if (kahuna.RestoreRoot is not null)
+            baseline.RestoreRoot = kahuna.RestoreRoot;
+
+        if (kahuna.AllowUnconfinedRemoteRestore is bool allowUnconfined)
+            baseline.AllowUnconfinedRemoteRestore = allowUnconfined;
+
+        if (kahuna.BackupRetentionMaxChains is int retentionChains)
+            baseline.BackupRetentionMaxChains = retentionChains;
+
+        if (kahuna.BackupRetentionMaxAgeSeconds is int retentionAge)
+            baseline.BackupRetentionMaxAge = TimeSpan.FromSeconds(retentionAge);
+
+        if (kahuna.BackupRetentionMaxBytes is long retentionBytes)
+            baseline.BackupRetentionMaxBytes = retentionBytes;
+
+        if (kahuna.BackupGcIntervalSeconds is int gcInterval)
+            baseline.BackupGcInterval = TimeSpan.FromSeconds(gcInterval);
+
+        if (kahuna.BackupRestoreThrottleBytesPerSec is long throttle)
+            baseline.BackupRestoreThrottleBytesPerSec = throttle;
+
         // Kahuna only builds the shared bundle when sharing is enabled and both databases are RocksDB;
         // otherwise the budgets are ignored. In that build case the memtable sub-budget must fit inside
         // the total cache budget, or Kahuna's RocksDbSharedResources.CreateWithUnifiedBudget throws an

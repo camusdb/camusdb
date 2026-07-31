@@ -238,12 +238,103 @@ public static class CamusDBErrorCodes
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
+    /// A backup/PITR operation was requested but the node has no backup directory configured
+    /// (<c>kahuna.backup_dir</c> is unset). Backups are opt-in; set the directory and restart to enable
+    /// them. Maps to HTTP 503 — the capability is unavailable on this node, not a caller mistake.
+    /// </summary>
+    public const string BackupNotConfigured = "CADB0700";
+
+    /// <summary>
+    /// A backup chain could not be resolved or validated: it does not start at a full backup, has a gap
+    /// or a broken parent link, or contains a cycle. A restore refuses loudly rather than reconstruct a
+    /// state that never existed. A permanent caller/data mistake — maps to HTTP 422.
+    /// </summary>
+    public const string BackupChainInvalid = "CADB0701";
+
+    /// <summary>
+    /// An incremental backup was requested but its parent has fallen below the retention floor (too old
+    /// to still be in the WAL), so a contiguous increment is impossible. The caller must take a fresh
+    /// full backup instead. Maps to HTTP 409.
+    /// </summary>
+    public const string BackupNeedsFullBackup = "CADB0702";
+
+    /// <summary>
+    /// A restore requested a point in time outside the recoverable window: in the future, or older than
+    /// <c>now - </c><see cref="CamusDBConfig.PitrWindowSeconds"/>. The window is the upper bound on
+    /// recoverability; actual reach is further limited by which backups survive in the chain. A
+    /// permanent caller mistake — maps to HTTP 422.
+    /// </summary>
+    public const string RestorePointOutOfWindow = "CADB0703";
+
+    /// <summary>
+    /// A restore failed while copying the base image or replaying WAL (I/O error, corrupt artifact, or
+    /// an unexpected engine failure). The partially written target directory should be discarded. Maps
+    /// to HTTP 500.
+    /// </summary>
+    public const string RestoreFailed = "CADB0704";
+
+    /// <summary>The parent backup named by an incremental request does not exist. Maps to HTTP 404.</summary>
+    public const string BackupParentMissing = "CADB0705";
+
+    /// <summary>
+    /// A backup artifact is missing, truncated, extra, duplicated, or fails its recorded digest. The
+    /// engine refuses to restore rather than reconstruct a state that never existed. Maps to HTTP 422.
+    /// </summary>
+    public const string BackupCorruptArtifact = "CADB0706";
+
+    /// <summary>
+    /// The restore destination already exists or overlaps a protected path (the live data root, its
+    /// kv/wal, the backup root, or another job's target). Restore into a fresh directory. Maps to 409.
+    /// </summary>
+    public const string RestoreTargetConflict = "CADB0707";
+
+    /// <summary>
+    /// The backend cannot produce an exact as-of checkpoint at the requested cut, so a full backup with
+    /// a proven base cut cannot be taken. The engine fails closed rather than publish an image that
+    /// over-includes post-cut state. Maps to HTTP 409.
+    /// </summary>
+    public const string BackupExactCheckpointUnavailable = "CADB0708";
+
+    /// <summary>
+    /// A backup artifact/manifest is in a legacy or unsupported format and was not upgraded. Maps to 422.
+    /// </summary>
+    public const string BackupUnsupportedFormat = "CADB0709";
+
+    /// <summary>
+    /// A backup/restore operation lost partition leadership mid-flight; it applied nothing durable and
+    /// the caller may retry. Transient — maps to HTTP 503.
+    /// </summary>
+    public const string BackupRetryableLeadershipLoss = "CADB070A";
+
+    /// <summary>A backup/restore operation was cancelled by the caller. Maps to HTTP 499.</summary>
+    public const string BackupCancelled = "CADB070B";
+
+    /// <summary>
+    /// Restore is not permitted on this node: no server-owned restore root is configured and the
+    /// unconfined opt-in is off. Set <c>kahuna.restore_root</c> to a directory restore destinations must
+    /// live under, then retry. Maps to HTTP 403.
+    /// </summary>
+    public const string RemoteRestoreDisabled = "CADB070C";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
     /// </summary>
     public static int GetHttpStatus(string code) => code switch
     {
+        BackupNotConfigured => 503,
+        BackupChainInvalid => 422,
+        BackupNeedsFullBackup => 409,
+        RestorePointOutOfWindow => 422,
+        BackupParentMissing => 404,
+        BackupCorruptArtifact => 422,
+        RestoreTargetConflict => 409,
+        BackupExactCheckpointUnavailable => 409,
+        BackupUnsupportedFormat => 422,
+        BackupRetryableLeadershipLoss => 503,
+        BackupCancelled => 499,
+        RemoteRestoreDisabled => 403,
         TransactionMutationLimitExceeded => 400,
         CheckConstraintViolation => 400,
         InvalidAsOfSystemTime => 400,

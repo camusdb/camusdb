@@ -57,6 +57,12 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Information, Message = "Database {Name} dropped")]
     public static partial void LogDatabaseDropped(ILogger logger, string name);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Took {Kind} backup {BackupId}")]
+    public static partial void LogBackupTaken(ILogger logger, string kind, string backupId);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Restored backup chain {LeafBackupId} into {TargetDir}")]
+    public static partial void LogBackupRestored(ILogger logger, string leafBackupId, string targetDir);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Database {DbName} opened")]
     public static partial void LogDatabaseOpened(ILogger logger, string dbName);
 

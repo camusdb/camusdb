@@ -173,6 +173,16 @@ public static class CamusDBConfig
     public static int BranchSnapshotHoldLeaseMs = 300_000;
 
     /// <summary>
+    /// Effective Kahuna point-in-time-recovery retention window, in seconds — how far back a restore may
+    /// target. Mirrors <c>kahuna.pitr_window_seconds</c> (→ <see cref="Kahuna.EmbeddedKahunaOptions.PitrWindow"/>)
+    /// so the restore admin path can reject a target time older than <c>now - window</c> (or in the
+    /// future) without re-reading the embedded node's options. Default 3600 (1 hour), matching Kahuna's
+    /// default; this is an upper bound on recoverability — actual reach is still limited by which backups
+    /// survive in the chain.
+    /// </summary>
+    public static int PitrWindowSeconds = 3600;
+
+    /// <summary>
     /// Sliding TTL for the SQL parser AST cache, in seconds.
     /// A successfully-parsed <c>NodeAst</c> is kept in the cache for this many seconds after
     /// the last hit; each cache hit extends the deadline by the same interval.

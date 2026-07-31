@@ -69,6 +69,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     // ANALYZE. Started alongside the renewer; disposed on teardown.
     private AutoAnalyzeScheduler? autoAnalyzeScheduler;
 
+    // Server-level backup / point-in-time-recovery controller over the shared node. Null only when this
+    // executor was constructed without a shared node (no backup surface is reachable).
+    private readonly BackupManager? backupManager;
+
     /// <summary>
     /// Optional probe returning the number of in-flight foreground transactions, wired by the host so
     /// the auto-analyze scheduler can back off under load. Null in contexts (tests, standalone) that
@@ -186,6 +190,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             authCatalogTask = AuthCatalog.OpenAsync(sharedNode, isClusterMode);
             authService = new AuthService(authCatalogTask);
+            backupManager = new BackupManager(sharedNode, logger);
         }
 
         databaseDescriptors = new();
@@ -2606,6 +2611,98 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     /// <summary>Revokes the presented token (logout).</summary>
     public Task LogoutAsync(string? bearer) => RequireAuthService().LogoutAsync(bearer);
+
+    private BackupManager RequireBackupManager()
+    {
+        if (backupManager is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Backup service is unavailable (no shared node was configured)");
+        return backupManager;
+    }
+
+    /// <summary>
+    /// Common gate for every backup/PITR admin operation: superuser authorization (when authentication
+    /// is enabled) followed by the backup-configured check. Both are server-level and privileged, so a
+    /// non-superuser is refused and an unconfigured node reports the capability as unavailable rather
+    /// than leaking a raw engine exception.
+    /// </summary>
+    private void EnsureBackupAllowed(Principal? principal)
+    {
+        if (CamusDBConfig.AuthenticationEnabled)
+        {
+            if (principal is null)
+                throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Backup administration requires a superuser");
+        }
+
+        // backupManager is non-null exactly when sharedNode is, so this also guards the no-shared-node case.
+        if (backupManager is null || sharedNode is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Backup service is unavailable (no shared node was configured)");
+
+        if (!sharedNode.IsBackupConfigured)
+            throw new CamusDBException(
+                CamusDBErrorCodes.BackupNotConfigured,
+                "Backups are not configured on this node; set 'kahuna.backup_dir' and restart to enable them");
+    }
+
+    /// <summary>
+    /// Takes a node-wide backup (full/incremental/coordinated). Superuser-gated; requires a configured
+    /// backup directory. Covers every database at once.
+    /// </summary>
+    public Task<BackupInfo> TakeBackup(TakeBackupTicket ticket, CancellationToken cancellationToken = default)
+    {
+        validator.Validate(ticket);
+        EnsureBackupAllowed(ticket.Principal);
+        return RequireBackupManager().TakeBackup(ticket, cancellationToken);
+    }
+
+    /// <summary>Lists every backup in the node's catalog. Superuser-gated; requires a configured backup directory.</summary>
+    public Task<IReadOnlyList<BackupInfo>> ListBackups(ListBackupsTicket ticket, CancellationToken cancellationToken = default)
+    {
+        EnsureBackupAllowed(ticket.Principal);
+        return RequireBackupManager().ListBackups(cancellationToken);
+    }
+
+    /// <summary>
+    /// Resolves and validates the backup chain ending at the given leaf. Superuser-gated; requires a
+    /// configured backup directory. Throws <see cref="CamusDBErrorCodes.BackupChainInvalid"/> if the
+    /// chain is broken.
+    /// </summary>
+    public Task<IReadOnlyList<BackupInfo>> GetBackupChain(GetBackupChainTicket ticket, CancellationToken cancellationToken = default)
+    {
+        validator.Validate(ticket);
+        EnsureBackupAllowed(ticket.Principal);
+        return RequireBackupManager().GetBackupChain(ticket, cancellationToken);
+    }
+
+    /// <summary>
+    /// Offline restore into a fresh data root (optionally to a point in time). Superuser-gated; requires
+    /// a configured backup directory and that restore is enabled (a configured restore root). Non-
+    /// destructive to the live node — the operator restarts a fresh node with
+    /// <c>data_dir = </c><see cref="RestoreResult.DataRoot"/> afterwards.
+    /// </summary>
+    public Task<RestoreResult> RestoreBackup(RestoreBackupTicket ticket, CancellationToken cancellationToken = default)
+    {
+        validator.Validate(ticket);
+        EnsureBackupAllowed(ticket.Principal);
+        return RequireBackupManager().Restore(ticket, cancellationToken);
+    }
+
+    /// <summary>
+    /// Runs (or, when <paramref name="dryRun"/> is true, previews) backup garbage collection: retention
+    /// enforcement plus orphan-artifact sweep. Superuser-gated; requires a configured backup directory.
+    /// GC also runs automatically after each backup and on the periodic tick — this is the on-demand
+    /// operator entry point.
+    /// </summary>
+    public Task<BackupGcResult> RunBackupGarbageCollection(bool dryRun, Principal? principal, CancellationToken cancellationToken = default)
+    {
+        EnsureBackupAllowed(principal);
+        return RequireBackupManager().RunGarbageCollection(dryRun, cancellationToken);
+    }
 
     /// <summary>
     /// If <see cref="CamusDBConfig.AuthenticationEnabled"/> is on, ensures the catalog has at least one

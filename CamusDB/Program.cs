@@ -369,6 +369,25 @@ app.UseAuthorization();
 
 app.MapRazorPages();
 
+// Load the authentication policy BEFORE binding the socket, so the auth middleware never serves a
+// request while the flag still holds its default. These are pure environment reads with no dependency
+// on the node being up; the flag/key sourced here decide whether the middleware authenticates. (The
+// bootstrap superuser is seeded after StartAsync — it needs the shared node — and until it exists an
+// auth-enabled server simply resolves no token and fails closed, which is safe.)
+// Sourced from the environment / secret provider, never config.yml (a plaintext key or bootstrap
+// password in config.yml would be a leak). The flag defaults off, so a deployment that sets nothing
+// keeps today's unauthenticated behavior.
+CamusDBConfig.AuthenticationEnabled = string.Equals(
+    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase);
+CamusDBConfig.AccessTokenServerKey =
+    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? CamusDBConfig.AccessTokenServerKey;
+CamusDBConfig.BootstrapSuperuser =
+    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "";
+CamusDBConfig.BootstrapSuperuserPassword =
+    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "";
+CamusDBConfig.NodeSecret =
+    Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "";
+
 // Start Kestrel first so the gRPC Raft port is bound before the cluster node
 // begins leader election and tries to reach peers.
 await app.StartAsync();
@@ -395,20 +414,6 @@ CamusStartup camus = new(
 await camus.Initialize();
 
 CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
-
-// Authentication configuration is sourced from the environment / secret provider, never config.yml
-// (a plaintext key or bootstrap password in config.yml would be a leak). The flag defaults off, so a
-// deployment that sets nothing keeps today's unauthenticated behavior.
-CamusDBConfig.AuthenticationEnabled = string.Equals(
-    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase);
-CamusDBConfig.AccessTokenServerKey =
-    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? CamusDBConfig.AccessTokenServerKey;
-CamusDBConfig.BootstrapSuperuser =
-    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "";
-CamusDBConfig.BootstrapSuperuserPassword =
-    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "";
-CamusDBConfig.NodeSecret =
-    Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "";
 
 // Seed the bootstrap superuser when auth is enabled and the catalog is empty; fail-closed (refuse to
 // start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.

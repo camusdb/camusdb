@@ -7,6 +7,7 @@
  */
 
 using Kahuna;
+using Kahuna.Shared.Communication.Rest;
 using Kommander;
 using Kommander.Communication;
 using Kommander.Communication.Grpc;
@@ -285,6 +286,78 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// Must be called after <see cref="WaitForLeaderAsync"/> and before reading persisted data.
     /// </summary>
     public Task FlushAsync() => node.FlushAsync();
+
+    /// <summary>
+    /// True when the underlying node was started with a backup directory configured
+    /// (<c>kahuna.backup_dir</c> → <see cref="EmbeddedKahunaOptions.BackupDir"/>). When false, every
+    /// backup/PITR call below throws inside Kahuna, so callers gate on this and surface
+    /// <see cref="CamusDBErrorCodes.BackupNotConfigured"/> instead of leaking a raw exception.
+    /// </summary>
+    public bool IsBackupConfigured => node.Kahuna.IsBackupConfigured;
+
+    /// <summary>
+    /// True when restore is permitted on this node: a server-owned restore root is configured (so
+    /// destinations are confined to it) or an explicit unconfined opt-in is set. False by default —
+    /// restore is administrative and denied unless deliberately enabled via <c>kahuna.restore_root</c>
+    /// (or <c>kahuna.allow_unconfined_remote_restore</c>). The backup/restore admin surface gates on this.
+    /// </summary>
+    public bool IsRemoteRestoreAllowed => node.Kahuna.IsRemoteRestoreAllowed;
+
+    /// <summary>
+    /// Takes a full backup of the whole node now: a base image of the storage engine plus a manifest
+    /// recording per-partition WAL coverage and checksums. Online — safe while the node serves traffic.
+    /// Backups are node-wide (every CamusDB database lives in this one shared node), not per-database.
+    /// </summary>
+    public Task<KahunaBackupInfo> TakeFullBackupAsync(CancellationToken cancellationToken = default)
+        => node.Kahuna.TakeFullBackupAsync(cancellationToken);
+
+    /// <summary>
+    /// Takes an incremental backup: the slice of WAL committed since <paramref name="parentBackupId"/>,
+    /// linked to that parent to form a chain. Fails if the parent has fallen below the retention floor
+    /// (a fresh full backup is then required). Online.
+    /// </summary>
+    public Task<KahunaBackupInfo> TakeIncrementalBackupAsync(Guid parentBackupId, CancellationToken cancellationToken = default)
+        => node.Kahuna.TakeIncrementalBackupAsync(parentBackupId, cancellationToken);
+
+    /// <summary>
+    /// Takes a cluster-wide coordinated full backup: every partition is capped at one consistent HLC
+    /// cut. For the embedded single node this is effectively equivalent to a plain full backup (its
+    /// quorum is formed with phantom witnesses); it matters for real multi-node clusters. Online.
+    /// </summary>
+    public Task<KahunaBackupInfo> TakeCoordinatedBackupAsync(CancellationToken cancellationToken = default)
+        => node.Kahuna.TakeCoordinatedBackupAsync(cancellationToken);
+
+    /// <summary>
+    /// Lists every backup recorded in the configured backup directory's catalog. Online.
+    /// </summary>
+    public Task<IReadOnlyList<KahunaBackupInfo>> ListBackupsAsync(CancellationToken cancellationToken = default)
+        => node.Kahuna.ListBackupsAsync(cancellationToken);
+
+    /// <summary>
+    /// Resolves and validates the backup chain ending at <paramref name="leafBackupId"/> (must start at
+    /// a full backup, be contiguous, unbroken, and acyclic) and returns it root-first. Online.
+    /// </summary>
+    public Task<IReadOnlyList<KahunaBackupInfo>> GetBackupChainAsync(Guid leafBackupId, CancellationToken cancellationToken = default)
+        => node.Kahuna.GetBackupChainAsync(leafBackupId, cancellationToken);
+
+    /// <summary>
+    /// Offline restore: validates the chain ending at <paramref name="leafBackupId"/>, copies its base
+    /// image into <paramref name="targetDir"/>, and replays WAL up to <paramref name="targetTimeMs"/>
+    /// (Unix epoch milliseconds; <c>0</c> = chain max). Non-destructive to the live node — it only
+    /// writes <paramref name="targetDir"/>; the operator then boots a fresh node whose storage path
+    /// points at the restored image (see the backup/restore runbook for the RocksDB path shape).
+    /// </summary>
+    public Task<KahunaRestoreResponse> RestoreToAsync(Guid leafBackupId, string targetDir, long targetTimeMs, CancellationToken cancellationToken = default)
+        => node.Kahuna.RestoreToAsync(leafBackupId, targetDir, targetTimeMs, cancellationToken);
+
+    /// <summary>
+    /// Reclaims backup disk: sweeps orphaned/leftover artifacts and enforces the retention policy. With
+    /// <paramref name="dryRun"/> true it returns the inventory of what would be reclaimed without deleting
+    /// anything. The same work also runs automatically after each backup and on the periodic GC tick;
+    /// this is the on-demand operator entry point.
+    /// </summary>
+    public Task<KahunaBackupGcResult> RunBackupGarbageCollectionAsync(bool dryRun, CancellationToken cancellationToken = default)
+        => node.Kahuna.RunBackupGarbageCollectionAsync(dryRun, cancellationToken);
 
     /// <summary>
     /// Resolves the single Raft partition that carries <i>all</i> schema-log traffic for a

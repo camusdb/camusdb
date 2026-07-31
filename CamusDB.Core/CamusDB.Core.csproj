@@ -77,7 +77,7 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.9.1" />
+    <PackageReference Include="Kahuna.Core" Version="0.9.3" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />

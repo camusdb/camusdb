@@ -289,6 +289,24 @@ initial_partitions: 4      # Raft partition count (>= 1). More partitions spread
 #   rocksdb_shared_memory: true                 # set false to give each database its own budget
 #   rocksdb_shared_memory_budget_mb: 320        # total shared block-cache budget (MiB)
 #   rocksdb_shared_memtable_budget_mb: 128      # memtable sub-budget (MiB); must be <= the total
+#
+#   # Backups & point-in-time recovery (opt-in; off unless backup_dir is set).
+#   # When backup_dir is set, the server-admin backup/PITR API (/v1/backups/*, /v1/restore) is
+#   # enabled and node-wide backups are written under this directory. It backs up ALL databases at
+#   # once (they share one Kahuna node). Superuser-only when authentication is enabled.
+#   backup_dir: /opt/camusdb/backups            # omit to DISABLE backups (default). Must not be blank when set
+#   pitr_window_seconds: 3600                   # how far back live WAL is retained for recovery; > 0 and <= 21600 (6h). Default 3600 (1h)
+#   base_snapshot_interval_seconds: 1800        # base-image cadence; > 0 and <= pitr_window_seconds. Default 1800 (30m)
+#   # Restore is disabled unless a server-owned restore root is set (destinations are confined to it).
+#   # /v1/restore refuses with RemoteRestoreDisabled until this is configured.
+#   restore_root: /opt/camusdb/restores         # omit to keep restore disabled. Must not be blank when set
+#   allow_unconfined_remote_restore: false      # true = allow restore to any absolute path (insecure). Default false
+#   # Backup disk retention (garbage collection deletes only whole chains; also runs after each backup):
+#   backup_retention_max_chains: 0              # keep at most N chains (0 = unlimited)
+#   backup_retention_max_age_seconds: 0         # delete chains older than this (0 = unlimited)
+#   backup_retention_max_bytes: 0               # cap total backup bytes (0 = unlimited)
+#   backup_gc_interval_seconds: 3600            # background GC reaper cadence (0 = disabled). Default 3600 (1h)
+#   backup_restore_throttle_bytes_per_sec: 0    # throttle a restore's checkpoint copy (0 = unlimited)
 
 # ── Diagnostics (standalone only; opt-in) ─────────────────────────────────────
 # Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:

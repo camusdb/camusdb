@@ -52,6 +52,16 @@ public sealed class KahunaOptionsConfig
         "rocksdb_shared_memory",
         "rocksdb_shared_memory_budget_mb",
         "rocksdb_shared_memtable_budget_mb",
+        "backup_dir",
+        "pitr_window_seconds",
+        "base_snapshot_interval_seconds",
+        "restore_root",
+        "allow_unconfined_remote_restore",
+        "backup_retention_max_chains",
+        "backup_retention_max_age_seconds",
+        "backup_retention_max_bytes",
+        "backup_gc_interval_seconds",
+        "backup_restore_throttle_bytes_per_sec",
     };
 
     /// <summary>Persistence backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
@@ -189,6 +199,68 @@ public sealed class KahunaOptionsConfig
     public int? RocksdbSharedMemtableBudgetMb { get; set; }
 
     /// <summary>
+    /// Filesystem directory where node-wide backups (base images, WAL segments, manifests) are written
+    /// and read. Enabling backups is opt-in: when null/empty, backups are <b>disabled</b> and the
+    /// backup/PITR admin API reports <see cref="CamusDBErrorCodes.BackupNotConfigured"/>. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BackupDir"/>. Must not be blank when the key is present.
+    /// </summary>
+    public string? BackupDir { get; set; }
+
+    /// <summary>
+    /// Point-in-time-recovery retention window, in <b>seconds</b>: how far back a restore may target.
+    /// Also bounds how much WAL Kahuna keeps for recovery. Must be &gt; 0 and &lt;= 21600 (6 hours), the
+    /// Kahuna maximum. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.PitrWindow"/> (a
+    /// <see cref="System.TimeSpan"/>). Also used by the CamusDB-side restore window guard.
+    /// </summary>
+    public int? PitrWindowSeconds { get; set; }
+
+    /// <summary>
+    /// How often, in <b>seconds</b>, a fresh base image is taken per shard. Smaller = faster restores
+    /// (less WAL to replay) at the cost of more frequent snapshots. Must be &gt; 0 and &lt;=
+    /// <see cref="PitrWindowSeconds"/> when both are set. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BaseSnapshotInterval"/>.
+    /// </summary>
+    public int? BaseSnapshotIntervalSeconds { get; set; }
+
+    /// <summary>
+    /// Server-owned root that restore destinations must be contained within. Setting it enables remote
+    /// (REST) restore with destinations confined to this tree; leaving it empty keeps remote restore
+    /// disabled unless <see cref="AllowUnconfinedRemoteRestore"/> is set. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RestoreRoot"/>. Must not be blank when the key is present.
+    /// </summary>
+    public string? RestoreRoot { get; set; }
+
+    /// <summary>
+    /// Allows remote restore without a configured <see cref="RestoreRoot"/> (insecure — a restore may
+    /// then target any absolute path). Off by default. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.AllowUnconfinedRemoteRestore"/>.
+    /// </summary>
+    public bool? AllowUnconfinedRemoteRestore { get; set; }
+
+    /// <summary>
+    /// Retention cap on the number of backup chains kept in the backup directory (0 = unlimited). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BackupRetentionMaxChains"/>. Garbage collection deletes
+    /// only whole chains, keeping a valid full root for every retained leaf.
+    /// </summary>
+    public int? BackupRetentionMaxChains { get; set; }
+
+    /// <summary>Retention cap on backup age, in <b>seconds</b> (0 = unlimited). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BackupRetentionMaxAge"/>.</summary>
+    public int? BackupRetentionMaxAgeSeconds { get; set; }
+
+    /// <summary>Retention cap on total backup bytes (0 = unlimited). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BackupRetentionMaxBytes"/>.</summary>
+    public long? BackupRetentionMaxBytes { get; set; }
+
+    /// <summary>How often, in <b>seconds</b>, the background backup GC reaper runs (0 = disabled; GC also
+    /// runs after each backup). Maps to <see cref="Kahuna.EmbeddedKahunaOptions.BackupGcInterval"/>.</summary>
+    public int? BackupGcIntervalSeconds { get; set; }
+
+    /// <summary>Throughput budget in bytes/sec for a restore's checkpoint copy (0 = unlimited). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BackupRestoreThrottleBytesPerSec"/>.</summary>
+    public long? BackupRestoreThrottleBytesPerSec { get; set; }
+
+    /// <summary>
     /// Validates allow-listed Kahuna fields. Called from <see cref="ConfigDefinition.Validate"/>.
     /// </summary>
     public void Validate()
@@ -281,7 +353,55 @@ public sealed class KahunaOptionsConfig
         if (RocksdbSharedMemtableBudgetMb is int memtable && RocksdbSharedMemoryBudgetMb is int total && memtable > total)
             throw InvalidConfig(
                 $"'kahuna.rocksdb_shared_memtable_budget_mb' ({memtable}) must be <= 'kahuna.rocksdb_shared_memory_budget_mb' ({total})");
+
+        if (BackupDir is not null && string.IsNullOrWhiteSpace(BackupDir))
+            throw InvalidConfig("'kahuna.backup_dir' must not be blank when set (omit the key to disable backups)");
+
+        if (PitrWindowSeconds is <= 0)
+            throw InvalidConfig($"'kahuna.pitr_window_seconds' must be > 0, got {PitrWindowSeconds}");
+
+        if (PitrWindowSeconds is int window && window > 21600)
+            throw InvalidConfig($"'kahuna.pitr_window_seconds' must be <= 21600 (6 hours), got {window}");
+
+        if (BaseSnapshotIntervalSeconds is <= 0)
+            throw InvalidConfig($"'kahuna.base_snapshot_interval_seconds' must be > 0, got {BaseSnapshotIntervalSeconds}");
+
+        // Cross-check the EFFECTIVE pair, not just the provided keys. Kahuna requires
+        // BaseSnapshotInterval <= PitrWindow; if we only compared when both YAML keys are present, a
+        // one-sided override (e.g. pitr_window_seconds=600 while base-snapshot keeps its 1800s default)
+        // would slip past CamusDB and only blow up at Kahuna startup. Fill the unset side with the same
+        // defaults EmbeddedKahunaOptions uses (PitrWindow 1h, BaseSnapshotInterval 30m).
+        int effectiveWindow = PitrWindowSeconds ?? DefaultPitrWindowSeconds;
+        int effectiveSnapshot = BaseSnapshotIntervalSeconds ?? DefaultBaseSnapshotIntervalSeconds;
+        if (effectiveSnapshot > effectiveWindow)
+            throw InvalidConfig(
+                $"effective 'kahuna.base_snapshot_interval_seconds' ({effectiveSnapshot}) must be <= " +
+                $"'kahuna.pitr_window_seconds' ({effectiveWindow}); set both when lowering the window below " +
+                $"the {DefaultBaseSnapshotIntervalSeconds}s default snapshot interval");
+
+        if (RestoreRoot is not null && string.IsNullOrWhiteSpace(RestoreRoot))
+            throw InvalidConfig("'kahuna.restore_root' must not be blank when set (omit the key to disable confined remote restore)");
+
+        if (BackupRetentionMaxChains is < 0)
+            throw InvalidConfig($"'kahuna.backup_retention_max_chains' must be >= 0, got {BackupRetentionMaxChains}");
+
+        if (BackupRetentionMaxAgeSeconds is < 0)
+            throw InvalidConfig($"'kahuna.backup_retention_max_age_seconds' must be >= 0, got {BackupRetentionMaxAgeSeconds}");
+
+        if (BackupRetentionMaxBytes is < 0)
+            throw InvalidConfig($"'kahuna.backup_retention_max_bytes' must be >= 0, got {BackupRetentionMaxBytes}");
+
+        if (BackupGcIntervalSeconds is < 0)
+            throw InvalidConfig($"'kahuna.backup_gc_interval_seconds' must be >= 0, got {BackupGcIntervalSeconds}");
+
+        if (BackupRestoreThrottleBytesPerSec is < 0)
+            throw InvalidConfig($"'kahuna.backup_restore_throttle_bytes_per_sec' must be >= 0, got {BackupRestoreThrottleBytesPerSec}");
     }
+
+    // Match EmbeddedKahunaOptions defaults (PitrWindow 1h, BaseSnapshotInterval 30m) so the effective
+    // cross-check above reflects what the node will actually run with when a key is left unset.
+    private const int DefaultPitrWindowSeconds = 3600;
+    private const int DefaultBaseSnapshotIntervalSeconds = 1800;
 
     private static void ValidateStorage(string? value, string field)
     {
