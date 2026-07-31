@@ -3815,5 +3815,282 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         Assert.IsNotNull(result[0].Row["name"].StrValue);
     }
 
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateCountWithLimitCountsAllRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // LIMIT restricts output rows, not the aggregate's input: COUNT must see all 25 rows.
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT COUNT(*) AS c FROM robots LIMIT 1",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(25, result[0].Row["c"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateSumWithLimitOffsetOnOutputRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // Years are 2000..2024; the sum must include every input row despite LIMIT.
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT SUM(year) AS total FROM robots LIMIT 3 OFFSET 0",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(50300, result[0].Row["total"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectAggregateOffsetSkipsTheOutputRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        // OFFSET applies to the single aggregate output row, not to the scanned input rows.
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT COUNT(*) AS c FROM robots LIMIT 1 OFFSET 1",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(0, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectInnerJoinAggregateWithLimitCountsAllRows()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT COUNT(*) AS cnt FROM app_users u JOIN posts p ON p.user_id = u.id LIMIT 1",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(5, result[0].Row["cnt"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOffsetWithoutLimit()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT name FROM robots OFFSET 20",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(5, result.Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectOrderByOffsetWithoutLimit()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> _) = await SetupBasicTable();
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT year FROM robots ORDER BY year OFFSET 20",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(5, result.Count);
+
+        // Years are 2000..2024 ascending; skipping 20 leaves 2020..2024.
+        for (int i = 0; i < 5; i++)
+            Assert.AreEqual(2020 + i, result[i].Row["year"].LongValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectJoinAliasCaseInsensitiveQualifiedColumns()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        // Aliases bind case-insensitively: "U.email" must resolve to alias "u" in the
+        // projection, WHERE, ON, and ORDER BY, and the referenced columns must be decoded.
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT U.email, P.title FROM app_users u JOIN posts p ON P.user_id = U.id WHERE U.email = \"a@example.com\" ORDER BY P.title",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> result = await cursor.ToListAsync();
+
+        Assert.AreEqual(2, result.Count);
+
+        Assert.AreEqual("a@example.com", result[0].Row["email"].StrValue);
+        Assert.AreEqual("Draft", result[0].Row["title"].StrValue);
+
+        Assert.AreEqual("a@example.com", result[1].Row["email"].StrValue);
+        Assert.AreEqual("Post A", result[1].Row["title"].StrValue);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectDistinctOnDescendingIndexHonorsOrderBy()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        KvTransaction ddlTxn = await database.Transactions.BeginAsync();
+
+        // NOT NULL int column with a DESC index: the streaming-distinct scan over this index
+        // delivers descending values, so an ORDER BY n (ascending) must NOT have its sort
+        // elided — the claimed scan ordering has to carry the index's real direction.
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "measurements",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("n", ColumnType.Integer64, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                new(ConstraintType.IndexMulti, "n_desc_idx", new ColumnIndexInfo[] { new("n", OrderType.Descending) }),
+            },
+            ifNotExists: false
+        );
+
+        await executor.CreateTable(tableTicket);
+
+        // Scrambled insert order with duplicates.
+        long[] values = [30, 10, 20, 10, 30, 20, 40];
+
+        foreach (long value in values)
+        {
+            InsertTicket insertTicket = new(
+                txnState: ddlTxn,
+                databaseName: dbname,
+                tableName: "measurements",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "n", new(ColumnType.Integer64, value) },
+                    }
+                }
+            );
+
+            await executor.Insert(insertTicket);
+        }
+
+        await database.Transactions.CommitAsync(ddlTxn);
+
+        KvTransaction txnState = await database.Transactions.BeginAsync();
+
+        ExecuteSQLTicket ascTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT n FROM measurements ORDER BY n",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> ascCursor) = await executor.ExecuteSQLQuery(ascTicket);
+        List<QueryResultRow> ascResult = await ascCursor.ToListAsync();
+
+        CollectionAssert.AreEqual(
+            new long[] { 10, 20, 30, 40 },
+            ascResult.Select(r => r.Row["n"].LongValue).ToList(),
+            "DISTINCT over a DESC index with ORDER BY n must return ascending values");
+
+        ExecuteSQLTicket descTicket = new(
+            txnState: txnState,
+            database: dbname,
+            sql: "SELECT DISTINCT n FROM measurements ORDER BY n DESC",
+            parameters: null
+        );
+
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> descCursor) = await executor.ExecuteSQLQuery(descTicket);
+        List<QueryResultRow> descResult = await descCursor.ToListAsync();
+
+        CollectionAssert.AreEqual(
+            new long[] { 40, 30, 20, 10 },
+            descResult.Select(r => r.Row["n"].LongValue).ToList(),
+            "DISTINCT over a DESC index with ORDER BY n DESC must return descending values");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteSelectJoinDuplicateAliasDifferentCaseRejected()
+    {
+        AppUsersPostsFixture fixture = await SetupAppUsersAndPosts();
+
+        KvTransaction txnState = await fixture.Database.Transactions.BeginAsync();
+
+        // Aliases resolve case-insensitively, so "u" and "U" are the same alias and the
+        // binder must reject the duplicate up front instead of failing later.
+        ExecuteSQLTicket ticket = new(
+            txnState: txnState,
+            database: fixture.DbName,
+            sql: "SELECT u.email FROM app_users u JOIN posts U ON U.user_id = u.id",
+            parameters: null
+        );
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await fixture.Executor.ExecuteSQLQuery(ticket);
+            await cursor.ToListAsync();
+        })!;
+
+        Assert.IsTrue(exception.Message.Contains("Duplicate alias"), $"Unexpected message: {exception.Message}");
+    }
+
     #endregion
 }

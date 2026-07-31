@@ -69,6 +69,29 @@ public sealed class TestJoinEquiJoinAnalyzer
     }
 
     [Test]
+    public void TryMatch_IgnoresIndexStillBeingBuiltOnline()
+    {
+        // A WriteOnly index is mid-backfill: probing it would silently miss rows inserted
+        // before the backfill reached them, so the analyzer must not select it.
+        BoundSelectQuery bound = MakeBoundQuery(
+            ("app_users", "u", new[] { ("id", ColumnType.Id) }),
+            ("posts", "p", new[] { ("id", ColumnType.Id), ("user_id", ColumnType.Id) },
+                IndexType.Multi, "user_id"),
+            indexState: SchemaElementState.WriteOnly);
+
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email FROM app_users u JOIN posts p ON p.user_id = u.id"));
+
+        Assert.IsFalse(
+            JoinEquiJoinAnalyzer.TryMatch(
+                bound.Sources[1],
+                ((JoinSource)query.Source).OnPredicate,
+                bound,
+                out _));
+    }
+
+    [Test]
     public void TryMatch_ReturnsFalseWhenRightJoinColumnIsNotIndexed()
     {
         BoundSelectQuery bound = MakeBoundQuery(
@@ -104,12 +127,13 @@ public sealed class TestJoinEquiJoinAnalyzer
 
     private static BoundSelectQuery MakeBoundQuery(
         (string table, string alias, (string name, ColumnType type)[] columns) left,
-        (string table, string alias, (string name, ColumnType type)[] columns, IndexType indexType, string indexColumn) right)
+        (string table, string alias, (string name, ColumnType type)[] columns, IndexType indexType, string indexColumn) right,
+        SchemaElementState indexState = SchemaElementState.Public)
     {
         List<BoundTableSource> boundSources =
         [
             MakeBoundSource(left.table, left.alias, left.columns),
-            MakeBoundSource(right.table, right.alias, right.columns, right.indexType, right.indexColumn),
+            MakeBoundSource(right.table, right.alias, right.columns, right.indexType, right.indexColumn, indexState),
         ];
 
         SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
@@ -124,7 +148,8 @@ public sealed class TestJoinEquiJoinAnalyzer
         string alias,
         (string name, ColumnType type)[] columns,
         IndexType? indexType = null,
-        string? indexColumn = null)
+        string? indexColumn = null,
+        SchemaElementState indexState = SchemaElementState.Public)
     {
         List<TableColumnSchema> columnSchemas = new(columns.Length);
 
@@ -146,7 +171,8 @@ public sealed class TestJoinEquiJoinAnalyzer
             table.Indexes["posts_user_id_idx"] = new TableIndexSchema(
                 "posts_user_id_idx",
                 [indexColumn],
-                indexType.Value);
+                indexType.Value,
+                indexState);
         }
 
         return new BoundTableSource(new TableSource(tableName, alias), table, alias);

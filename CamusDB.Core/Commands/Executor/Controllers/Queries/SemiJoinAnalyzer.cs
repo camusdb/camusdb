@@ -115,6 +115,11 @@ internal sealed class SemiJoinAnalyzer
             return null;
         if (innerQuery.GroupBy is { Count: > 0 })
             return null;
+        // LIMIT/OFFSET restricts which inner values participate in the membership set;
+        // the rewrite probes the whole inner index, so it must not absorb such queries
+        // (IN would match extra rows, NOT IN would silently drop rows).
+        if (innerQuery.Limit is not null || innerQuery.Offset is not null)
+            return null;
         // Inner DISTINCT is intentionally NOT a disqualifier: a semi/anti join tests existence,
         // so deduplicating the inner values is a no-op for membership. The spec probes the inner
         // index directly and never re-runs the inner query, so DISTINCT is simply dropped.

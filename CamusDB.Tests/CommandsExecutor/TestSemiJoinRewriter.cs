@@ -595,4 +595,62 @@ public sealed class TestSemiJoinRewriter : BaseTest
         Assert.AreEqual(1, rows.Count, "Parameterized inner filter must be evaluated with the supplied parameters");
         Assert.AreEqual("Alpha", rows[0].Row["name"].StrValue);
     }
+
+    [Test]
+    public async Task InSubqueryWithOuterLimitReturnsFullLimitCount()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        // Scan order is insertion order: Alpha (matches), Beta (filtered), Gamma (matches).
+        // The LIMIT must not be pushed into the scan below the semi-join probe: a truncated
+        // 2-row scan would yield only Alpha after filtering, even though 2 matches exist.
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name IN (SELECT name FROM approved) LIMIT 2");
+
+        Assert.AreEqual(2, rows.Count, "LIMIT above a semi-join must return LIMIT rows when enough matches exist");
+
+        IEnumerable<string?> names = rows.Select(r => r.Row["name"].StrValue).OrderBy(n => n);
+        CollectionAssert.AreEqual(new[] { "Alpha", "Gamma" }, names);
+    }
+
+    [Test]
+    public async Task InSubqueryWithInnerLimitIsNotRewrittenToSemiJoin()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        // An inner LIMIT restricts which values participate in the membership set; the
+        // semi-join rewrite probes the whole inner index and would ignore it.
+        string plan = await GetExplainAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name IN (SELECT name FROM approved ORDER BY name LIMIT 1)");
+
+        Assert.That(plan, Does.Not.Contain("semi-join"),
+            "IN over an inner LIMIT subquery must not rewrite to a semi-join");
+
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name IN (SELECT name FROM approved ORDER BY name LIMIT 1)");
+
+        Assert.AreEqual(1, rows.Count, "Only the first approved name (Alpha) participates in the IN set");
+        Assert.AreEqual("Alpha", rows[0].Row["name"].StrValue);
+    }
+
+    [Test]
+    public async Task NotInSubqueryWithInnerLimitIsNotRewrittenToAntiJoin()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTablesAsync();
+
+        string plan = await GetExplainAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name NOT IN (SELECT name FROM approved ORDER BY name LIMIT 1)");
+
+        Assert.That(plan, Does.Not.Contain("anti-join"),
+            "NOT IN over an inner LIMIT subquery must not rewrite to an anti-join");
+
+        List<QueryResultRow> rows = await RunQueryAsync(database, executor, dbname,
+            "SELECT name FROM robots WHERE name NOT IN (SELECT name FROM approved ORDER BY name LIMIT 1)");
+
+        // Membership set is {Alpha} only, so Beta and Gamma survive NOT IN.
+        Assert.AreEqual(2, rows.Count, "NOT IN must exclude only the LIMITed membership set");
+
+        IEnumerable<string?> names = rows.Select(r => r.Row["name"].StrValue).OrderBy(n => n);
+        CollectionAssert.AreEqual(new[] { "Beta", "Gamma" }, names);
+    }
 }

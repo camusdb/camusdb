@@ -42,7 +42,10 @@ internal static class ExistsSubqueryAnalyzer
 
     public static HashSet<string> CollectSourceAliases(QuerySource source)
     {
-        HashSet<string> aliases = new(StringComparer.Ordinal);
+        // Case-insensitive to match alias binding (QueryRowNameResolver): a reference
+        // qualified as "R." must count as the inner alias "r", not as an outer-scope
+        // correlation reference.
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
         CollectSourceAliases(source, aliases);
         return aliases;
     }

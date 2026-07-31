@@ -519,8 +519,10 @@ public class TestQueryPlanner
 
         Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
         Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
+        // Limit sits above the projection: it restricts output rows, and stacking it last
+        // keeps it above aggregates when the projection contains one.
         CollectionAssert.AreEqual(
-            new[] { QueryPlanStepType.RangeScanFromIndex, QueryPlanStepType.Limit, QueryPlanStepType.ReduceToProjections },
+            new[] { QueryPlanStepType.RangeScanFromIndex, QueryPlanStepType.ReduceToProjections, QueryPlanStepType.Limit },
             StepTypes(plan));
         Assert.AreEqual(1, plan.ScanRowLimit);
     }
@@ -538,8 +540,8 @@ public class TestQueryPlanner
             {
                 QueryPlanStepType.FullScanFromTableIndex,
                 QueryPlanStepType.SortBy,
-                QueryPlanStepType.Limit,
                 QueryPlanStepType.ReduceToProjections,
+                QueryPlanStepType.Limit,
             },
             StepTypes(plan));
         Assert.IsNull(plan.ScanRowLimit);

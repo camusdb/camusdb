@@ -82,19 +82,17 @@ internal static class IndexScanBoundAnalysis
                 if (lower is null && upper is null)
                     return null;
 
-                bool lowerInclusive = scanStep.FromInclusive;
-                bool upperInclusive = scanStep.ToInclusive;
-
+                int fromBoundLength = scanStep.FromBound?.Values.Length ?? 0;
                 int toBoundLength = scanStep.ToBound?.Values.Length ?? 0;
 
-                // Prefix-cap bounds pin earlier index columns with inclusive equality.
-                if (toBoundLength > 0
-                    && columnIndex < toBoundLength
-                    && lower is not null
-                    && upper is not null)
-                {
-                    lowerInclusive = true;
-                }
+                // A composite bound's exclusivity applies only to its *terminal* component:
+                // a scan bounded above by < (5,10) still contains rows with a = 5 (e.g.
+                // (5,9)), so for every non-terminal component the effective per-column bound
+                // is inclusive on both sides. Treating a non-terminal upper component as
+                // exclusive would wrongly absorb predicates like "a < 5" (computed max = 4)
+                // and return rows for an unsatisfiable conjunction such as a = 5 AND a < 5.
+                bool lowerInclusive = columnIndex < fromBoundLength - 1 || scanStep.FromInclusive;
+                bool upperInclusive = columnIndex < toBoundLength - 1 || scanStep.ToInclusive;
 
                 return new ColumnScanBounds
                 {

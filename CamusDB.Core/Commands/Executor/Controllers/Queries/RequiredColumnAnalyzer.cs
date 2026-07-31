@@ -1043,7 +1043,10 @@ internal static class RequiredColumnAnalyzer
     {
         if (TrySplitQualified(identifier, out string identifierAlias, out string bareColumn))
         {
-            if (!string.Equals(identifierAlias, alias, StringComparison.Ordinal))
+            // Aliases bind case-insensitively (QueryRowNameResolver accepts "R.year" for
+            // alias "r"), so the required-column match must be case-insensitive too or the
+            // column is silently dropped from the decode set.
+            if (!string.Equals(identifierAlias, alias, StringComparison.OrdinalIgnoreCase))
             {
                 columnName = "";
                 return false;
@@ -1063,7 +1066,7 @@ internal static class RequiredColumnAnalyzer
                 return true;
             }
 
-            if (!string.Equals(resolvedAlias, alias, StringComparison.Ordinal))
+            if (!string.Equals(resolvedAlias, alias, StringComparison.OrdinalIgnoreCase))
                 return false;
 
             return true;

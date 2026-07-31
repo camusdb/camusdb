@@ -470,9 +470,18 @@ internal sealed class JoinQueryPlanner
             for (int i = 0; i < bareKeyColumns.Count; i++)
             {
                 if (!string.Equals(index.Columns[i], bareKeyColumns[i], StringComparison.Ordinal))
-                { 
-                    match = false; 
-                    break; 
+                {
+                    match = false;
+                    break;
+                }
+
+                // The merge join consumes a strictly ascending stream and the key ordering
+                // built for it is all-ascending; a descending index column would deliver
+                // complemented (descending) key order and silently drop join matches.
+                if (index.DirectionAt(i) != OrderType.Ascending)
+                {
+                    match = false;
+                    break;
                 }
             }
 

@@ -30,7 +30,10 @@ internal sealed class QueryBinder
     {
         List<BoundTableSource> sources = [];
         List<BoundDerivedTableSource> derivedSources = [];
-        HashSet<string> aliases = new(StringComparer.Ordinal);
+
+        // Case-insensitive: aliases resolve case-insensitively downstream, so "t a JOIN u A"
+        // is a genuine duplicate and must be rejected here with a clear error.
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
         ValidateJoinPredicates(query.Source, sources, derivedSources);
@@ -49,7 +52,7 @@ internal sealed class QueryBinder
     {
         List<BoundTableSource> sources = [];
         List<BoundDerivedTableSource> derivedSources = [];
-        HashSet<string> aliases = new(StringComparer.Ordinal);
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
         ValidateJoinPredicates(query.Source, sources, derivedSources);

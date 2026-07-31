@@ -14,64 +14,50 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal sealed class QueryLimiter
 {
-    // @todo rewrite this method to support any level of sorting
+    /// <summary>
+    /// Applies LIMIT and/or OFFSET to the cursor. Either clause may be present alone:
+    /// a missing OFFSET skips nothing and a missing LIMIT streams every remaining row
+    /// (offset-only queries like <c>SELECT … OFFSET 20</c> are valid SQL).
+    /// </summary>
     internal IAsyncEnumerable<QueryResultRow> LimitResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
-    {        
-        if (ticket.Limit is not null && ticket.Offset is null)
-            return LimitResultsetWithoutOffset(ticket, dataCursor);
-
-        if (ticket.Limit is not null && ticket.Offset is not null)
-            return LimitResultsetWithOffset(ticket, dataCursor);
-
-        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal limit context");
-    }
-
-    private static async IAsyncEnumerable<QueryResultRow> LimitResultsetWithoutOffset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
     {
-        if (ticket.Limit is null)
+        if (ticket.Limit is null && ticket.Offset is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal limit context");
 
-        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
-        if (limit.Type != ColumnType.Integer64)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
+        return LimitOffsetResultset(ticket, dataCursor);
+    }
 
-        int count = 0;
+    private static async IAsyncEnumerable<QueryResultRow> LimitOffsetResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
+    {
+        long? limit = null;
+        long offset = 0;
 
-        await foreach (QueryResultRow resultRow in dataCursor)
+        if (ticket.Limit is not null)
         {
-            if (count >= limit.LongValue)
-                yield break;
+            ColumnValue limitValue = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
+            if (limitValue.Type != ColumnType.Integer64)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
 
-            yield return resultRow;
-
-            count++;
+            limit = limitValue.LongValue;
         }
-    }
 
-    private static async IAsyncEnumerable<QueryResultRow> LimitResultsetWithOffset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
-    {
-        if (ticket.Limit is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal limit context");
+        if (ticket.Offset is not null)
+        {
+            ColumnValue offsetValue = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
+            if (offsetValue.Type != ColumnType.Integer64)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
 
-        if (ticket.Offset is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal offset context");
+            offset = offsetValue.LongValue;
+        }
 
-        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
-        if (limit.Type != ColumnType.Integer64)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
-
-        ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
-        if (offset.Type != ColumnType.Integer64)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
-
-        int count = 0;
+        long count = 0;
 
         await foreach (QueryResultRow resultRow in dataCursor)
         {
-            if (count >= (limit.LongValue + offset.LongValue))
+            if (limit is not null && count >= offset + limit.Value)
                 yield break;
 
-            if (count >= offset.LongValue)
+            if (count >= offset)
                 yield return resultRow;
 
             count++;

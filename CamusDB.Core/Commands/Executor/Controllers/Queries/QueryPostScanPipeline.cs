@@ -87,9 +87,6 @@ internal static class QueryPostScanPipeline
         if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
             cursor = querySorter.SortResultset(ticket, cursor);
 
-        if (ticket.Limit is not null || ticket.Offset is not null)
-            cursor = queryLimiter.LimitResultset(ticket, cursor);
-
         if (ticket.Projection is not null && ticket.Projection.Count > 0)
         {
             if (HasAggregation(ticket.Projection, ticket))
@@ -102,6 +99,11 @@ internal static class QueryPostScanPipeline
             if (!IsFullProjection(ticket.Projection))
                 cursor = queryProjector.ProjectResultset(ticket, cursor);
         }
+
+        // Limit runs above the aggregate: LIMIT/OFFSET restricts the query's output
+        // rows, not the aggregate's input (SELECT COUNT(*) … LIMIT 1 counts every row).
+        if (ticket.Limit is not null || ticket.Offset is not null)
+            cursor = queryLimiter.LimitResultset(ticket, cursor);
 
         if (!havingApplied)
         {

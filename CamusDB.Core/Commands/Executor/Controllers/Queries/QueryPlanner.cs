@@ -289,13 +289,6 @@ public sealed class QueryPlanner
                 if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
                     root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
 
-                if (ticket.Limit is not null || ticket.Offset is not null)
-                    root = new LimitNode(root)
-                    {
-                        LimitValue = EvalLong(ticket.Limit, ticket),
-                        OffsetValue = EvalLong(ticket.Offset, ticket),
-                    };
-
                 if (ticket.Projection is not null && ticket.Projection.Count > 0)
                 {
                     if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
@@ -313,6 +306,16 @@ public sealed class QueryPlanner
                     if (!QueryPostScanPipeline.IsFullProjection(ticket.Projection))
                         root = new ProjectNode(root);
                 }
+
+                // Limit must sit above the aggregate: LIMIT/OFFSET restricts the query's
+                // output rows, not the aggregate's input (SELECT COUNT(*) … LIMIT 1 counts
+                // every row and then limits the single result row).
+                if (ticket.Limit is not null || ticket.Offset is not null)
+                    root = new LimitNode(root)
+                    {
+                        LimitValue = EvalLong(ticket.Limit, ticket),
+                        OffsetValue = EvalLong(ticket.Offset, ticket),
+                    };
             }
         }
 
@@ -359,6 +362,13 @@ public sealed class QueryPlanner
             return null;
 
         if (executionFilter is not null)
+            return null;
+
+        // IN / NOT IN rewrites filter rows in SemiJoinNode *above* the scan, and the rewrite
+        // removed the predicate from WHERE — so ExecutionFilter is null even though rows can
+        // still be rejected. Pushing the limit into the scan would truncate before the probe
+        // and return fewer rows than actually match.
+        if (ticket.SemiJoinSpecs is { Count: > 0 })
             return null;
 
         if (ticket.OrderBy is { Count: > 0 } && !scanSatisfiesOrderBy)
@@ -915,20 +925,24 @@ public sealed class QueryPlanner
     }
 
     /// <summary>
-    /// Builds an ascending OutputOrdering from the first <c>distinctCols.Count</c> columns
-    /// of <paramref name="index"/>. This is the order a streaming-distinct scan guarantees.
+    /// Builds the OutputOrdering a streaming-distinct scan actually delivers: the first
+    /// <c>distinctCols.Count</c> columns of <paramref name="index"/> with each column's real
+    /// sort direction. Descending index columns are stored complemented, so a forward scan
+    /// yields them in descending order — claiming Ascending here would let sort elision emit
+    /// rows in the wrong order.
     /// </summary>
     private static List<QueryOrderBy> BuildDistinctOrdering(TableIndexSchema index, IReadOnlyList<string> distinctCols)
     {
         List<QueryOrderBy> ordering = new(distinctCols.Count);
         for (int i = 0; i < distinctCols.Count; i++)
-            ordering.Add(new QueryOrderBy(index.Columns[i], OrderType.Ascending));
+            ordering.Add(new QueryOrderBy(index.Columns[i], index.DirectionAt(i)));
         return ordering;
     }
 
     /// <summary>
-    /// Returns true when the streaming-distinct ordering (ascending by the index prefix) is a
-    /// prefix of the requested ORDER BY, allowing the SortNode to be elided.
+    /// Returns true when the streaming-distinct scan's delivered ordering (index prefix with
+    /// per-column directions) is a prefix of the requested ORDER BY — same column, same
+    /// direction — allowing the SortNode to be elided.
     /// </summary>
     private static bool StreamingOrderSatisfiesOrderBy(
         IReadOnlyList<QueryOrderBy> streamingOrdering,
@@ -939,8 +953,8 @@ public sealed class QueryPlanner
 
         for (int i = 0; i < orderBy.Count; i++)
         {
-            if (orderBy[i].Type != OrderType.Ascending)
-                return false; // streaming only guarantees ascending
+            if (orderBy[i].Type != streamingOrdering[i].Type)
+                return false;
 
             if (!string.Equals(orderBy[i].ColumnName, streamingOrdering[i].ColumnName, StringComparison.OrdinalIgnoreCase))
                 return false;

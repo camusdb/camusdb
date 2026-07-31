@@ -1128,6 +1128,81 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "No index on line_items.order_ext_key → right must get a SortNode");
     }
 
+    /// <summary>
+    /// Descending join-key indexes must NOT be used for merge-join free ordering: the merge
+    /// consumes a strictly ascending stream, and a DESC index full scan yields descending
+    /// values, which would silently drop join matches. Both sides must fall back to SortNode.
+    /// </summary>
+    [Test]
+    public async Task MergeJoin_SortElision_DescendingIndexNotUsedForFreeOrdering()
+    {
+        CommandExecutor executor = CreateCommandExecutor();
+        CatalogsManager catalogs = executor.Catalogs;
+
+        string dbname = $"mjdesc_{Guid.NewGuid():n}";
+        TrackDatabase(dbname, executor);
+        DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "d_orders",
+            columns:
+            [
+                new("id",      ColumnType.Id),
+                new("ext_num", ColumnType.Integer64, notNull: true),
+                new("name",    ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "d_orders_ext_num_idx", [new("ext_num", OrderType.Descending)]),
+            ],
+            ifNotExists: false));
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "d_items",
+            columns:
+            [
+                new("id",            ColumnType.Id),
+                new("order_ext_num", ColumnType.Integer64),
+                new("product",       ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "d_items_order_ext_num_idx", [new("order_ext_num", OrderType.Descending)]),
+            ],
+            ifNotExists: false));
+
+        await database.Transactions.CommitAsync(txn);
+
+        executor.Statistics.ForceMergeJoinForTesting = true;
+
+        const string sql = "SELECT o.name, li.product FROM d_orders o JOIN d_items li ON li.order_ext_num = o.ext_num";
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: await database.Transactions.BeginAsync(),
+            database: dbname, sql: sql, parameters: null);
+
+        SelectQuery selectQuery = new SelectQueryCreator().CreateSelectQuery(SQLParserProcessor.Parse(sql));
+        BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
+            .BindAsync(database, selectQuery);
+        QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
+
+        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+
+        Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
+        MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
+
+        Assert.IsInstanceOf<SortNode>(mergeJoin.Input,
+            "DESC index on d_orders.ext_num must not provide free ordering → left needs a SortNode");
+
+        Assert.IsNotNull(mergeJoin.RightPhysicalNode);
+        Assert.IsInstanceOf<SortNode>(mergeJoin.RightPhysicalNode,
+            "DESC index on d_items.order_ext_num must not provide free ordering → right needs a SortNode");
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Cost-based merge-join selection (production, no ForceMergeJoin flag)
     // ─────────────────────────────────────────────────────────────────────────

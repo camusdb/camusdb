@@ -237,7 +237,7 @@ internal static class JoinEquiJoinAnalyzer
 
             foreach (BoundTableSource source in bound.Sources)
             {
-                if (source.Alias != alias)
+                if (!string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 if (!SourceHasColumn(source, columnName))
@@ -249,7 +249,7 @@ internal static class JoinEquiJoinAnalyzer
 
             foreach (BoundDerivedTableSource source in bound.DerivedSources)
             {
-                if (source.Alias != alias)
+                if (!string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 if (!source.HasColumn(columnName))
@@ -277,6 +277,11 @@ internal static class JoinEquiJoinAnalyzer
     {
         foreach (TableIndexSchema candidate in table.Indexes.Values)
         {
+            // Skip indexes still being built online (Absent/DeleteOnly/WriteOnly or with
+            // non-Public key columns): probing a half-backfilled index silently misses rows.
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, candidate))
+                continue;
+
             if (candidate.Columns.Length == 1 && candidate.Columns[0] == columnName)
             {
                 index = candidate;
