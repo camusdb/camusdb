@@ -16,7 +16,7 @@ Why CamusDB?
 
 ### Serializable and consistent by default
 
-Most databases default to weaker isolation levels and ask you to opt in to correctness. CamusDB inverts that: **every transaction is serializable unless you ask for less.** Pessimistic two-phase locking with range/predicate locks blocks phantoms, wait-die scheduling avoids deadlocks, and reads run against consistent snapshots. Cross-partition writes are coordinated with two-phase commit on top of Raft consensus, so a committed write is durable and replicated. If a workload genuinely doesn't need serializability, read-committed is available per transaction (`SET TRANSACTION`) or as a process default — but you have to say so.
+Most databases default to weaker isolation levels and ask you to opt in to correctness. CamusDB inverts that: **every transaction is serializable unless you ask for less.** Pessimistic two-phase locking with range/predicate locks blocks phantoms, wait-die scheduling avoids deadlocks, and reads run against consistent snapshots. Cross-partition writes are coordinated with two-phase commit on top of Raft consensus, so a committed write is durable and replicated. If a workload genuinely doesn't need serializability, read-committed is available per transaction (`SET TRANSACTION`) or as a process default, but you have to say so.
 
 ### Database branching (copy-on-write forks)
 
@@ -48,7 +48,7 @@ SELECT * FROM leaderboard AS OF SYSTEM TIME '-10s';                        -- 10
 SELECT * FROM accounts    AS OF SYSTEM TIME '2026-07-19 20:00:00+00:00';  -- an exact instant
 ```
 
-The whole statement — every scanned table, join, and subquery — reads one consistent historical snapshot, lock-free and without blocking writers. Beyond debugging ("what did this row look like before the deploy?"), it's a recovery tool: rows deleted or overwritten by mistake can be read back from just before the bad statement and re-inserted, as long as the storage layer still retains that history. See [Time-Travel Reads](#time-travel-reads) below.
+The whole statement, every scanned table, join, and subquery, reads one consistent historical snapshot, lock-free and without blocking writers. Beyond debugging ("what did this row look like before the deploy?"), it's a recovery tool: rows deleted or overwritten by mistake can be read back from just before the bad statement and re-inserted, as long as the storage layer still retains that history. See [Time-Travel Reads](#time-travel-reads) below.
 
 ### Query result-set caching
 
@@ -62,7 +62,7 @@ The cache is correct before it is fast: a committed write on the same node evict
 
 ### Native .NET
 
-CamusDB's engine is written in modern C# on .NET — the SQL parser, the query planner and operators, the transaction layer, and the embedded [Kahuna](https://github.com/kahunakv/kahuna) storage node all run in a single .NET process (with RocksDB underneath for persistence). Because the engine itself is pure .NET, extending it means writing ordinary C#: bring your own NuGet libraries and custom business logic directly into the database layer without crossing a language boundary or fighting a foreign extension API. Reading and debugging the engine is equally direct, and it runs on any platform .NET 10 supports. Clients talk to it over a JSON/HTTP API or a gRPC API with a .NET client library.
+CamusDB's engine is written in modern C# on .NET: the SQL parser, the query planner and operators, the transaction layer, and the embedded [Kahuna](https://github.com/kahunakv/kahuna) storage node all run in a single .NET process (with [RocksDB](https://rocksdb.org/) underneath for persistence). Because the engine itself is pure .NET, extending it means writing ordinary C#: bring your own NuGet libraries and custom business logic directly into the database layer without crossing a language boundary or fighting a foreign extension API. Reading and debugging the engine is equally direct, and it runs on any platform .NET 10 supports. Clients talk to it over a JSON/HTTP API or a gRPC API with a .NET client library.
 
 Features
 --------
@@ -258,14 +258,14 @@ SELECT * FROM leaderboard AS OF SYSTEM TIME '-10s';
 SELECT * FROM accounts AS OF SYSTEM TIME '2026-07-19 20:00:00+00:00' WHERE id = 9910;
 ```
 
-This doubles as a fine-grained recovery tool: after an accidental `DELETE` or a bad `UPDATE`, query the table as of just before the mistake and re-insert what was lost — no backup restore needed, as long as the storage layer still retains that history (by default all persisted revisions are kept; tightening revision retention narrows the window).
+This doubles as a fine-grained recovery tool: after an accidental `DELETE` or a bad `UPDATE`, query the table as of just before the mistake and re-insert what was lost. No backup restore needed, as long as the storage layer still retains that history (by default all persisted revisions are kept; tightening revision retention narrows the window).
 
 `AS OF SYSTEM TIME` is limited to autocommit read-only statements (it is rejected inside explicit transactions, and there is no historical `UPDATE`/`DELETE`), and only past instants are accepted. See [docs/time-travel-reads.md](docs/time-travel-reads.md) for the full reference: syntax and accepted value forms, snapshot semantics, restrictions, and retention behavior.
 
 Query Result Cache
 ------------------
 
-Opt a read into an in-memory, per-node result cache with an inline hint: `SELECT * FROM orders {cache=recent_orders}`. An identical later query — same shape, same bound values, same schema — is served from memory without touching storage. The cache is correct before it is fast: a committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Writes on other nodes are bounded by a per-entry TTL, or eliminated per-hit with `{cache=…, strict}`. Options include `ttl=30s` (units `ms`/`s`/`m`/`h`) and `strict`; entries are dropped manually with `EVICT CACHE 'name'` or `EVICT CACHE ALL`. The feature is on by default (opt-in per query via the hint — nothing without a `{cache=…}` hint is cached) and applies to autocommit single-table `SELECT`s; set `query_result_cache_enabled: false` to disable it entirely.
+Opt a read into an in-memory, per-node result cache with an inline hint: `SELECT * FROM orders {cache=recent_orders}`. An identical later query — same shape, same bound values, same schema is served from memory without touching storage. The cache is correct before it is fast: a committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Writes on other nodes are bounded by a per-entry TTL, or eliminated per-hit with `{cache=…, strict}`. Options include `ttl=30s` (units `ms`/`s`/`m`/`h`) and `strict`; entries are dropped manually with `EVICT CACHE 'name'` or `EVICT CACHE ALL`. The feature is on by default (opt-in per query via the hint — nothing without a `{cache=…}` hint is cached) and applies to autocommit single-table `SELECT`s; set `query_result_cache_enabled: false` to disable it entirely.
 
 ```sql
 -- Cache this result under the "recent_orders" family, expiring after 30 seconds
