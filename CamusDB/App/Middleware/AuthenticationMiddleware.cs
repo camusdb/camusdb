@@ -14,7 +14,7 @@ namespace CamusDB.App.Middleware;
 
 /// <summary>
 /// Transport-wide authentication and coarse authorization for every HTTP route, so authentication is a
-/// single boundary rather than a per-controller opt-in. When <see cref="CamusDBConfig.AuthenticationEnabled"/>
+/// single boundary rather than a per-controller opt-in. When <see cref="CamusDBOptions.AuthenticationEnabled"/>
 /// is off it is a pass-through.
 ///
 /// <para>When on, it rejects any request to a data / DDL / transaction route that lacks a valid bearer
@@ -28,7 +28,7 @@ namespace CamusDB.App.Middleware;
 /// with the exact per-statement privilege.</para>
 ///
 /// <para>Node-to-node cluster forwarding (<c>/internal/*</c>) is authenticated by a shared
-/// <see cref="CamusDBConfig.NodeSecret"/> header, not a public user token; with auth on and no node
+/// <see cref="CamusDBOptions.NodeSecret"/> header, not a public user token; with auth on and no node
 /// secret configured those routes are refused (fail-closed).</para>
 /// </summary>
 public sealed class AuthenticationMiddleware
@@ -64,9 +64,9 @@ public sealed class AuthenticationMiddleware
 
     public AuthenticationMiddleware(RequestDelegate next) => this.next = next;
 
-    public async Task Invoke(HttpContext context, CommandExecutor executor)
+    public async Task Invoke(HttpContext context, CommandExecutor executor, CamusDBOptions options)
     {
-        if (!CamusDBConfig.AuthenticationEnabled)
+        if (!options.AuthenticationEnabled)
         {
             await next(context).ConfigureAwait(false);
             return;
@@ -83,8 +83,8 @@ public sealed class AuthenticationMiddleware
         // Node-to-node forwarding: authenticate the peer by shared secret, not a user token.
         if (path.StartsWith("/internal/", StringComparison.OrdinalIgnoreCase))
         {
-            if (string.IsNullOrEmpty(CamusDBConfig.NodeSecret)
-                || !string.Equals(context.Request.Headers["X-Camus-Node-Secret"], CamusDBConfig.NodeSecret, StringComparison.Ordinal))
+            if (string.IsNullOrEmpty(options.NodeSecret)
+                || !string.Equals(context.Request.Headers["X-Camus-Node-Secret"], options.NodeSecret, StringComparison.Ordinal))
             {
                 await WriteErrorAsync(context, CamusDBErrorCodes.AuthenticationFailed, "Node authentication required").ConfigureAwait(false);
                 return;
@@ -97,7 +97,7 @@ public sealed class AuthenticationMiddleware
         Principal principal;
         try
         {
-            EnsureSecureTransport(context);
+            EnsureSecureTransport(context, options);
             string? bearer = ExtractBearer(context);
             principal = await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
         }
@@ -131,9 +131,9 @@ public sealed class AuthenticationMiddleware
             : null;
     }
 
-    private static void EnsureSecureTransport(HttpContext context)
+    private static void EnsureSecureTransport(HttpContext context, CamusDBOptions options)
     {
-        if (!CamusDBConfig.RequireTlsWhenAuthEnabled || context.Request.IsHttps)
+        if (!options.RequireTlsWhenAuthEnabled || context.Request.IsHttps)
             return;
 
         System.Net.IPAddress? remote = context.Connection.RemoteIpAddress;

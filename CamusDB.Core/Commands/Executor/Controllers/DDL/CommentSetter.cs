@@ -102,7 +102,7 @@ internal sealed class CommentSetter
 
             case CommentTarget.Index:
                 {
-                    if (string.Equals(ticket.ElementName, CamusDBConfig.PrimaryKeyInternalName, StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(ticket.ElementName, CamusDBConstants.PrimaryKeyInternalName, StringComparison.OrdinalIgnoreCase))
                         throw new CamusDBException(
                             CamusDBErrorCodes.InvalidInput,
                             "The primary key index cannot carry a comment: PRIMARY KEY has no inline COMMENT form, " +

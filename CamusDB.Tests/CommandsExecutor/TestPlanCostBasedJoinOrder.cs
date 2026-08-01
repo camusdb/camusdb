@@ -166,7 +166,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindStarJoin(StarJoinSql);
 
-        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
         // Heuristic: events(score 1) and sessions(score 1) tie; declared order → events is outermost.
         Assert.AreEqual("e", GetLeftmostScanAlias(plan.Root),
@@ -183,7 +183,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindStarJoin(StarJoinSql);
 
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             // DP: sessions (50 filtered rows) first → INLJ into events.session_id index costs 50×2=100.
             // events first → must full-scan events (5 000 rows × 2 = 10 000) before filtering.
@@ -254,7 +254,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
                 .BindAsync(database, sq);
             QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
-            return new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            return new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
         }
 
         try
@@ -288,19 +288,21 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindStarJoin(StarJoinSql);
 
+        // A planner takes its configuration when it is constructed, so the two settings under
+        // comparison are two planners rather than one planner and a flag flipped between calls.
+        CamusDBOptions flagOff = CamusDBConfig.Ambient with { CostBasedJoinOrderEnabled = false };
+        CamusDBOptions flagOn  = CamusDBConfig.Ambient with { CostBasedJoinOrderEnabled = true };
+
         // Plan A: flag off, stats available.  Dispatcher goes: flag=false → heuristic.
-        CamusDBConfig.CostBasedJoinOrderEnabled = false;
-        QueryPlan planOff = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan planOff = new JoinQueryPlanner(flagOff, executor.Statistics).GetPlan(database, bound, ticket);
 
         // Plan B: no stats at all.  _stats is null → dispatcher always takes heuristic branch,
         // regardless of flag.  This is the gold-standard "pure heuristic" plan.
-        QueryPlan planNoStats = new JoinQueryPlanner().GetPlan(database, bound, ticket);
+        QueryPlan planNoStats = new JoinQueryPlanner(flagOff).GetPlan(database, bound, ticket);
 
         // Plan C: flag on, stats available.  Dispatcher goes: flag=true → DP → sessions first.
-        CamusDBConfig.CostBasedJoinOrderEnabled = true;
-        try
         {
-            QueryPlan planOn = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan planOn = new JoinQueryPlanner(flagOn, executor.Statistics).GetPlan(database, bound, ticket);
 
             List<string> orderOff     = CollectJoinOrder(planOff.Root);
             List<string> orderNoStats = CollectJoinOrder(planNoStats.Root);
@@ -314,10 +316,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             // and the test is not vacuously passing).
             Assert.AreNotEqual(orderOff, orderOn,
                 "Flag=on ordering must differ from flag=off — if equal the DP had no effect and the test is vacuous.");
-        }
-        finally
-        {
-            CamusDBConfig.CostBasedJoinOrderEnabled = false;
         }
     }
 
@@ -620,7 +618,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
 
-        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
         // Find the orders leaf scan node — the leftmost TableScanNode with an ExecutionFilter.
         TableScanNode? ordersLeaf = FindLeafWithFilter(plan.Root, "o");
@@ -648,7 +646,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
 
-        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
             "Selective filter on outer side must make INLJ cheaper than hash join");
@@ -662,7 +660,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
 
-        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
         long? joinCard = plan.Root.EstimatedCardinality;
         Assert.IsNotNull(joinCard, "Join root EstimatedCardinality must be populated by CostEstimator");
@@ -789,7 +787,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindIndexedJoinLeafSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             // Walk the plan to find the orders leaf.
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
@@ -817,7 +815,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindIndexedJoinLeafSetup();
 
-        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
         IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
         Assert.IsNull(rangeLeaf,
@@ -1054,7 +1052,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindIndexedLeafAnnotationSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
             Assert.IsNotNull(rangeLeaf, "Expected an IndexRangeScanNode for the orders leaf with CostBasedAccessPathEnabled=true");
@@ -1089,7 +1087,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindIndexedLeafAnnotationSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
             Assert.IsNotNull(rangeLeaf);
@@ -1203,7 +1201,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindUniqueLeftKeyJoinSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             // Precondition: the orders left leaf must actually be an IndexRangeScanNode. If a future
             // breakeven/estimate change turned it into a TableScanNode, the always-present TableScanNode
@@ -1322,7 +1320,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindInListJoinLeafSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexInListScanNode? inListLeaf = FindIndexInListLeaf(plan.Root, "o");
             Assert.IsNotNull(inListLeaf,
@@ -1347,7 +1345,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindInListJoinLeafSetup();
 
-        QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
         IndexInListScanNode? inListLeaf = FindIndexInListLeaf(plan.Root, "o");
         Assert.IsNull(inListLeaf,
@@ -1429,7 +1427,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
                 .BindAsync(database, selectQuery);
 
             QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
-            QueryPlan plan = new JoinQueryPlanner(executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexInListScanNode? inListLeaf = FindIndexInListLeaf(plan.Root, "o");
             Assert.IsNull(inListLeaf,

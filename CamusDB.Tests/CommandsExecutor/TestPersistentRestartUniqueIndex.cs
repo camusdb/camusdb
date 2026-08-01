@@ -51,10 +51,10 @@ internal sealed class TestPersistentRestartUniqueIndex : BaseTest
             WalStorage = "sqlite",
             WalPath = storageRoot,
             InitialPartitions = 8
-        });
+        }.WithFastTestTimers());
 
     private CommandExecutor NewExecutor(EmbeddedKahuna node) =>
-        new(new CommandValidator(), new CatalogsManager(logger), logger, sharedNode: node, isClusterMode: true);
+        new(new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient, sharedNode: node, isClusterMode: true);
 
     private static async Task<int> CountAll(string dbname, DatabaseDescriptor db, CommandExecutor ex)
     {

@@ -55,7 +55,7 @@ public static class IndexIncludeValueCodec
 
     /// <summary>
     /// Encodes the include tuple (as <see cref="EncodeTuple"/>) and enforces the per-entry byte ceiling
-    /// <see cref="CamusDBConfig.MaxIndexIncludeTupleBytes"/>: a row whose encoded payload exceeds the
+    /// <see cref="CamusDBOptions.MaxIndexIncludeTupleBytes"/>: a row whose encoded payload exceeds the
     /// limit is rejected with <see cref="CamusDBErrorCodes.SchemaLimitExceeded"/> before any KV mutation,
     /// so a single oversized String/Bytes/Array value cannot bloat every index entry, its replication,
     /// and the enclosing transaction batch. Every write path (INSERT/UPDATE/backfill) that materializes

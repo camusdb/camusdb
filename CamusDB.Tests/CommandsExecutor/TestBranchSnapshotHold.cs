@@ -18,6 +18,7 @@ using Kahuna;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -224,7 +225,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
 
         // registryB = the "creating node" registry, an independent instance on the same Kahuna node.
         // It registers the branch into KV (and its own cache) but does not touch registryA's cache.
-        await using DatabaseRegistry registryB = await DatabaseRegistry.OpenAsync(TestNode!);
+        await using DatabaseRegistry registryB = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
 
         // Create a root database using registryA so the hold Kahuna-object (the parent's partition)
         // is reachable. The root itself only needs a name and an id in the KV; use registryB

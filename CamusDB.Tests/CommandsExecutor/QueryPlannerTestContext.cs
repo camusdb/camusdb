@@ -63,15 +63,15 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        });
+        }.WithFastTestTimers());
 
         TableSchema schema = BuildRobotsSchema();
-        KvTableStore store = new(kahuna.Kahuna, "testdb", schema.Id!);
+        KvTableStore store = new(kahuna.Kahuna, CamusDBConfig.Ambient, "testdb", schema.Id!);
 
         TableDescriptor table = new(schema.Id!, schema.Name!, schema, store);
         table.Indexes.Add(
-            CamusDBConfig.PrimaryKeyInternalName,
-            new TableIndexSchema(CamusDBConfig.PrimaryKeyInternalName, ["id"], IndexType.Unique));
+            CamusDBConstants.PrimaryKeyInternalName,
+            new TableIndexSchema(CamusDBConstants.PrimaryKeyInternalName, ["id"], IndexType.Unique));
         table.Indexes.Add(
             "year_idx",
             new TableIndexSchema("year_idx", ["year"], IndexType.Multi));
@@ -89,8 +89,9 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
             id: "planner-test-id",
             name: DatabaseName,
             kahuna: kahuna,
-            transactions: new KvTransactionsManager(kahuna.Kahuna),
-            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>());
+            transactions: new KvTransactionsManager(kahuna.Kahuna, CamusDBConfig.Ambient),
+            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>(),
+            options: CamusDBConfig.Ambient);
 
         KvTransaction txn = new(HLCTimestamp.Zero, "planner-test");
 

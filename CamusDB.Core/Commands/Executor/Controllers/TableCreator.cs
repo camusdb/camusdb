@@ -20,12 +20,16 @@ internal sealed class TableCreator
 {
     private readonly CatalogsManager catalogs;
 
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
     private readonly ILogger<ICamusDB> logger;
 
-    public TableCreator(CatalogsManager catalogs, ILogger<ICamusDB> logger)
+    public TableCreator(CatalogsManager catalogs, ILogger<ICamusDB> logger, CamusDBOptions options)
     {
         this.catalogs = catalogs;
         this.logger = logger;
+        this.options = options;
     }
 
     public async Task<bool> Create(
@@ -41,7 +45,7 @@ internal sealed class TableCreator
         if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
             return false;
 
-        int maxTables = CamusDBConfig.MaxTablesPerDatabase;
+        int maxTables = options.MaxTablesPerDatabase;
         if (maxTables > 0 && database.Schema.Tables.Count >= maxTables)
             throw new CamusDBException(
                 CamusDBErrorCodes.SchemaLimitExceeded,

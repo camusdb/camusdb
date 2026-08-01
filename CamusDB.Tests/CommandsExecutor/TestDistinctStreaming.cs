@@ -566,7 +566,7 @@ public sealed class TestDistinctStreaming : BaseTest
             QueryDistincter distincter = new();
             // DistinctResultset ignores the ticket (both branches take only the cursor).
             List<QueryResultRow> output = await distincter
-                .DistinctResultset(null!, ToAsync(input))
+                .DistinctResultset(null!, ToAsync(input), new QueryExecutionContext(CamusDBOptions.Default with { SpillEnabled = true }))
                 .ToListAsync();
 
             Assert.AreEqual(2, output.Count, "duplicate robot-a across layouts must collapse to one");

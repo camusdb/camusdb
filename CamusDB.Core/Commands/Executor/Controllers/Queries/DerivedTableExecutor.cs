@@ -20,7 +20,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Executes a bound derived table into a <see cref="SpillableRowList"/>.
 ///
 /// <para>
-/// When <see cref="CamusDBConfig.SpillEnabled"/> is <c>false</c> or the row count stays
+/// When <see cref="CamusDBOptions.SpillEnabled"/> is <c>false</c> or the row count stays
 /// below the threshold, all rows remain in memory — byte-identical to a plain list. When
 /// the threshold is exceeded, rows overflow to a spill file managed by
 /// <see cref="SpillableRowList"/>. The caller is responsible for disposing the returned
@@ -68,7 +68,7 @@ internal sealed class DerivedTableExecutor
             ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
             : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
 
-        SpillableRowList rows = new();
+        SpillableRowList rows = new(QueryExecutionContext.For(database));
 
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
         {

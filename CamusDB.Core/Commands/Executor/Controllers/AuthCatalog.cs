@@ -92,7 +92,7 @@ public sealed class AuthCatalog
     /// before scanning, exactly like <see cref="DatabaseRegistry.OpenAsync"/>, so the eager open during
     /// executor construction cannot race a not-yet-created partition.
     /// </summary>
-    public static async Task<AuthCatalog> OpenAsync(EmbeddedKahuna sharedNode, bool isClusterMode = false)
+    public static async Task<AuthCatalog> OpenAsync(EmbeddedKahuna sharedNode, CamusDBOptions options, bool isClusterMode = false)
     {
         ArgumentNullException.ThrowIfNull(sharedNode);
 
@@ -103,7 +103,7 @@ public sealed class AuthCatalog
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager txManager = new(sharedNode.Kahuna, mintLocalT);
+        KvTransactionsManager txManager = new(sharedNode.Kahuna, options, mintLocalT);
         AuthCatalog catalog = new(sharedNode.Kahuna, txManager, "_system/", isClusterMode);
 
         await sharedNode.WaitUntilStartedAsync().ConfigureAwait(false);

@@ -59,10 +59,10 @@ internal sealed class TestFenceLease : BaseTest
 
         string id = "f" + Guid.NewGuid().ToString("n");
 
-        DatabaseRegistry dead = await DatabaseRegistry.OpenAsync(TestNode!);
+        DatabaseRegistry dead = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
         Assert.IsTrue(await dead.AcquireDropIntentAsync(id), "sanity: fence acquired by the first owner");
 
-        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!);
+        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
         try
         {
             // While the first owner's lease is live, the fence is genuinely held.
@@ -96,8 +96,8 @@ internal sealed class TestFenceLease : BaseTest
 
         string id = "f" + Guid.NewGuid().ToString("n");
 
-        DatabaseRegistry holder = await DatabaseRegistry.OpenAsync(TestNode!);
-        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!);
+        DatabaseRegistry holder = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
+        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
         try
         {
             Assert.IsTrue(await holder.AcquireDropIntentAsync(id), "sanity: fence acquired");
@@ -130,8 +130,8 @@ internal sealed class TestFenceLease : BaseTest
 
         string id = "f" + Guid.NewGuid().ToString("n");
 
-        DatabaseRegistry a = await DatabaseRegistry.OpenAsync(TestNode!);
-        DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!);
+        DatabaseRegistry a = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
+        DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
         try
         {
             Assert.IsTrue(await a.AcquireDropIntentAsync(id));

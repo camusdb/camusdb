@@ -60,12 +60,16 @@ internal sealed class QueryJoinExecutor
 
     private readonly StatisticsManager? _stats;
 
+    /// <summary>Configuration of the engine this executor belongs to.</summary>
+    private readonly CamusDBOptions _options;
+
     private readonly PlanCache? _planCache;
 
-    public QueryJoinExecutor(QueryExecutor queryExecutor, StatisticsManager? stats = null, PlanCache? planCache = null)
+    public QueryJoinExecutor(QueryExecutor queryExecutor, CamusDBOptions options, StatisticsManager? stats = null, PlanCache? planCache = null)
     {
         this.queryExecutor = queryExecutor;
         _stats = stats;
+        _options = options;
         _planCache = planCache;
         derivedTableExecutor = new DerivedTableExecutor(queryExecutor, this);
     }
@@ -82,7 +86,7 @@ internal sealed class QueryJoinExecutor
         BoundSelectQuery bound,
         QueryTicket ticket)
     {
-        JoinQueryPlanner planner = new(_stats, _planCache);
+        JoinQueryPlanner planner = new(_stats, _planCache, _options);
         QueryPlan plan = planner.GetPlan(database, bound, ticket);
 
         IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinTree(plan.Root, plan);
@@ -168,7 +172,7 @@ internal sealed class QueryJoinExecutor
 
             case SortNode { Input: not null } sortNode when sortNode.OrderBy is { Count: > 0 }:
             {
-                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy);
+                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy, QueryExecutionContext.For(plan.Database));
                 
                 await foreach (QueryResultRow row in sorted.ConfigureAwait(false))
                     yield return row;
@@ -908,10 +912,10 @@ internal sealed class QueryJoinExecutor
     ///
     /// Returns null to signal that the caller should route to a fallback:
     /// <list type="bullet">
-    ///   <item>When <see cref="CamusDBConfig.SpillEnabled"/> is true, the effective cap is
-    ///     <see cref="CamusDBConfig.SpillEffectiveThreshold"/>; overflow routes to
+    ///   <item>When <see cref="CamusDBOptions.SpillEnabled"/> is true, the effective cap is
+    ///     <see cref="CamusDBOptions.SpillEffectiveThreshold"/>; overflow routes to
     ///     <see cref="GraceHashJoinAsync"/>.</item>
-    ///   <item>When spill is disabled, the cap is <see cref="CamusDBConfig.HashJoinMaxBuildRows"/>;
+    ///   <item>When spill is disabled, the cap is <see cref="CamusDBOptions.HashJoinMaxBuildRows"/>;
     ///     overflow routes to a full nested-loop scan.</item>
     /// </list>
     ///
@@ -940,9 +944,11 @@ internal sealed class QueryJoinExecutor
         // With spill enabled, cap at SpillEffectiveThreshold so the Grace path is triggered
         // at the configured spill boundary instead of the (much larger) legacy NLJ cap.
         // With spill disabled, honour the legacy HashJoinMaxBuildRows cap.
-        int buildCap = CamusDBConfig.SpillEnabled
-            ? CamusDBConfig.SpillEffectiveThreshold
-            : CamusDBConfig.HashJoinMaxBuildRows;
+        QueryExecutionContext context = QueryExecutionContext.For(plan.Database);
+
+        int buildCap = context.Options.SpillEnabled
+            ? context.Options.SpillEffectiveThreshold
+            : context.Options.HashJoinMaxBuildRows;
 
         int rowCount = 0;
 
@@ -1037,7 +1043,7 @@ internal sealed class QueryJoinExecutor
             // Build cap exceeded. When spilling is enabled, route to Grace/hybrid hash join
             // so large builds are partitioned to disk instead of falling back to O(n·m) NLJ.
             // Both paths re-scan the build side from scratch (~2× cost on this rare path).
-            if (CamusDBConfig.SpillEnabled)
+            if (plan.Database.Options.SpillEnabled)
             {
                 await foreach (QueryResultRow row in GraceHashJoinAsync(joinNode, plan, ct).ConfigureAwait(false))
                     yield return row;
@@ -1502,9 +1508,9 @@ internal sealed class QueryJoinExecutor
 
     /// <summary>
     /// Grace/hybrid hash join entry point. Partitions both build and probe sides into
-    /// <see cref="CamusDBConfig.SpillMergeFanIn"/> spill files each (keyed by join-key hash),
+    /// <see cref="CamusDBOptions.SpillMergeFanIn"/> spill files each (keyed by join-key hash),
     /// then joins each partition pair. Partitions whose build side exceeds
-    /// <see cref="CamusDBConfig.SpillEffectiveThreshold"/> are recursively re-partitioned up to
+    /// <see cref="CamusDBOptions.SpillEffectiveThreshold"/> are recursively re-partitioned up to
     /// <see cref="MaxGraceHashDepth"/> levels deep; beyond that depth the entire partition is
     /// loaded into the hash table regardless (correctness backstop for extreme single-key skew).
     ///
@@ -1528,7 +1534,7 @@ internal sealed class QueryJoinExecutor
         QueryPlan plan,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        int K = CamusDBConfig.SpillMergeFanIn;
+        int K = plan.Database.Options.SpillMergeFanIn;
 
         if (_stats is not null)
             _stats.HashJoinGracePathCount++;
@@ -1553,7 +1559,7 @@ internal sealed class QueryJoinExecutor
             probeKeyColumns = joinNode.BuildKeyColumns;
         }
 
-        SpillScope scope = SpillFileManager.CreateScope(CamusDBConfig.DataDirectory);
+        SpillScope scope = SpillFileManager.CreateScope(QueryExecutionContext.For(plan.Database).SpillDirectory);
 
         try
         {
@@ -1579,7 +1585,7 @@ internal sealed class QueryJoinExecutor
     /// and streaming the probe partition against it.
     ///
     /// <para>
-    /// When the build partition count exceeds <see cref="CamusDBConfig.SpillEffectiveThreshold"/>
+    /// When the build partition count exceeds <see cref="CamusDBOptions.SpillEffectiveThreshold"/>
     /// and the recursion depth allows it, both files are re-read with a perturbed hash seed to
     /// split into sub-partitions. When the depth limit is reached (extreme skew where a single
     /// key dominates and cannot be split further), the method falls back to a nested-loop join
@@ -1599,8 +1605,8 @@ internal sealed class QueryJoinExecutor
         int depth,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        int threshold = CamusDBConfig.SpillEffectiveThreshold;
-        int K = CamusDBConfig.SpillMergeFanIn;
+        int threshold = plan.Database.Options.SpillEffectiveThreshold;
+        int K = plan.Database.Options.SpillMergeFanIn;
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.BuildSource.Alias;
 

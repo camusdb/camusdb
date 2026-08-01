@@ -45,7 +45,7 @@ namespace CamusDB.Core.Cache;
 ///   </description></item>
 ///   <item><description>
 ///     <b>Probe limit:</b> if the total number of keys probed across point and range checks
-///     exceeds <see cref="CamusDBConfig.QueryResultCacheStrictValidationMaxKeys"/>, validation
+///     exceeds <see cref="CamusDBOptions.QueryResultCacheStrictValidationMaxKeys"/>, validation
 ///     fails closed — the stale entry is evicted and the request falls through to live execution.
 ///   </description></item>
 /// </list>
@@ -70,7 +70,7 @@ internal static class StrictValidator
         CancellationToken ct)
     {
         int probeCount = 0;
-        int maxKeys = CamusDBConfig.QueryResultCacheStrictValidationMaxKeys;
+        int maxKeys = database.Options.QueryResultCacheStrictValidationMaxKeys;
 
         // ── Schema deps ────────────────────────────────────────────────────────
         // Check that every table referenced by the cached plan still exists at the

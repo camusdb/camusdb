@@ -22,7 +22,7 @@ namespace CamusDB.Core.Cache;
 /// at the SQL level.</para>
 ///
 /// <para><b>TtlMs</b> overrides the server-default TTL for this specific entry. When null,
-/// <see cref="CamusDB.Core.CamusDBConfig.QueryResultCacheDefaultTtlMs"/> applies.</para>
+/// <see cref="CamusDB.Core.CamusDBOptions.QueryResultCacheDefaultTtlMs"/> applies.</para>
 ///
 /// <para><b>IsStrict</b>: when true, a cache hit is only served if the entry's
 /// <c>CachedAt</c> HLC timestamp is causally after the current session's most-recent

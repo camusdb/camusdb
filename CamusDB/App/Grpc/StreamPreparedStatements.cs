@@ -44,16 +44,19 @@ internal sealed class StreamPreparedStatements
     // Ids start at 1: 0 is reserved on the wire to mean "inline request, no prepared statement".
     private int lastId;
 
-    public StreamPreparedStatements()
-    {
-    }
+    private readonly CamusDBOptions options;
+
+    public StreamPreparedStatements(CamusDBOptions options) => this.options = options;
 
     /// <summary>
     /// Test-only seam: starts the id counter at <paramref name="firstIdMinusOne"/> so the exhaustion
-    /// boundary can be reached without issuing two billion registrations. Production always uses the
-    /// parameterless constructor.
+    /// boundary can be reached without issuing two billion registrations.
     /// </summary>
-    internal StreamPreparedStatements(int firstIdMinusOne) => lastId = firstIdMinusOne;
+    internal StreamPreparedStatements(CamusDBOptions options, int firstIdMinusOne)
+    {
+        this.options = options;
+        lastId = firstIdMinusOne;
+    }
 
     private long retainedBytes;
 
@@ -76,8 +79,8 @@ internal sealed class StreamPreparedStatements
     /// </exception>
     public int Add(PreparedStatement statement)
     {
-        int countLimit = CamusDBConfig.GrpcMaxPreparedStatementsPerStream;
-        long byteLimit = CamusDBConfig.GrpcMaxPreparedStatementBytesPerStream;
+        int countLimit = options.GrpcMaxPreparedStatementsPerStream;
+        long byteLimit = options.GrpcMaxPreparedStatementBytesPerStream;
         long bytes = RetainedBytesOf(statement);
 
         lock (admission)

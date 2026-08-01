@@ -20,16 +20,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <b>Small-input / flag-off path:</b> rows are materialised into a <c>List</c>, sorted
 /// with <c>List.Sort</c>, and yielded — byte-identical to the previous implementation.
-/// This path is always used when <see cref="CamusDBConfig.SpillEnabled"/> is <c>false</c>.
+/// This path is always used when <see cref="context.Options.SpillEnabled"/> is <c>false</c>.
 ///
-/// <b>External merge-sort path</b> (active when <see cref="CamusDBConfig.SpillEnabled"/> is
+/// <b>External merge-sort path</b> (active when <see cref="context.Options.SpillEnabled"/> is
 /// <c>true</c>): rows are accumulated in a buffer until the buffer reaches
-/// <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. When the threshold is hit the buffer
+/// <see cref="context.Options.SpillEffectiveThreshold"/>. When the threshold is hit the buffer
 /// is sorted and written as a sorted run to a spill file; the buffer is cleared and filling
 /// restarts. If no spill occurred when the input ends, the buffered rows are sorted and
 /// yielded in-memory (same result as the small-input path). Otherwise the last partial buffer
 /// is also spilled, and the runs are k-way merged (via a min-heap) with up to
-/// <see cref="CamusDBConfig.SpillMergeFanIn"/> simultaneously-open readers per merge pass.
+/// <see cref="context.Options.SpillMergeFanIn"/> simultaneously-open readers per merge pass.
 ///
 /// The shared <see cref="QueryResultRowOrderComparer"/> is used by both the in-memory
 /// <c>List.Sort</c> and the k-way heap, so the two paths produce the same ordering for
@@ -49,6 +49,7 @@ internal sealed class QuerySorter
     internal async IAsyncEnumerable<QueryResultRow> SortResultset(
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
@@ -56,7 +57,7 @@ internal sealed class QuerySorter
 
         IComparer<QueryResultRow> comparer = new QueryResultRowOrderComparer(ticket.OrderBy);
 
-        if (!CamusDBConfig.SpillEnabled)
+        if (!context.Options.SpillEnabled)
         {
             List<QueryResultRow> rows = new();
             await foreach (QueryResultRow row in dataCursor.WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -67,7 +68,7 @@ internal sealed class QuerySorter
             yield break;
         }
 
-        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(dataCursor, comparer, cancellationToken).ConfigureAwait(false))
+        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(dataCursor, comparer, context, cancellationToken).ConfigureAwait(false))
             yield return row;
     }
 
@@ -80,11 +81,12 @@ internal sealed class QuerySorter
     internal async IAsyncEnumerable<QueryResultRow> SortByKeys(
         IAsyncEnumerable<QueryResultRow> cursor,
         IReadOnlyList<QueryOrderBy> orderBy,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         IComparer<QueryResultRow> comparer = new QueryResultRowOrderComparer(orderBy);
 
-        if (!CamusDBConfig.SpillEnabled)
+        if (!context.Options.SpillEnabled)
         {
             List<QueryResultRow> rows = new();
             await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -95,14 +97,14 @@ internal sealed class QuerySorter
             yield break;
         }
 
-        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(cursor, comparer, cancellationToken).ConfigureAwait(false))
+        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(cursor, comparer, context, cancellationToken).ConfigureAwait(false))
             yield return row;
     }
 
     /// <summary>
     /// Sorts <paramref name="input"/> using the supplied <paramref name="comparer"/>. When
-    /// <see cref="CamusDBConfig.SpillEnabled"/> is <c>true</c> and the input exceeds
-    /// <see cref="CamusDBConfig.SpillEffectiveThreshold"/>, sorted runs are spilled to temp
+    /// <see cref="context.Options.SpillEnabled"/> is <c>true</c> and the input exceeds
+    /// <see cref="context.Options.SpillEffectiveThreshold"/>, sorted runs are spilled to temp
     /// files and k-way merged. Otherwise rows are sorted in memory.
     ///
     /// Intended for callers that supply their own comparison, such as the DISTINCT deduplication
@@ -111,9 +113,10 @@ internal sealed class QuerySorter
     internal static async IAsyncEnumerable<QueryResultRow> SortAsync(
         IAsyncEnumerable<QueryResultRow> input,
         IComparer<QueryResultRow> comparer,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        if (!CamusDBConfig.SpillEnabled)
+        if (!context.Options.SpillEnabled)
         {
             List<QueryResultRow> rows = new();
             await foreach (QueryResultRow row in input.WithCancellation(ct).ConfigureAwait(false))
@@ -124,7 +127,7 @@ internal sealed class QuerySorter
             yield break;
         }
 
-        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(input, comparer, ct).ConfigureAwait(false))
+        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(input, comparer, context, ct).ConfigureAwait(false))
             yield return row;
     }
 
@@ -144,9 +147,10 @@ internal sealed class QuerySorter
     private static async IAsyncEnumerable<QueryResultRow> SortWithPossibleSpillAsync(
         IAsyncEnumerable<QueryResultRow> input,
         IComparer<QueryResultRow> comparer,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        int threshold = CamusDBConfig.SpillEffectiveThreshold;
+        int threshold = context.Options.SpillEffectiveThreshold;
         List<QueryResultRow> buffer = new();
         List<SpillRun> runs = new();
         SpillScope? scope = null;
@@ -158,9 +162,9 @@ internal sealed class QuerySorter
                 buffer.Add(row);
                 if (buffer.Count >= threshold)
                 {
-                    scope ??= SpillFileManager.CreateScope(CamusDBConfig.DataDirectory);
+                    scope ??= SpillFileManager.CreateScope(context.SpillDirectory);
                     buffer.Sort(comparer);
-                    runs.Add(await SpillSortedBufferAsync(scope, buffer, ct).ConfigureAwait(false));
+                    runs.Add(await SpillSortedBufferAsync(scope, buffer, context, ct).ConfigureAwait(false));
                     buffer.Clear();
                 }
             }
@@ -178,12 +182,12 @@ internal sealed class QuerySorter
                 if (buffer.Count > 0)
                 {
                     buffer.Sort(comparer);
-                    runs.Add(await SpillSortedBufferAsync(scope!, buffer, ct).ConfigureAwait(false));
+                    runs.Add(await SpillSortedBufferAsync(scope!, buffer, context, ct).ConfigureAwait(false));
                     buffer.Clear();
                 }
 
                 // K-way merge: multi-pass if #runs > fanIn, then stream the final merge.
-                await foreach (QueryResultRow row in MergeAndYieldAsync(scope!, runs, comparer, ct).ConfigureAwait(false))
+                await foreach (QueryResultRow row in MergeAndYieldAsync(scope!, runs, comparer, context, ct).ConfigureAwait(false))
                     yield return row;
             }
         }
@@ -209,6 +213,7 @@ internal sealed class QuerySorter
     private static async Task<SpillRun> SpillSortedBufferAsync(
         SpillScope scope,
         List<QueryResultRow> sortedBuffer,
+        QueryExecutionContext context,
         CancellationToken ct)
     {
         // Detect value-only format: all rows must be QueryRow with the same layout.
@@ -253,16 +258,17 @@ internal sealed class QuerySorter
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reduces <paramref name="runs"/> to at most <see cref="CamusDBConfig.SpillMergeFanIn"/>
+    /// Reduces <paramref name="runs"/> to at most <see cref="context.Options.SpillMergeFanIn"/>
     /// runs via intermediate merge passes, then yields the final sorted stream directly.
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> MergeAndYieldAsync(
         SpillScope scope,
         List<SpillRun> runs,
         IComparer<QueryResultRow> comparer,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        int fanIn = CamusDBConfig.SpillMergeFanIn;
+        int fanIn = context.Options.SpillMergeFanIn;
 
         // Reduce to ≤ fanIn runs via intermediate passes (each pass writes new run files).
         while (runs.Count > fanIn)
@@ -272,7 +278,7 @@ internal sealed class QuerySorter
             {
                 int end = Math.Min(i + fanIn, runs.Count);
                 List<SpillRun> batch = runs.GetRange(i, end - i);
-                nextRuns.Add(await MergeRunsToFileAsync(scope, batch, comparer, ct).ConfigureAwait(false));
+                nextRuns.Add(await MergeRunsToFileAsync(scope, batch, comparer, context, ct).ConfigureAwait(false));
             }
             runs = nextRuns;
         }
@@ -291,6 +297,7 @@ internal sealed class QuerySorter
         SpillScope scope,
         IReadOnlyList<SpillRun> runs,
         IComparer<QueryResultRow> comparer,
+        QueryExecutionContext context,
         CancellationToken ct)
     {
         // Propagate layout-header format when all input runs share it.

@@ -29,8 +29,8 @@ public sealed class ColumnInfo
 
     /// <summary>
     /// Maximum length in characters (String) or bytes (Bytes). Null means unbounded-but-capped
-    /// at the default (see <see cref="CamusDB.Core.CamusDBConfig.DefaultStringMaxLength"/> /
-    /// <see cref="CamusDB.Core.CamusDBConfig.DefaultBytesMaxLength"/>). Ignored for other types.
+    /// at the default (see <see cref="CamusDB.Core.CamusDBConstants.DefaultStringMaxLength"/> /
+    /// <see cref="CamusDB.Core.CamusDBConstants.DefaultBytesMaxLength"/>). Ignored for other types.
     /// </summary>
     public int? MaxLength { get; }
 

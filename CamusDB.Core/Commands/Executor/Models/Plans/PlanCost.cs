@@ -42,7 +42,7 @@ public readonly struct PlanCost
 
     /// <summary>
     /// Network shipping cost: <c>remoteRows × rowWidthBytes × NetWeight</c>.
-    /// Non-zero only when key-range sharding is on and <see cref="CamusDBConfig.ClusterPartitionCount"/>
+    /// Non-zero only when key-range sharding is on and <see cref="CamusDBOptions.ClusterPartitionCount"/>
     /// &gt; 1. Zero for single-node deployments and for non-scan (pipeline) nodes.
     /// </summary>
     public double NetworkFactor { get; init; }

@@ -79,11 +79,11 @@ public class FullQueryBenchmarks
         await _node.WaitForLeaderAsync("bench-warmup", CancellationToken.None);
         await _node.FlushAsync();
 
-        _registry = await DatabaseRegistry.OpenAsync(_node);
+        _registry = await DatabaseRegistry.OpenAsync(_node, CamusDBConfig.Ambient);
 
         CommandValidator validator    = new();
         CatalogsManager  catalogsMgr = new(Logger);
-        _executor = new CommandExecutor(validator, catalogsMgr, Logger,
+        _executor = new CommandExecutor(validator, catalogsMgr, Logger, CamusDBConfig.Ambient,
             sharedNode: _node, registry: _registry, isClusterMode: true);
 
         _dbName = Guid.NewGuid().ToString("N");

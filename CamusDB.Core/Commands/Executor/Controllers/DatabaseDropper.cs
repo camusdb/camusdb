@@ -429,7 +429,7 @@ internal sealed class DatabaseDropper
 
     /// <summary>
     /// Deletes every key under <paramref name="keyPrefix"/> in <paramref name="bucket"/> in bounded
-    /// batches of <see cref="CamusDBConfig.KeyspacePurgeBatchSize"/>: scan one batch, delete it,
+    /// batches of <see cref="CamusDBOptions.KeyspacePurgeBatchSize"/>: scan one batch, delete it,
     /// re-scan. Peak memory is one batch regardless of how large the overlay is — a <c>DROP DATABASE</c>
     /// can span an entire database. The loop ends after <see cref="MaxPurgeScanRounds"/> consecutive
     /// scans make no progress (all-empty or all-failed), which also absorbs a transient scan miss; a

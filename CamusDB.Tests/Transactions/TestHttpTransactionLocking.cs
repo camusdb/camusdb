@@ -396,7 +396,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
     /// </summary>
     private sealed class LockingParseProbe : CommandsController
     {
-        private LockingParseProbe() : base(null!, null!, null!) { }
+        private LockingParseProbe() : base(null!, null!, null!, CamusDBConfig.Ambient) { }
 
         public static (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) Parse(ExecuteSQLRequest request)
             => ParseRequestLevelMode(request);

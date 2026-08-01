@@ -33,10 +33,14 @@ public sealed class CamusAuthService : CamusAuth.CamusAuthBase
     private readonly CommandExecutor executor;
     private readonly ILogger<ICamusDB> logger;
 
-    public CamusAuthService(CommandExecutor executor, ILogger<ICamusDB> logger)
+    /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public CamusAuthService(CommandExecutor executor, ILogger<ICamusDB> logger, CamusDBOptions options)
     {
         this.executor = executor;
         this.logger   = logger;
+        this.options  = options;
     }
 
     /// <summary>
@@ -53,7 +57,7 @@ public sealed class CamusAuthService : CamusAuth.CamusAuthBase
         try
         {
             // Before touching the credentials: a password must never travel in the clear.
-            GrpcTransportSecurity.EnsureSecureTransport(context);
+            GrpcTransportSecurity.EnsureSecureTransport(context, options);
 
             if (string.IsNullOrEmpty(request.User) || request.Password is null)
                 throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");

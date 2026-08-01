@@ -134,7 +134,7 @@ internal sealed class SelectQueryCreator
 
         string index = rightAst.extendedOne!.yytext!;
         return index.Equals("pk", StringComparison.InvariantCultureIgnoreCase)
-            ? CamusDBConfig.PrimaryKeyInternalName
+            ? CamusDBConstants.PrimaryKeyInternalName
             : index;
     }
 

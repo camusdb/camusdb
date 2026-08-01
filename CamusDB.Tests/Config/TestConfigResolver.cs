@@ -241,7 +241,7 @@ public sealed class TestConfigResolver
             await node.StartAsync(CancellationToken.None);
             await using (node)
             {
-                KvTransactionsManager mgr = new(node.Kahuna);
+                KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient);
                 KvTransaction tx = await mgr.BeginAsync();
                 Assert.That(tx.IsolationLevel, Is.EqualTo(CamusIsolationLevel.ReadCommitted));
                 await mgr.RollbackAsync(tx);

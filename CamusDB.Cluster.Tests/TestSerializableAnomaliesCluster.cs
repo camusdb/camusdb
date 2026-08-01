@@ -134,7 +134,7 @@ public sealed class TestSerializableAnomaliesCluster
 
         CommandValidator validator  = new();
         CatalogsManager  catalogs   = new(logger);
-        CommandExecutor  executor   = new(validator, catalogs, logger,
+        CommandExecutor  executor   = new(validator, catalogs, logger, CamusDBConfig.Ambient,
             sharedNode: node, isClusterMode: true);
 
         string dbname = Guid.NewGuid().ToString("n");

@@ -94,14 +94,14 @@ public sealed class TestBackupCommandExecutor
             WriteIOThreads = 1,
             BackupDir = backup ? backupDir : "",
             RestoreRoot = restore ? restoreRoot : "",
-        });
+        }.WithFastTestTimers());
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
         await node.FlushAsync();
 
-        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node);
+        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
         CommandExecutor executor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger,
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: node, registry: registry, isClusterMode: false);
 
         Ctx ctx = new(executor, node, registry, root, backupDir, restoreRoot);
@@ -175,8 +175,10 @@ public sealed class TestBackupCommandExecutor
     [Test]
     public async Task AuthEnabled_NullPrincipal_AuthenticationFailed()
     {
-        Ctx c = await NewExecutorAsync();
+        // An engine fixes its configuration when it is constructed, so authentication has to be on
+        // before the executor is built — flipping it afterwards leaves the executor unauthenticated.
         CamusConfig.AuthenticationEnabled = true;
+        Ctx c = await NewExecutorAsync();
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await c.Executor.TakeBackup(new TakeBackupTicket(BackupKind.Full, null, principal: null)))!;
         Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ex.Code);
@@ -185,8 +187,10 @@ public sealed class TestBackupCommandExecutor
     [Test]
     public async Task AuthEnabled_NonSuperuser_InsufficientPrivilege()
     {
-        Ctx c = await NewExecutorAsync();
+        // An engine fixes its configuration when it is constructed, so authentication has to be on
+        // before the executor is built — flipping it afterwards leaves the executor unauthenticated.
         CamusConfig.AuthenticationEnabled = true;
+        Ctx c = await NewExecutorAsync();
         Principal user = new("bob", isSuperuser: false, Array.Empty<GrantRecord>());
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await c.Executor.TakeBackup(new TakeBackupTicket(BackupKind.Full, null, user)))!;

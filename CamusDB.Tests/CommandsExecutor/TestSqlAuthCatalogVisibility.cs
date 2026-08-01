@@ -383,12 +383,15 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         (string root, CommandExecutor ex, _) = await Setup();
         (_, string child, string grandchild) = await NewBranchChain(ex, root);
 
+        // An engine fixes its configuration when it is constructed, so the unauthenticated listing is
+        // exercised through a second executor built with authentication off.
         CamusConfig.AuthenticationEnabled = false;
+        CommandExecutor unauthenticated = CreateCommandExecutor();
 
         CollectionAssert.AreEquivalent(
             new[] { child, grandchild },
-            await ListAsync(ex, "", $"SHOW BRANCHES FROM {root}", "database", null, false));
-        Assert.AreEqual(2, (await RowsAsync(ex, $"SHOW ANCESTORS FROM {grandchild}", null)).Count);
+            await ListAsync(unauthenticated, "", $"SHOW BRANCHES FROM {root}", "database", null, false));
+        Assert.AreEqual(2, (await RowsAsync(unauthenticated, $"SHOW ANCESTORS FROM {grandchild}", null)).Count);
     }
 
     /// <summary>Runs a server-level statement and returns the raw rows (for multi-column assertions).</summary>
@@ -409,10 +412,13 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         (string db, CommandExecutor ex, _) = await Setup();
 
         // With the flag off there is no principal to filter by; both listings must behave exactly as
-        // they did before visibility filtering existed.
+        // they did before visibility filtering existed. An engine fixes its configuration when it is
+        // constructed, so the unauthenticated behaviour is exercised through a second executor built
+        // with authentication off, not by flipping a flag under the one that created the tables.
         CamusConfig.AuthenticationEnabled = false;
+        CommandExecutor unauthenticated = CreateCommandExecutor();
 
-        CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTables(ex, db, null));
-        Assert.IsTrue((await ShowDatabases(ex, db, null)).Contains(db));
+        CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTables(unauthenticated, db, null));
+        Assert.IsTrue((await ShowDatabases(unauthenticated, db, null)).Contains(db));
     }
 }

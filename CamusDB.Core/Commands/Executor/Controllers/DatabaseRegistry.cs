@@ -81,7 +81,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     private const int MaxRetries = 10;
 
-    // A drop-intent fence carries a bounded lease (its KV key's native expiry, CamusDBConfig.FenceLeaseMs).
+    // A drop-intent fence carries a bounded lease (its KV key's native expiry, CamusDBOptions.FenceLeaseMs).
     // If the owner crashes without releasing it, the lease lapses and any node can then re-acquire — a
     // dead owner can no longer block relink/GC of an id forever. A live owner keeps the fence by renewing
     // the lease in the background (below) for as long as it holds it, so an operation that legitimately
@@ -349,7 +349,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// this process owns the single registry, so a cache hit is trusted without the per-resolve
     /// generation round-trip — see <see cref="isClusterMode"/>.</para>
     /// </summary>
-    public static async Task<DatabaseRegistry> OpenAsync(EmbeddedKahuna sharedNode, bool isClusterMode = false)
+    public static async Task<DatabaseRegistry> OpenAsync(EmbeddedKahuna sharedNode, CamusDBOptions options, bool isClusterMode = false)
     {
         ArgumentNullException.ThrowIfNull(sharedNode);
 
@@ -360,7 +360,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager txManager = new(sharedNode.Kahuna, mintLocalT);
+        KvTransactionsManager txManager = new(sharedNode.Kahuna, options, mintLocalT);
         DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/", sharedNode.Raft.GetLocalNodeId(), isClusterMode);
 
         // OpenAsync is kicked off eagerly during CommandExecutor construction, which a hosted service
@@ -381,7 +381,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// marker) without perturbing the descriptor/hold/metadata paths, which resolve their own node. Loads
     /// the in-memory cache like <see cref="OpenAsync"/> so name lookups behave normally.
     /// </summary>
-    internal static async Task<DatabaseRegistry> OpenForTestingAsync(EmbeddedKahuna node, IKahuna kvOverride, bool isClusterMode = false)
+    internal static async Task<DatabaseRegistry> OpenForTestingAsync(EmbeddedKahuna node, IKahuna kvOverride, CamusDBOptions options, bool isClusterMode = false)
     {
         ArgumentNullException.ThrowIfNull(node);
         ArgumentNullException.ThrowIfNull(kvOverride);
@@ -393,7 +393,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             return node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager txManager = new(kvOverride, mintLocalT);
+        KvTransactionsManager txManager = new(kvOverride, options, mintLocalT);
         DatabaseRegistry registry = new(kvOverride, txManager, "_system/", node.Raft.GetLocalNodeId(), isClusterMode);
 
         await node.WaitUntilStartedAsync().ConfigureAwait(false);
@@ -1027,7 +1027,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     /// <summary>
     /// Atomically acquires the drop-intent fence for <paramref name="dbId"/> with a bounded lease
-    /// (<see cref="CamusDBConfig.FenceLeaseMs"/>) via <c>SetIfNotExists</c>. Returns <c>true</c> if this node now owns
+    /// (<see cref="CamusDBOptions.FenceLeaseMs"/>) via <c>SetIfNotExists</c>. Returns <c>true</c> if this node now owns
     /// the fence; <c>false</c> if another node's <em>live</em> (non-expired) lease already holds it.
     ///
     /// <para><b>Lease.</b> The marker's KV key carries a native expiry, so a holder that crashes without
@@ -1081,7 +1081,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     /// <summary>
     /// Starts (or replaces) the background lease renewer for a fence this node just acquired. The renewer
-    /// re-stamps the lease every <see cref="CamusDBConfig.FenceLeaseRenewIntervalMs"/> with a compare-and-set on this node's
+    /// re-stamps the lease every <see cref="CamusDBOptions.FenceLeaseRenewIntervalMs"/> with a compare-and-set on this node's
     /// owner value, so it renews only while this node still owns the fence and self-terminates the moment
     /// the fence is lost (e.g. the lease lapsed during a stall and another node took it) or released.
     /// </summary>

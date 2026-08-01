@@ -138,7 +138,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByModifiedKeys_RowWrite_EvictsRangeDepEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string bucket = "db1:tbl1:r";
         string fp = await PublishEntry(cache, "db1", "fp-range", [bucket]);
 
@@ -152,7 +152,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByModifiedKeys_IndexWrite_EvictsIndexRangeDepEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string indexBucket = "db1:tbl1:i:idx001";
         string fp = await PublishEntry(cache, "db1", "fp-index-range", [indexBucket]);
 
@@ -165,7 +165,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByModifiedKeys_DifferentTable_PreservesEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string bucket = "db1:tbl1:r";
         string fp = await PublishEntry(cache, "db1", "fp-tbl1", [bucket]);
 
@@ -179,7 +179,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByModifiedKeys_SchemaMetaKey_DoesNotEvictRangeEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string bucket = "db1:tbl1:r";
         string fp = await PublishEntry(cache, "db1", "fp-range", [bucket]);
 
@@ -197,7 +197,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByTableId_EvictsSchemaDepEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         QueryDependencySet deps = new([], [], [("tblid001", 1)]);
         CacheGenerationToken token = SnapshotToken(cache);
@@ -213,7 +213,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByTableId_DifferentTableId_PreservesEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         QueryDependencySet deps = new([], [], [("tblid001", 1)]);
         CacheGenerationToken token = SnapshotToken(cache);
@@ -229,7 +229,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateByTableId_DifferentDatabase_PreservesEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         QueryDependencySet deps = new([], [], [("tblid001", 1)]);
         CacheGenerationToken token = SnapshotToken(cache);
@@ -249,7 +249,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task InvalidateDatabase_EvictsAllEntriesForDatabase()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         CacheGenerationToken t = SnapshotToken(cache);
         await cache.TryPublishAsync(MakeResult("db1", "fp1"), t);
@@ -288,7 +288,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task CommitWrite_ThroughCache_EvictsStaleRangeEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         string bucket = "db1:tbl1:r";
         string fp = await PublishEntry(cache, "db1", "fp-e2e", [bucket]);
@@ -310,7 +310,7 @@ public sealed class TestQueryResultCacheInvalidation
     [Test]
     public async Task AbortWrite_ThroughCache_PreservesEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         string bucket = "db1:tbl1:r";
         string fp = await PublishEntry(cache, "db1", "fp-abort", [bucket]);

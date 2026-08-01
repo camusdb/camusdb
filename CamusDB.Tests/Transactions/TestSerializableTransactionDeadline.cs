@@ -39,28 +39,22 @@ namespace CamusDB.Tests.Transactions;
 [NonParallelizable]
 public sealed class TestSerializableTransactionDeadline
 {
-    private int originalDeadlineMs;
 
-    [SetUp]
-    public void SaveConfig()
-    {
-        originalDeadlineMs = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
-    }
-
-    [TearDown]
-    public void RestoreConfig()
-    {
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = originalDeadlineMs;
-    }
-
+    /// <summary>
+    /// Builds a node whose transaction manager and store enforce <paramref name="deadlineMs"/>. The
+    /// deadline is fixed when they are constructed, so it is passed in rather than assigned to a global
+    /// afterwards — an already-built manager would keep the configuration it was created with.
+    /// </summary>
     private static async Task<(EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store)>
-        CreateAsync(string tag)
+        CreateAsync(string tag, int deadlineMs)
     {
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        KvTransactionsManager mgr = new(node.Kahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", tag);
+
+        CamusDBOptions options = CamusDBOptions.Default with { MaxSerializableTransactionLifetimeMs = deadlineMs };
+        KvTransactionsManager mgr = new(node.Kahuna, options);
+        KvTableStore store = new(node.Kahuna, options, "testdb", tag);
         return (node, mgr, store);
     }
 
@@ -76,10 +70,8 @@ public sealed class TestSerializableTransactionDeadline
     [Test]
     public async Task SerializableRW_ExceedsDeadline_RangeLockAcquisitionThrows()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-01");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-01", 100);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 100; // 100 ms deadline
 
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
 
@@ -110,10 +102,8 @@ public sealed class TestSerializableTransactionDeadline
     [Test]
     public async Task SerializableRW_ExceedsDeadline_CommitThrows()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-02");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-02", 100);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 100; // 100 ms deadline
 
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
 
@@ -145,10 +135,8 @@ public sealed class TestSerializableTransactionDeadline
     [Test]
     public async Task SerializableRW_AfterDeadlineAbort_ForeignWriterSucceeds()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-03");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-03", 100);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 100; // 100 ms deadline
 
         // Holder: acquires an exclusive row range lock.
         KvTransaction holder = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
@@ -161,12 +149,16 @@ public sealed class TestSerializableTransactionDeadline
         Assert.ThrowsAsync<CamusDBException>(() => mgr.CommitAsync(holder));
         Assert.AreEqual(KvTransactionStatus.RolledBack, holder.Status);
 
-        // Restore deadline to allow the writer to proceed normally.
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = originalDeadlineMs;
+        // The foreign writer must not inherit the holder's 100 ms deadline, so it gets its own manager
+        // and store over the same node configured with the normal lifetime — the deadline is fixed when
+        // those are constructed, so there is no global to restore.
+        CamusDBOptions writerOptions = CamusDBOptions.Default;
+        KvTransactionsManager writerManager = new(node.Kahuna, writerOptions);
+        store = new KvTableStore(node.Kahuna, writerOptions, "testdb", "TXD-03");
 
         // Foreign writer: must be able to insert into the row space now that the holder's
         // exclusive lock has been released by the abort.
-        KvTransaction writer = await mgr.BeginAsync();
+        KvTransaction writer = await writerManager.BeginAsync();
         ObjectIdValue newRowId = new(1, 0, 0);
         Assert.DoesNotThrowAsync(
             () => store.InsertRow(writer, newRowId, [42]),
@@ -186,10 +178,8 @@ public sealed class TestSerializableTransactionDeadline
     [Test]
     public async Task ReadCommitted_NotSubjectToDeadline()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-04");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-04", 100);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 100; // 100 ms deadline
 
         KvTransaction tx = await mgr.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
@@ -217,10 +207,8 @@ public sealed class TestSerializableTransactionDeadline
     [Test]
     public async Task SerializableRW_DeadlineDisabled_CommitsSuccessfully()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-05");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("TXD-05", 0);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = 0; // disabled
 
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
         await store.AcquireRowRangeLockAsync(tx);

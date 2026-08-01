@@ -231,7 +231,7 @@ public sealed class KvTransaction
 
     /// <summary>
     /// Monotonic elapsed-time counter started when the Kahuna coordinator session begins. Used to
-    /// enforce <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/> — immune to NTP
+    /// enforce <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/> — immune to NTP
     /// wall-clock jumps, consistent with the monotonic lock-wait deadline used elsewhere in the
     /// store.
     ///

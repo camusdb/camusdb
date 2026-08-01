@@ -53,11 +53,15 @@ internal sealed class ExplainExecutor
 
     private readonly QueryExecutor queryExecutor;
 
+    /// <summary>Configuration of the engine this executor belongs to.</summary>
+    private readonly CamusDBOptions options;
+
     public ExplainExecutor(
         SubqueryRewriter subqueryRewriter,
         QueryBinder queryBinder,
         ExistsSubqueryPreparer existsSubqueryPreparer,
         QueryExecutor queryExecutor,
+        CamusDBOptions options,
         StatisticsManager? stats = null,
         SemiJoinAnalyzer? semiJoinAnalyzer = null)
     {
@@ -66,8 +70,9 @@ internal sealed class ExplainExecutor
         this.queryBinder = queryBinder;
         this.existsSubqueryPreparer = existsSubqueryPreparer;
         this.queryExecutor = queryExecutor;
-        queryPlanner = new QueryPlanner(stats);
-        joinQueryPlanner = new JoinQueryPlanner(stats);
+        this.options = options;
+        queryPlanner = new QueryPlanner(options, stats);
+        joinQueryPlanner = new JoinQueryPlanner(options, stats);
     }
 
     /// <summary>
@@ -168,7 +173,7 @@ internal sealed class ExplainExecutor
     /// here is the plan-level view; at run time the cache additionally applies only to autocommit
     /// reads (an explicit transaction reads live storage).</para>
     /// </summary>
-    private static string DescribeCacheEligibility(QueryPlan plan, CacheHintOptions hint)
+    private string DescribeCacheEligibility(QueryPlan plan, CacheHintOptions hint)
     {
         string opts =
             $"ttl={(hint.TtlMs is { } ms ? ms + "ms" : "default")}, " +
@@ -177,7 +182,7 @@ internal sealed class ExplainExecutor
         if (plan.BoundQuery is not null)
             return $"family={hint.CacheName}, eligible=false, reason=join, {opts}";
 
-        if (!CamusDBConfig.QueryResultCacheEnabled)
+        if (!options.QueryResultCacheEnabled)
             return $"family={hint.CacheName}, eligible=false, reason=cache-disabled, {opts}";
 
         return $"family={hint.CacheName}, eligible=true, {opts}";

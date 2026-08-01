@@ -83,7 +83,7 @@ public abstract class BaseTest
                 Storage = "memory",
                 WalStorage = "memory",
                 InitialPartitions = 1
-            });
+            }.WithFastTestTimers());
             await testNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
             await testNode.WaitForLeaderAsync("warmup", CancellationToken.None).ConfigureAwait(false);
             await testNode.FlushAsync().ConfigureAwait(false);
@@ -97,7 +97,7 @@ public abstract class BaseTest
     /// Override in shared-node fixtures to use a different node.
     /// </summary>
     protected virtual Task<DatabaseRegistry> CreateRegistryAsync()
-        => DatabaseRegistry.OpenAsync(testNode!);
+        => DatabaseRegistry.OpenAsync(testNode!, Options);
 
     /// <summary>
     /// Builds a <see cref="CommandExecutor"/> for the current test. All executors within
@@ -105,11 +105,35 @@ public abstract class BaseTest
     /// resolve each other's databases.
     /// Override in shared-node fixtures to pass a different cluster node.
     /// </summary>
+    /// <summary>
+    /// Configuration for the engine under test. A fixture that needs a non-default knob overrides
+    /// <see cref="ConfigureOptions"/>; nothing here mutates shared state, so two fixtures wanting
+    /// different settings do not conflict.
+    ///
+    /// <para>It is evaluated where it is used rather than captured in set-up, and it starts from the
+    /// ambient value rather than from the defaults. Both are deliberate while the migration is in
+    /// progress: fixtures that still configure by assigning statics — including in their own set-up,
+    /// which NUnit runs *after* this class's — would otherwise silently lose those settings. Once a
+    /// fixture is migrated to <see cref="ConfigureOptions"/> the ambient contributes nothing, and the
+    /// base can become <see cref="CamusDBOptions.Default"/>.</para>
+    /// </summary>
+    protected CamusDBOptions Options =>
+        ConfigureOptions(CamusDBConfig.Ambient with { DataDirectory = CamusConfig.DataDirectory });
+
+    /// <summary>
+    /// Hook for a fixture to state the configuration it needs, applied once per test before anything is
+    /// constructed. Override with a <c>with</c> expression — e.g.
+    /// <c>defaults with { SpillEnabled = true }</c> — instead of assigning to a static and restoring it
+    /// in tear-down. Configuration is fixed when a component is built, so setting it afterwards has no
+    /// effect on an engine that already exists.
+    /// </summary>
+    protected virtual CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults;
+
     protected virtual CommandExecutor CreateCommandExecutor()
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, Options,
                    sharedNode: testNode!, registry: sharedRegistry!, isClusterMode: false);
     }
 

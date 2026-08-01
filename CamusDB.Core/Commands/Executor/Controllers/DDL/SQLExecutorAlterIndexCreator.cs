@@ -70,7 +70,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             return new(
                 ticket.DatabaseName,
                 tableName,
-                CamusDBConfig.PrimaryKeyInternalName,
+                CamusDBConstants.PrimaryKeyInternalName,
                 indexColumns.ToArray(),
                 AlterIndexOperation.AddPrimaryKey
             );
@@ -89,7 +89,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             return new(
                 ticket.DatabaseName,
                 tableName,
-                CamusDBConfig.PrimaryKeyInternalName,
+                CamusDBConstants.PrimaryKeyInternalName,
                 Array.Empty<ColumnIndexInfo>(),
                 AlterIndexOperation.DropIndex
             );

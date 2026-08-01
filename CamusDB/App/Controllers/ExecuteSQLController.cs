@@ -36,7 +36,7 @@ public sealed class ExecuteSQLController : CommandsController
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
         PreparedStatementRegistry preparedStatements,
-        ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+        ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
     {
         this.preparedStatements = preparedStatements;
     }
@@ -252,7 +252,7 @@ public sealed class ExecuteSQLController : CommandsController
                 }
             }
 
-            CamusIsolationLevel resolvedLevel = reqLevel ?? CamusDBConfig.DefaultIsolationLevel;
+            CamusIsolationLevel resolvedLevel = reqLevel ?? options.DefaultIsolationLevel;
             if (resolvedLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
             else
@@ -606,7 +606,7 @@ public sealed class ExecuteSQLController : CommandsController
                 }
             }
 
-            CamusIsolationLevel resolvedLevel2 = reqLevel2 ?? CamusDBConfig.DefaultIsolationLevel;
+            CamusIsolationLevel resolvedLevel2 = reqLevel2 ?? options.DefaultIsolationLevel;
             if (resolvedLevel2 == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDmlBody).ConfigureAwait(false);
             else

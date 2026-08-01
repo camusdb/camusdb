@@ -65,7 +65,7 @@ public sealed class TestSchemaDdlForwardController
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
-        });
+        }.WithFastTestTimers());
 
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
@@ -73,7 +73,7 @@ public sealed class TestSchemaDdlForwardController
         executor = new CommandExecutor(
             new CommandValidator(),
             new CatalogsManager(NullLogger<ICamusDB>.Instance),
-            NullLogger<ICamusDB>.Instance,
+            NullLogger<ICamusDB>.Instance, CamusDBConfig.Ambient,
             sharedNode: node,
             isClusterMode: true
         );
@@ -106,7 +106,7 @@ public sealed class TestSchemaDdlForwardController
             executor!,
             txCoord,
             NullLogger<ICamusDB>.Instance
-        );
+        , CamusDBConfig.Ambient);
 
         byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonBody);
         DefaultHttpContext httpContext = new()

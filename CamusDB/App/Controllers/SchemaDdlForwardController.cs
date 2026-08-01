@@ -49,8 +49,9 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class SchemaDdlForwardController : CommandsController
 {
-    public SchemaDdlForwardController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger)
-        : base(executor, transactions, logger)
+    public SchemaDdlForwardController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger,
+        CamusDBOptions options)
+        : base(executor, transactions, logger, options)
     {
     }
 

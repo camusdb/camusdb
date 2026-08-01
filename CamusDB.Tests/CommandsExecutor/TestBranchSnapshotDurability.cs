@@ -76,14 +76,14 @@ public sealed class TestBranchSnapshotDurability
             InitialPartitions = 1,
             RevisionRetention = RetentionWindow,
             RevisionsToKeepCached = RetentionWindow,
-        });
+        }.WithFastTestTimers());
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
         await node.FlushAsync();
 
-        registry = await DatabaseRegistry.OpenAsync(node);
+        registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
         catalogs = new CatalogsManager(logger);
-        executor = new CommandExecutor(new CommandValidator(), catalogs, logger,
+        executor = new CommandExecutor(new CommandValidator(), catalogs, logger, CamusDBConfig.Ambient,
                                        sharedNode: node, registry: registry, isClusterMode: false);
     }
 

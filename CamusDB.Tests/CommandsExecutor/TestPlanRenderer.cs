@@ -38,7 +38,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestPlanRenderer
 {
     private static QueryPlannerTestContext? context;
-    private readonly QueryPlanner queryPlanner = new();
+    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
 
     [OneTimeSetUp]
     public void OneTimeSetUp() => context = QueryPlannerTestContext.Create();
@@ -102,7 +102,7 @@ public sealed class TestPlanRenderer
             new() { { "@id", new ColumnValue(ColumnType.Id, QueryPlannerTestContext.SampleRowId) } });
 
         string rendered = PlanRenderer.Render(plan);
-        Assert.AreEqual($"index-lookup(index={CamusDBConfig.PrimaryKeyInternalName}, key={QueryPlannerTestContext.SampleRowId})", rendered);
+        Assert.AreEqual($"index-lookup(index={CamusDBConstants.PrimaryKeyInternalName}, key={QueryPlannerTestContext.SampleRowId})", rendered);
     }
 
     // ── range index scan ───────────────────────────────────────────────────

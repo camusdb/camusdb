@@ -25,9 +25,13 @@ internal sealed class SchemaQuerier
 {
     private readonly CatalogsManager catalogs;
 
-    public SchemaQuerier(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger)
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public SchemaQuerier(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger, CamusDBOptions options)
     {
         this.catalogs = catalogsManager;
+        this.options = options;
     }
 
     /// <summary>
@@ -83,7 +87,7 @@ internal sealed class SchemaQuerier
     {
         foreach (KeyValuePair<string, TableIndexSchema> kv in indexes)
         {
-            if (kv.Key == CamusDBConfig.PrimaryKeyInternalName && kv.Value.Columns.Contains(name))
+            if (kv.Key == CamusDBConstants.PrimaryKeyInternalName && kv.Value.Columns.Contains(name))
                 return true;
         }
         return false;
@@ -184,7 +188,7 @@ internal sealed class SchemaQuerier
             // COMMENT ON INDEX rejects the primary index outright.
             string indexComment = GetSQLComment(kv.Value.Comment);
 
-            if (kv.Key == CamusDBConfig.PrimaryKeyInternalName)
+            if (kv.Key == CamusDBConstants.PrimaryKeyInternalName)
                 createTableSql.Append(" PRIMARY KEY (" + cols + "),");
             else if (kv.Value.Type == IndexType.Unique)
                 createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + ")" + include + indexComment + ",");
@@ -439,11 +443,11 @@ internal sealed class SchemaQuerier
     /// (<c>yyyy-MM-ddTHH:mm:ss.fffZ</c>) from the HLC's physical component (Unix epoch milliseconds).
     /// <c>expires_at</c> is the advisory reclamation deadline (<c>DroppedAt + OrphanRetentionMs</c>), or
     /// the literal <c>"never"</c> when automatic reclamation is disabled
-    /// (<see cref="CamusDBConfig.OrphanRetentionMs"/> &lt;= 0).
+    /// (<see cref="CamusDBOptions.OrphanRetentionMs"/> &lt;= 0).
     /// </summary>
-    private static QueryResultRow OrphanRow(string id, string formerName, HLCTimestamp droppedAt)
+    private QueryResultRow OrphanRow(string id, string formerName, HLCTimestamp droppedAt)
     {
-        long retentionMs = CamusDBConfig.OrphanRetentionMs;
+        long retentionMs = options.OrphanRetentionMs;
         string expiresAt = retentionMs > 0 ? IsoFromUnixMs(droppedAt.L + retentionMs) : "never";
 
         return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)

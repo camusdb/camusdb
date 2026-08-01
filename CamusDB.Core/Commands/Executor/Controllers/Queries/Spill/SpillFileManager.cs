@@ -25,8 +25,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// <b>Call order at node boot:</b>
 /// <code>
-/// SpillFileManager.AcquireInstanceLock(CamusDBConfig.DataDirectory);
-/// SpillFileManager.RunStartupSweep(CamusDBConfig.DataDirectory);
+/// SpillFileManager.AcquireInstanceLock(CamusDBOptions.DataDirectory);
+/// SpillFileManager.RunStartupSweep(CamusDBOptions.DataDirectory);
 /// </code>
 /// <b>Call at graceful shutdown:</b>
 /// <code>
@@ -189,7 +189,7 @@ public static class SpillFileManager
     /// Throws <see cref="CamusDBException"/> (<see cref="CamusDBErrorCodes.SpillStorageUnavailable"/>)
     /// if the directory cannot be created (disk full, bad path, permission denied, etc.).
     ///
-    /// Callers should check <see cref="CamusDBConfig.SpillEnabled"/> before calling this
+    /// Callers should check <see cref="CamusDBOptions.SpillEnabled"/> before calling this
     /// method; the scope itself does not enforce the flag.
     /// </summary>
     public static SpillScope CreateScope(string dataDirectory)

@@ -53,6 +53,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private readonly CommandExecutor executor;
     private readonly HttpTransactionCoordinator transactions;
     private readonly ILogger<ICamusDB> logger;
+
+    /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly IHostApplicationLifetime appLifetime;
     private readonly ForegroundRequestGauge loadGauge;
 
@@ -61,28 +64,30 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         HttpTransactionCoordinator transactions,
         ILogger<ICamusDB> logger,
         IHostApplicationLifetime appLifetime,
-        ForegroundRequestGauge loadGauge)
+        ForegroundRequestGauge loadGauge,
+        CamusDBOptions options)
     {
         this.executor     = executor;
         this.transactions = transactions;
         this.logger       = logger;
         this.appLifetime  = appLifetime;
         this.loadGauge    = loadGauge;
+        this.options      = options;
     }
 
     /// <summary>
     /// Resolves the authenticated principal from the request's <c>authorization</c> metadata (a
     /// <c>Bearer</c> token), mirroring the REST bearer resolution. Returns <c>null</c> when
-    /// <see cref="CamusDBConfig.AuthenticationEnabled"/> is off. When on, a missing/invalid/expired
+    /// <see cref="CamusDBOptions.AuthenticationEnabled"/> is off. When on, a missing/invalid/expired
     /// token throws <see cref="CamusDBErrorCodes.AuthenticationFailed"/> (mapped to the gRPC error
     /// status at the RPC boundary), so the engine gate never sees a null principal while auth is on.
     /// </summary>
     private async Task<Principal?> ResolvePrincipalAsync(ServerCallContext context)
     {
-        if (!CamusDBConfig.AuthenticationEnabled)
+        if (!options.AuthenticationEnabled)
             return null;
 
-        GrpcTransportSecurity.EnsureSecureTransport(context);
+        GrpcTransportSecurity.EnsureSecureTransport(context, options);
 
         string? authorization = context.RequestHeaders.GetValue("authorization");
         string? bearer = authorization is not null
@@ -146,7 +151,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Autocommit: retry transparently on transient serialization failures, but only while
             // nothing has been streamed yet (see RunAutocommitQuery).
             (CamusIsolationLevel? reqLevel, _, _) = ParseLevelMode(request);
-            bool retry = (reqLevel ?? CamusDBConfig.DefaultIsolationLevel) == CamusIsolationLevel.Serializable;
+            bool retry = (reqLevel ?? options.DefaultIsolationLevel) == CamusIsolationLevel.Serializable;
 
             CacheMetadataHolder cacheMeta = new();
             HLCTimestamp commitToken = await RunAutocommitQuery(request, sql, sink, retry, principal, cacheMeta, ct).ConfigureAwait(false);
@@ -358,7 +363,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 }
             }
 
-            CamusIsolationLevel resolvedLevel = reqLevel ?? CamusDBConfig.DefaultIsolationLevel;
+            CamusIsolationLevel resolvedLevel = reqLevel ?? options.DefaultIsolationLevel;
             if (resolvedLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDml).ConfigureAwait(false);
             else
@@ -450,7 +455,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <para>Ops that share a <see cref="TxnHandle"/> execute in <b>arrival order</b> (a per-handle
     /// serial chain preserves the <c>KvTransaction</c> ordering and read-your-writes the coordinator
     /// session assumes); a <c>START</c> carries no handle yet and runs concurrently, and autocommit ops
-    /// (no handle) run concurrently up to <see cref="CamusDBConfig.GrpcBatchMaxInFlight"/>, which also
+    /// (no handle) run concurrently up to <see cref="CamusDBOptions.GrpcBatchMaxInFlight"/>, which also
     /// backpressures the read loop. The chain is per stream, so a client must pin all of one
     /// transaction's ops to a single stream for the ordering to hold.</para>
     ///
@@ -484,7 +489,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
 
         SemaphoreSlim writeLock = new(1, 1);
-        int maxInFlight = Math.Max(1, CamusDBConfig.GrpcBatchMaxInFlight);
+        int maxInFlight = Math.Max(1, options.GrpcBatchMaxInFlight);
         SemaphoreSlim inFlight = new(maxInFlight, maxInFlight);
 
         // Per-txn-handle serial chains so same-handle ops run strictly in arrival order. The chain is
@@ -503,7 +508,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         // Statements prepared by ops on this stream. A local of the call, so it is freed with the
         // call — a stream that ends for any reason takes its handles with it.
-        StreamPreparedStatements prepared = new();
+        StreamPreparedStatements prepared = new(options);
 
         try
         {

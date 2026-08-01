@@ -25,39 +25,42 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Transactions;
 
 /// <summary>
-/// Verifies the per-transaction mutation cap (CADB0506). Every test overrides
-/// CamusDBConfig.MaxMutationsPerTransaction to a small value so the suite completes
-/// quickly. TearDown restores the original value so the cap doesn't leak into other tests.
+/// Verifies the per-transaction mutation cap (CADB0506). Each test builds its manager and store with
+/// the small cap it wants, so the suite completes quickly and no cap leaks between tests — the limit
+/// is fixed when those objects are constructed, which is why it is passed to the factory rather than
+/// assigned afterwards.
 ///
-/// [NonParallelizable]: tests mutate the global CamusDBConfig.MaxMutationsPerTransaction.
+/// [NonParallelizable]: each test starts its own embedded node. Now that nothing here mutates
+/// process-wide configuration, that node is the only remaining reason for the attribute.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestTransactionMutationLimit
 {
-    private int originalLimit;
-
-    [SetUp]
-    public void SaveConfig()
-    {
-        originalLimit = CamusDBConfig.MaxMutationsPerTransaction;
-    }
-
-    [TearDown]
-    public void RestoreConfig()
-    {
-        CamusDBConfig.MaxMutationsPerTransaction = originalLimit;
-    }
-
+    /// <summary>
+    /// Builds a node whose transaction manager and store are configured with <paramref name="mutationLimit"/>.
+    /// The limit is fixed when they are constructed, so it is passed in rather than assigned to a global
+    /// afterwards — an already-built manager would keep the configuration it was created with.
+    /// </summary>
     private static async Task<(EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store)>
-        CreateAsync(string tag)
+        CreateAsync(string tag, int mutationLimit)
     {
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        KvTransactionsManager mgr = new(node.Kahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", tag);
+
+        (KvTransactionsManager mgr, KvTableStore store) = WithLimit(node, tag, mutationLimit);
         return (node, mgr, store);
+    }
+
+    /// <summary>
+    /// A second manager and store over the same node with a different mutation limit, for the cases that
+    /// stage data under one limit and then exercise another.
+    /// </summary>
+    private static (KvTransactionsManager mgr, KvTableStore store) WithLimit(EmbeddedKahuna node, string tag, int mutationLimit)
+    {
+        CamusDBOptions options = CamusDBOptions.Default with { MaxMutationsPerTransaction = mutationLimit };
+        return (new KvTransactionsManager(node.Kahuna, options), new KvTableStore(node.Kahuna, options, "testdb", tag));
     }
 
     // -----------------------------------------------------------------------
@@ -67,10 +70,8 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task BelowLimit_CommitsSuccessfully()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-01");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-01", 10);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxMutationsPerTransaction = 10;
 
         KvTransaction tx = await mgr.BeginAsync();
 
@@ -91,10 +92,8 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task ExceedsLimit_ThrowsCADB0506_AndNoPartialRows()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-02");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-02", 3);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxMutationsPerTransaction = 3;
 
         KvTransaction tx = await mgr.BeginAsync();
 
@@ -129,12 +128,11 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task IndexMultiplicity_CountsRowPlusIndexEntries()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-03");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-03", 3);
         await using EmbeddedKahuna __ = node;
 
         // 1 row + 2 index entries = 3 mutations per insert. With limit=3 the first insert
         // exhausts the budget; the second must throw.
-        CamusDBConfig.MaxMutationsPerTransaction = 3;
 
         KvTransaction tx = await mgr.BeginAsync();
 
@@ -184,10 +182,8 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task MassBatchInsert_ExceedsLimit_WritesNothing()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-04");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-04", 5);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxMutationsPerTransaction = 5;
 
         KvTransaction tx = await mgr.BeginAsync();
 
@@ -218,17 +214,15 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task MassBatchDelete_ExceedsLimit_Throws()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-05");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-05", 0);
         await using EmbeddedKahuna __ = node;
 
         // Insert 10 rows under unlimited mutations, then try to delete them with a cap of 5.
-        CamusDBConfig.MaxMutationsPerTransaction = 0; // unlimited for setup
         KvTransaction setup = await mgr.BeginAsync();
         for (int i = 0; i < 10; i++)
             await store.InsertRow(setup, new ObjectIdValue(i, 0, 0), [(byte)i]);
         await mgr.CommitAsync(setup);
-
-        CamusDBConfig.MaxMutationsPerTransaction = 5;
+        (mgr, store) = WithLimit(node, "ML-05", 5);
         KvTransaction delTx = await mgr.BeginAsync();
 
         List<KvTableStore.RowDelete> deletes = [];
@@ -249,11 +243,10 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task UpdateTwice_CountsTwice()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-06");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-06", 3);
         await using EmbeddedKahuna __ = node;
 
         // Allow 3 mutations. Write the same row 3 times → should trip on the 4th.
-        CamusDBConfig.MaxMutationsPerTransaction = 3;
 
         KvTransaction tx = await mgr.BeginAsync();
 
@@ -280,10 +273,8 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task DDLTransaction_Unlimited_DoesNotTrip()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-07");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-07", 3);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxMutationsPerTransaction = 3;
 
         // A DDL/backfill transaction is created with mutationLimitOverride: 0.
         KvTransaction ddlTx = await mgr.BeginAsync(mutationLimitOverride: 0);
@@ -306,10 +297,8 @@ public sealed class TestTransactionMutationLimit
     [Test]
     public async Task Disabled_NoLimit_LargeTransactionCommits()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-08");
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) = await CreateAsync("ML-08", 0);
         await using EmbeddedKahuna __ = node;
-
-        CamusDBConfig.MaxMutationsPerTransaction = 0; // disabled
 
         KvTransaction tx = await mgr.BeginAsync();
 

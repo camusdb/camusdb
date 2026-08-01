@@ -395,7 +395,7 @@ public sealed class TestEmbeddedKahuna
                 Storage = "memory",
                 WalStorage = "memory",
                 InitialPartitions = 3
-            },
+            }.WithFastTestTimers(),
             interNode,
             raftCommunication,
             new StaticDiscovery(peers)

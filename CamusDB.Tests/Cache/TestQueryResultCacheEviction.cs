@@ -32,10 +32,10 @@ public sealed class TestQueryResultCacheEviction : CommandsExecutor.BaseTest
 
     protected override CommandExecutor CreateCommandExecutor()
     {
-        _cache = new QueryResultCache(sweepIntervalMs: -1);
+        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }
@@ -180,11 +180,11 @@ public sealed class TestQueryResultCacheEviction : CommandsExecutor.BaseTest
         //
         // Here we create two separate executors both pointing at the same QueryResultCache object
         // so we can verify isolation by database id.
-        QueryResultCache sharedCache = new(sweepIntervalMs: -1);
+        QueryResultCache sharedCache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
-        CommandExecutor execForA = new(new CommandValidator(), new CatalogsManager(logger), logger,
+        CommandExecutor execForA = new(new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: sharedCache);
-        CommandExecutor execForB = new(new CommandValidator(), new CatalogsManager(logger), logger,
+        CommandExecutor execForB = new(new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: sharedCache);
 
         await CreateOrdersTable(dbnameA, dbA, execForA);
@@ -227,7 +227,7 @@ public sealed class TestQueryResultCacheEviction : CommandsExecutor.BaseTest
     {
         // Build an executor with cache: null (disabled).
         CommandExecutor disabledExecutor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger,
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: null);
 

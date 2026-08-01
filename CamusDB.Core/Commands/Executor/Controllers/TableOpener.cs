@@ -67,7 +67,7 @@ internal sealed class TableOpener
         // — so the check must live in Open (which runs on every access), not LoadTable (cache miss only).
         // The required privilege and principal ride the ambient AuthorizationContext set by the request
         // entry point. A superuser and any broader-scope (global / db.*) grant pass via HasPrivilege.
-        if (CamusDBConfig.AuthenticationEnabled)
+        if (database.Options.AuthenticationEnabled)
         {
             AuthorizationScope scope = AuthorizationContext.Current;
             if (scope.Principal is not null && scope.RequiredPrivilege is { } required
@@ -95,13 +95,13 @@ internal sealed class TableOpener
             database.Ancestors.Count > 0
                 ? database.Ancestors
                     .Select(a => (
-                        new KvTableStore(database.Kahuna.Kahuna, a.DatabaseId, tableSchema.Id!, tableSchema.Name ?? "", logger),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
+                        new KvTableStore(database.Kahuna.Kahuna, database.Options, a.DatabaseId, tableSchema.Id!, tableSchema.Name ?? "", logger),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
                         a.ForkTimestamp
                     ))
                     .ToArray()
                 : null;
 
-        KvTableStore store = new(database.Kahuna.Kahuna, database.Id, tableSchema.Id!, tableSchema.Name ?? "", logger, ancestorStores, database.Name);
+        KvTableStore store = new(database.Kahuna.Kahuna, database.Options, database.Id, tableSchema.Id!, tableSchema.Name ?? "", logger, ancestorStores, database.Name);
 
         // Key-range sharding (opt-in): mark this table's row and eligible index key spaces as
         // key-range routed on the local node and auto-seed their initial whole-space descriptors.
@@ -123,14 +123,14 @@ internal sealed class TableOpener
         // process restart, but it is never written to and poses no correctness risk (bounded leak).
         // Lazy-on-open registration is the correct contract: K1 forwarding means the very first
         // writer pays at most one extra round-trip to establish the range descriptor.
-        if (CamusDBConfig.KeyRangeShardingEnabled)
+        if (database.Options.KeyRangeShardingEnabled)
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 
         // Build a column-ID→type lookup used by IsIndexRangeable to gate index registration.
         // Every indexable type uses an ASCII order-preserving key encoding, so only missing or
         // unresolvable column IDs keep an index hash-routed.
         Dictionary<string, ColumnType>? columnTypeById =
-            CamusDBConfig.KeyRangeShardingEnabled && tableSchema.Columns is { Count: > 0 }
+            database.Options.KeyRangeShardingEnabled && tableSchema.Columns is { Count: > 0 }
                 ? tableSchema.Columns.ToDictionary(c => c.Id, c => c.Type)
                 : null;
 

@@ -32,7 +32,7 @@ namespace CamusDB.Core.Transactions;
 ///   transient failure (leader election, partition move) returned <c>MustRetry</c> after
 ///   exhausting the server-side retry budget. No data was written.</item>
 ///   <item><see cref="CamusDBErrorCodes.TransactionLifetimeExceeded"/> (CADB0505) — the
-///   transaction was open longer than <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/>.
+///   transaction was open longer than <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/>.
 ///   Its range locks were released cleanly before this error was raised.</item>
 /// </list>
 /// All other codes are permanent failures (constraint violations, schema errors, invalid input,

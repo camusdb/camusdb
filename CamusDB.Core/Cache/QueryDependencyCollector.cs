@@ -21,7 +21,7 @@ namespace CamusDB.Core.Cache;
 ///   <item><description>
 ///     Table-scan paths record the entire row-bucket keyspace as a range dep
 ///     (<c>{dbId}:{tableId}:r</c>) plus individual row point deps for each row fetched, up to
-///     <see cref="CamusDBConfig.QueryResultCacheMaxPointDeps"/>. When the point-dep cap is
+///     <see cref="CamusDBOptions.QueryResultCacheMaxPointDeps"/>. When the point-dep cap is
 ///     reached, further point deps are silently dropped and <see cref="PointDepsTruncated"/> is
 ///     set. The range dep remains for non-strict entries (it provides conservative coverage for
 ///     inserts and updates). Strict entries must bypass publication when point deps were truncated
@@ -36,13 +36,13 @@ namespace CamusDB.Core.Cache;
 ///     non-indexed columns.
 ///   </description></item>
 ///   <item><description>
-///     <see cref="CamusDBConfig.QueryResultCacheMaxDeps"/> caps the total dep count across all
+///     <see cref="CamusDBOptions.QueryResultCacheMaxDeps"/> caps the total dep count across all
 ///     three categories. If the total is exceeded, <see cref="CapExceeded"/> is set and
 ///     <see cref="Build"/> returns <see cref="QueryDependencySet.Empty"/> — the caller must
 ///     bypass publish rather than store an incomplete dep set.
 ///   </description></item>
 ///   <item><description>
-///     <see cref="CamusDBConfig.QueryResultCacheMaxRanges"/> caps the number of distinct range
+///     <see cref="CamusDBOptions.QueryResultCacheMaxRanges"/> caps the number of distinct range
 ///     deps. Unlike point deps, a truncated range set cannot provide conservative coverage —
 ///     a missing range means writes into that keyspace go undetected. Overflow sets
 ///     <see cref="CapExceeded"/> and the caller must bypass publish.
@@ -68,7 +68,7 @@ internal sealed class QueryDependencyCollector
 
     /// <summary>
     /// True if <see cref="RecordPoint"/> silently dropped at least one point dep because the
-    /// per-query cap (<see cref="CamusDBConfig.QueryResultCacheMaxPointDeps"/>) was reached.
+    /// per-query cap (<see cref="CamusDBOptions.QueryResultCacheMaxPointDeps"/>) was reached.
     ///
     /// <para>Non-strict entries: this flag is informational only. The range dep provides
     /// conservative coverage for rows not individually tracked — inserts and updates in the
@@ -90,7 +90,7 @@ internal sealed class QueryDependencyCollector
     ///
     /// <para>Unlike the point-dep cap, a range-dep overflow cannot be silently truncated: dropping
     /// a range dep means any write into that keyspace would go undetected, violating the
-    /// "dependency-complete or bypass" invariant. When <see cref="CamusDBConfig.QueryResultCacheMaxRanges"/>
+    /// "dependency-complete or bypass" invariant. When <see cref="CamusDBOptions.QueryResultCacheMaxRanges"/>
     /// is reached, <see cref="CapExceeded"/> is set and <see cref="Build"/> returns
     /// <see cref="QueryDependencySet.Empty"/> so the caller bypasses publish.</para>
     /// </summary>

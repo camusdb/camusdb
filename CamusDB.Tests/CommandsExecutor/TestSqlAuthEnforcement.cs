@@ -215,12 +215,13 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     [Test]
     public async Task PasswordRotation_InvalidatesToken()
     {
-        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
-
         // Force authoritative validation on every resolve so the old token is checked against the
         // catalog immediately (the default 1s cache would otherwise serve it until the TTL elapses —
-        // that documented staleness bound is covered by the token-cache tests, not here).
+        // that documented staleness bound is covered by the token-cache tests, not here). The auth
+        // service fixes this when it is constructed, so it is set before the engine is built.
         CamusConfig.AuthenticationCacheTtl = TimeSpan.Zero;
+
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
 
         await RunDdl(executor, "", "CREATE USER rot IDENTIFIED BY 'old-pw'", root);
         string token = (await executor.LoginAsync("rot", "old-pw")).Token;

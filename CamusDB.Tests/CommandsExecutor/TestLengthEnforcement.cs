@@ -145,7 +145,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     public async Task BareString_InsertAtDefaultLimit_Succeeds()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareString();
-        string val = new('a', CamusDBConfig.DefaultStringMaxLength);
+        string val = new('a', CamusDBConstants.DefaultStringMaxLength);
 
         InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
@@ -161,7 +161,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     public async Task BareString_InsertOverDefaultLimit_Throws()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareString();
-        string val = new('a', CamusDBConfig.DefaultStringMaxLength + 1);
+        string val = new('a', CamusDBConstants.DefaultStringMaxLength + 1);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
@@ -180,7 +180,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     public async Task BareBytes_InsertAtDefaultLimit_Succeeds()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareBytes();
-        byte[] val = new byte[CamusDBConfig.DefaultBytesMaxLength];
+        byte[] val = new byte[CamusDBConstants.DefaultBytesMaxLength];
 
         InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
         {
@@ -196,7 +196,7 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
     public async Task BareBytes_InsertOverDefaultLimit_Throws()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithBareBytes();
-        byte[] val = new byte[CamusDBConfig.DefaultBytesMaxLength + 1];
+        byte[] val = new byte[CamusDBConstants.DefaultBytesMaxLength + 1];
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()

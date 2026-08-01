@@ -29,6 +29,12 @@ internal sealed class QueryExecutor
 {
     private readonly ILogger<ICamusDB> logger;
 
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    /// <summary>Configuration of the engine this executor belongs to.</summary>
+    internal CamusDBOptions Options => options;
+
     private readonly QueryPlanner queryPlanner;
 
     private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
@@ -58,14 +64,15 @@ internal sealed class QueryExecutor
     /// </summary>
     private readonly IKahuna? _kahuna;
 
-    public QueryExecutor(ILogger<ICamusDB> logger, StatisticsManager? stats = null, IKahuna? kahuna = null)
+    public QueryExecutor(ILogger<ICamusDB> logger, CamusDBOptions options, StatisticsManager? stats = null, IKahuna? kahuna = null)
     {
         this.logger = logger;
+        this.options = options;
         _kahuna = kahuna;
-        PlanCache = new PlanCache(CamusDBConfig.PlanCacheMaxEntries);
-        queryPlanner = new QueryPlanner(stats, PlanCache);
+        PlanCache = new PlanCache(options.PlanCacheMaxEntries);
+        queryPlanner = new QueryPlanner(stats, PlanCache, options);
         queryAggregator = new QueryAggregator(stats);
-        queryJoinExecutor = new QueryJoinExecutor(this, stats, PlanCache);
+        queryJoinExecutor = new QueryJoinExecutor(this, options, stats, PlanCache);
         this.queryScanner = new(logger);
     }
 
@@ -289,7 +296,7 @@ internal sealed class QueryExecutor
         {
             // We are a waiter. Block until the owner signals completion or the timeout elapses.
             bool ownerPublished = await sfSlot.WaitAsync(
-                CamusDBConfig.QueryResultCacheSingleFlightWaitMs, ct).ConfigureAwait(false);
+                options.QueryResultCacheSingleFlightWaitMs, ct).ConfigureAwait(false);
 
             if (ownerPublished)
             {
@@ -436,7 +443,7 @@ internal sealed class QueryExecutor
         for (int i = 0; i < plan.Steps.Count; i++)
         {
             QueryPlanStep step = plan.Steps[i];
-            if (CamusDBConfig.QueryTracingEnabled)
+            if (options.QueryTracingEnabled)
                 Log.LogExecutingQueryStep(logger, step.Type);
 
             switch (step.Type)
@@ -461,7 +468,7 @@ internal sealed class QueryExecutor
                     if (plan.DataCursor is null)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
-                    plan.DataCursor = querySorter.SortResultset(plan.Ticket, plan.DataCursor);
+                    plan.DataCursor = querySorter.SortResultset(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database));
                     break;
 
                 case QueryPlanStepType.ReduceToProjections:
@@ -480,7 +487,7 @@ internal sealed class QueryExecutor
                         DistinctNode distinctNode = (DistinctNode)plan.StepNodes[i];
                         plan.DataCursor = distinctNode.IsStreaming
                             ? queryDistincter.StreamingDistinctRows(plan.DataCursor)
-                            : queryDistincter.DistinctResultset(plan.Ticket, plan.DataCursor);
+                            : queryDistincter.DistinctResultset(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database));
                     }
                     break;
 
@@ -492,8 +499,8 @@ internal sealed class QueryExecutor
                     {
                         AggregateNode aggNode = (AggregateNode)plan.StepNodes[i];
                         plan.DataCursor = aggNode.IsStreamingGroupBy
-                            ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, plan.DataCursor)
-                            : queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor);
+                            ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database))
+                            : queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database));
                     }
                     break;
 
@@ -750,7 +757,7 @@ internal sealed class QueryExecutor
         // Index order is preserved: the page is filled in scan order and batch results are
         // indexed positionally, so rows are decoded and yielded in scan order. A missing row
         // (null from the batch) is silently skipped — the same contract as the per-entry path.
-        int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
+        int batchSize = options.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
 
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
@@ -927,7 +934,7 @@ internal sealed class QueryExecutor
         QueryByIdTicket ticket
     )
     {
-        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? index))
+        if (!table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? index))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

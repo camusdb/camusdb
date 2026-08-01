@@ -106,15 +106,15 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// <param name="logger">Optional logger; receives a <c>Debug</c> line after each sweep.</param>
     /// <param name="ttlSeconds">
     /// Sliding TTL in seconds. <c>0</c> or negative disables the cache entirely (every parse
-    /// re-lexes from scratch). Maps to <see cref="CamusDBConfig.SqlParserCacheTtlSeconds"/>.
+    /// re-lexes from scratch). Maps to <see cref="CamusDBOptions.SqlParserCacheTtlSeconds"/>.
     /// </param>
     /// <param name="maxEntries">
     /// Maximum entries the dictionary may hold. <c>0</c> = unbounded.
-    /// Maps to <see cref="CamusDBConfig.SqlParserCacheMaxEntries"/>.
+    /// Maps to <see cref="CamusDBOptions.SqlParserCacheMaxEntries"/>.
     /// </param>
     /// <param name="sweepSeconds">
     /// Interval between background eviction sweeps in seconds; clamped to 1 if &lt;= 0.
-    /// Maps to <see cref="CamusDBConfig.SqlParserCacheSweepSeconds"/>.
+    /// Maps to <see cref="CamusDBOptions.SqlParserCacheSweepSeconds"/>.
     /// </param>
     public SqlParserCache(ILogger? logger, int ttlSeconds, int maxEntries, int sweepSeconds)
     {

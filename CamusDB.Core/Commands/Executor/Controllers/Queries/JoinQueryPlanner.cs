@@ -48,14 +48,22 @@ internal sealed class JoinQueryPlanner
 
     private readonly StatisticsManager? _stats;
 
+    /// <summary>
+    /// Configuration of the engine this planner belongs to. Held here rather than read from the
+    /// descriptor passed to each call, so one planner cannot silently plan under two different
+    /// configurations.
+    /// </summary>
+    private readonly CamusDBOptions _options;
+
     private readonly PlanCache? _cache;
 
-    public JoinQueryPlanner(StatisticsManager? stats = null) : this(stats, null) { }
+    public JoinQueryPlanner(CamusDBOptions options, StatisticsManager? stats = null) : this(stats, null, options) { }
 
-    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache)
+    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options)
     {
         _stats = stats;
         _cache = cache;
+        _options = options;
     }
 
     public QueryPlan GetPlan(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)
@@ -87,7 +95,7 @@ internal sealed class JoinQueryPlanner
 
         // Read the config flag once per plan: it is a mutable static, and reading it again at
         // the Put below could observe a mid-plan flip (Put into a cache the lookup said was off).
-        bool planCacheEnabled = CamusDBConfig.PlanCacheEnabled;
+        bool planCacheEnabled = _options.PlanCacheEnabled;
 
         if (_cache is not null
             && planCacheEnabled
@@ -101,7 +109,7 @@ internal sealed class JoinQueryPlanner
         }
         else
         {
-            orderedSource = CamusDBConfig.CostBasedJoinOrderEnabled && _stats is not null
+            orderedSource = _options.CostBasedJoinOrderEnabled && _stats is not null
                 ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats)
                 : JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
         }
@@ -186,7 +194,7 @@ internal sealed class JoinQueryPlanner
             CollectCacheDepsInto(database, d.InnerBound, deps);
     }
 
-    private static PhysicalPlanNode BuildJoinTree(
+    private PhysicalPlanNode BuildJoinTree(
         QuerySource source,
         BoundSelectQuery bound,
         JoinPredicatePushdown.Result pushdown,
@@ -201,7 +209,7 @@ internal sealed class JoinQueryPlanner
                 pushdown.ScanFiltersByAlias.TryGetValue(boundSource.Alias, out NodeAst? scanFilter);
 
                 // When CBO access-path selection is enabled, attempt an index scan on this join leaf.
-                if (CamusDBConfig.CostBasedAccessPathEnabled
+                if (_options.CostBasedAccessPathEnabled
                     && stats is not null
                     && scanFilter is not null)
                 {
@@ -785,7 +793,7 @@ internal sealed class JoinQueryPlanner
     /// Attempts to build an index-range-scan leaf for a join table source that has a
     /// pushed-down filter, replacing the default full primary-row scan.
     ///
-    /// Gated on <see cref="CamusDBConfig.CostBasedAccessPathEnabled"/>. Falls back
+    /// Gated on <see cref="CamusDBOptions.CostBasedAccessPathEnabled"/>. Falls back
     /// (returns null) when no usable index is found, the chosen step is a full scan,
     /// or the range-scan cost exceeds the full-scan breakeven threshold.
     /// </summary>

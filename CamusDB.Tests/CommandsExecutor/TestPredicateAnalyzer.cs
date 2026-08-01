@@ -386,7 +386,7 @@ public class TestPredicateAnalyzer
 
         Assert.IsNotNull(step);
         Assert.AreEqual(QueryPlanStepType.QueryFromIndex, step!.Value.Type);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, step.Value.Index!.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, step.Value.Index!.Name);
     }
 
     [Test]

@@ -10,6 +10,8 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+
 namespace CamusDB.Core.CommandsExecutor.Models.StateMachines;
 
 internal sealed class DeleteFluxState
@@ -27,7 +29,7 @@ internal sealed class DeleteFluxState
     /// so that very large matched sets spill to disk rather than exhausting the process heap.
     /// Owned by <c>RowDeleter.DeleteInternal</c>, which disposes it after the mutation phase.
     /// </summary>
-    public SpillableRowList RowsToDelete { get; set; } = new();
+    public SpillableRowList RowsToDelete { get; set; }
 
     public int DeletedRows { get; set; }
 
@@ -37,5 +39,6 @@ internal sealed class DeleteFluxState
         Table = table;
         Ticket = ticket;
         QueryExecutor = queryExecutor;
+        RowsToDelete = new SpillableRowList(QueryExecutionContext.For(database));
     }
 }

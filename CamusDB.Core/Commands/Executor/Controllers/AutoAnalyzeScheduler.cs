@@ -30,10 +30,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <para><b>Never spikes, never interferes.</b> The scan is delegated to
 /// <see cref="TableAnalyzer.AnalyzeBackgroundAsync"/>, which reads a lock-free snapshot (cannot block
 /// or abort foreground work), samples to bound memory, and throttles its row rate. This scheduler adds
-/// three protections: it analyzes at most <see cref="CamusDBConfig.AutoAnalyzeMaxConcurrent"/> tables
+/// three protections: it analyzes at most <see cref="CamusDBOptions.AutoAnalyzeMaxConcurrent"/> tables
 /// at once; it holds a per-node in-flight claim per table so the loop and the test seam never overlap
 /// on one table; and it passes the analyzer a load callback that cancels a running scan at the next
-/// batch boundary when foreground load exceeds <see cref="CamusDBConfig.AutoAnalyzeLoadPauseThreshold"/>.
+/// batch boundary when foreground load exceeds <see cref="CamusDBOptions.AutoAnalyzeLoadPauseThreshold"/>.
 /// Because the reads take no locks, there is no priority inversion — load backoff addresses raw
 /// CPU/IO contention only.</para>
 ///
@@ -49,6 +49,9 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
     private readonly Func<CancellationToken, Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>>> discoverStale;
     private readonly Func<int> foregroundLoad;
     private readonly ILogger<ICamusDB> logger;
+
+    /// <summary>Configuration for the engine this scheduler serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly int intervalMs;
     private readonly CancellationTokenSource cts = new();
 
@@ -65,8 +68,10 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
         Func<CancellationToken, Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>>> discoverStale,
         Func<int> foregroundLoad,
         ILogger<ICamusDB> logger,
-        int intervalMs)
+        int intervalMs,
+        CamusDBOptions options)
     {
+        this.options = options;
         this.sharedNode = sharedNode;
         this.leaderKey = leaderKey;
         this.analyzer = analyzer;
@@ -79,7 +84,7 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
     /// <summary>Starts the sweep loop. Disabled entirely when auto-analyze is off or the interval is non-positive.</summary>
     public void Start()
     {
-        if (!CamusDBConfig.AutoAnalyzeEnabled || intervalMs <= 0)
+        if (!options.AutoAnalyzeEnabled || intervalMs <= 0)
             return;
 
         // Serialize concurrent Start calls: an unsynchronized `loop ??=` is check-then-act, and
@@ -118,7 +123,7 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
     // True when the foreground load probe reports more in-flight work than the pause threshold allows.
     private bool LoadExceeded()
     {
-        int threshold = CamusDBConfig.AutoAnalyzeLoadPauseThreshold;
+        int threshold = options.AutoAnalyzeLoadPauseThreshold;
         if (threshold <= 0)
             return false; // load-based backoff disabled
         return foregroundLoad() > threshold;
@@ -133,7 +138,7 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
     /// </summary>
     internal async Task<int> RunSweepAsync(CancellationToken ct)
     {
-        if (!CamusDBConfig.AutoAnalyzeEnabled)
+        if (!options.AutoAnalyzeEnabled)
             return 0;
 
         if (!await AmILeaderAsync(ct).ConfigureAwait(false))
@@ -153,7 +158,7 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
         var ordered = new List<(DatabaseDescriptor db, TableDescriptor table)>(candidates);
         Shuffle(ordered, (ulong)Now().L);
 
-        int maxConcurrent = Math.Max(1, CamusDBConfig.AutoAnalyzeMaxConcurrent);
+        int maxConcurrent = Math.Max(1, options.AutoAnalyzeMaxConcurrent);
         HLCTimestamp analyzedAt = Now();
 
         int analyzed = 0;

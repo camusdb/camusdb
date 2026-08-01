@@ -47,11 +47,11 @@ public class TestGrpcRowsService : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger,
+        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
-        rowsService = new(serviceExecutor, coordinator, logger);
-        sqlService   = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge());
+        rowsService = new(serviceExecutor, coordinator, logger, CamusDBConfig.Ambient);
+        sqlService   = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), CamusDBConfig.Ambient);
     }
 
     [TearDown]

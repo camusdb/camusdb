@@ -39,7 +39,7 @@ public sealed class PreparedStatementsController : CommandsController
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
         PreparedStatementRegistry preparedStatements,
-        ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+        ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
     {
         this.preparedStatements = preparedStatements;
     }

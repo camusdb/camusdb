@@ -39,7 +39,7 @@ internal sealed class SubqueryQueryExecutor
     {
         this.queryBinder = queryBinder;
         this.queryExecutor = queryExecutor;
-        queryJoinExecutor = new QueryJoinExecutor(queryExecutor);
+        queryJoinExecutor = new QueryJoinExecutor(queryExecutor, queryExecutor.Options);
     }
 
     /// <summary>

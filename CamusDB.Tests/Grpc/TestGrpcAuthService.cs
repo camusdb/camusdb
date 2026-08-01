@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Grpc.Core;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
@@ -47,11 +48,11 @@ internal sealed class TestGrpcAuthService : BaseTest
     public void SetUpGrpcAuthService()
     {
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(), new CatalogsManager(logger), logger,
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
-        auth = new CamusAuthService(serviceExecutor, logger);
+        auth = new CamusAuthService(serviceExecutor, logger, CamusConfig.Ambient);
         sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge());
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusConfig.Ambient);
 
         savedEnabled           = CamusConfig.AuthenticationEnabled;
         savedServerKey         = CamusConfig.AccessTokenServerKey;
@@ -85,6 +86,17 @@ internal sealed class TestGrpcAuthService : BaseTest
         CamusConfig.BootstrapSuperuser         = "root";
         CamusConfig.BootstrapSuperuserPassword = "root-password";
         CamusConfig.AuthenticationEnabled      = true;
+
+        // An engine fixes its configuration when it is constructed, so the executor and the services
+        // in front of it are rebuilt here — after the authentication policy and signing key are in
+        // place — rather than in set-up, where they would have captured auth-disabled settings.
+        serviceExecutor = new CommandExecutor(
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusConfig.Ambient,
+            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
+        auth = new CamusAuthService(serviceExecutor, logger, CamusConfig.Ambient);
+        sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusConfig.Ambient);
+
         await serviceExecutor.EnsureBootstrapSuperuserAsync();
     }
 

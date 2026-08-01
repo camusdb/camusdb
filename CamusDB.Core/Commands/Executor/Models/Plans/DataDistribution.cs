@@ -12,7 +12,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// Describes how a plan node's output data is distributed across the cluster.
 /// Populated on scan leaves by the planner; null on all other nodes.
 ///
-/// Staleness contract: reflects <see cref="CamusDB.Core.CamusDBConfig.KeyRangeShardingEnabled"/>
+/// Staleness contract: reflects <see cref="CamusDB.Core.CamusDBOptions.KeyRangeShardingEnabled"/>
 /// at plan-build time. Leadership transitions are not tracked — this is an approximate
 /// snapshot suitable for cost estimates only. Re-planning is triggered by schema changes,
 /// not by Raft leadership changes.

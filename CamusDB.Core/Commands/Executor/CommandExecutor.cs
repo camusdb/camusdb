@@ -126,6 +126,16 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly CommandValidator validator;
 
+    /// <summary>
+    /// Configuration for this engine. Held here and handed to everything this executor constructs, so
+    /// a component never reaches for a process-wide value and two executors can be configured
+    /// independently in one process.
+    /// </summary>
+    private readonly CamusDBOptions options;
+
+    /// <summary>Configuration for this engine, for the controllers and stores it owns.</summary>
+    internal CamusDBOptions Options => options;
+
     private readonly SemiJoinAnalyzer semiJoinAnalyzer;
 
     private readonly ISchemaDdlForwarder? schemaDdlForwarder;
@@ -161,6 +171,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         CommandValidator validator,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
+        CamusDBOptions options,
         EmbeddedKahuna? sharedNode = null,
         ISchemaDdlForwarder? schemaDdlForwarder = null,
         DatabaseRegistry? registry = null,
@@ -170,6 +181,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
+        this.options = options;
         this.schemaDdlForwarder = schemaDdlForwarder;
         this.isClusterMode = isClusterMode;
         this.sharedNode = sharedNode;
@@ -181,25 +193,25 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
         else
         {
-            registryTask = DatabaseRegistry.OpenAsync(sharedNode!, isClusterMode);
+            registryTask = DatabaseRegistry.OpenAsync(sharedNode!, options, isClusterMode);
             ownsRegistry = true;
         }
 
         // The auth catalog rides the same shared node and _system/ keyspace as the registry.
         if (sharedNode is not null)
         {
-            authCatalogTask = AuthCatalog.OpenAsync(sharedNode, isClusterMode);
-            authService = new AuthService(authCatalogTask);
+            authCatalogTask = AuthCatalog.OpenAsync(sharedNode, options, isClusterMode);
+            authService = new AuthService(authCatalogTask, options);
             backupManager = new BackupManager(sharedNode, logger);
         }
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, sharedNode, registryTask, isClusterMode, cache);
+        databaseOpener = new(this, databaseDescriptors, catalogs, logger, options, sharedNode, registryTask, isClusterMode, cache);
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger);
         databaseCreator = new(logger);
         tableOpener = new(catalogs, logger);
-        tableCreator = new(catalogs, logger);
+        tableCreator = new(catalogs, logger, options);
         tableColumnAlterer = new(catalogs, logger);
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
@@ -208,9 +220,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         statisticsManager = new(logger);
         tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);
-        queryExecutor = new(logger, statisticsManager, sharedNode?.Kahuna);
+        queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna);
         sqlExecutor = new();
-        schemaQuerier = new(catalogs, logger);
+        schemaQuerier = new(catalogs, logger, options);
         queryBinder = new QueryBinder(tableOpener);
         SubqueryQueryExecutor subqueryQueryExecutor = new(queryBinder, queryExecutor);
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
@@ -220,14 +232,14 @@ public sealed class CommandExecutor : IAsyncDisposable
             existsSubqueryExecutor);
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
-        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, statisticsManager, semiJoinAnalyzer);
-        tableAnalyzer = new TableAnalyzer(statisticsManager);
+        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, options, statisticsManager, semiJoinAnalyzer);
+        tableAnalyzer = new TableAnalyzer(statisticsManager, options);
 
         sqlParserCache = new SQLParser.SqlParserCache(
             logger,
-            CamusDBConfig.SqlParserCacheTtlSeconds,
-            CamusDBConfig.SqlParserCacheMaxEntries,
-            CamusDBConfig.SqlParserCacheSweepSeconds);
+            options.SqlParserCacheTtlSeconds,
+            options.SqlParserCacheMaxEntries,
+            options.SqlParserCacheSweepSeconds);
 
         // Keep every branch's snapshot-floor hold alive for as long as the branch exists. The
         // registry is opened asynchronously, so defer the start until it is ready; the renewer
@@ -248,7 +260,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // pre-created-registry path, where registryTask completes without that gate.)
         await node.WaitUntilStartedAsync().ConfigureAwait(false);
 
-        SnapshotHoldRenewer renewer = new(node, registry, logger, CamusDBConfig.BranchSnapshotHoldLeaseMs);
+        SnapshotHoldRenewer renewer = new(node, registry, logger, options.BranchSnapshotHoldLeaseMs);
         renewer.Start();
         snapshotHoldRenewer = renewer;
 
@@ -262,7 +274,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Physically reclaim deferred-dropped databases/tables past their retention window, on the
         // elected node. Kick one immediate sweep so orphans already expired during downtime are cleaned
         // promptly rather than waiting a full interval.
-        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, CamusDBConfig.OrphanReclaimIntervalMs);
+        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options.OrphanReclaimIntervalMs);
         reclaimer.Start();
         orphanReclaimer = reclaimer;
         _ = ReclaimExpiredOrphansOnStartupAsync(reclaimer);
@@ -276,7 +288,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             DiscoverStaleTablesAsync,
             () => ForegroundLoadProbe?.Invoke() ?? 0,
             logger,
-            CamusDBConfig.AutoAnalyzeCheckIntervalMs);
+            options.AutoAnalyzeCheckIntervalMs,
+            options);
         analyzeScheduler.Start();
         autoAnalyzeScheduler = analyzeScheduler;
     }
@@ -294,8 +307,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (sharedNode is null)
             return result;
 
-        double fraction = CamusDBConfig.AutoAnalyzeFractionStaleRows;
-        long minRows = CamusDBConfig.AutoAnalyzeMinStaleRows;
+        double fraction = options.AutoAnalyzeFractionStaleRows;
+        long minRows = options.AutoAnalyzeMinStaleRows;
 
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
         IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
@@ -376,7 +389,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Test-only seam: forces one auto-analyze sweep (after the deferred renewer start completes) and
     /// returns the number of tables analyzed, so a test can drive it deterministically instead of
-    /// waiting for the timer. Requires <see cref="CamusDBConfig.AutoAnalyzeEnabled"/> to be set.
+    /// waiting for the timer. Requires <see cref="CamusDBOptions.AutoAnalyzeEnabled"/> to be set.
     /// </summary>
     internal async Task<int> RunAutoAnalyzeForTestsAsync()
     {
@@ -429,7 +442,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Test-only seam: forces one orphan-reclamation sweep after the deferred renewer/reclaimer start
     /// completes, and returns the number of orphans reclaimed. Lets a test drive the GC deterministically
-    /// (with a tiny <see cref="CamusDBConfig.OrphanRetentionMs"/>) instead of waiting for the timer.
+    /// (with a tiny <see cref="CamusDBOptions.OrphanRetentionMs"/>) instead of waiting for the timer.
     /// </summary>
     internal async Task<int> RunOrphanReclaimForTestsAsync()
     {
@@ -441,7 +454,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>
     /// Runs one orphan-reclamation sweep at startup so databases/tables whose retention window elapsed
     /// while the node was down (and any purge interrupted by a crash) are reclaimed promptly instead of
-    /// waiting a full <see cref="CamusDBConfig.OrphanReclaimIntervalMs"/>. Best-effort and gated by
+    /// waiting a full <see cref="CamusDBOptions.OrphanReclaimIntervalMs"/>. Best-effort and gated by
     /// leader election inside the reclaimer; failures are logged and swallowed so startup never blocks.
     /// </summary>
     private async Task ReclaimExpiredOrphansOnStartupAsync(OrphanReclaimer reclaimer)
@@ -752,7 +765,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             // is renewed while the branch lives (leader-owned renewer) and released on leaf drop.
             IKahuna sourceKahuna = sourceDescriptor.Kahuna.Kahuna;
             (KeyValueResponseType holdType, string holdId, _) = await sourceKahuna
-                .LocateAndAcquireSnapshotHold(branchId, forkT, CamusDBConfig.BranchSnapshotHoldLeaseMs, CancellationToken.None)
+                .LocateAndAcquireSnapshotHold(branchId, forkT, options.BranchSnapshotHoldLeaseMs, CancellationToken.None)
                 .ConfigureAwait(false);
 
             if (holdType != KeyValueResponseType.Set || string.IsNullOrEmpty(holdId))
@@ -1615,7 +1628,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             ticket.IndexName,
             name => table.Schema.Columns!.Find(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Type);
 
-        TableIndexAdder.ValidateIncludeColumns(table, ticket);
+        TableIndexAdder.ValidateIncludeColumns(table, ticket, options);
 
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIdsForIndex(table, ticket.Columns);
@@ -1957,7 +1970,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     $"No orphaned table with id '{ticket.OrphanTableId}' is available to relink in database '{ticket.DatabaseName}'");
 
             // Relink adds a live table, so it counts against the per-database table limit like CREATE.
-            int maxTables = CamusDBConfig.MaxTablesPerDatabase;
+            int maxTables = options.MaxTablesPerDatabase;
             if (maxTables > 0 && database.Schema.Tables.Count >= maxTables)
                 throw new CamusDBException(
                     CamusDBErrorCodes.SchemaLimitExceeded,
@@ -2471,7 +2484,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
-    /// The authorization gate. A no-op when <see cref="CamusDBConfig.AuthenticationEnabled"/> is off
+    /// The authorization gate. A no-op when <see cref="CamusDBOptions.AuthenticationEnabled"/> is off
     /// (the default). When on, it rejects an unauthenticated request and then checks the parsed
     /// statement against the caller's privileges before any lock or mutation:
     /// <list type="bullet">
@@ -2492,7 +2505,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private async Task EnforceAsync(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        if (!CamusDBConfig.AuthenticationEnabled)
+        if (!options.AuthenticationEnabled)
             return;
 
         Principal? principal = ticket.Principal;
@@ -2567,7 +2580,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private void SetAuthorizationScope(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        AuthorizationContext.Current = CamusDBConfig.AuthenticationEnabled
+        AuthorizationContext.Current = options.AuthenticationEnabled
             ? new AuthorizationScope(ticket.Principal, MapRequiredPrivilege(ast.nodeType))
             : default;
     }
@@ -2582,8 +2595,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// one was already rejected by <see cref="EnforceAsync"/> before this is reached — so the
     /// null-propagation here is only a safety net, never a way to opt out of filtering.</para>
     /// </summary>
-    private static Principal? VisibilityPrincipal(ExecuteSQLTicket ticket)
-        => CamusDBConfig.AuthenticationEnabled ? ticket.Principal : null;
+    private Principal? VisibilityPrincipal(ExecuteSQLTicket ticket)
+        => options.AuthenticationEnabled ? ticket.Principal : null;
 
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
     private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
@@ -2646,7 +2659,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private void EnsureBackupAllowed(Principal? principal)
     {
-        if (CamusDBConfig.AuthenticationEnabled)
+        if (options.AuthenticationEnabled)
         {
             if (principal is null)
                 throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
@@ -2722,32 +2735,32 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
-    /// If <see cref="CamusDBConfig.AuthenticationEnabled"/> is on, ensures the catalog has at least one
+    /// If <see cref="CamusDBOptions.AuthenticationEnabled"/> is on, ensures the catalog has at least one
     /// user by seeding the configured bootstrap superuser when it is empty. Fails startup (fail-closed)
     /// when auth is enabled, the catalog is empty, and no bootstrap secret was supplied — never opens an
     /// unauthenticated administration window. A no-op when auth is disabled or a user already exists.
     /// </summary>
     public async Task EnsureBootstrapSuperuserAsync()
     {
-        if (!CamusDBConfig.AuthenticationEnabled || authCatalogTask is null)
+        if (!options.AuthenticationEnabled || authCatalogTask is null)
             return;
 
         AuthCatalog catalog = await GetAuthCatalogAsync().ConfigureAwait(false);
         if (await catalog.UserCountAsync().ConfigureAwait(false) > 0)
             return;
 
-        if (string.IsNullOrEmpty(CamusDBConfig.BootstrapSuperuser) || string.IsNullOrEmpty(CamusDBConfig.BootstrapSuperuserPassword))
+        if (string.IsNullOrEmpty(options.BootstrapSuperuser) || string.IsNullOrEmpty(options.BootstrapSuperuserPassword))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidConfig,
                 "Authentication is enabled with an empty user catalog but no bootstrap superuser is configured; " +
                 "refusing to start without an administrator (set the bootstrap superuser secret).");
 
         bool created = await catalog.TryBootstrapSuperuserAsync(
-            CamusDBConfig.BootstrapSuperuser,
-            PasswordHasher.Hash(CamusDBConfig.BootstrapSuperuserPassword)).ConfigureAwait(false);
+            options.BootstrapSuperuser,
+            PasswordHasher.Hash(options.BootstrapSuperuserPassword)).ConfigureAwait(false);
 
         if (created && logger.IsEnabled(LogLevel.Information))
-            logger.LogInformation("Bootstrap superuser '{User}' created", CamusDBConfig.BootstrapSuperuser);
+            logger.LogInformation("Bootstrap superuser '{User}' created", options.BootstrapSuperuser);
     }
 
     /// <summary>

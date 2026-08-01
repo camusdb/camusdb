@@ -39,7 +39,7 @@ public abstract class PhysicalPlanNode
     /// <see cref="Controllers.Queries.JoinQueryPlanner"/> from the table/index sharding scheme.
     /// Null on all non-leaf nodes (filter, sort, join, …).
     ///
-    /// Staleness contract: reflects <see cref="CamusDB.Core.CamusDBConfig.KeyRangeShardingEnabled"/>
+    /// Staleness contract: reflects <see cref="CamusDB.Core.CamusDBOptions.KeyRangeShardingEnabled"/>
     /// at plan-build time; leadership transitions are not tracked (approximate cost-estimation snapshot).
     /// </summary>
     public DataDistribution? Distribution { get; internal set; }

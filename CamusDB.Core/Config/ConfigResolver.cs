@@ -73,57 +73,18 @@ public static class ConfigResolver
         if (cli.RequireTlsWhenAuthEnabled is bool requireTls)
             config.RequireTlsWhenAuthEnabled = requireTls;
     }
-
     /// <summary>
-    /// Applies resolved config to process-wide static knobs. Call once at startup before the engine runs.
+    /// Builds the immutable options instance for one engine from resolved configuration. Precedence
+    /// (CLI &gt; env &gt; YAML &gt; built-in default) has already been applied to <paramref name="config"/>
+    /// by <see cref="ApplyCliOverrides"/> and the reader; this method only maps the result.
     /// </summary>
-    public static void ApplyToCamusDBConfig(ConfigDefinition config)
+    public static CamusDBOptions Resolve(ConfigDefinition config)
     {
-        if (!string.IsNullOrEmpty(config.DataDir))
-            CamusDBConfig.DataDirectory = config.DataDir;
-
-        CamusDBConfig.StatsFlushIntervalMs = config.StatsFlushIntervalMs;
-        CamusDBConfig.StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows;
-        CamusDBConfig.StatsHistogramBuckets = config.StatsHistogramBuckets;
-
-        CamusDBConfig.AutoAnalyzeEnabled = config.AutoAnalyzeEnabled;
-        CamusDBConfig.AutoAnalyzeCheckIntervalMs = config.AutoAnalyzeCheckIntervalMs;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = config.AutoAnalyzeFractionStaleRows;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = config.AutoAnalyzeMinStaleRows;
-        CamusDBConfig.AutoAnalyzeMaxConcurrent = config.AutoAnalyzeMaxConcurrent;
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond = config.AutoAnalyzeMaxRowsPerSecond;
-        CamusDBConfig.AutoAnalyzeHistogramSampleRows = config.AutoAnalyzeHistogramSampleRows;
-        CamusDBConfig.AutoAnalyzeHllPrecision = config.AutoAnalyzeHllPrecision;
-        CamusDBConfig.AutoAnalyzeLoadPauseThreshold = config.AutoAnalyzeLoadPauseThreshold;
-        CamusDBConfig.AutoAnalyzeOwnershipCheckRows = config.AutoAnalyzeOwnershipCheckRows;
-
-        CamusDBConfig.SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds;
-        CamusDBConfig.SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries;
-        CamusDBConfig.SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds;
-
-        CamusDBConfig.OrphanRetentionMs = config.OrphanRetentionMs;
-        CamusDBConfig.OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs;
-
-        CamusDBConfig.DefaultIsolationLevel = config.ParseDefaultIsolationLevel();
-        CamusDBConfig.DefaultTransactionLocking = config.ParseDefaultTransactionLocking();
-        CamusDBConfig.RangeLockExpiresMs = config.RangeLockExpiresMs;
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs;
-        CamusDBConfig.TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs;
-        CamusDBConfig.TransactionReaperIntervalMs = config.TransactionReaperIntervalMs;
-        CamusDBConfig.PreparedStatementIdleTimeoutMs = config.PreparedStatementIdleTimeoutMs;
-        CamusDBConfig.PreparedStatementSweepIntervalMs = config.PreparedStatementSweepIntervalMs;
-        CamusDBConfig.GrpcMaxPreparedStatementsPerStream = config.GrpcMaxPreparedStatementsPerStream;
-        CamusDBConfig.RestMaxPreparedStatementsPerPrincipal = config.RestMaxPreparedStatementsPerPrincipal;
-        CamusDBConfig.RestMaxPreparedStatements = config.RestMaxPreparedStatements;
-        CamusDBConfig.MaxPreparedStatementBytes = config.MaxPreparedStatementBytes;
-        CamusDBConfig.RestMaxPreparedStatementBytes = config.RestMaxPreparedStatementBytes;
-        CamusDBConfig.RestMaxPreparedStatementBytesPerPrincipal = config.RestMaxPreparedStatementBytesPerPrincipal;
-        CamusDBConfig.GrpcMaxPreparedStatementBytesPerStream = config.GrpcMaxPreparedStatementBytesPerStream;
-        CamusDBConfig.LockEscalationThreshold = config.LockEscalationThreshold;
-        CamusDBConfig.LockWaitDeadlineMs = config.LockWaitDeadlineMs;
-
+        // Key-range sharding is the one knob the environment may override after YAML, so it is
+        // computed before the initializer rather than mapped straight across.
         bool keyRangeSharding = config.KeyRangeSharding;
         string? envSharding = Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING");
+
         if (!string.IsNullOrEmpty(envSharding))
         {
             keyRangeSharding =
@@ -131,54 +92,116 @@ public static class ConfigResolver
                 string.Equals(envSharding, "true", StringComparison.OrdinalIgnoreCase);
         }
 
-        CamusDBConfig.KeyRangeShardingEnabled = keyRangeSharding;
-        CamusDBConfig.ClusterPartitionCount = config.InitialPartitions;
-        CamusDBConfig.GrpcBatchMaxInFlight = config.GrpcBatchMaxInFlight;
-        CamusDBConfig.CostBasedAccessPathEnabled = config.CostBasedAccessPathEnabled;
-        CamusDBConfig.CostBasedJoinOrderEnabled = config.CostBasedJoinOrderEnabled;
-        CamusDBConfig.PlanCacheEnabled = config.PlanCacheEnabled;
-        CamusDBConfig.PlanCacheMaxEntries = config.PlanCacheMaxEntries;
+        return new CamusDBOptions
+        {
+        // An empty data_dir means "unset": keep the built-in default rather than
+        // rooting the database at the current directory.
+        DataDirectory = !string.IsNullOrEmpty(config.DataDir) ? config.DataDir : CamusDBOptions.Default.DataDirectory,
 
-        CamusDBConfig.RegexMatchTimeoutMs = config.RegexMatchTimeoutMs;
-        CamusDBConfig.RegexCacheMaxEntries = config.RegexCacheMaxEntries;
+        StatsFlushIntervalMs = config.StatsFlushIntervalMs,
+        StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows,
+        StatsHistogramBuckets = config.StatsHistogramBuckets,
 
-        CamusDBConfig.SpillEnabled = config.SpillEnabled;
-        CamusDBConfig.SpillThresholdRows = config.SpillThresholdRows;
-        CamusDBConfig.SpillMergeFanIn = config.SpillMergeFanIn;
+        AutoAnalyzeEnabled = config.AutoAnalyzeEnabled,
+        AutoAnalyzeCheckIntervalMs = config.AutoAnalyzeCheckIntervalMs,
+        AutoAnalyzeFractionStaleRows = config.AutoAnalyzeFractionStaleRows,
+        AutoAnalyzeMinStaleRows = config.AutoAnalyzeMinStaleRows,
+        AutoAnalyzeMaxConcurrent = config.AutoAnalyzeMaxConcurrent,
+        AutoAnalyzeMaxRowsPerSecond = config.AutoAnalyzeMaxRowsPerSecond,
+        AutoAnalyzeHistogramSampleRows = config.AutoAnalyzeHistogramSampleRows,
+        AutoAnalyzeHllPrecision = config.AutoAnalyzeHllPrecision,
+        AutoAnalyzeLoadPauseThreshold = config.AutoAnalyzeLoadPauseThreshold,
+        AutoAnalyzeOwnershipCheckRows = config.AutoAnalyzeOwnershipCheckRows,
 
-        CamusDBConfig.MaxIdentifierLength = config.MaxIdentifierLength;
-        CamusDBConfig.MaxColumnsPerTable = config.MaxColumnsPerTable;
-        CamusDBConfig.MaxIndexesPerTable = config.MaxIndexesPerTable;
-        CamusDBConfig.MaxTablesPerDatabase = config.MaxTablesPerDatabase;
-        CamusDBConfig.MaxIndexColumns = config.MaxIndexColumns;
-        CamusDBConfig.MaxIndexIncludeTupleBytes = config.MaxIndexIncludeTupleBytes;
-        CamusDBConfig.MaxMutationsPerTransaction = config.MaxMutationsPerTransaction;
-        CamusDBConfig.BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs;
+        SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds,
+        SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries,
+        SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds,
 
-        // Mirror the effective Kahuna PITR retention window (seconds) into the process-wide config so
-        // the restore window guard can reject a target time older than now - window without re-reading
-        // the embedded node's options. Falls back to Kahuna's 1-hour default when the kahuna block
-        // leaves it unset, matching EmbeddedKahunaOptions.PitrWindow.
-        CamusDBConfig.PitrWindowSeconds = config.Kahuna.PitrWindowSeconds ?? 3600;
+        OrphanRetentionMs = config.OrphanRetentionMs,
+        OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs,
 
-        CamusDBConfig.QueryResultCacheEnabled = config.QueryResultCacheEnabled;
-        CamusDBConfig.QueryResultCacheDefaultTtlMs = config.QueryResultCacheDefaultTtlMs;
-        CamusDBConfig.QueryResultCacheMaxEntries = config.QueryResultCacheMaxEntries;
-        CamusDBConfig.QueryResultCacheMaxBytes = config.QueryResultCacheMaxBytes;
-        CamusDBConfig.QueryResultCacheMaxEntryBytes = config.QueryResultCacheMaxEntryBytes;
-        CamusDBConfig.QueryResultCacheMaxEntryRows = config.QueryResultCacheMaxEntryRows;
-        CamusDBConfig.QueryResultCacheMaxDeps = config.QueryResultCacheMaxDeps;
-        CamusDBConfig.QueryResultCacheMaxPointDeps = config.QueryResultCacheMaxPointDeps;
-        CamusDBConfig.QueryResultCacheMaxRanges = config.QueryResultCacheMaxRanges;
-        CamusDBConfig.QueryResultCacheSingleFlightWaitMs = config.QueryResultCacheSingleflightWaitMs;
-        CamusDBConfig.QueryResultCacheStrictValidationMaxKeys = config.QueryResultCacheStrictValidationMaxKeys;
-        CamusDBConfig.QueryResultCacheSweepIntervalMs = config.QueryResultCacheSweepIntervalMs;
+        DefaultIsolationLevel = config.ParseDefaultIsolationLevel(),
+        DefaultTransactionLocking = config.ParseDefaultTransactionLocking(),
+        RangeLockExpiresMs = config.RangeLockExpiresMs,
+        MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs,
+        TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs,
+        TransactionReaperIntervalMs = config.TransactionReaperIntervalMs,
+        PreparedStatementIdleTimeoutMs = config.PreparedStatementIdleTimeoutMs,
+        PreparedStatementSweepIntervalMs = config.PreparedStatementSweepIntervalMs,
+        GrpcMaxPreparedStatementsPerStream = config.GrpcMaxPreparedStatementsPerStream,
+        RestMaxPreparedStatementsPerPrincipal = config.RestMaxPreparedStatementsPerPrincipal,
+        RestMaxPreparedStatements = config.RestMaxPreparedStatements,
+        MaxPreparedStatementBytes = config.MaxPreparedStatementBytes,
+        RestMaxPreparedStatementBytes = config.RestMaxPreparedStatementBytes,
+        RestMaxPreparedStatementBytesPerPrincipal = config.RestMaxPreparedStatementBytesPerPrincipal,
+        GrpcMaxPreparedStatementBytesPerStream = config.GrpcMaxPreparedStatementBytesPerStream,
+        LockEscalationThreshold = config.LockEscalationThreshold,
+        LockWaitDeadlineMs = config.LockWaitDeadlineMs,
 
-        // Transport-security policy for authenticated requests. Applied unconditionally: authentication
-        // itself is switched on later from the environment, so this must already hold the operator's
-        // choice by the time the first request is gated.
-        CamusDBConfig.RequireTlsWhenAuthEnabled = config.RequireTlsWhenAuthEnabled;
+        KeyRangeShardingEnabled = keyRangeSharding,
+        ClusterPartitionCount = config.InitialPartitions,
+        GrpcBatchMaxInFlight = config.GrpcBatchMaxInFlight,
+        CostBasedAccessPathEnabled = config.CostBasedAccessPathEnabled,
+        CostBasedJoinOrderEnabled = config.CostBasedJoinOrderEnabled,
+        PlanCacheEnabled = config.PlanCacheEnabled,
+        PlanCacheMaxEntries = config.PlanCacheMaxEntries,
 
-        CamusDBConfig.Kahuna = config.Kahuna;
+        RegexMatchTimeoutMs = config.RegexMatchTimeoutMs,
+        RegexCacheMaxEntries = config.RegexCacheMaxEntries,
+
+        SpillEnabled = config.SpillEnabled,
+        SpillThresholdRows = config.SpillThresholdRows,
+        SpillMergeFanIn = config.SpillMergeFanIn,
+
+        MaxIdentifierLength = config.MaxIdentifierLength,
+        MaxColumnsPerTable = config.MaxColumnsPerTable,
+        MaxIndexesPerTable = config.MaxIndexesPerTable,
+        MaxTablesPerDatabase = config.MaxTablesPerDatabase,
+        MaxIndexColumns = config.MaxIndexColumns,
+        MaxIndexIncludeTupleBytes = config.MaxIndexIncludeTupleBytes,
+        MaxMutationsPerTransaction = config.MaxMutationsPerTransaction,
+        BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs,
+
+            // Mirror the effective Kahuna PITR retention window (seconds) into the process-wide config so
+            // the restore window guard can reject a target time older than now - window without re-reading
+            // the embedded node's options. Falls back to Kahuna's 1-hour default when the kahuna block
+            // leaves it unset, matching EmbeddedKahunaOptions.PitrWindow.
+        PitrWindowSeconds = config.Kahuna.PitrWindowSeconds ?? 3600,
+
+        QueryResultCacheEnabled = config.QueryResultCacheEnabled,
+        QueryResultCacheDefaultTtlMs = config.QueryResultCacheDefaultTtlMs,
+        QueryResultCacheMaxEntries = config.QueryResultCacheMaxEntries,
+        QueryResultCacheMaxBytes = config.QueryResultCacheMaxBytes,
+        QueryResultCacheMaxEntryBytes = config.QueryResultCacheMaxEntryBytes,
+        QueryResultCacheMaxEntryRows = config.QueryResultCacheMaxEntryRows,
+        QueryResultCacheMaxDeps = config.QueryResultCacheMaxDeps,
+        QueryResultCacheMaxPointDeps = config.QueryResultCacheMaxPointDeps,
+        QueryResultCacheMaxRanges = config.QueryResultCacheMaxRanges,
+        QueryResultCacheSingleFlightWaitMs = config.QueryResultCacheSingleflightWaitMs,
+        QueryResultCacheStrictValidationMaxKeys = config.QueryResultCacheStrictValidationMaxKeys,
+        QueryResultCacheSweepIntervalMs = config.QueryResultCacheSweepIntervalMs,
+
+            // Transport-security policy for authenticated requests. Applied unconditionally: authentication
+            // itself is switched on later from the environment, so this must already hold the operator's
+            // choice by the time the first request is gated.
+        RequireTlsWhenAuthEnabled = config.RequireTlsWhenAuthEnabled,
+
+        Kahuna = config.Kahuna.Copy(),
+        };
+    }
+
+    /// <summary>
+    /// Resolves the configuration and also installs it as the process-wide ambient instance, returning
+    /// what it installed so the caller can inject the same instance. Retained only while call sites are
+    /// migrated to constructor-injected options; new code should call <see cref="Resolve"/> and pass
+    /// the result explicitly rather than relying on the ambient value.
+    /// </summary>
+    public static CamusDBOptions ApplyToCamusDBConfig(ConfigDefinition config)
+    {
+        CamusDBOptions options = Resolve(config);
+
+        CamusDBConfig.SetAmbient(options);
+
+        return options;
     }
 }

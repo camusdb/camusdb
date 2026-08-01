@@ -39,7 +39,7 @@ public class TestIndexInListScan : BaseTest
     // ── Planner-only test harness ─────────────────────────────────────────────
 
     private static QueryPlannerTestContext? ctx;
-    private readonly QueryPlanner queryPlanner = new();
+    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
 
     [OneTimeSetUp]
     public void OneTimeSetUp() => ctx = QueryPlannerTestContext.Create();
@@ -93,7 +93,7 @@ public class TestIndexInListScan : BaseTest
             "Expected index-in-list scan on unique PK");
 
         IndexInListScanNode node = (IndexInListScanNode)ScanRoot(plan);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, node.Index.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, node.Index.Name);
         Assert.AreEqual("id", node.ColumnName);
         Assert.AreEqual(3, node.Values.Count);
     }
@@ -166,7 +166,7 @@ public class TestIndexInListScan : BaseTest
             "Unique PK IN-list (N=3) must beat the year range scan (R15b finding #1)");
 
         IndexInListScanNode node = (IndexInListScanNode)ScanRoot(plan);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, node.Index.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, node.Index.Name);
         Assert.AreEqual(3, node.Values.Count);
 
         // year > 2019 must remain as a residual filter (it is not absorbed by the IN-list scan).
@@ -769,7 +769,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: 2);
 
-        QueryPlanner planner = new(executor.Statistics);
+        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -795,7 +795,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: null);
 
-        QueryPlanner planner = new(executor.Statistics);
+        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -820,7 +820,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: 5_000);
 
-        QueryPlanner planner = new(executor.Statistics);
+        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -847,7 +847,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: 5);
 
-        QueryPlanner planner = new(executor.Statistics);
+        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -885,7 +885,7 @@ public class TestIndexInListScan : BaseTest
         executor.Statistics.SeedRowCountForTesting(database,
             await database.TableDescriptors["robots"], 10_000);
 
-        QueryPlanner planner = new(executor.Statistics);
+        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         string id0 = ids[0], id1 = ids[1], id2 = ids[2];

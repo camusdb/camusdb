@@ -21,22 +21,23 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <b>Flag-off (default):</b> deduplication via a <see cref="HashSet{T}"/> of
 /// <see cref="DistinctRowKey"/> — O(distinct-count) memory.
 ///
-/// <b>Flag-on (<see cref="CamusDBConfig.SpillEnabled"/> = <c>true</c>):</b> rows are sorted
+/// <b>Flag-on (<see cref="CamusDBOptions.SpillEnabled"/> = <c>true</c>):</b> rows are sorted
 /// by all projected columns using the external merge sort (<see cref="QuerySorter.SortAsync"/>),
 /// which spills sorted runs to disk when the input exceeds
-/// <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. After sorting, equal rows are adjacent
+/// <see cref="CamusDBOptions.SpillEffectiveThreshold"/>. After sorting, equal rows are adjacent
 /// and are removed by the O(1)-memory <see cref="StreamingDistinctRows"/> streaming dedup.
 /// </summary>
 internal sealed class QueryDistincter
 {
     internal IAsyncEnumerable<QueryResultRow> DistinctResultset(
         QueryTicket ticket,
-        IAsyncEnumerable<QueryResultRow> dataCursor)
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context)
     {
-        if (!CamusDBConfig.SpillEnabled)
+        if (!context.Options.SpillEnabled)
             return DistinctRows(dataCursor);
 
-        return DistinctWithSpill(dataCursor);
+        return DistinctWithSpill(dataCursor, context);
     }
 
     /// <summary>
@@ -124,10 +125,11 @@ internal sealed class QueryDistincter
     /// </summary>
     private static IAsyncEnumerable<QueryResultRow> DistinctWithSpill(
         IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context,
         CancellationToken ct = default)
     {
         IComparer<QueryResultRow> comparer = new DistinctRowComparer();
-        return StreamingRows(QuerySorter.SortAsync(dataCursor, comparer, ct));
+        return StreamingRows(QuerySorter.SortAsync(dataCursor, comparer, context, ct));
     }
 
     /// <summary>

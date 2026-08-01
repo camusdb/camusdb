@@ -29,9 +29,9 @@ internal static class GrpcTransportSecurity
     /// <para>Skipped when the call has no ASP.NET <see cref="HttpContext"/> — an in-process unit-test
     /// invocation — because transport security cannot be assessed there.</para>
     /// </summary>
-    public static void EnsureSecureTransport(ServerCallContext context)
+    public static void EnsureSecureTransport(ServerCallContext context, CamusDBOptions options)
     {
-        if (!CamusDBConfig.AuthenticationEnabled || !CamusDBConfig.RequireTlsWhenAuthEnabled)
+        if (!options.AuthenticationEnabled || !options.RequireTlsWhenAuthEnabled)
             return;
 
         HttpContext? http;

@@ -121,7 +121,7 @@ public sealed class TestMultiPartitionRouting
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger,
+        CommandExecutor executor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: sharedNode!, isClusterMode: true);
         return executor;
     }
@@ -719,7 +719,7 @@ public sealed class TestMultiPartitionRouting
             ));
 
             KvTransaction txn = await database.Transactions.BeginAsync();
-            KvTableStore seedStore = new(database.Kahuna.Kahuna, database.Id, version0Schema.Id!);
+            KvTableStore seedStore = new(database.Kahuna.Kahuna, CamusDBConfig.Ambient, database.Id, version0Schema.Id!);
             ObjectIdValue seededRowId = ObjectIdGenerator.Generate();
             await seedStore.InsertRow(
                 txn,
@@ -743,7 +743,7 @@ public sealed class TestMultiPartitionRouting
             Assert.IsNull(reopenedTable.SchemaHistory);
 
             txn = await reopened.Transactions.BeginAsync();
-            KvTableStore store = new(reopened.Kahuna.Kahuna, reopened.Id, reopenedTable.Id!);
+            KvTableStore store = new(reopened.Kahuna.Kahuna, CamusDBConfig.Ambient, reopened.Id, reopenedTable.Id!);
             List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
 
             await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in store.ScanRows(txn))

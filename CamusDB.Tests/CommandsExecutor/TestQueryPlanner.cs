@@ -33,7 +33,7 @@ public class TestQueryPlanner
 {
     private static QueryPlannerTestContext? context;
 
-    private readonly QueryPlanner queryPlanner = new();
+    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
@@ -131,8 +131,8 @@ public class TestQueryPlanner
         TableDescriptor source = context!.Table;
         TableDescriptor table = new(source.Id + "-year-pk", source.Name, source.Schema, source.Store);
         table.Indexes.Add(
-            CamusDBConfig.PrimaryKeyInternalName,
-            new TableIndexSchema(CamusDBConfig.PrimaryKeyInternalName, ["year"], IndexType.Unique));
+            CamusDBConstants.PrimaryKeyInternalName,
+            new TableIndexSchema(CamusDBConstants.PrimaryKeyInternalName, ["year"], IndexType.Unique));
         return table;
     }
 
@@ -179,10 +179,10 @@ public class TestQueryPlanner
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
         Assert.AreEqual(QueryPlannerTestContext.SampleRowId, plan.Steps[0].ColumnValue!.StrValue);
         Assert.IsInstanceOf<IndexLookupNode>(ScanRoot(plan));
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, ((IndexLookupNode)ScanRoot(plan)).Index.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, ((IndexLookupNode)ScanRoot(plan)).Index.Name);
     }
 
     [Test]
@@ -565,7 +565,7 @@ public class TestQueryPlanner
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
         Assert.IsNotNull(plan.ExecutionFilter);
     }
 
@@ -635,7 +635,7 @@ public class TestQueryPlanner
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
         Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, plan.Steps[0].Index!.Name);
         // Limit sits above the projection: it restricts output rows, and stacking it last
         // keeps it above aggregates when the projection contains one.
         CollectionAssert.AreEqual(
@@ -1160,8 +1160,8 @@ public class TestQueryPlanner
             context.Table.Schema,
             context.Table.Store);
         compositeOnly.Indexes.Add(
-            CamusDBConfig.PrimaryKeyInternalName,
-            context.Table.Indexes[CamusDBConfig.PrimaryKeyInternalName]);
+            CamusDBConstants.PrimaryKeyInternalName,
+            context.Table.Indexes[CamusDBConstants.PrimaryKeyInternalName]);
         compositeOnly.Indexes.Add(
             "name_year_idx",
             context.Table.Indexes["name_year_idx"]);

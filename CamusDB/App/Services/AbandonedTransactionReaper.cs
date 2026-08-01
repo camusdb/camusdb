@@ -20,31 +20,36 @@ namespace CamusDB.App.Services;
 /// process restarts and every conflicting transaction aborts indefinitely.
 ///
 /// <para>A single periodic timer scans the <see cref="HttpTransactionCoordinator"/> for
-/// transactions idle longer than <see cref="CamusDBConfig.TransactionIdleTimeoutMs"/> and rolls
+/// transactions idle longer than <see cref="CamusDBOptions.TransactionIdleTimeoutMs"/> and rolls
 /// them back. One timer covers all transactions — the cost is one pass per
-/// <see cref="CamusDBConfig.TransactionReaperIntervalMs"/>, independent of transaction count.</para>
+/// <see cref="CamusDBOptions.TransactionReaperIntervalMs"/>, independent of transaction count.</para>
 ///
-/// <para>Disabled when <see cref="CamusDBConfig.TransactionIdleTimeoutMs"/> is <c>&lt;= 0</c>. Even
+/// <para>Disabled when <see cref="CamusDBOptions.TransactionIdleTimeoutMs"/> is <c>&lt;= 0</c>. Even
 /// disabled, an abandoned Serializable+RW transaction's locks remain bounded by
-/// <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/> (the heartbeat self-terminates
+/// <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/> (the heartbeat self-terminates
 /// past that cap), so the reaper is prompt cleanup, not the sole safety net.</para>
 /// </summary>
 public sealed class AbandonedTransactionReaper : BackgroundService
 {
     private readonly HttpTransactionCoordinator coordinator;
+
+    /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly ILogger<AbandonedTransactionReaper> logger;
 
     public AbandonedTransactionReaper(
         HttpTransactionCoordinator coordinator,
-        ILogger<AbandonedTransactionReaper> logger)
+        ILogger<AbandonedTransactionReaper> logger,
+        CamusDBOptions options)
     {
         this.coordinator = coordinator;
         this.logger = logger;
+        this.options = options;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        int idleTimeoutMs = CamusDBConfig.TransactionIdleTimeoutMs;
+        int idleTimeoutMs = options.TransactionIdleTimeoutMs;
         if (idleTimeoutMs <= 0)
         {
             logger.LogInformation("Abandoned-transaction reaper disabled (transaction_idle_timeout_ms <= 0)");
@@ -52,12 +57,12 @@ public sealed class AbandonedTransactionReaper : BackgroundService
         }
 
         TimeSpan idleTimeout = TimeSpan.FromMilliseconds(idleTimeoutMs);
-        TimeSpan interval = TimeSpan.FromMilliseconds(CamusDBConfig.TransactionReaperIntervalMs);
+        TimeSpan interval = TimeSpan.FromMilliseconds(options.TransactionReaperIntervalMs);
 
         if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation(
                 "Abandoned-transaction reaper started: idle timeout {IdleMs} ms, sweep interval {IntervalMs} ms",
-                idleTimeoutMs, CamusDBConfig.TransactionReaperIntervalMs);
+                idleTimeoutMs, options.TransactionReaperIntervalMs);
 
         using PeriodicTimer timer = new(interval);
 

@@ -62,7 +62,7 @@ public sealed class RowUpdater
                 $"Unknown column '{columnName}' in column list"
             );
 
-        if (indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? indexSchema))
+        if (indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? indexSchema))
         {
             if (indexSchema.Columns.Contains(columnName, StringComparer.OrdinalIgnoreCase))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
@@ -232,7 +232,7 @@ public sealed class RowUpdater
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        SpillableRowList rowList = new();
+        SpillableRowList rowList = new(QueryExecutionContext.For(state.Database));
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             await rowList.AddAsync(row).ConfigureAwait(false);
         await rowList.SealAsync().ConfigureAwait(false);
@@ -301,7 +301,7 @@ public sealed class RowUpdater
         if (column.Type == ColumnType.String)
         {
             string s = value.StrValue ?? "";
-            int max = column.MaxLength ?? CamusDBConfig.DefaultStringMaxLength;
+            int max = column.MaxLength ?? CamusDBConstants.DefaultStringMaxLength;
             if (s.Length > max)
                 throw new CamusDBException(
                     CamusDBErrorCodes.ValueTooLong,
@@ -310,7 +310,7 @@ public sealed class RowUpdater
         else if (column.Type == ColumnType.Bytes)
         {
             byte[] b = value.BytesValue ?? [];
-            int max = column.MaxLength ?? CamusDBConfig.DefaultBytesMaxLength;
+            int max = column.MaxLength ?? CamusDBConstants.DefaultBytesMaxLength;
             if (b.Length > max)
                 throw new CamusDBException(
                     CamusDBErrorCodes.ValueTooLong,

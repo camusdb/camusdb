@@ -201,12 +201,13 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
         const int categories = 20;
         const int itemsEach  = 2;
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
-            = await SetupTablesAsync(categoryCount: categories, itemsPerCategory: itemsEach);
-
-        // threshold=3 → the inner subquery (20 rows) will spill after the 3rd value.
+        // threshold=3 → the inner subquery (20 rows) will spill after the 3rd value. The engine fixes
+        // its configuration when it is built, so this is set before the tables are created.
         CamusDBConfig.SpillEnabled            = true;
         CamusDBConfig.ForceSpillThresholdRows = 3;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await SetupTablesAsync(categoryCount: categories, itemsPerCategory: itemsEach);
         executor.Statistics.InSubqueryValueListSpillCount = 0;
 
         List<QueryResultRow> rows = await RunQueryAsync(dbname, database, executor,
@@ -232,6 +233,10 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
         const int categories = 10;
         const int itemsEach  = 2;
 
+        // Configured before the engine is built, which is when it fixes its configuration.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.ForceSpillThresholdRows = 3;
+
         (string dbname, DatabaseDescriptor database, CommandExecutor executor)
             = await SetupTablesAsync(categoryCount: categories, itemsPerCategory: itemsEach);
 
@@ -242,8 +247,6 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
         // We need to get the ids of the first 5 categories to build the NOT IN list.
         // Instead, query all items NOT IN a subquery that returns ALL categories → 0 items.
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
         executor.Statistics.InSubqueryValueListSpillCount = 0;
 
         // No items are NOT IN the full category list → 0 rows.
@@ -275,17 +278,20 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
             "WHERE i.category_id IN (SELECT c.id FROM categories c GROUP BY c.id) " +
             "ORDER BY i.name";
 
-        // In-memory reference.
+        // In-memory reference. The engine fixes its configuration when it is built, so the setting is
+        // in place before the tables (and the executor) are created.
+        CamusDBConfig.SpillEnabled = false;
+
         (string db1, DatabaseDescriptor d1, CommandExecutor ex1)
             = await SetupTablesAsync(categories, itemsEach);
-        CamusDBConfig.SpillEnabled = false;
         List<QueryResultRow> reference = await RunQueryAsync(db1, d1, ex1, sql);
 
-        // Spill path.
-        (string db2, DatabaseDescriptor d2, CommandExecutor ex2)
-            = await SetupTablesAsync(categories, itemsEach);
+        // Spill path — again configured before the engine that must honour it is built.
         CamusDBConfig.SpillEnabled            = true;
         CamusDBConfig.ForceSpillThresholdRows = 2;
+
+        (string db2, DatabaseDescriptor d2, CommandExecutor ex2)
+            = await SetupTablesAsync(categories, itemsEach);
         List<QueryResultRow> spill = await RunQueryAsync(db2, d2, ex2, sql);
 
         Assert.That(spill.Count, Is.EqualTo(reference.Count),
@@ -307,11 +313,12 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
     [Test]
     public async Task InSubquerySpill_SpillFilesRemovedAfterCompletion()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
-            = await SetupTablesAsync(categoryCount: 12, itemsPerCategory: 2);
-
+        // Configured before the engine is built, which is when it fixes its configuration.
         CamusDBConfig.SpillEnabled            = true;
         CamusDBConfig.ForceSpillThresholdRows = 2;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await SetupTablesAsync(categoryCount: 12, itemsPerCategory: 2);
 
         await RunQueryAsync(dbname, database, executor,
             "SELECT i.name FROM items i WHERE i.category_id IN (SELECT c.id FROM categories c GROUP BY c.id)");

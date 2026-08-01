@@ -44,6 +44,9 @@ namespace CamusDB.Core.Transactions;
 public sealed class KvTransactionsManager : IDisposable
 {
     private readonly IKahuna kahuna;
+
+    /// <summary>Configuration for the engine these transactions belong to; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly ILogger logger;
 
     // Bounded back-off for opening a Kahuna transaction while a partition leader is still being
@@ -89,12 +92,14 @@ public sealed class KvTransactionsManager : IDisposable
 
     public KvTransactionsManager(
         IKahuna kahuna,
+        CamusDBOptions options,
         Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null,
         ILogger<ICamusDB>? logger = null,
         IQueryResultCache? cache = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
+        this.options = options;
         this.mintLocalT = mintLocalT;
         this.logger = logger ?? NullLogger<ICamusDB>.Instance;
         _cache = cache;
@@ -154,7 +159,7 @@ public sealed class KvTransactionsManager : IDisposable
     /// <para><b>All other combinations:</b> <paramref name="isolationLevel"/> and
     /// <paramref name="transactionMode"/> are carried as metadata only, with no change to the
     /// underlying Kahuna transaction. Selection precedence: explicit argument →
-    /// <see cref="CamusDBConfig.DefaultIsolationLevel"/> → <see cref="CamusIsolationLevel.ReadCommitted"/>.</para>
+    /// <see cref="CamusDBOptions.DefaultIsolationLevel"/> → <see cref="CamusIsolationLevel.ReadCommitted"/>.</para>
     /// </summary>
     public async Task<KvTransaction> BeginAsync(
         CamusIsolationLevel? isolationLevel = null,
@@ -166,7 +171,7 @@ public sealed class KvTransactionsManager : IDisposable
         bool deferStart = false,
         CancellationToken cancellationToken = default)
     {
-        CamusIsolationLevel level = isolationLevel ?? CamusDBConfig.DefaultIsolationLevel;
+        CamusIsolationLevel level = isolationLevel ?? options.DefaultIsolationLevel;
         CamusTransactionMode mode = transactionMode ?? CamusTransactionMode.ReadWrite;
 
         // Serializable + ReadOnly: mint a server HLC timestamp T and return a stateless
@@ -176,13 +181,13 @@ public sealed class KvTransactionsManager : IDisposable
 
         // Concurrency strategy: caller-chosen, defaulting to pessimistic (acquire-then-write, block on
         // conflict). Optimistic defers conflict detection to the coordinator's read-set validation at
-        // commit; it is opt-in per transaction. See CamusDBConfig.DefaultTransactionLocking.
-        KeyValueTransactionLocking lockingMode = locking ?? CamusDBConfig.DefaultTransactionLocking;
-        ReadValidation readValidationMode = readValidation ?? CamusDBConfig.DefaultReadValidation;
-        DecisionDurability decisionDurabilityMode = decisionDurability ?? CamusDBConfig.DefaultDecisionDurability;
+        // commit; it is opt-in per transaction. See options.DefaultTransactionLocking.
+        KeyValueTransactionLocking lockingMode = locking ?? options.DefaultTransactionLocking;
+        ReadValidation readValidationMode = readValidation ?? options.DefaultReadValidation;
+        DecisionDurability decisionDurabilityMode = decisionDurability ?? options.DefaultDecisionDurability;
 
         string uniqueId = Guid.NewGuid().ToString("N");
-        int mutationLimit = mutationLimitOverride ?? CamusDBConfig.MaxMutationsPerTransaction;
+        int mutationLimit = mutationLimitOverride ?? options.MaxMutationsPerTransaction;
 
         // Deferred start is opt-in and used ONLY for explicit client transactions begun through
         // /start-transaction, where a subsequent SET TRANSACTION LOCKING may reconfigure the locking
@@ -316,7 +321,7 @@ public sealed class KvTransactionsManager : IDisposable
                     // is never finalized after this window plus its grace period, releasing its range
                     // locks. Non-positive leaves the server default. This replaces the client-side
                     // heartbeat as the backstop for a transaction whose client disconnects.
-                    Timeout           = CamusDBConfig.MaxSerializableTransactionLifetimeMs
+                    Timeout           = options.MaxSerializableTransactionLifetimeMs
                 },
                 cancellationToken
             ).ConfigureAwait(false);
@@ -375,12 +380,12 @@ public sealed class KvTransactionsManager : IDisposable
         Kommander.Time.HLCTimestamp? causalToken = null,
         CancellationToken cancellationToken = default)
     {
-        if (!promote || !CamusDBConfig.KeyRangeShardingEnabled)
+        if (!promote || !options.KeyRangeShardingEnabled)
         {
             // Serializable default: mint a local HLC timestamp T ≥ causalToken (when provided)
             // and return a zero-identity snapshot transaction at T — no Kahuna round-trip.
             // RC default: keep the HLCTimestamp.Zero fast path (latest-committed per key).
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable &&
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable &&
                 mintLocalT is not null)
                 return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken));
 
@@ -489,7 +494,7 @@ public sealed class KvTransactionsManager : IDisposable
             // abandoned to the reaper); the caller then rolls back and retries from BeginAsync.
             if (tx.IsolationLevel == CamusIsolationLevel.Serializable &&
                 tx.TransactionMode == CamusTransactionMode.ReadWrite &&
-                tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+                tx.IsExpired(options.MaxSerializableTransactionLifetimeMs))
             {
                 tx.Status = KvTransactionStatus.Finalizing;
                 try
@@ -507,7 +512,7 @@ public sealed class KvTransactionsManager : IDisposable
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionLifetimeExceeded,
                     $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
-                    $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+                    $"({options.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
             }
         }
 

@@ -22,7 +22,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <summary>
 /// Implements <c>ANALYZE TABLE</c>: full-scan (or sampled) statistics collection.
 ///
-/// For tables with row count ≤ <see cref="CamusDBConfig.StatsAnalyzeSampleRows"/> the entire
+/// For tables with row count ≤ <see cref="CamusDBOptions.StatsAnalyzeSampleRows"/> the entire
 /// table is scanned; for larger tables the first N rows in storage order are used as the
 /// sample. v1 uses exact scan-based counting; HyperLogLog/reservoir sampling are deferred.
 ///
@@ -38,17 +38,21 @@ internal sealed class TableAnalyzer
 {
     private readonly StatisticsManager statistics;
 
-    public TableAnalyzer(StatisticsManager statistics)
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public TableAnalyzer(StatisticsManager statistics, CamusDBOptions options)
     {
         this.statistics = statistics;
+        this.options = options;
     }
 
     internal async Task<QueryResultRow> AnalyzeAsync(
         DatabaseDescriptor database,
         TableDescriptor table)
     {
-        int sampleLimit = CamusDBConfig.StatsAnalyzeSampleRows;
-        int bucketCount = CamusDBConfig.StatsHistogramBuckets;
+        int sampleLimit = options.StatsAnalyzeSampleRows;
+        int bucketCount = options.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
 
         // Capture the live counter baseline BEFORE pinning the scan snapshot (below), mirroring
@@ -188,7 +192,7 @@ internal sealed class TableAnalyzer
             baseline, analyzedAt).ConfigureAwait(false);
 
         string status = isSampled
-            ? $"sampled {rowCount} rows (table larger than {CamusDBConfig.StatsAnalyzeSampleRows})"
+            ? $"sampled {rowCount} rows (table larger than {options.StatsAnalyzeSampleRows})"
             : $"analyzed {rowCount} rows";
 
         return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
@@ -211,7 +215,7 @@ internal sealed class TableAnalyzer
     ///   <see cref="ReservoirSampler{T}"/> and NDV from fixed-size <see cref="HyperLogLog"/> sketches,
     ///   so memory does not scale with table size (unlike the manual path's full distinct-sets).
     ///   Row and index-entry counts stay exact (running integers, O(1) memory).</item>
-    ///   <item><b>Throttled scan.</b> Rows are paced to <see cref="CamusDBConfig.AutoAnalyzeMaxRowsPerSecond"/>
+    ///   <item><b>Throttled scan.</b> Rows are paced to <see cref="CamusDBOptions.AutoAnalyzeMaxRowsPerSecond"/>
     ///   with an inter-batch delay and cooperative yield, bounding CPU/IO.</item>
     ///   <item><b>Zero lock contention.</b> It opens its <em>own</em> read-only snapshot transaction
     ///   (no range locks, no read-set folding), so it can neither block nor abort a foreground
@@ -241,23 +245,23 @@ internal sealed class TableAnalyzer
     {
         // Rows between successive leadership/load re-checks. Amortizes the (async) leadership probe
         // while still noticing a surge or a lost lease within a bounded number of rows mid-scan.
-        int checkEveryRows = Math.Max(1, CamusDBConfig.AutoAnalyzeOwnershipCheckRows);
+        int checkEveryRows = Math.Max(1, options.AutoAnalyzeOwnershipCheckRows);
 
         // Honor a per-table opt-out that landed on this node's descriptor after discovery selected it
         // (discovery already filters on the fresh meta blob; this covers the disable-during-sweep race).
         if (!table.Schema.AutoStatsCollectionEnabled)
             return;
 
-        int bucketCount = CamusDBConfig.StatsHistogramBuckets;
+        int bucketCount = options.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
 
-        int sampleCapacity = CamusDBConfig.AutoAnalyzeHistogramSampleRows;
+        int sampleCapacity = options.AutoAnalyzeHistogramSampleRows;
         if (sampleCapacity < 1) sampleCapacity = 1;
 
-        int hllPrecision = CamusDBConfig.AutoAnalyzeHllPrecision;
+        int hllPrecision = options.AutoAnalyzeHllPrecision;
         if (hllPrecision is < 4 or > 16) hllPrecision = 11;
 
-        int maxRowsPerSecond = CamusDBConfig.AutoAnalyzeMaxRowsPerSecond;
+        int maxRowsPerSecond = options.AutoAnalyzeMaxRowsPerSecond;
 
         List<string> indexedColumns = GetIndexedColumns(table);
         List<(string indexName, string[] keyColumns)> readableIndexes = GetReadableIndexes(table);

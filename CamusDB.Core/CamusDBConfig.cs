@@ -37,15 +37,21 @@ public static class CamusDBConfig
     /// <summary>
     /// The options instance every member here reads through. Migrated code should take this by
     /// constructor instead of reaching for the ambient value.
+    ///
+    /// <para>Public only so that not-yet-migrated callers outside this assembly — chiefly tests that
+    /// still configure an engine by assigning to the statics above — can hand the very instance they
+    /// configured to a component that now requires one. Passing this is a transitional step, not the
+    /// destination: the point of the migration is that a test builds its own options.</para>
     /// </summary>
-    internal static CamusDBOptions Ambient => ambient;
+    public static CamusDBOptions Ambient => ambient;
 
     /// <summary>
     /// Installs the resolved configuration as the ambient instance. Called once at composition time
     /// (host startup) while migration is in progress; it exists so the facade and injected options
-    /// cannot disagree.
+    /// cannot disagree. Public only because the host composes outside this assembly — it is not an
+    /// extension point, and it disappears with the rest of this type.
     /// </summary>
-    internal static void SetAmbient(CamusDBOptions options)
+    public static void SetAmbient(CamusDBOptions options)
         => Interlocked.Exchange(ref ambient, options);
 
     /// <summary>

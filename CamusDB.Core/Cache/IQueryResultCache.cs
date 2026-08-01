@@ -22,7 +22,7 @@ namespace CamusDB.Core.Cache;
 /// <param name="ResultFingerprint">Stable, collision-resistant key that encodes query shape, typed parameters, schema versions, and cache options.</param>
 /// <param name="CachedAt">HLC timestamp at which the result was computed; used by strict validation.</param>
 /// <param name="Status">Status to surface in the response envelope for this entry.</param>
-/// <param name="HintTtlMs">Per-query TTL from the <c>{cache=…, ttl=…}</c> hint, or <c>null</c> to use <see cref="CamusDBConfig.QueryResultCacheDefaultTtlMs"/>.</param>
+/// <param name="HintTtlMs">Per-query TTL from the <c>{cache=…, ttl=…}</c> hint, or <c>null</c> to use <see cref="CamusDBOptions.QueryResultCacheDefaultTtlMs"/>.</param>
 /// <param name="HintIsStrict">Whether the hint requested strict (read-your-writes) validation. Carried on the entry so revalidation can apply the same strictness the original query requested.</param>
 /// <param name="CreatedAtMs">Monotonic tick count (<see cref="Environment.TickCount64"/>) stamped when the entry is stored. Used to compute <c>ageMs</c> in the response envelope. Zero for entries created before this field was added.</param>
 public sealed record CachedQueryResult(

@@ -16,6 +16,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -77,7 +78,7 @@ public sealed class TestOptimisticLockAudit
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         CountingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, "lockaudit", tableId));
+        return (node, stub, new KvTableStore(stub, CamusDBConfig.Ambient, "lockaudit", tableId));
     }
 
     private static async Task<KvTransaction> BeginAsync(IKahuna kahuna, KeyValueTransactionLocking locking, CamusIsolationLevel level)

@@ -19,7 +19,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class CloseDatabaseController : CommandsController
 {    
-    public CloseDatabaseController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public CloseDatabaseController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
     {
         
     }

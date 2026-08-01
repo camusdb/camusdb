@@ -14,6 +14,7 @@ using NUnit.Framework;
 
 using Kahuna;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers;
@@ -42,7 +43,7 @@ public abstract class SharedNodeBaseTest : BaseTest
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        });
+        }.WithFastTestTimers());
 
         await sharedNode.StartAsync(CancellationToken.None);
         await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);
@@ -65,13 +66,13 @@ public abstract class SharedNodeBaseTest : BaseTest
     protected EmbeddedKahuna SharedNode => sharedNode!;
 
     protected override Task<DatabaseRegistry> CreateRegistryAsync()
-        => DatabaseRegistry.OpenAsync(sharedNode!);
+        => DatabaseRegistry.OpenAsync(sharedNode!, Options);
 
     protected override CommandExecutor CreateCommandExecutor()
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, Options,
             sharedNode: sharedNode!,
             registry: sharedRegistry!, isClusterMode: true);
     }

@@ -37,7 +37,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 public class TestPlanDistributedProperties
 {
     private static QueryPlannerTestContext? ctx;
-    private readonly QueryPlanner queryPlanner = new();
+    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
 
     [OneTimeSetUp]
     public void OneTimeSetUp() => ctx = QueryPlannerTestContext.Create();

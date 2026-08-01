@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using CamusDB.Core;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
@@ -44,10 +45,10 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
 
     protected override CommandExecutor CreateCommandExecutor()
     {
-        _cache = new QueryResultCache(sweepIntervalMs: -1);
+        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }
@@ -85,7 +86,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public void EnterSingleFlight_FirstCaller_IsOwner()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         SingleFlightSlot slot = cache.EnterSingleFlight("fp-1");
         Assert.IsTrue(slot.IsOwner, "First caller for a fingerprint must be the owner");
         cache.ExitSingleFlight("fp-1", published: false);  // cleanup
@@ -94,7 +95,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public void EnterSingleFlight_SecondConcurrentCaller_IsWaiter()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         SingleFlightSlot owner = cache.EnterSingleFlight("fp-2");
         SingleFlightSlot waiter = cache.EnterSingleFlight("fp-2");
 
@@ -107,7 +108,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public void EnterSingleFlight_AfterExit_NewCallerIsOwner()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         SingleFlightSlot first = cache.EnterSingleFlight("fp-3");
         Assert.IsTrue(first.IsOwner);
         cache.ExitSingleFlight("fp-3", published: false);
@@ -121,7 +122,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public async Task WaitAsync_OwnerSignalsPublished_WaiterIsToldToReprobe()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         const string fp = "fp-waiter-success";
 
         SingleFlightSlot owner = cache.EnterSingleFlight(fp);
@@ -138,7 +139,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public async Task WaitAsync_OwnerFails_WaiterIsToldToExecuteLive()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         const string fp = "fp-waiter-failure";
 
         SingleFlightSlot owner = cache.EnterSingleFlight(fp);
@@ -155,7 +156,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public async Task WaitAsync_Timeout_ReturnsFalse()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         const string fp = "fp-waiter-timeout";
 
         SingleFlightSlot owner = cache.EnterSingleFlight(fp);
@@ -173,7 +174,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     [Test]
     public async Task WaitAsync_MultipleWaiters_AllReceiveTheSameSignal()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         const string fp = "fp-multi-waiter";
 
         SingleFlightSlot owner = cache.EnterSingleFlight(fp);

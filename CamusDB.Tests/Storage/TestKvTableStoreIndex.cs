@@ -61,7 +61,7 @@ public sealed class TestKvTableStoreIndex
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
-        return (node, new KvTableStore(node.Kahuna, "testdb", tableId));
+        return (node, new KvTableStore(node.Kahuna, CamusDBConfig.Ambient, "testdb", tableId));
     }
 
     // ---- helper: single ColumnValue composite ----------------------------
@@ -521,7 +521,7 @@ public sealed class TestKvTableStoreIndex
             // Mark the index as ranged (simulates what TableOpener does after RegisterKeyRangeAsync).
             store.MarkIndexAsRanged("idx_age");
 
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             KvTransaction tx1 = await transactions.BeginAsync();
             await store.AcquireIndexRangeLockAsync(tx1, "idx_age");
@@ -636,7 +636,7 @@ public sealed class TestKvTableStoreIndex
         await using EmbeddedKahuna __ = node;
 
         // idx_name is NOT marked as ranged — no lock should be acquired.
-        KvTransactionsManager transactions = new(node.Kahuna);
+        KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
         KvTransaction tx1 = await transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         await store.AcquireIndexRangeLockAsync(tx1, "idx_name");
@@ -662,7 +662,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_age");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
             CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
@@ -723,7 +723,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_age");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
             CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
@@ -772,7 +772,7 @@ public sealed class TestKvTableStoreIndex
         {
             (EmbeddedKahuna node, _) = await CreateStoreAsync("irange-zero");
             await using EmbeddedKahuna __ = node;
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             // Sharding ON but promotion NOT requested (e.g. a point read) → Zero snapshot.
             CamusDBConfig.KeyRangeShardingEnabled = true;
@@ -804,7 +804,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_age");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             CompositeColumnValue low  = new(new ColumnValue(ColumnType.Integer64, 1L));
             CompositeColumnValue mid  = new(new ColumnValue(ColumnType.Integer64, 50L));
@@ -861,7 +861,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_age");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
             CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
@@ -916,7 +916,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_name");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             CompositeColumnValue cvApple  = new(new ColumnValue(ColumnType.String, "apple"));
             CompositeColumnValue cvBanana = new(new ColumnValue(ColumnType.String, "banana"));
@@ -972,7 +972,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_age");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
             CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
@@ -1027,7 +1027,7 @@ public sealed class TestKvTableStoreIndex
             await using EmbeddedKahuna __ = node;
 
             store.MarkIndexAsRanged("idx_cat_age");
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             static CompositeColumnValue CV2(string cat, long age) => new(new ColumnValue[]
             {

@@ -115,7 +115,7 @@ internal sealed class RowDeleter
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        SpillableRowList rowList = new();
+        SpillableRowList rowList = new(QueryExecutionContext.For(state.Database));
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             await rowList.AddAsync(row).ConfigureAwait(false);
         await rowList.SealAsync().ConfigureAwait(false);
@@ -141,7 +141,7 @@ internal sealed class RowDeleter
         // spill and the mutation batch with one knob. RowsToDelete is already sealed (the full
         // match set is materialized before any delete), so chunked draining preserves the
         // Halloween barrier.
-        int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
+        int chunkSize = state.Database.Options.SpillEffectiveThreshold;
         List<ObjectIdValue> chunk = new(Math.Min(chunkSize, 64));
 
         await foreach (QueryResultRow row in state.RowsToDelete.EnumerateAsync().ConfigureAwait(false))

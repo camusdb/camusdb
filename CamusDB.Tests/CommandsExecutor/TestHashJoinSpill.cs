@@ -547,6 +547,14 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     [Test]
     public async Task HashJoinSpill_SkewedKey_NljBackstopTaken_NotLoadAll()
     {
+        // threshold=2: the 4-row single-key build overflows at every recursion level. At
+        // MaxGraceHashDepth the NLJ backstop fires instead of load-all. The engine fixes its
+        // configuration when it is built, so this is set before the database is created.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000;
+        CamusDBConfig.ForceSpillThresholdRows = 2;
+        CamusDBConfig.SpillMergeFanIn         = 4;
+
         // items (right/build side, 4 rows) all share one order_id — extreme skew.
         // orders (left/probe side, 6 rows) is larger so ChooseBuildSide picks items as build.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
@@ -595,12 +603,6 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         // Reset counter before the test run.
         executor.Statistics.HashJoinNljPartitionFallbackCount = 0;
 
-        // threshold=2: the 4-row single-key build overflows at every recursion level.
-        // At MaxGraceHashDepth the NLJ backstop fires instead of load-all.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        CamusDBConfig.SpillMergeFanIn         = 4;
 
         KvTransaction runTxn = await database.Transactions.BeginAsync();
         ExecuteSQLTicket ticket = new(txnState: runTxn, database: dbname,

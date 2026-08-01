@@ -28,13 +28,13 @@ internal sealed class QueryAggregator
         _stats = stats;
     }
 
-    internal IAsyncEnumerable<QueryResultRow> AggregateResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor)
+    internal IAsyncEnumerable<QueryResultRow> AggregateResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor, QueryExecutionContext context)
     {
         if (ticket.Projection is null || ticket.Projection.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "This resultset shouldn't be aggregated");
 
         if (ticket.GroupBy is { Count: > 0 })
-            return AggregateGrouped(ticket, dataCursor, _stats);
+            return AggregateGrouped(ticket, dataCursor, _stats, context);
 
         if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket) || HasCompoundProjection(ticket.Projection))
             return AggregateGlobalWorkspace(ticket, dataCursor);
@@ -54,11 +54,11 @@ internal sealed class QueryAggregator
     }
 
     /// <summary>
-    /// Aggregates grouped rows. When <see cref="CamusDBConfig.SpillEnabled"/> is <c>false</c>
+    /// Aggregates grouped rows. When <see cref="context.Options.SpillEnabled"/> is <c>false</c>
     /// (the default), all groups are accumulated in a single in-memory dictionary — same as the
     /// original implementation. When spilling is enabled the path buffers input rows until the
-    /// buffer reaches <see cref="CamusDBConfig.SpillEffectiveThreshold"/>; if overflow occurs
-    /// the rows are partitioned into <see cref="CamusDBConfig.SpillMergeFanIn"/> spill files by
+    /// buffer reaches <see cref="context.Options.SpillEffectiveThreshold"/>; if overflow occurs
+    /// the rows are partitioned into <see cref="context.Options.SpillMergeFanIn"/> spill files by
     /// group-key hash, and each partition is then aggregated in-memory independently. Because
     /// the hash is deterministic, all rows that share a group key land in the same partition and
     /// the per-partition result is identical to the global result.
@@ -67,12 +67,13 @@ internal sealed class QueryAggregator
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
         StatisticsManager? stats,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy!;
         List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
 
-        if (!CamusDBConfig.SpillEnabled)
+        if (!context.Options.SpillEnabled)
         {
             GroupKeyBuilder keyBuilder = new();
             Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
@@ -94,7 +95,7 @@ internal sealed class QueryAggregator
         }
 
         await foreach (QueryResultRow row in AggregateGroupedWithPossibleSpill(
-            groupBy, projections, ticket, dataCursor, stats, ct).ConfigureAwait(false))
+            groupBy, projections, ticket, dataCursor, stats, context, ct).ConfigureAwait(false))
             yield return row;
     }
 
@@ -105,13 +106,14 @@ internal sealed class QueryAggregator
     /// </summary>
     internal IAsyncEnumerable<QueryResultRow> AggregateStreamingGrouped(
         QueryTicket ticket,
-        IAsyncEnumerable<QueryResultRow> dataCursor)
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
                 "Streaming GROUP BY requires GROUP BY expressions");
         List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
-        return StreamingAggregateRows(groupBy, projections, ticket, dataCursor);
+        return StreamingAggregateRows(groupBy, projections, ticket, dataCursor, context);
     }
 
     private static async IAsyncEnumerable<QueryResultRow> StreamingAggregateRows(
@@ -119,6 +121,7 @@ internal sealed class QueryAggregator
         List<AnalyzedProjection> projections,
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         GroupKeyBuilder keyBuilder = new();
@@ -150,15 +153,15 @@ internal sealed class QueryAggregator
 
     /// <summary>
     /// Spill-aware GROUP BY aggregation. Buffers rows until the buffer count reaches
-    /// <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. If the threshold is never reached
+    /// <see cref="context.Options.SpillEffectiveThreshold"/>. If the threshold is never reached
     /// the buffered rows are aggregated in memory. Otherwise all buffered rows plus the
-    /// remaining input are written to <see cref="CamusDBConfig.SpillMergeFanIn"/> partition
+    /// remaining input are written to <see cref="context.Options.SpillMergeFanIn"/> partition
     /// files by <see cref="GroupPartitionIndex"/>, and each partition file is aggregated by
     /// <see cref="AggregatePartitionAsync"/>. The <see cref="SpillScope"/> is disposed in a
     /// <c>finally</c> block so spill files are cleaned up on completion, cancellation, and
     /// exception.
     ///
-    /// If a first-level partition still holds more than <see cref="CamusDBConfig.SpillEffectiveThreshold"/>
+    /// If a first-level partition still holds more than <see cref="context.Options.SpillEffectiveThreshold"/>
     /// distinct groups, <see cref="AggregatePartitionAsync"/> recursively re-partitions it with a
     /// fresh hash seed until the partition fits in memory or the recursion depth cap is reached.
     /// </summary>
@@ -168,10 +171,11 @@ internal sealed class QueryAggregator
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
         StatisticsManager? stats,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        int threshold = CamusDBConfig.SpillEffectiveThreshold;
-        int K = CamusDBConfig.SpillMergeFanIn;
+        int threshold = context.Options.SpillEffectiveThreshold;
+        int K = context.Options.SpillMergeFanIn;
 
         List<QueryResultRow> buffer = new();
         SpillScope? scope = null;
@@ -189,7 +193,7 @@ internal sealed class QueryAggregator
                     buffer.Add(row);
                     if (buffer.Count >= threshold)
                     {
-                        scope = SpillFileManager.CreateScope(CamusDBConfig.DataDirectory);
+                        scope = SpillFileManager.CreateScope(context.SpillDirectory);
                         paths   = new string[K];
                         writers = new FileStream[K];
                         for (int i = 0; i < K; i++)
@@ -237,7 +241,7 @@ internal sealed class QueryAggregator
                 for (int i = 0; i < K; i++)
                 {
                     await foreach (QueryResultRow row in AggregatePartitionAsync(
-                        paths![i], projections, groupBy, ticket, scope!, depth: 0, seed: 0, stats, ct).ConfigureAwait(false))
+                        paths![i], projections, groupBy, ticket, scope!, depth: 0, seed: 0, stats, context, ct).ConfigureAwait(false))
                         yield return row;
                 }
             }
@@ -310,9 +314,9 @@ internal sealed class QueryAggregator
     /// which level produced this partition file.
     ///
     /// When the number of distinct groups in this partition would exceed
-    /// <see cref="CamusDBConfig.SpillEffectiveThreshold"/> and <paramref name="depth"/> is
+    /// <see cref="context.Options.SpillEffectiveThreshold"/> and <paramref name="depth"/> is
     /// below <see cref="MaxGroupByRecursionDepth"/>, the partition is re-read and split into
-    /// <see cref="CamusDBConfig.SpillMergeFanIn"/> sub-partitions using <paramref name="seed"/>+1
+    /// <see cref="context.Options.SpillMergeFanIn"/> sub-partitions using <paramref name="seed"/>+1
     /// so that group keys that collided at this level land in different sub-partitions. Each
     /// sub-partition is then aggregated recursively. Beyond the depth cap the remaining rows
     /// are aggregated in-memory regardless of count: the hash function cannot separate truly
@@ -328,9 +332,10 @@ internal sealed class QueryAggregator
         int depth,
         int seed,
         StatisticsManager? stats,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct)
     {
-        int threshold = CamusDBConfig.SpillEffectiveThreshold;
+        int threshold = context.Options.SpillEffectiveThreshold;
 
         SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
         if (reader is null) yield break;
@@ -378,7 +383,7 @@ internal sealed class QueryAggregator
         if (stats is not null)
             stats.GroupByPartitionRecursionCount++;
 
-        int K = Math.Max(2, CamusDBConfig.SpillMergeFanIn);
+        int K = Math.Max(2, context.Options.SpillMergeFanIn);
         int newSeed = seed + 1;
         string[] subPaths = new string[K];
         FileStream[] subWriters = new FileStream[K];
@@ -409,7 +414,7 @@ internal sealed class QueryAggregator
         for (int i = 0; i < K; i++)
         {
             await foreach (QueryResultRow row in AggregatePartitionAsync(
-                subPaths[i], projections, groupBy, ticket, scope, depth + 1, newSeed, stats, ct).ConfigureAwait(false))
+                subPaths[i], projections, groupBy, ticket, scope, depth + 1, newSeed, stats, context, ct).ConfigureAwait(false))
                 yield return row;
         }
     }

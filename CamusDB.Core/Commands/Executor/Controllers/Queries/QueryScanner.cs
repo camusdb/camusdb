@@ -37,11 +37,11 @@ internal sealed class QueryScanner
     /// operator <b>retains</b> rows across scan iterations. A borrowed row holds its <i>full</i> KV bytes
     /// for its lifetime, so retaining it (ORDER BY / GROUP BY / DISTINCT / semi-join) would hold more live
     /// memory than the projected-only slot path; those shapes keep the existing decode. The global
-    /// <see cref="CamusDBConfig.BorrowedDecode"/> override still forces it on everywhere for A/B runs.
+    /// <see cref="CamusDBOptions.BorrowedDecode"/> override still forces it on everywhere for A/B runs.
     /// </summary>
     private static bool ShouldUseBorrowedDecode(QueryPlan plan)
     {
-        switch (CamusDBConfig.BorrowedDecode)
+        switch (plan.Database.Options.BorrowedDecode)
         {
             case BorrowedDecodePolicy.ForceBorrowed:
                 return true;
@@ -99,7 +99,7 @@ internal sealed class QueryScanner
         RowEncoder.RowDecodeState decodeState =
             new()
             {
-                SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null,
+                SlotBackedDecode = plan.Database.Options.SlotBackedDecode || plan.ExecutionFilter is not null,
                 BorrowedDecode = ShouldUseBorrowedDecode(plan),
             };
 
@@ -259,7 +259,7 @@ internal sealed class QueryScanner
         RowEncoder.RowDecodeState decodeState =
             new()
             {
-                SlotBackedDecode = CamusDBConfig.SlotBackedDecode || plan.ExecutionFilter is not null,
+                SlotBackedDecode = plan.Database.Options.SlotBackedDecode || plan.ExecutionFilter is not null,
                 BorrowedDecode = ShouldUseBorrowedDecode(plan),
             };
         int batchSize = CamusDBConfig.IndexScanFetchBatchSize;

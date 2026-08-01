@@ -261,6 +261,15 @@ public sealed class KahunaOptionsConfig
     public long? BackupRestoreThrottleBytesPerSec { get; set; }
 
     /// <summary>
+    /// Returns an independent copy. <see cref="CamusDBOptions"/> is immutable, but this class is a
+    /// YAML-bound settings object with ordinary setters, so holding the deserialized instance directly
+    /// would leave one mutable object reachable from every options value derived by <c>with</c> —
+    /// a single mutation would then be visible to engines meant to be configured independently.
+    /// A memberwise copy suffices: every property is a scalar or a string.
+    /// </summary>
+    internal KahunaOptionsConfig Copy() => (KahunaOptionsConfig)MemberwiseClone();
+
+    /// <summary>
     /// Validates allow-listed Kahuna fields. Called from <see cref="ConfigDefinition.Validate"/>.
     /// </summary>
     public void Validate()

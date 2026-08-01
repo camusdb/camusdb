@@ -69,11 +69,11 @@ public sealed class TestStandaloneRocksDbSharedMemoryBoot
             await node.WaitForLeaderAsync("warmup", CancellationToken.None);
             await node.FlushAsync();
 
-            registry = await DatabaseRegistry.OpenAsync(node);
+            registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
 
             ILogger<ICamusDB> logger = LoggerFactory.CreateLogger<ICamusDB>();
             executor = new CommandExecutor(
-                new CommandValidator(), new CatalogsManager(logger), logger,
+                new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
                 sharedNode: node, registry: registry, isClusterMode: false);
 
             string dbname = Guid.NewGuid().ToString("n");

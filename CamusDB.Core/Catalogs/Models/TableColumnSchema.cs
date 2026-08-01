@@ -57,8 +57,8 @@ public sealed class TableColumnSchema
 
     /// <summary>
     /// Maximum length in characters (String) or bytes (Bytes). Null means unbounded-but-capped
-    /// at the default (see <see cref="CamusDB.Core.CamusDBConfig.DefaultStringMaxLength"/> /
-    /// <see cref="CamusDB.Core.CamusDBConfig.DefaultBytesMaxLength"/>). Persisted in schema JSON.
+    /// at the default (see <see cref="CamusDB.Core.CamusDBConstants.DefaultStringMaxLength"/> /
+    /// <see cref="CamusDB.Core.CamusDBConstants.DefaultBytesMaxLength"/>). Persisted in schema JSON.
     /// Ignored for other types.
     /// </summary>
     public int? MaxLength { get; }

@@ -18,7 +18,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
 /// Background garbage collector for deferred-dropped (orphaned) databases and tables. Once an orphan's
-/// age exceeds <see cref="CamusDBConfig.OrphanRetentionMs"/> it is no longer recoverable and its
+/// age exceeds <see cref="CamusDBOptions.OrphanRetentionMs"/> it is no longer recoverable and its
 /// keyspace is physically reclaimed.
 ///
 /// <para><b>Single-owner election.</b> Like <see cref="SnapshotHoldRenewer"/>, a sweep runs only while
@@ -98,7 +98,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
 
     /// <summary>
     /// True once an orphan dropped at <paramref name="droppedAt"/> is past the retention window. Always
-    /// false when retention is disabled (<see cref="CamusDBConfig.OrphanRetentionMs"/> &lt;= 0), which
+    /// false when retention is disabled (<see cref="CamusDBOptions.OrphanRetentionMs"/> &lt;= 0), which
     /// keeps orphans indefinitely.
     /// </summary>
     private bool IsExpired(HLCTimestamp droppedAt, HLCTimestamp now)

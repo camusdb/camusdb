@@ -18,8 +18,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// <c>regexp_instr</c>, <c>regexp_substr</c>, and <c>regexp_split_to_array</c>.
 ///
 /// <para>All functions reuse <see cref="RegexMatcher"/>'s compiled-regex cache and per-match
-/// timeout, so the <see cref="CamusDBConfig.RegexMatchTimeoutMs"/> and
-/// <see cref="CamusDBConfig.RegexCacheMaxEntries"/> YAML keys also cover these functions.</para>
+/// timeout, so the <see cref="CamusDBOptions.RegexMatchTimeoutMs"/> and
+/// <see cref="CamusDBOptions.RegexCacheMaxEntries"/> YAML keys also cover these functions.</para>
 ///
 /// <para>The underlying regex engine is .NET <see cref="System.Text.RegularExpressions"/>,
 /// not POSIX ERE — see the operator documentation for engine differences and the supported

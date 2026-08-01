@@ -150,7 +150,7 @@ internal sealed class TestCommentOnHardening : BaseTest
         CommandExecutor executor, string? databaseName, string sql, bool ddlEndpoint)
     {
         HttpTransactionCoordinator txCoord = new(executor);
-        ExecuteSQLController controller = new(executor, txCoord, new PreparedStatementRegistry(), Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ICamusDB>(SharedLoggerFactory));
+        ExecuteSQLController controller = new(executor, txCoord, new PreparedStatementRegistry(CamusDBConfig.Ambient), Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ICamusDB>(SharedLoggerFactory), CamusDBConfig.Ambient);
 
         string body = JsonSerializer.Serialize(new { databaseName, sql }, JsonOpts);
         byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
@@ -379,7 +379,7 @@ internal sealed class TestCommentOnHardening : BaseTest
 
     // ── The length bound must apply to every comment-bearing field ──────────
 
-    private static string TooLong => new('x', CamusDBConfig.MaxCommentLength + 1);
+    private static string TooLong => new('x', CamusDBConstants.MaxCommentLength + 1);
 
     [Test]
     public async Task InlineTableCommentIsBounded()
@@ -457,7 +457,7 @@ internal sealed class TestCommentOnHardening : BaseTest
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
 
-        string atLimit = new('x', CamusDBConfig.MaxCommentLength);
+        string atLimit = new('x', CamusDBConstants.MaxCommentLength);
 
         await ExecuteDdl(executor, dbname,
             $"CREATE TABLE t (id oid PRIMARY KEY NOT NULL COMMENT '{atLimit}') COMMENT '{atLimit}'");

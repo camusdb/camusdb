@@ -46,7 +46,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///     enhancement.</item>
 /// </list>
 ///
-/// Gated by <see cref="CamusDBConfig.CostBasedJoinOrderEnabled"/> (default false). With the
+/// Gated by <see cref="CamusDBOptions.CostBasedJoinOrderEnabled"/> (default false). With the
 /// flag off plans are byte-identical to the heuristic output.
 /// </summary>
 internal static class JoinEnumerator

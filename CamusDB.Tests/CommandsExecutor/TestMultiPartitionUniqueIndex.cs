@@ -60,7 +60,7 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
             WalStorage = "sqlite",
             WalPath = storageRoot,
             InitialPartitions = Partitions
-        });
+        }.WithFastTestTimers());
 
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
@@ -81,7 +81,7 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, sharedNode: node!, isClusterMode: true);
+        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient, sharedNode: node!, isClusterMode: true);
     }
 
     private static async Task CreateTeams(string dbname, DatabaseDescriptor database, CommandExecutor executor)

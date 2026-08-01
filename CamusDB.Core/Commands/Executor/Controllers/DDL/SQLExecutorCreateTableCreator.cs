@@ -84,7 +84,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             List<ColumnIndexInfo> columnIndexInfos = new();
             GetIndexColumnList(constraintList.leftAst, columnIndexInfos);
-            ConstraintInfo constraintInfo = new(ConstraintType.PrimaryKey, CamusDBConfig.PrimaryKeyInternalName, columnIndexInfos.ToArray());
+            ConstraintInfo constraintInfo = new(ConstraintType.PrimaryKey, CamusDBConstants.PrimaryKeyInternalName, columnIndexInfos.ToArray());
             constraintInfos.Add(constraintInfo);
             return;
         }
@@ -93,7 +93,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             List<ColumnIndexInfo> columnIndexInfos = new();
             GetIndexColumnList(constraintList.leftAst, columnIndexInfos);
-            ConstraintInfo constraintInfo = new(ConstraintType.PrimaryKey, CamusDBConfig.PrimaryKeyInternalName, columnIndexInfos.ToArray());
+            ConstraintInfo constraintInfo = new(ConstraintType.PrimaryKey, CamusDBConstants.PrimaryKeyInternalName, columnIndexInfos.ToArray());
             constraintInfos.Add(constraintInfo);
             return;
         }
@@ -364,7 +364,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                     {
                         ConstraintInfo constraintInfo = new(
                             ConstraintType.PrimaryKey,
-                            CamusDBConfig.PrimaryKeyInternalName,
+                            CamusDBConstants.PrimaryKeyInternalName,
                             [new(name: fieldList.leftAst.yytext! ?? "", OrderType.Ascending)]
                         );
 
@@ -402,7 +402,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         {
             List<ColumnIndexInfo> columnIndexInfos = new();
             GetIndexColumnList(fieldList.leftAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.PrimaryKey, CamusDBConfig.PrimaryKeyInternalName, columnIndexInfos.ToArray()));
+            constraintInfos.Add(new(ConstraintType.PrimaryKey, CamusDBConstants.PrimaryKeyInternalName, columnIndexInfos.ToArray()));
             return;
         }
 

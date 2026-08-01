@@ -67,7 +67,7 @@ internal sealed class TableDropper
                     tableName: ticket.TableName,
                     indexName: index.Key,
                     columns: Array.Empty<ColumnIndexInfo>(),
-                    operation: index.Key == CamusDBConfig.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
+                    operation: index.Key == CamusDBConstants.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
                 );
 
                 await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);

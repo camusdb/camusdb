@@ -36,6 +36,11 @@ namespace CamusDB.App.Services;
 /// </summary>
 public sealed class PreparedStatementRegistry
 {
+    /// <summary>Configuration for the engine this registry serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public PreparedStatementRegistry(CamusDBOptions options) => this.options = options;
+
     /// <summary>
     /// A registered statement plus the two facts the stream model gives gRPC for free: who may use
     /// it, and when it was last used. <see cref="LastUsedTicks"/> is written on every successful
@@ -128,7 +133,7 @@ public sealed class PreparedStatementRegistry
         string ownerKey = OwnerKey(principal);
         long bytes = RetainedBytesOf(statement);
 
-        int statementLimit = CamusDBConfig.MaxPreparedStatementBytes;
+        int statementLimit = options.MaxPreparedStatementBytes;
         if (statementLimit > 0 && bytes > statementLimit)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -161,10 +166,10 @@ public sealed class PreparedStatementRegistry
     /// </summary>
     private void Reserve(string ownerKey, long bytes)
     {
-        int nodeCountLimit = CamusDBConfig.RestMaxPreparedStatements;
-        int ownerCountLimit = CamusDBConfig.RestMaxPreparedStatementsPerPrincipal;
-        long nodeByteLimit = CamusDBConfig.RestMaxPreparedStatementBytes;
-        long ownerByteLimit = CamusDBConfig.RestMaxPreparedStatementBytesPerPrincipal;
+        int nodeCountLimit = options.RestMaxPreparedStatements;
+        int ownerCountLimit = options.RestMaxPreparedStatementsPerPrincipal;
+        long nodeByteLimit = options.RestMaxPreparedStatementBytes;
+        long ownerByteLimit = options.RestMaxPreparedStatementBytesPerPrincipal;
 
         for (int attempt = 0; ; attempt++)
         {
@@ -285,12 +290,12 @@ public sealed class PreparedStatementRegistry
     }
 
     /// <summary>
-    /// Drops every entry idle for longer than <see cref="CamusDBConfig.PreparedStatementIdleTimeoutMs"/>
+    /// Drops every entry idle for longer than <see cref="CamusDBOptions.PreparedStatementIdleTimeoutMs"/>
     /// and returns how many went. Called by the background reaper, and inline when a cap is hit.
     /// </summary>
     public int ReapExpired()
     {
-        if (CamusDBConfig.PreparedStatementIdleTimeoutMs <= 0)
+        if (options.PreparedStatementIdleTimeoutMs <= 0)
             return 0;
 
         int reaped = 0;
@@ -315,9 +320,9 @@ public sealed class PreparedStatementRegistry
         return true;
     }
 
-    private static bool IsExpired(Entry entry)
+    private bool IsExpired(Entry entry)
     {
-        int timeoutMs = CamusDBConfig.PreparedStatementIdleTimeoutMs;
+        int timeoutMs = options.PreparedStatementIdleTimeoutMs;
         return timeoutMs > 0 && entry.IdleTime.TotalMilliseconds >= timeoutMs;
     }
 

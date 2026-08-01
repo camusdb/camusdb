@@ -43,7 +43,7 @@ internal sealed class TableIndexAdder
         this.logger = logger;
     }
 
-    private static void Validate(TableDescriptor table, AlterIndexTicket ticket)
+    private static void Validate(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
     {
         if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.Indexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
@@ -60,7 +60,7 @@ internal sealed class TableIndexAdder
         // Index count cap — only for user-visible secondary indexes (not PK or ~-prefixed internals).
         if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
         {
-            int maxIdx = CamusDBConfig.MaxIndexesPerTable;
+            int maxIdx = options.MaxIndexesPerTable;
             if (maxIdx > 0)
             {
                 int userIndexCount = 0;
@@ -107,12 +107,12 @@ internal sealed class TableIndexAdder
                 );
         }
 
-        ValidateIncludeColumns(table, ticket);
+        ValidateIncludeColumns(table, ticket, options);
     }
 
     /// <summary>
     /// Validates the optional INCLUDE (stored/payload) column list: the combined key+include column
-    /// count must be within <see cref="CamusDBConfig.MaxIndexColumns"/>, and each included column must
+    /// count must be within <see cref="CamusDBOptions.MaxIndexColumns"/>, and each included column must
     /// exist and be public, must not duplicate another include column, and must not also be a key
     /// column of the same index (it would be stored twice with an ambiguous covered slot). Key-column
     /// existence/public checks already ran in <see cref="Validate"/>. Included columns are unordered
@@ -120,15 +120,15 @@ internal sealed class TableIndexAdder
     /// the cluster add paths.
     /// </summary>
     /// <summary>
-    /// Enforces the combined key+include column ceiling (<see cref="CamusDBConfig.MaxIndexColumns"/>)
+    /// Enforces the combined key+include column ceiling (<see cref="CamusDBOptions.MaxIndexColumns"/>)
     /// for a single index. A covering index duplicates each included value into every entry, so an
     /// unbounded column count is a storage/replication amplification hazard. Disabled when the config
     /// value is <c>&lt;= 0</c>. Shared by the standalone/cluster add paths and the inline
     /// <c>CREATE TABLE</c> constraint builder.
     /// </summary>
-    internal static void ValidateIndexColumnCount(string indexName, int keyColumnCount, int includeColumnCount)
+    internal static void ValidateIndexColumnCount(string indexName, int keyColumnCount, int includeColumnCount, CamusDBOptions options)
     {
-        int max = CamusDBConfig.MaxIndexColumns;
+        int max = options.MaxIndexColumns;
         if (max <= 0)
             return;
 
@@ -139,9 +139,9 @@ internal sealed class TableIndexAdder
                 $"Index '{indexName}' spans {total} columns ({keyColumnCount} key + {includeColumnCount} INCLUDE), exceeding the maximum of {max}");
     }
 
-    internal static void ValidateIncludeColumns(TableDescriptor table, AlterIndexTicket ticket)
+    internal static void ValidateIncludeColumns(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
     {
-        ValidateIndexColumnCount(ticket.IndexName, ticket.Columns.Length, ticket.IncludeColumns.Length);
+        ValidateIndexColumnCount(ticket.IndexName, ticket.Columns.Length, ticket.IncludeColumns.Length, options);
 
         if (ticket.IncludeColumns.Length == 0)
             return;
@@ -192,7 +192,7 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket
     )
     {
-        Validate(table, ticket);
+        Validate(table, ticket, database.Options);
 
         AddIndexFluxState state = new(
             catalogs: catalogs,

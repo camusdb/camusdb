@@ -18,7 +18,7 @@ namespace CamusDB.Core.Auth;
 /// transports to turn credentials into a token and a token into a <see cref="Principal"/>.
 ///
 /// <para>Ordinary requests never run the KDF — they validate the random token's HMAC and read a cached
-/// authorization snapshot bounded by <see cref="CamusDBConfig.AuthenticationCacheTtl"/>, so a revoke on
+/// authorization snapshot bounded by <see cref="CamusDBOptions.AuthenticationCacheTtl"/>, so a revoke on
 /// another node takes effect within that window. A cache hit still re-checks the token's secret HMAC on
 /// every request, so the cache never authenticates a token by id alone. Login is rate-limited per
 /// account and source and the number of concurrent KDF operations is capped, so a login flood cannot
@@ -27,7 +27,7 @@ namespace CamusDB.Core.Auth;
 public sealed class AuthService
 {
     private readonly Task<AuthCatalog> catalogTask;
-    private readonly SemaphoreSlim kdfConcurrency = new(CamusDBConfig.LoginKdfMaxConcurrency, CamusDBConfig.LoginKdfMaxConcurrency);
+    private readonly SemaphoreSlim kdfConcurrency;
 
     // tokenId -> cached validation. The SecretMac is re-verified on every hit (constant-time), so a
     // warm cache never lets `camus_<id>.<wrong-secret>` authenticate. Bounded by
@@ -45,9 +45,16 @@ public sealed class AuthService
 
     private readonly record struct CachedSession(Principal Principal, byte[] SecretMac, DateTime Expires);
 
-    public AuthService(Task<AuthCatalog> catalogTask)
+    /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public AuthService(Task<AuthCatalog> catalogTask, CamusDBOptions options)
     {
         this.catalogTask = catalogTask;
+        this.options = options;
+
+        // Sized from the injected configuration rather than a field initializer, which cannot see it.
+        kdfConcurrency = new SemaphoreSlim(options.LoginKdfMaxConcurrency, options.LoginKdfMaxConcurrency);
     }
 
     private static string Normalize(string name) => name.ToLowerInvariant();
@@ -65,7 +72,7 @@ public sealed class AuthService
     /// </summary>
     public async Task<LoginResult> LoginAsync(string user, string password, string source = "")
     {
-        if (string.IsNullOrEmpty(CamusDBConfig.AccessTokenServerKey))
+        if (string.IsNullOrEmpty(options.AccessTokenServerKey))
             throw new CamusDBException(CamusDBErrorCodes.InvalidConfig, "Access token server key is not configured");
 
         string normalized = Normalize(user);
@@ -101,12 +108,12 @@ public sealed class AuthService
 
         TokenCodec.MintedToken token = TokenCodec.Mint();
         DateTime now = DateTime.UtcNow;
-        DateTime expiresAt = now.Add(CamusDBConfig.AccessTokenTtl);
+        DateTime expiresAt = now.Add(options.AccessTokenTtl);
         SessionRecord session = new()
         {
             TokenId = token.TokenId,
             User = normalized,
-            SecretMac = TokenCodec.ComputeMac(CamusDBConfig.AccessTokenServerKey, token.TokenId, token.Secret),
+            SecretMac = TokenCodec.ComputeMac(options.AccessTokenServerKey, token.TokenId, token.Secret),
             CredentialEpoch = record.CredentialEpoch,
             AuthorizationEpoch = record.AuthorizationEpoch,
             IssuedAt = now,
@@ -130,7 +137,7 @@ public sealed class AuthService
         if (!TokenCodec.TryParse(bearer, out string tokenId, out string secret))
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
 
-        byte[] presentedMac = TokenCodec.ComputeMac(CamusDBConfig.AccessTokenServerKey, tokenId, secret);
+        byte[] presentedMac = TokenCodec.ComputeMac(options.AccessTokenServerKey, tokenId, secret);
 
         // Cache hit is trusted ONLY when the presented secret still matches — a wrong secret with a
         // known id falls through to full validation (which also fails).
@@ -175,7 +182,7 @@ public sealed class AuthService
         if (session is null)
             return;
 
-        byte[] presentedMac = TokenCodec.ComputeMac(CamusDBConfig.AccessTokenServerKey, tokenId, secret);
+        byte[] presentedMac = TokenCodec.ComputeMac(options.AccessTokenServerKey, tokenId, secret);
         if (!TokenCodec.MacEquals(presentedMac, session.SecretMac))
             return; // wrong secret — not authorized to revoke this session
 
@@ -186,19 +193,19 @@ public sealed class AuthService
     private void CachePrincipal(string tokenId, Principal principal, byte[] secretMac, DateTime sessionExpiresAt)
     {
         DateTime now = DateTime.UtcNow;
-        if (principalCache.Count >= CamusDBConfig.AuthenticationCacheMaxEntries)
+        if (principalCache.Count >= options.AuthenticationCacheMaxEntries)
         {
             foreach (KeyValuePair<string, CachedSession> entry in principalCache)
             {
                 if (entry.Value.Expires <= now)
                     principalCache.TryRemove(entry.Key, out _);
             }
-            if (principalCache.Count >= CamusDBConfig.AuthenticationCacheMaxEntries)
+            if (principalCache.Count >= options.AuthenticationCacheMaxEntries)
                 return; // still full — skip caching rather than grow unbounded
         }
 
         // Never trust the cache past the token's own absolute lifetime.
-        DateTime expires = now.Add(CamusDBConfig.AuthenticationCacheTtl);
+        DateTime expires = now.Add(options.AuthenticationCacheTtl);
         if (sessionExpiresAt < expires)
             expires = sessionExpiresAt;
 
@@ -211,14 +218,14 @@ public sealed class AuthService
 
         // Bound the limiter: purge expired windows when it grows, and fail closed (global admission
         // budget) if it is still full, so a flood of unique account/source keys cannot grow memory.
-        if (loginAttempts.Count >= CamusDBConfig.LoginRateLimitMaxEntries)
+        if (loginAttempts.Count >= options.LoginRateLimitMaxEntries)
         {
             foreach (KeyValuePair<string, (int Count, DateTime WindowStart)> entry in loginAttempts)
             {
                 if (now - entry.Value.WindowStart > RateWindow)
                     loginAttempts.TryRemove(entry.Key, out _);
             }
-            if (loginAttempts.Count >= CamusDBConfig.LoginRateLimitMaxEntries)
+            if (loginAttempts.Count >= options.LoginRateLimitMaxEntries)
                 throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Authentication is saturated; retry later");
         }
 
@@ -228,7 +235,7 @@ public sealed class AuthService
             _ => (1, now),
             (_, existing) => now - existing.WindowStart > RateWindow ? (1, now) : (existing.Count + 1, existing.WindowStart));
 
-        if (updated.Count > CamusDBConfig.LoginMaxAttemptsPerMinute)
+        if (updated.Count > options.LoginMaxAttemptsPerMinute)
             throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Too many authentication attempts; retry later");
     }
 }

@@ -161,7 +161,7 @@ public class TestSelectQueryCreator
         SelectQuery query = ParseSelectQuery("SELECT id FROM robots@{FORCE_INDEX=pk}");
 
         TableSource source = AssertTableSource(query);
-        Assert.AreEqual(CamusDBConfig.PrimaryKeyInternalName, source.ForcedIndexName);
+        Assert.AreEqual(CamusDBConstants.PrimaryKeyInternalName, source.ForcedIndexName);
     }
 
     [Test]

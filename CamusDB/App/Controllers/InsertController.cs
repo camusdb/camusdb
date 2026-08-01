@@ -22,7 +22,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class InsertController : CommandsController
 {
-    public InsertController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public InsertController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
     {
 
     }
@@ -96,7 +96,7 @@ public sealed class InsertController : CommandsController
                 }
             }
 
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);

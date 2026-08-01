@@ -53,14 +53,19 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     private readonly HttpTransactionCoordinator transactions;
     private readonly ILogger<ICamusDB> logger;
 
+    /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
     public CamusRowsService(
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
-        ILogger<ICamusDB> logger)
+        ILogger<ICamusDB> logger,
+        CamusDBOptions options)
     {
         this.executor     = executor;
         this.transactions = transactions;
         this.logger       = logger;
+        this.options      = options;
     }
 
     // ─── InsertRow ────────────────────────────────────────────────────────────
@@ -127,7 +132,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitInsert).ConfigureAwait(false);
             else
                 await AutocommitInsert(ct).ConfigureAwait(false);
@@ -352,7 +357,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdate).ConfigureAwait(false);
             else
                 await AutocommitUpdate(ct).ConfigureAwait(false);
@@ -438,7 +443,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdateById).ConfigureAwait(false);
             else
                 await AutocommitUpdateById(ct).ConfigureAwait(false);
@@ -514,7 +519,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDelete).ConfigureAwait(false);
             else
                 await AutocommitDelete(ct).ConfigureAwait(false);
@@ -592,7 +597,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
+            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDeleteById).ConfigureAwait(false);
             else
                 await AutocommitDeleteById(ct).ConfigureAwait(false);
@@ -708,7 +713,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// </summary>
     private static EngineQueryFilter PrimaryKeyFilter(TableDescriptor table, string id)
     {
-        if (!table.Indexes.TryGetValue(CamusDBConfig.PrimaryKeyInternalName, out TableIndexSchema? pk) ||
+        if (!table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? pk) ||
             pk.Columns.Length == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation, "Table doesn't have a primary key index");

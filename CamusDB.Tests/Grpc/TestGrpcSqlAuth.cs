@@ -47,10 +47,10 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger,
+        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge());
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
 
         savedEnabled = CamusConfig.AuthenticationEnabled;
         savedServerKey = CamusConfig.AccessTokenServerKey;
@@ -86,6 +86,15 @@ internal sealed class TestGrpcSqlAuth : BaseTest
         CamusConfig.BootstrapSuperuser = "root";
         CamusConfig.BootstrapSuperuserPassword = "root-password";
         CamusConfig.AuthenticationEnabled = true;
+
+        // An engine fixes its configuration when it is constructed, so the executor and the service in
+        // front of it are rebuilt here — after the authentication policy and signing key are in place —
+        // rather than in set-up, where they would have captured auth-disabled settings.
+        serviceExecutor = new CommandExecutor(
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
+        service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
 
         await serviceExecutor.EnsureBootstrapSuperuserAsync();
         string rootToken = (await serviceExecutor.LoginAsync("root", "root-password")).Token;

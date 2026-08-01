@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
@@ -48,14 +49,14 @@ public sealed class TestGrpcQueryCacheMetadata : BaseTest
     public void SetUpGrpcCacheService()
     {
         // sweepIntervalMs: -1 keeps the background sweeper off so an entry cannot expire mid-test.
-        cache = new QueryResultCache(sweepIntervalMs: -1);
+        cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(), new CatalogsManager(logger), logger,
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: cache);
         service = new CamusSqlService(
             serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge());
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
     }
 
     [TearDown]

@@ -133,7 +133,7 @@ public static class RowEncoder
 
         /// <summary>
         /// Per-scan override for slot-backed decode. <see langword="null"/> defers to the global
-        /// <see cref="CamusDBConfig.SlotBackedDecode"/>; a non-null value lets the scan opt in or out
+        /// <see cref="CamusDBOptions.SlotBackedDecode"/>; a non-null value lets the scan opt in or out
         /// based on its own shape. Slot-backed decode only pays off when the scan rejects rows (a
         /// rejected row decodes to slots but never materializes its projection cells); a scan that
         /// materializes every row — no residual filter, or a full-materialize consumer — is faster on
@@ -143,7 +143,7 @@ public static class RowEncoder
 
         /// <summary>
         /// Per-scan override for borrowed (zero-copy) decode. <see langword="null"/> defers to the global
-        /// <see cref="CamusDBConfig.BorrowedDecode"/>. When set, a decoded row is backed by a
+        /// <see cref="CamusDBOptions.BorrowedDecode"/>. When set, a decoded row is backed by a
         /// <see cref="RowView"/> over the raw KV bytes instead of an eager <c>ValueSlot[]</c>: no per-row
         /// slot array is allocated and an unread cell decodes nothing, which wins hardest on selective
         /// scans over wide or string/bytes-heavy rows. Takes precedence over
@@ -576,7 +576,7 @@ public static class RowEncoder
     /// materialized lazily on access — a win only when the scan rejects rows, so those cells are never
     /// materialized. Otherwise it takes the eager <see cref="ColumnValue"/><c>[]</c> path, which is
     /// faster when every row is fully materialized. The caller chooses per scan (see
-    /// <see cref="RowDecodeState.SlotBackedDecode"/> / <see cref="CamusDBConfig.SlotBackedDecode"/>);
+    /// <see cref="RowDecodeState.SlotBackedDecode"/> / <see cref="CamusDBOptions.SlotBackedDecode"/>);
     /// both paths are value-identical.
     /// </para>
     /// </summary>
@@ -609,7 +609,7 @@ public static class RowEncoder
     /// <summary>
     /// Eager fallback for <see cref="ExecuteDecodePlan"/>: decodes each cell straight into a
     /// <see cref="ColumnValue"/> as the pipeline did before slot-backed rows. Kept as the kill-switch
-    /// path (<see cref="CamusDBConfig.SlotBackedDecode"/> == false) and the A/B baseline.
+    /// path (<see cref="CamusDBOptions.SlotBackedDecode"/> == false) and the A/B baseline.
     /// </summary>
     private static QueryRow ExecuteDecodePlanEager(RowDecodePlan plan, ReadOnlySpan<byte> data, ObjectIdValue rowId)
     {

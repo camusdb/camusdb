@@ -44,10 +44,10 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
 
     protected override CommandExecutor CreateCommandExecutor()
     {
-        _cache = new QueryResultCache(sweepIntervalMs: -1);
+        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }
@@ -243,7 +243,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         // database.Cache will be null, exercising the dispatch branch in Query() that
         // fires when a hint is present but no cache is wired up.
         CommandExecutor disabledExecutor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger,
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: null);
 
@@ -304,7 +304,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     [Test]
     public async Task EvictedBeforePublish_GenerationFence_ReasonIsInFlightWrite()
     {
-        using var gate_cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var gate_cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string ks = "db1:tbl1:r";
         CacheGenerationToken staleToken = gate_cache.PublishGate.SnapshotGenerations([ks]);  // gen=0
         gate_cache.PublishGate.CommitWrite([ks]);  // gen→1 — stales the snapshot token

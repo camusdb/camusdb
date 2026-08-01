@@ -30,17 +30,21 @@ internal static class QueryPostScanPipeline
         QueryDistincter queryDistincter,
         QueryLimiter queryLimiter)
     {
+        // Built once for the whole pipeline: every operator below runs against the same engine and
+        // the same query, so they share one context rather than each rediscovering its configuration.
+        QueryExecutionContext context = QueryExecutionContext.For(database);
+
         bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
         bool havingApplied = ticket.Having is null;
 
         if (hasGroupBy)
         {
-            cursor = queryAggregator.AggregateResultset(ticket, cursor);
+            cursor = queryAggregator.AggregateResultset(ticket, cursor, context);
             cursor = queryFilterer.FilterHavingResultset(database, ticket, cursor);
             havingApplied = true;
 
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-                cursor = querySorter.SortResultset(ticket, cursor);
+                cursor = querySorter.SortResultset(ticket, cursor, context);
 
             if (ticket.Projection is not null && ticket.Projection.Count > 0 && !IsFullProjection(ticket.Projection))
                 cursor = queryProjector.ProjectResultset(ticket, cursor);
@@ -57,7 +61,7 @@ internal static class QueryPostScanPipeline
             {
                 if (HasAggregation(ticket.Projection, ticket))
                 {
-                    cursor = queryAggregator.AggregateResultset(ticket, cursor);
+                    cursor = queryAggregator.AggregateResultset(ticket, cursor, context);
                     cursor = queryFilterer.FilterHavingResultset(database, ticket, cursor);
                     havingApplied = true;
                 }
@@ -66,10 +70,10 @@ internal static class QueryPostScanPipeline
                     cursor = queryProjector.ProjectResultset(ticket, cursor);
             }
 
-            cursor = queryDistincter.DistinctResultset(ticket, cursor);
+            cursor = queryDistincter.DistinctResultset(ticket, cursor, context);
 
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-                cursor = querySorter.SortResultset(ticket, cursor);
+                cursor = querySorter.SortResultset(ticket, cursor, context);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
                 cursor = queryLimiter.LimitResultset(ticket, cursor);
@@ -85,13 +89,13 @@ internal static class QueryPostScanPipeline
         }
 
         if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-            cursor = querySorter.SortResultset(ticket, cursor);
+            cursor = querySorter.SortResultset(ticket, cursor, context);
 
         if (ticket.Projection is not null && ticket.Projection.Count > 0)
         {
             if (HasAggregation(ticket.Projection, ticket))
             {
-                cursor = queryAggregator.AggregateResultset(ticket, cursor);
+                cursor = queryAggregator.AggregateResultset(ticket, cursor, context);
                 cursor = queryFilterer.FilterHavingResultset(database, ticket, cursor);
                 havingApplied = true;
             }

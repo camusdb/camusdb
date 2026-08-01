@@ -264,7 +264,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task HitAfterPublish()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
         CachedQueryResult result = MakeResult("db", "c", fp);
         CacheGenerationToken token = EmptyToken(cache);
@@ -280,7 +280,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task MissWhenNotPublished()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
 
         CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
@@ -290,7 +290,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task DifferentDatabaseIds_Miss()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string fp = ResultFingerprintBuilder.Build("db1", "c", "s", null, null, NoOpts);
         string fpOther = ResultFingerprintBuilder.Build("db2", "c", "s", null, null, NoOpts);
 
@@ -305,7 +305,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task DifferentSchemaVersion_AfterDropRecreate_Miss()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         // Cache entry for schema version 1
         string fp1 = ResultFingerprintBuilder.Build("db", "c", "s", null, SchemaDeps("orders", 1), NoOpts);
@@ -328,7 +328,7 @@ public sealed class TestQueryResultCacheCommitGate
         try
         {
             CamusDBConfig.QueryResultCacheMaxEntryRows = 2;
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             // Build 3 rows — exceeds the cap of 2
             var rows = new List<QueryResultRow>
@@ -359,7 +359,7 @@ public sealed class TestQueryResultCacheCommitGate
         try
         {
             CamusDBConfig.QueryResultCacheMaxEntryBytes = 1; // 1 byte — any row exceeds this
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             var rows = new List<QueryResultRow> { MakeRow("col", "hello") };
             string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
@@ -386,7 +386,7 @@ public sealed class TestQueryResultCacheCommitGate
         try
         {
             CamusDBConfig.QueryResultCacheMaxEntries = 2;
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             string fp1 = ResultFingerprintBuilder.Build("db", "c", "s1", null, null, NoOpts);
             string fp2 = ResultFingerprintBuilder.Build("db", "c", "s2", null, null, NoOpts);
@@ -423,7 +423,7 @@ public sealed class TestQueryResultCacheCommitGate
         try
         {
             CamusDBConfig.QueryResultCacheDefaultTtlMs = 0; // expires immediately (TTL = 0 ms)
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
             await cache.TryPublishAsync(MakeResult("db", "c", fp), EmptyToken(cache));
@@ -448,7 +448,7 @@ public sealed class TestQueryResultCacheCommitGate
         try
         {
             CamusDBConfig.QueryResultCacheDefaultTtlMs = 0;
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
             await cache.TryPublishAsync(MakeResult("db", "c", fp), EmptyToken(cache));
@@ -477,7 +477,7 @@ public sealed class TestQueryResultCacheCommitGate
             // during the test.
             CamusDBConfig.QueryResultCacheDefaultTtlMs = 60_000;
 
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             // Entry with a per-hint TTL of 1 ms
             string fpShort = ResultFingerprintBuilder.Build("db", "short", "s", null, null, NoOpts);
@@ -520,7 +520,7 @@ public sealed class TestQueryResultCacheCommitGate
         try
         {
             CamusDBConfig.QueryResultCacheDefaultTtlMs = 60_000;
-            using var cache = new QueryResultCache(sweepIntervalMs: -1);
+            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
             string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
             var result = new CachedQueryResult(
@@ -551,7 +551,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateCacheName_RemovesMatchingEntries()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         string fp1 = ResultFingerprintBuilder.Build("db", "orders", "s1", null, null, NoOpts);
         string fp2 = ResultFingerprintBuilder.Build("db", "customers", "s2", null, null, NoOpts);
@@ -570,7 +570,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateDatabase_RemovesAllEntriesForDatabase()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         string fp1 = ResultFingerprintBuilder.Build("db1", "c1", "s1", null, null, NoOpts);
         string fp2 = ResultFingerprintBuilder.Build("db1", "c2", "s2", null, null, NoOpts);
@@ -591,7 +591,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateCacheName_OtherDatabaseUnaffected()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         // Both databases have a cache named "orders"
         string fp1 = ResultFingerprintBuilder.Build("db1", "orders", "s1", null, null, NoOpts);
@@ -614,7 +614,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task GenerationFence_BlocksPublishAfterWrite()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         string keyspace = "db:table1:r";
 
         // Snapshot generations before query starts
@@ -642,7 +642,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task ByteAccounting_IncreasesOnPublish_DecreasesOnRemove()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
         var rows = new List<QueryResultRow> { MakeRow("col", "hello world") };
@@ -671,7 +671,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateByModifiedKeys_RowKey_RemovesMatchingEntry()
     {
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         // Publish an entry whose fingerprint maps to "db1:tbl1" in the dep index.
         // Since entries currently carry QueryDependencySet.Empty, we verify the row-key
@@ -703,7 +703,7 @@ public sealed class TestQueryResultCacheCommitGate
         //
         // We test the extraction logic directly through InvalidateByModifiedKeys + a manually
         // constructed dep. Since QueryDependencySet is public we can build a non-empty dep set.
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         // Real row key: "mydb:orders:r/000000000000000000000001"
         // Expected bucket: "mydb:orders:r"
@@ -728,7 +728,7 @@ public sealed class TestQueryResultCacheCommitGate
         // Real index key format: "{dbId}:{tableId}:i:{indexId}/{encodedKey}"
         // Example: "mydb:orders:i:idx-name/0031003200330034"
         // Expected bucket: "mydb:orders:i:idx-name"
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         string indexKey = "mydb:orders:i:idx-name/0031003200330034";
 
@@ -747,7 +747,7 @@ public sealed class TestQueryResultCacheCommitGate
         // That format does not exist in production — the real format has a colon.
         // Passing a key in the old format should return an empty bucket (no match),
         // not silently extract a wrong bucket.
-        using var cache = new QueryResultCache(sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         // Old format (never actually written by KvTableStore): "db:tbl:i/idx/key"
         // The new code requires key[colonAfterI] == ':', so this should produce no bucket.

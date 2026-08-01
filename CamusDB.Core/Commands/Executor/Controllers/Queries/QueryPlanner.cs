@@ -24,14 +24,22 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 public sealed class QueryPlanner
 {
     private readonly StatisticsManager? _stats;
+
+    /// <summary>
+    /// Configuration of the engine this planner belongs to. Held here rather than read from the
+    /// descriptor passed to each call, so one planner cannot silently plan under two different
+    /// configurations.
+    /// </summary>
+    private readonly CamusDBOptions _options;
     private readonly PlanCache? _cache;
 
-    public QueryPlanner(StatisticsManager? stats = null) : this(stats, null) { }
+    public QueryPlanner(CamusDBOptions options, StatisticsManager? stats = null) : this(stats, null, options) { }
 
-    internal QueryPlanner(StatisticsManager? stats, PlanCache? cache)
+    internal QueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options)
     {
         _stats = stats;
         _cache = cache;
+        _options = options;
     }
 
     // Tag a scan leaf with its DataDistribution and return it (fluent helper).
@@ -99,7 +107,7 @@ public sealed class QueryPlanner
 
         if (shapeId is not null
             && _cache is not null
-            && CamusDBConfig.PlanCacheEnabled
+            && _options.PlanCacheEnabled
             && _cache.TryGet(database.Id, shapeId, cacheDeps, out PlanCacheEntry? cached)
             && cached!.SingleTable is { } cachedDecision)
         {
@@ -344,7 +352,7 @@ public sealed class QueryPlanner
         // On a cache miss, store the access-path decision so the next identical-shape query
         // can skip the expensive cost enumeration.  In-list scans are excluded: they have no
         // QueryPlanStep (the step slot is null) and their choice is IN-list-value-count-dependent.
-        if (!fromCache && _cache is not null && CamusDBConfig.PlanCacheEnabled
+        if (!fromCache && _cache is not null && _options.PlanCacheEnabled
             && shapeId is not null
             && plan.Steps is [{ } s0, ..]
             && s0.Type != QueryPlanStepType.InListScanFromIndex)
@@ -536,7 +544,7 @@ public sealed class QueryPlanner
         // chosen scan node's own ordering, so a cost-picked order-satisfying index still elides
         // the sort, and a non-satisfying pick correctly retains it. (Folding sort cost into the
         // candidate comparison — "interesting orders" — is a future enhancement, not a correctness need.)
-        if (CamusDBConfig.CostBasedAccessPathEnabled
+        if (_options.CostBasedAccessPathEnabled
             && _stats is not null
             && analysis.IndexableComparisons.Count > 0
             && !ticket.ExclusivePredicateLocks)

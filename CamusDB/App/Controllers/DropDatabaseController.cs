@@ -19,7 +19,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class DropDatabaseController : CommandsController
 {
-    public DropDatabaseController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public DropDatabaseController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
     {
 
     }

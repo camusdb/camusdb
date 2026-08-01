@@ -14,10 +14,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// <summary>
 /// Thread-safe compiled-regex cache and match helper for the <c>~</c>, <c>~*</c>, <c>!~</c>,
 /// and <c>!~*</c> operators, and the <c>regexp_*</c> scalar functions. Caches up to
-/// <see cref="CamusDBConfig.RegexCacheMaxEntries"/> compiled <see cref="Regex"/> instances
+/// <see cref="CamusDBOptions.RegexCacheMaxEntries"/> compiled <see cref="Regex"/> instances
 /// keyed by <c>(pattern, RegexOptions)</c>. When full, new patterns are compiled and evaluated
 /// without being stored — queries never fail because the cache is full. Every match runs under
-/// <see cref="CamusDBConfig.RegexMatchTimeoutMs"/> to guard against ReDoS on pathological
+/// <see cref="CamusDBOptions.RegexMatchTimeoutMs"/> to guard against ReDoS on pathological
 /// patterns.
 ///
 /// <para>The underlying regex engine is .NET <see cref="System.Text.RegularExpressions"/>,

@@ -22,7 +22,7 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class TransactionsController : CommandsController
 {
-    public TransactionsController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger) : base(executor, transactions, logger)
+    public TransactionsController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
     {
 
     }

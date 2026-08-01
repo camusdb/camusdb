@@ -59,10 +59,10 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogs = new(logger);
-        executor = new(validator, catalogs, logger,
+        executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(executor);
-        registry = new();
+        registry = new(CamusDBConfig.Ambient);
 
         savedIdleTimeout = CamusConfig.PreparedStatementIdleTimeoutMs;
         savedPerPrincipal = CamusConfig.RestMaxPreparedStatementsPerPrincipal;
@@ -91,10 +91,10 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     }
 
     private ExecuteSQLController Sql(object body) =>
-        new(executor, coordinator, registry, logger) { ControllerContext = Context(body) };
+        new(executor, coordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
 
     private PreparedStatementsController Statements(object body) =>
-        new(executor, coordinator, registry, logger) { ControllerContext = Context(body) };
+        new(executor, coordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
 
     private async Task<string> CreateDatabaseWithTableAsync(string createTableSql)
     {
@@ -425,6 +425,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     public async Task AnIdleHandleExpiresAndIsReportedAsUnknown()
     {
         CamusConfig.PreparedStatementIdleTimeoutMs = 1;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         (string handle, _) = registry.Prepare(null, "db", "SELECT 1");
         await Task.Delay(30);
@@ -439,6 +442,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     {
         CamusConfig.PreparedStatementIdleTimeoutMs = 1;
         CamusConfig.RestMaxPreparedStatementsPerPrincipal = 2;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         registry.Prepare(null, "db", "SELECT 1");
         registry.Prepare(null, "db", "SELECT 2");
@@ -457,6 +463,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     {
         CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
         CamusConfig.RestMaxPreparedStatementsPerPrincipal = 2;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         (string first, _) = registry.Prepare(null, "db", "SELECT 1");
         registry.Prepare(null, "db", "SELECT 2");
@@ -478,6 +487,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
         CamusConfig.RestMaxPreparedStatementsPerPrincipal = 100;
         CamusConfig.RestMaxPreparedStatements = 2;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         Principal alice = new("alice", isSuperuser: false, []);
         Principal bob = new("bob", isSuperuser: false, []);
@@ -499,6 +511,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         // cannot see it — the interleaving has to be produced.
         CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
         CamusConfig.RestMaxPreparedStatementsPerPrincipal = 4;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         for (int round = 0; round < 200; round++)
         {
@@ -541,6 +556,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
         CamusConfig.RestMaxPreparedStatementsPerPrincipal = 4;
         CamusConfig.RestMaxPreparedStatements = 4;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         registry.Prepare(null, "db", "SELECT 1");
         registry.Prepare(null, "db", "SELECT 2");
@@ -572,6 +590,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     {
         int savedMax = CamusConfig.MaxPreparedStatementBytes;
         CamusConfig.MaxPreparedStatementBytes = 256;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
         try
         {
             string padding = new('x', 4096);
@@ -599,6 +620,9 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         CamusConfig.RestMaxPreparedStatementBytesPerPrincipal = 8 * 1024;
         CamusConfig.RestMaxPreparedStatementBytes = 1024 * 1024;
         CamusConfig.MaxPreparedStatementBytes = 65_536;
+        // The registry captures its configuration when constructed, so rebuild it now that the
+        // limits under test are in place.
+        registry = new(CamusDBConfig.Ambient);
 
         try
         {
@@ -698,14 +722,14 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     public async Task ACacheHintedPreparedSelect_MissesThenHitsLikeAnInlineOne()
     {
         // A real cache, or the executor reports "cache-disabled" and a broken hit path would pass.
-        QueryResultCache cache = new(sweepIntervalMs: -1);
+        QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandExecutor cachedExecutor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger,
+            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: cache);
         HttpTransactionCoordinator cachedCoordinator = new(cachedExecutor);
 
         ExecuteSQLController CachedSql(object body) =>
-            new(cachedExecutor, cachedCoordinator, registry, logger) { ControllerContext = Context(body) };
+            new(cachedExecutor, cachedCoordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
 
         try
         {
@@ -723,7 +747,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
             }).ExecuteNonSQLQuery();
 
             JsonResult prepareResult = await new PreparedStatementsController(
-                cachedExecutor, cachedCoordinator, registry, logger)
+                cachedExecutor, cachedCoordinator, registry, logger, CamusDBConfig.Ambient)
             {
                 ControllerContext = Context(new
                 {

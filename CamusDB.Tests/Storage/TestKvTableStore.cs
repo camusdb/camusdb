@@ -84,7 +84,7 @@ public sealed class TestKvTableStore
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
-        return (node, new KvTableStore(node.Kahuna, "testdb", tableId));
+        return (node, new KvTableStore(node.Kahuna, CamusDBConfig.Ambient, "testdb", tableId));
     }
 
     // ---- tests ------------------------------------------------------------
@@ -354,7 +354,7 @@ public sealed class TestKvTableStore
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("trangelock");
             await using EmbeddedKahuna __ = node;
 
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             KvTransaction tx1 = await transactions.BeginAsync();
             await store.AcquireRowRangeLockAsync(tx1);
@@ -419,8 +419,8 @@ public sealed class TestKvTableStore
             await using EmbeddedKahuna __ = node;
 
             ReleaseCountingKahuna counting = new(node.Kahuna);
-            KvTableStore store = new(counting, "testdb", "norelease");
-            KvTransactionsManager transactions = new(counting);
+            KvTableStore store = new(counting, CamusDBConfig.Ambient, "testdb", "norelease");
+            KvTransactionsManager transactions = new(counting, CamusDBConfig.Ambient);
 
             // Commit path.
             KvTransaction committed = await transactions.BeginAsync(
@@ -459,7 +459,7 @@ public sealed class TestKvTableStore
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("hybridopt");
             await using EmbeddedKahuna __ = node;
 
-            KvTransactionsManager transactions = new(node.Kahuna);
+            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
 
             ObjectIdValue rowId = new(9, 9, 9);
             KvTransaction seed = await transactions.BeginAsync();

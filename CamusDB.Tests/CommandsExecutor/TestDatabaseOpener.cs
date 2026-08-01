@@ -10,6 +10,7 @@ using NUnit.Framework;
 using System.Threading;
 using System.Threading.Tasks;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor;
@@ -54,14 +55,14 @@ public sealed class TestDatabaseOpener : BaseTest
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        });
+        }.WithFastTestTimers());
 
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
 
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger, sharedNode: clusterNode, isClusterMode: true);
+        CommandExecutor executor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient, sharedNode: clusterNode, isClusterMode: true);
 
         string db1 = System.Guid.NewGuid().ToString("n");
         string db2 = System.Guid.NewGuid().ToString("n");

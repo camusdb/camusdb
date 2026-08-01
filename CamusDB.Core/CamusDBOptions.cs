@@ -30,14 +30,16 @@ public sealed record CamusDBOptions
     /// <summary>Built-in defaults, used where no configuration file or override applies.</summary>
     public static readonly CamusDBOptions Default = new();
 
-    private static readonly string DefaultDataDirectory = Path.GetFullPath("Data");
-
     /// <summary>
     /// The directory where the database files and directories will be stored. Because it is
     /// per-instance, two engines in one process can hold separate data directories — which is how a
     /// test gives itself an isolated directory without an ambient override.
+    ///
+    /// <para>The default is computed inline rather than read from a static field: a static field
+    /// declared after <see cref="Default"/> would still be null while <see cref="Default"/>'s own
+    /// initializer runs, leaving the shared defaults with a null data directory.</para>
     /// </summary>
-    public string DataDirectory { get; init; } = DefaultDataDirectory;
+    public string DataDirectory { get; init; } = Path.GetFullPath("Data");
 
     /// <summary>
     /// Minimum interval, in milliseconds, between background flushes of advisory table

@@ -570,10 +570,12 @@ internal sealed class TestIndexIncludeColumns : BaseTest
     [NonParallelizable]
     public async Task ColumnCountLimit_RejectsIndex_ExceedingKeyPlusIncludeCeiling()
     {
-        (string dbname, _, CommandExecutor executor) = await CreateOrdersTable();
-
+        // The validator fixes its configuration when the engine is built, so the ceiling is lowered
+        // before the table (and the executor behind it) are created.
         int saved = CamusDBConfig.MaxIndexColumns;
         CamusDBConfig.MaxIndexColumns = 2; // key(1) + include(2) = 3 > 2
+
+        (string dbname, _, CommandExecutor executor) = await CreateOrdersTable();
         try
         {
             CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
@@ -592,10 +594,11 @@ internal sealed class TestIndexIncludeColumns : BaseTest
     [NonParallelizable]
     public async Task ColumnCountLimit_RejectsInlineCreateTableIndex()
     {
-        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-
+        // Lowered before the engine that must enforce it is created.
         int saved = CamusDBConfig.MaxIndexColumns;
         CamusDBConfig.MaxIndexColumns = 2;
+
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
         try
         {
             CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>

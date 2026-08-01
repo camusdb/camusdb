@@ -29,6 +29,9 @@ internal sealed class DatabaseOpener
 {
     private readonly CommandExecutor commandExecutor;
 
+    /// <summary>Configuration for the engine whose databases this opens; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
     private readonly DatabaseDescriptors databaseDescriptors;
 
     private readonly CatalogsManager catalogs;
@@ -52,12 +55,14 @@ internal sealed class DatabaseOpener
         DatabaseDescriptors databaseDescriptors,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
+        CamusDBOptions options,
         EmbeddedKahuna? sharedNode,
         Task<DatabaseRegistry> registryTask,
         bool isClusterMode = false,
         IQueryResultCache? cache = null)
     {
         this.commandExecutor = commandExecutor;
+        this.options = options;
         this.databaseDescriptors = databaseDescriptors;
         this.catalogs = catalogs;
         this.schemaReplicator = new(catalogs, logger);
@@ -129,7 +134,7 @@ internal sealed class DatabaseOpener
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         };
 
-        KvTransactionsManager transactions = new(sharedNode.Kahuna, mintLocalT, logger, cache);
+        KvTransactionsManager transactions = new(sharedNode.Kahuna, options, mintLocalT, logger, cache);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new(StringComparer.OrdinalIgnoreCase);
 
         DatabaseDescriptor databaseDescriptor = new(
@@ -138,6 +143,7 @@ internal sealed class DatabaseOpener
             kahuna: sharedNode,
             transactions: transactions,
             tableDescriptors: tableDescriptors,
+            options: options,
             ancestors: ancestors
         )
         {

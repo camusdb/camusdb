@@ -50,8 +50,8 @@ public sealed class TestSerializableUpdateDelete
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        KvTransactionsManager mgr = new(node.Kahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", tag);
+        KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient);
+        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", tag);
         return (node, mgr, store);
     }
 

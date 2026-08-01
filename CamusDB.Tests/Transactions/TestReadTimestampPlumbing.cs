@@ -39,7 +39,7 @@ public sealed class TestReadTimestampPlumbing
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        return (node, new KvTransactionsManager(node.Kahuna));
+        return (node, new KvTransactionsManager(node.Kahuna, CamusDBConfig.Ambient));
     }
 
     // ------------------------------------------------------------------

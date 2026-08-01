@@ -81,8 +81,8 @@ public sealed class CachedQueryRunner
     /// and <see cref="FinalizeAsync"/> will not publish — enforcing the no-partial-publish invariant.
     ///
     /// <para><b>Cap enforcement:</b> once the accumulated row count or byte estimate crosses
-    /// <see cref="CamusDBConfig.QueryResultCacheMaxEntryRows"/> or
-    /// <see cref="CamusDBConfig.QueryResultCacheMaxEntryBytes"/>, buffering stops immediately:
+    /// <see cref="CamusDBOptions.QueryResultCacheMaxEntryRows"/> or
+    /// <see cref="CamusDBOptions.QueryResultCacheMaxEntryBytes"/>, buffering stops immediately:
     /// the accumulated list is cleared (releasing its memory), <see cref="_capBreached"/> is set
     /// to true, and the remaining rows are yielded to the consumer without being stored.
     /// This bounds the extra memory to at most one cap-limit's worth of rows — the spec guarantee

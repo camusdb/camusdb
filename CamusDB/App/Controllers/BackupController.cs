@@ -27,8 +27,9 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class BackupController : CommandsController
 {
-    public BackupController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger)
-        : base(executor, transactions, logger)
+    public BackupController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger,
+        CamusDBOptions options)
+        : base(executor, transactions, logger, options)
     {
     }
 
@@ -191,7 +192,7 @@ public sealed class BackupController : CommandsController
     {
         EnsureSecureTransport();
 
-        if (CamusDBConfig.AuthenticationEnabled)
+        if (options.AuthenticationEnabled)
             return;
 
         IPAddress? remote = HttpContext.Connection.RemoteIpAddress;

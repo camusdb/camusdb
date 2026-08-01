@@ -28,7 +28,7 @@ public static class SQLParserProcessor
     /// for the SQL parser AST cache: a single cached instance may be shared across many
     /// concurrent query executions of the same SQL text.
     /// <para>
-    /// When <see cref="CamusDBConfig.SqlParserCacheTtlSeconds"/> is positive the result of a
+    /// When <see cref="CamusDBOptions.SqlParserCacheTtlSeconds"/> is positive the result of a
     /// successful parse is stored in <see cref="SqlParserCache"/>. Subsequent calls with the same
     /// SQL text return the <b>same <see cref="NodeAst"/> reference</b> (cache hit) and extend the
     /// sliding TTL. A parse that throws is never cached; the exception propagates unchanged.

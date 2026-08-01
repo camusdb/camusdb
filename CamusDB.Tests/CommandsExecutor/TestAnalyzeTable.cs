@@ -450,14 +450,15 @@ public sealed class TestAnalyzeTable : BaseTest
     [Test]
     public async Task AnalyzeHistogram_BucketOvershoot_EmitsNoEmptyTrailingBuckets()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
-
         int originalBuckets = CamusDBConfig.StatsHistogramBuckets;
         try
         {
             // 6 rows / 4 buckets → bucketSize = ceil(6/4) = 2 → only 3 buckets hold data;
-            // a 4th would be empty (start index 6 past the last row 5).
+            // a 4th would be empty (start index 6 past the last row 5). The analyzer fixes its
+            // configuration when the engine is built, so this is set before the table is created.
             CamusDBConfig.StatsHistogramBuckets = 4;
+
+            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
             await InsertRobotsAsync(executor, database, dbname, count: 6, baseYear: 2000);
 
             TableDescriptor table = await OpenTableAsync(database, "robots");
@@ -495,14 +496,17 @@ public sealed class TestAnalyzeTable : BaseTest
     [Test]
     public async Task AnalyzeDetectsSamplingWhenTableExceedsSampleLimit()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
-
         // Use a very small sample limit so we can insert past it without a large insert loop.
         int originalLimit = CamusDBConfig.StatsAnalyzeSampleRows;
         try
         {
             const int sampleLimit = 10;
+
+            // The analyzer fixes its configuration when the engine is built, so the limit is in place
+            // before the table is created.
             CamusDBConfig.StatsAnalyzeSampleRows = sampleLimit;
+
+            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
 
             // Insert more rows than the sample limit.
             await InsertRobotsAsync(executor, database, dbname, count: sampleLimit + 5);

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 
 using CamusDB.Core;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
@@ -270,7 +271,7 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
         CamusDBConfig.SpillEnabled            = true;
         CamusDBConfig.ForceSpillThresholdRows = 3;
 
-        await using SpillableRowList list = new();
+        await using SpillableRowList list = new(new QueryExecutionContext(CamusDBConfig.Ambient));
 
         for (int i = 0; i < 10; i++)
         {

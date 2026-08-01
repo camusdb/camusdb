@@ -43,7 +43,9 @@ internal sealed class InSubqueryExecutor
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters)
     {
-        SpillableValueList valueList = new();
+        QueryExecutionContext context = QueryExecutionContext.For(database);
+
+        SpillableValueList valueList = new(context);
         bool containsNull = false;
         bool anyRow = false;
 
@@ -70,7 +72,7 @@ internal sealed class InSubqueryExecutor
         if (!anyRow)
         {
             await valueList.DisposeAsync().ConfigureAwait(false);
-            return new InSubqueryMaterialization(new SpillableValueList(), ContainsNull: false, IsEmpty: true);
+            return new InSubqueryMaterialization(new SpillableValueList(context), ContainsNull: false, IsEmpty: true);
         }
 
         return new InSubqueryMaterialization(valueList, containsNull, IsEmpty: false);

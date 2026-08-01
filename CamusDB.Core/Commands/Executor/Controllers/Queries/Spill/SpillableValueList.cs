@@ -18,14 +18,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// <para>
 /// <b>Memory phase:</b> values are accumulated in a <see cref="List{T}"/> until the buffer
-/// reaches <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. When the threshold is hit,
+/// reaches <see cref="_context.Options.SpillEffectiveThreshold"/>. When the threshold is hit,
 /// every buffered value is flushed to a spill file (encoded as a single-column
 /// <see cref="QueryResultRow"/> via <see cref="SpillRowCodec"/>) and subsequent values are
 /// written directly to disk; the in-memory list is released.
 /// </para>
 ///
 /// <para>
-/// <b>Flag-off / under-threshold:</b> when <see cref="CamusDBConfig.SpillEnabled"/> is
+/// <b>Flag-off / under-threshold:</b> when <see cref="_context.Options.SpillEnabled"/> is
 /// <c>false</c>, or when the subquery ends without reaching the threshold, all values remain
 /// in memory — byte-identical to a plain <c>List&lt;ColumnValue&gt;</c>.
 /// </para>
@@ -49,6 +49,11 @@ internal sealed class SpillableValueList : IAsyncDisposable
 
     private readonly List<ColumnValue> _memoryValues = [];
 
+    /// <summary>Configuration and spill location for the query this list belongs to.</summary>
+    private readonly QueryExecutionContext _context;
+
+    public SpillableValueList(QueryExecutionContext context) => _context = context;
+
     private SpillScope? _scope;
 
     private string? _spillPath;
@@ -64,8 +69,8 @@ internal sealed class SpillableValueList : IAsyncDisposable
     public bool IsSpilled => _overflowed;
 
     /// <summary>
-    /// Appends a value to the list. When <see cref="CamusDBConfig.SpillEnabled"/> is
-    /// <c>true</c> and the buffer reaches <see cref="CamusDBConfig.SpillEffectiveThreshold"/>,
+    /// Appends a value to the list. When <see cref="_context.Options.SpillEnabled"/> is
+    /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/>,
     /// all buffered values are flushed to a spill file and subsequent values are written
     /// directly to disk. Must not be called after <see cref="SealAsync"/>.
     /// </summary>
@@ -76,7 +81,7 @@ internal sealed class SpillableValueList : IAsyncDisposable
             _memoryValues.Add(value);
             Count++;
 
-            if (CamusDBConfig.SpillEnabled && _memoryValues.Count >= CamusDBConfig.SpillEffectiveThreshold)
+            if (_context.Options.SpillEnabled && _memoryValues.Count >= _context.Options.SpillEffectiveThreshold)
                 await OverflowToSpillAsync(ct).ConfigureAwait(false);
         }
         else
@@ -151,7 +156,7 @@ internal sealed class SpillableValueList : IAsyncDisposable
 
     private async Task OverflowToSpillAsync(CancellationToken ct)
     {
-        _scope = SpillFileManager.CreateScope(CamusDBConfig.DataDirectory);
+        _scope = SpillFileManager.CreateScope(_context.SpillDirectory);
         _spillPath = _scope.OpenWriter(out _spillWriter);
 
         foreach (ColumnValue v in _memoryValues)

@@ -41,7 +41,7 @@ public class TestQuerySorter
         ];
 
         QuerySorter sorter = new();
-        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync();
+        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default)).ToListAsync();
 
         Assert.AreEqual(4, sorted.Count);
         Assert.AreEqual("a", sorted[0].Row["name"].StrValue);
@@ -66,7 +66,7 @@ public class TestQuerySorter
         ];
 
         QuerySorter sorter = new();
-        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync();
+        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default)).ToListAsync();
 
         Assert.AreEqual(3, sorted.Count);
         Assert.AreEqual(1L, sorted[0].Row["position"].LongValue);
@@ -87,7 +87,7 @@ public class TestQuerySorter
 
         // List.Sort wraps comparer exceptions in InvalidOperationException; unwrap the inner cause.
         Exception outer = Assert.CatchAsync(
-            async () => await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync())!;
+            async () => await sorter.SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default)).ToListAsync())!;
 
         CamusDBException? exception = outer as CamusDBException ?? outer.InnerException as CamusDBException;
         Assert.IsNotNull(exception, $"Expected CamusDBException (possibly wrapped); got: {outer}");
@@ -110,7 +110,7 @@ public class TestQuerySorter
         ];
 
         QuerySorter sorter = new();
-        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync();
+        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default)).ToListAsync();
 
         Assert.AreEqual(3, sorted.Count);
         Assert.AreEqual("admin", sorted[0].Row["role"].StrValue);
@@ -163,7 +163,7 @@ public class TestQuerySorter
 
         QueryTicket ticket = MakeTicket(new QueryOrderBy("name", OrderType.Ascending));
         QuerySorter sorter = new();
-        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows)).ToListAsync();
+        List<QueryResultRow> sorted = await sorter.SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default)).ToListAsync();
 
         Assert.AreEqual(3, sorted.Count);
         // Each row must resolve "name" correctly regardless of which layout it carries.

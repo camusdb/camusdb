@@ -284,7 +284,7 @@ public sealed class CatalogsManager
         // creating a table is exactly one schema version. The table is empty, so each index is born
         // at Public with nothing to backfill. Index ids and column ids are generated here and carried
         // in the payload so every node applies identical definitions.
-        TableIndexSchema[]? indexes = BuildInlineIndexes(ticket, columns);
+        TableIndexSchema[]? indexes = BuildInlineIndexes(ticket, columns, database.Options);
 
         // Fold CHECK constraints declared in the CREATE TABLE into the same single delta so the
         // table is created with its constraints already in place.
@@ -315,7 +315,7 @@ public sealed class CatalogsManager
     /// Mirrors the validation the standalone AddIndex path performs (column existence, duplicate
     /// index name) since those constraints no longer flow through it.
     /// </summary>
-    private static TableIndexSchema[]? BuildInlineIndexes(CreateTableTicket ticket, SchemaColumnPayload[] columns)
+    private static TableIndexSchema[]? BuildInlineIndexes(CreateTableTicket ticket, SchemaColumnPayload[] columns, CamusDBOptions options)
     {
         if (ticket.Constraints.Length == 0)
             return null;
@@ -347,7 +347,7 @@ public sealed class CatalogsManager
 
             // Combined key+include column ceiling (mirrors the standalone/cluster add path). A covering
             // index duplicates every included value into each entry, so its column count is bounded.
-            int maxIndexColumns = CamusDBConfig.MaxIndexColumns;
+            int maxIndexColumns = options.MaxIndexColumns;
             if (maxIndexColumns > 0)
             {
                 int totalColumns = constraint.Columns.Length + constraint.IncludeColumns.Length;

@@ -246,7 +246,7 @@ public sealed class TestSchemaReplicator
 
         TableSchema tableSchema = database.Schema.Tables["robots"];
         database.TableDescriptors["robots"] = new AsyncLazy<TableDescriptor>(() => Task.FromResult(
-            new TableDescriptor(tableSchema.Id!, tableSchema.Name!, tableSchema, new KvTableStore(kahuna.Kahuna, database.Id, tableSchema.Id!))
+            new TableDescriptor(tableSchema.Id!, tableSchema.Name!, tableSchema, new KvTableStore(kahuna.Kahuna, CamusDBConfig.Ambient, database.Id, tableSchema.Id!))
         ));
 
         Assert.AreEqual(1, database.TableDescriptors.Count);
@@ -408,8 +408,9 @@ public sealed class TestSchemaReplicator
             id: db,
             name: db,
             kahuna: kahuna,
-            transactions: new KvTransactionsManager(kahuna.Kahuna),
-            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>()
+            transactions: new KvTransactionsManager(kahuna.Kahuna, CamusDBConfig.Ambient),
+            tableDescriptors: new ConcurrentDictionary<string, AsyncLazy<TableDescriptor>>(),
+            options: CamusDBConfig.Ambient
         );
     }
 

@@ -96,7 +96,7 @@ internal sealed class RowInserter
         if (column.Type == ColumnType.String)
         {
             string s = value.StrValue ?? "";
-            int max = column.MaxLength ?? CamusDBConfig.DefaultStringMaxLength;
+            int max = column.MaxLength ?? CamusDBConstants.DefaultStringMaxLength;
             if (s.Length > max)
                 throw new CamusDBException(
                     CamusDBErrorCodes.ValueTooLong,
@@ -105,7 +105,7 @@ internal sealed class RowInserter
         else if (column.Type == ColumnType.Bytes)
         {
             byte[] b = value.BytesValue ?? [];
-            int max = column.MaxLength ?? CamusDBConfig.DefaultBytesMaxLength;
+            int max = column.MaxLength ?? CamusDBConstants.DefaultBytesMaxLength;
             if (b.Length > max)
                 throw new CamusDBException(
                     CamusDBErrorCodes.ValueTooLong,
@@ -199,7 +199,7 @@ internal sealed class RowInserter
         // behavior and insert chunking with one knob.
         // The shared KvTransaction spans all chunks, so a duplicate-unique-key error in a later
         // chunk rolls back all prior chunks' staged writes and locks on transaction abort.
-        int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
+        int chunkSize = state.Database.Options.SpillEffectiveThreshold;
         List<KvTableStore.RowWrite> chunk = new(Math.Min(chunkSize, 64));
 
         foreach (Dictionary<string, ColumnValue> values in ticket.Values)

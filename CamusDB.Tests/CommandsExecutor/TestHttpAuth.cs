@@ -78,7 +78,7 @@ internal sealed class TestHttpAuth : BaseTest
 
     private async Task<JsonResult> LoginRest(CommandExecutor ex, string user, string password, bool https = true)
     {
-        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger)
+        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger, CamusDBConfig.Ambient)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { user, password }), bearer: null, https)
         };
@@ -93,7 +93,7 @@ internal sealed class TestHttpAuth : BaseTest
 
     private async Task<JsonResult> QueryRest(CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
     {
-        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(), Logger)
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(CamusDBConfig.Ambient), Logger, CamusDBConfig.Ambient)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https)
         };
@@ -102,7 +102,7 @@ internal sealed class TestHttpAuth : BaseTest
 
     private async Task<JsonResult> NonQueryRest(CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
     {
-        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(), Logger)
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(CamusDBConfig.Ambient), Logger, CamusDBConfig.Ambient)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https)
         };
@@ -180,7 +180,7 @@ internal sealed class TestHttpAuth : BaseTest
         (_, CommandExecutor ex) = await Setup();
         string token = await TokenFor(ex, "root", "root-pw");
 
-        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger)
+        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger, CamusDBConfig.Ambient)
         {
             ControllerContext = Context("", bearer: token, https: true)
         };
@@ -264,7 +264,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/insert", bearer: null);
-        await mw.Invoke(http, ex);
+        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
 
         Assert.AreEqual(401, http.Response.StatusCode, "an unauthenticated legacy route must be rejected");
         Assert.IsFalse(nextCalled, "the request must not reach the controller");
@@ -286,7 +286,7 @@ internal sealed class TestHttpAuth : BaseTest
         });
 
         DefaultHttpContext http = MiddlewareContext("/insert", token);
-        await mw.Invoke(http, ex);
+        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
 
         Assert.IsTrue(nextCalled);
         Assert.IsNotNull(captured.Principal, "the principal must be published for per-table enforcement");
@@ -302,7 +302,7 @@ internal sealed class TestHttpAuth : BaseTest
 
         // No node secret configured (Setup does not set one) → internal forwarding is refused.
         DefaultHttpContext http = MiddlewareContext("/internal/schema-ddl/create-table", bearer: null);
-        await mw.Invoke(http, ex);
+        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
 
         Assert.AreEqual(401, http.Response.StatusCode);
         Assert.IsFalse(nextCalled);
@@ -320,7 +320,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/CamusAuth/Login", bearer: null);
-        await mw.Invoke(http, ex);
+        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
 
         Assert.IsTrue(nextCalled, "gRPC login must not require the token it exists to issue");
         Assert.AreNotEqual(401, http.Response.StatusCode);
@@ -334,7 +334,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/CamusAuth/Logout", bearer: null);
-        await mw.Invoke(http, ex);
+        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
 
         Assert.IsTrue(nextCalled);
         Assert.AreNotEqual(401, http.Response.StatusCode);
@@ -350,7 +350,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/CamusSql/ExecuteQuery", bearer: null);
-        await mw.Invoke(http, ex);
+        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
 
         Assert.AreEqual(401, http.Response.StatusCode);
         Assert.IsFalse(nextCalled);

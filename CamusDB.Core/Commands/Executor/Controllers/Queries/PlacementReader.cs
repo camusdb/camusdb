@@ -15,7 +15,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Returns <see cref="DataDistribution"/> values for plan scan leaves.
 ///
-/// Answers are derived from <see cref="CamusDBConfig.KeyRangeShardingEnabled"/> and the
+/// Answers are derived from <see cref="CamusDBOptions.KeyRangeShardingEnabled"/> and the
 /// index/table key-column schema. This tells the cost model WHICH COLUMNS partition the data,
 /// but NOT how many partitions a given key range spans or whether those partitions are remote.
 ///
@@ -77,7 +77,7 @@ internal sealed class PlacementReader
     ///
     /// Model (approximate/cached):
     ///   - Sharding off OR partitions ≤ 1 → 0.0 (everything local, NetworkFactor = 0).
-    ///   - Otherwise → <c>(N-1)/N</c> where N = <see cref="CamusDBConfig.ClusterPartitionCount"/>.
+    ///   - Otherwise → <c>(N-1)/N</c> where N = <see cref="CamusDBOptions.ClusterPartitionCount"/>.
     ///     This treats all non-local partitions as equally likely to hold any given row
     ///     and the executing node as leader of exactly one partition. It is a rough
     ///     approximation; precise per-range partition assignment requires reading Kahuna's

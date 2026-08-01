@@ -59,6 +59,9 @@ namespace CamusDB.Core.Storage.Kv;
 public sealed class KvTableStore
 {
     private readonly IKahuna kahuna;
+
+    /// <summary>Configuration for the engine this store belongs to; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly ILogger logger;
     private readonly string dbId;
     private readonly string dbName;
@@ -94,14 +97,14 @@ public sealed class KvTableStore
     // milliseconds have elapsed, the loop throws TransactionMustRetry immediately rather
     // than spinning for the full MaxKahunaRetries budget. This caps deadlock / persistent
     // lock-conflict latency: in a reverse-order deadlock both transactions abort within
-    // roughly CamusDBConfig.LockWaitDeadlineMs rather than after the full ~1.4 s retry budget.
+    // roughly options.LockWaitDeadlineMs rather than after the full ~1.4 s retry budget.
     // Keep this shorter than MaxKahunaRetries × MaxRetryDelayMs (≈ 1.4 s) to be useful.
 
     // Safety-net expiry for an exclusive range (prefix) lock. The lock is released explicitly when
     // the owning transaction commits or rolls back; this expiry only bounds a leak if the client
     // dies mid-transaction. A range scan that needs serializable isolation should comfortably
     // finish inside this window.
-    private static int RangeLockExpiresMs => CamusDBConfig.RangeLockExpiresMs;
+    private int RangeLockExpiresMs => options.RangeLockExpiresMs;
 
     // Upper-bound sentinel appended to the encoded last value for non-unique index keys.
     // Non-unique stored key = "{encodedValue}{rowId24}" where rowId24 is exactly 24 lowercase
@@ -137,6 +140,7 @@ public sealed class KvTableStore
     /// </summary>
     public KvTableStore(
         IKahuna kahuna,
+        CamusDBOptions options,
         string dbId,
         string tableId,
         string tableName = "",
@@ -145,7 +149,9 @@ public sealed class KvTableStore
         string dbName = "")
     {
         ArgumentNullException.ThrowIfNull(kahuna);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrEmpty(dbId);
+        this.options = options;
         ArgumentException.ThrowIfNullOrEmpty(tableId);
 
         this.kahuna = kahuna;
@@ -272,7 +278,7 @@ public sealed class KvTableStore
     /// </summary>
     public Task AcquireRowRangeLockAsync(KvTransaction tx, bool exclusive = false, CancellationToken cancellationToken = default)
     {
-        if (!CamusDBConfig.KeyRangeShardingEnabled && !IsSerializableReadWrite(tx))
+        if (!options.KeyRangeShardingEnabled && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
         return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken,
             exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
@@ -294,7 +300,7 @@ public sealed class KvTableStore
     /// </summary>
     public Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, bool exclusive = false, CancellationToken cancellationToken = default)
     {
-        if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
+        if ((!options.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
         return AcquireRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), null, true, null, true, cancellationToken,
             exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
@@ -324,7 +330,7 @@ public sealed class KvTableStore
         CancellationToken cancellationToken = default,
         int keyColumnCount = 0)
     {
-        if ((!CamusDBConfig.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
+        if ((!options.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
 
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
@@ -413,11 +419,11 @@ public sealed class KvTableStore
         // transactions acquire range locks whose expiry would silently break isolation;
         // ReadCommitted transactions in key-range mode also take scan locks but have no
         // serializability to protect, so they are exempt (consistent with the CommitAsync gate).
-        if (IsSerializableReadWrite(tx) && tx.IsExpired(CamusDBConfig.MaxSerializableTransactionLifetimeMs))
+        if (IsSerializableReadWrite(tx) && tx.IsExpired(options.MaxSerializableTransactionLifetimeMs))
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionLifetimeExceeded,
                 $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
-                $"({CamusDBConfig.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+                $"({options.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
 
         long deadline = LockWaitDeadlineTicks();
         int retries = 0;
@@ -446,7 +452,7 @@ public sealed class KvTableStore
             if (type == KeyValueResponseType.Locked)
             {
                 tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
-                if (CamusDBConfig.LockTracingEnabled && logger.IsEnabled(LogLevel.Debug))
+                if (options.LockTracingEnabled && logger.IsEnabled(LogLevel.Debug))
                 {
                     string modeStr = mode.ToString();
                     Log.LogRangeLockAcquired(logger, modeStr, bucketPrefix,
@@ -511,7 +517,7 @@ public sealed class KvTableStore
     /// Conflict is detected at the writer's prepare/commit time via Kahuna's range-lock fence.
     ///
     /// <para><b>Escalation:</b> once the per-bucket point-lock count reaches
-    /// <see cref="CamusDBConfig.LockEscalationThreshold"/>, a single whole-bucket Shared lock
+    /// <see cref="CamusDBOptions.LockEscalationThreshold"/>, a single whole-bucket Shared lock
     /// (<c>[null,null)</c>) is acquired instead. All subsequent reads on the same bucket skip the
     /// per-point RPC — the whole-bucket lock already covers them. Old per-point entries are kept in
     /// tracking and released at commit.</para>
@@ -539,7 +545,7 @@ public sealed class KvTableStore
 
         // Past the threshold: promote to a single whole-bucket Shared lock.
         // Old per-point entries remain tracked and are released at commit/rollback.
-        if (tx.CountPointLocksForBucket(bucketPrefix) >= CamusDBConfig.LockEscalationThreshold)
+        if (tx.CountPointLocksForBucket(bucketPrefix) >= options.LockEscalationThreshold)
             return AcquireRangeLockAsync(tx, bucketPrefix, null, true, null, true, cancellationToken);
 
         return AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken);
@@ -818,7 +824,7 @@ public sealed class KvTableStore
     /// <para>
     /// The acquired locks are byte-for-byte the set a sequence of per-row <see cref="GetRow"/> calls
     /// would take (including whole-bucket escalation past
-    /// <see cref="CamusDBConfig.LockEscalationThreshold"/>); only the reads are batched into one round
+    /// <see cref="CamusDBOptions.LockEscalationThreshold"/>); only the reads are batched into one round
     /// trip. The subsequent exclusive batch write (<see cref="DeleteRowsBatch"/> /
     /// <see cref="UpdateRowsBatch"/>) then upgrades/covers these same keys, exactly as the per-row
     /// <see cref="GetRow"/> path already did.
@@ -1782,7 +1788,7 @@ public sealed class KvTableStore
             // First pass: trace every successfully locked key (when lock tracing is on). The coordinator
             // owns the folded point locks and releases them at finalize, so no client-side tracking is
             // needed for cleanup.
-            if (CamusDBConfig.LockTracingEnabled)
+            if (options.LockTracingEnabled)
             {
                 foreach ((KeyValueResponseType type, string key, KeyValueDurability _, _) in responses)
                 {
@@ -2529,7 +2535,7 @@ public sealed class KvTableStore
         if (lockType != KeyValueResponseType.Locked)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");
 
-        if (CamusDBConfig.LockTracingEnabled)
+        if (options.LockTracingEnabled)
             Log.LogPointLockAcquired(logger, key, tx.UniqueId);
     }
 
@@ -2641,7 +2647,7 @@ public sealed class KvTableStore
         StringBuilder message = new();
 
         message.Append("Lock-wait deadline exceeded after ")
-               .Append(CamusDBConfig.LockWaitDeadlineMs)
+               .Append(options.LockWaitDeadlineMs)
                .Append(" ms on ")
                .Append(operation);
 
@@ -2799,8 +2805,8 @@ public sealed class KvTableStore
         return printable.ToString();
     }
 
-    private static long LockWaitDeadlineTicks()
-        => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (CamusDBConfig.LockWaitDeadlineMs / 1000.0));
+    private long LockWaitDeadlineTicks()
+        => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (options.LockWaitDeadlineMs / 1000.0));
 
     private async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
         KvTransaction? tx,

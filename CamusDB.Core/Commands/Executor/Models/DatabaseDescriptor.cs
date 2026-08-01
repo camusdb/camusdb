@@ -37,6 +37,13 @@ public sealed record DatabaseDescriptor : IDisposable
 {
     public string Id { get; }
 
+    /// <summary>
+    /// Configuration of the engine this database belongs to. Carried here so per-table and per-scan
+    /// code — which always has a descriptor in hand — reads its engine's settings without threading
+    /// options through every call, and without reaching for a process-wide value.
+    /// </summary>
+    public CamusDBOptions Options { get; }
+
     private volatile string _name;
 
     /// <summary>
@@ -274,9 +281,11 @@ public sealed record DatabaseDescriptor : IDisposable
         EmbeddedKahuna kahuna,
         KvTransactionsManager transactions,
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors,
+        CamusDBOptions options,
         IReadOnlyList<DatabaseBranchAncestor>? ancestors = null
     )
     {
+        Options = options;
         Id = id;
         _name = name;
         Kahuna = kahuna;

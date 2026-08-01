@@ -8,6 +8,7 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using CamusDB.Core;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor;
@@ -36,10 +37,10 @@ public sealed class TestQueryResultCacheVolatileBypass : CommandsExecutor.BaseTe
 
     protected override CommandExecutor CreateCommandExecutor()
     {
-        _cache = new QueryResultCache(sweepIntervalMs: -1);
+        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }

@@ -13,7 +13,7 @@ namespace CamusDB.Core.Auth;
 /// accepted.
 ///
 /// <para>The expiry is reported because a client cannot otherwise know it. The session's absolute
-/// deadline is derived server-side from <see cref="CamusDBConfig.AccessTokenTtl"/>, so a driver that is
+/// deadline is derived server-side from <see cref="CamusDBOptions.AccessTokenTtl"/>, so a driver that is
 /// not told it must either guess a lifetime — and guess wrong whenever an operator shortens the TTL — or
 /// discover every expiry reactively, by letting a real statement fail authentication first.</para>
 ///

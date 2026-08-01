@@ -619,7 +619,7 @@ public sealed class TestSchemaDdlForwarding
 
             // One shared registry for the whole cluster — all executors share the same
             // in-memory name→id cache so CreateDatabase on any node is visible to all.
-            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(nodes[0]).ConfigureAwait(false);
+            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(nodes[0], CamusDBConfig.Ambient).ConfigureAwait(false);
 
             return new(nodes, sharedRegistry);
         }
@@ -628,7 +628,7 @@ public sealed class TestSchemaDdlForwarding
         {
             CommandValidator validator = new();
             CatalogsManager catalogs = new(Logger);
-            return new(validator, catalogs, Logger,
+            return new(validator, catalogs, Logger, CamusDBConfig.Ambient,
                 sharedNode: node,
                 schemaDdlForwarder: forwarder,
                 registry: SharedRegistry,
@@ -711,7 +711,7 @@ public sealed class TestSchemaDdlForwarding
                     Storage = "memory",
                     WalStorage = "memory",
                     InitialPartitions = 3
-                },
+                }.WithFastTestTimers(),
                 interNode,
                 raftCommunication,
                 new StaticDiscovery(peers)

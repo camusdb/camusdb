@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.IO;
 
 using NUnit.Framework;
 
@@ -26,6 +27,20 @@ namespace CamusDB.Tests.Config;
 /// </summary>
 public class TestConfigurationDefaults
 {
+    /// <summary>
+    /// The data directory must be a real path on the shared defaults. It is the one default computed
+    /// by an expression rather than written as a literal, so it is also the one that a static
+    /// initialization-order mistake can silently leave null — and a null here does not fail here, it
+    /// fails much later inside an unrelated <c>Path.Combine</c>.
+    /// </summary>
+    [Test]
+    public void DefaultDataDirectoryIsResolved()
+    {
+        Assert.IsNotNull(CamusDBOptions.Default.DataDirectory);
+        Assert.AreEqual(Path.GetFullPath("Data"), CamusDBOptions.Default.DataDirectory);
+        Assert.IsTrue(Path.IsPathRooted(CamusDBOptions.Default.DataDirectory));
+    }
+
     [Test]
     public void DefaultOptionsMatchDocumentedValues()
     {

@@ -75,8 +75,8 @@ public sealed class TestKvTransactionsManager
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
 
-        KvTransactionsManager mgr = new(node.Kahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", tableId);
+        KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient);
+        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", tableId);
         return (node, mgr, store);
     }
 
@@ -352,8 +352,8 @@ public sealed class TestKvTransactionsManager
 
         // 3 MustRetry responses before delegating to the real Kahuna (well under the finalize bound).
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: 3);
-        KvTransactionsManager mgr = new(faultKahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", "fault-a");
+        KvTransactionsManager mgr = new(faultKahuna, CamusDBConfig.Ambient);
+        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", "fault-a");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(200, 0, 0);
@@ -389,8 +389,8 @@ public sealed class TestKvTransactionsManager
         await using EmbeddedKahuna __ = node;
 
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections);
-        KvTransactionsManager mgr = new(faultKahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", "fault-b");
+        KvTransactionsManager mgr = new(faultKahuna, CamusDBConfig.Ambient);
+        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", "fault-b");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(201, 0, 0);
@@ -430,8 +430,8 @@ public sealed class TestKvTransactionsManager
         // First CommitAsync exhausts its bounded retries on injected MustRetry; the injections are then
         // spent, so the second CommitAsync on the same handle reaches the real coordinator and commits.
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections);
-        KvTransactionsManager mgr = new(faultKahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", "fault-c");
+        KvTransactionsManager mgr = new(faultKahuna, CamusDBConfig.Ambient);
+        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", "fault-c");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(203, 0, 0);
@@ -466,8 +466,8 @@ public sealed class TestKvTransactionsManager
         await using EmbeddedKahuna __ = node;
 
         RollbackFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections);
-        KvTransactionsManager mgr = new(faultKahuna);
-        KvTableStore store = new(node.Kahuna, "testdb", "fault-d");
+        KvTransactionsManager mgr = new(faultKahuna, CamusDBConfig.Ambient);
+        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", "fault-d");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
         CamusDB.Core.Util.ObjectIds.ObjectIdValue rowId = new(204, 0, 0);
@@ -506,7 +506,7 @@ public sealed class TestKvTransactionsManager
         const string anchor = "testdb:1:r/00000000000000000000dead";
         // MustRetry (with the anchor) for the whole first finalize loop, then Committed on resume.
         AnchorCommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections, anchor);
-        KvTransactionsManager mgr = new(faultKahuna);
+        KvTransactionsManager mgr = new(faultKahuna, CamusDBConfig.Ambient);
 
         KvTransaction tx = await mgr.BeginAsync();
 
@@ -542,7 +542,7 @@ public sealed class TestKvTransactionsManager
         await using EmbeddedKahuna __ = node;
 
         AnchorCommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: 0, anchor: null);
-        KvTransactionsManager mgr = new(faultKahuna);
+        KvTransactionsManager mgr = new(faultKahuna, CamusDBConfig.Ambient);
 
         KvTransaction tx = await mgr.BeginAsync();
         await mgr.CommitAsync(tx);
@@ -566,7 +566,7 @@ public sealed class TestKvTransactionsManager
         await node.WaitForLeaderAsync("closeset/warmup", CancellationToken.None);
         await using EmbeddedKahuna __ = node;
 
-        using QueryResultCache cache = new(sweepIntervalMs: -1);
+        using QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
 
         const string keyspace = "testdb:1:r";
         TransactionWorkingSet serverSet = new()
@@ -582,7 +582,7 @@ public sealed class TestKvTransactionsManager
         };
 
         CloseSetKahuna spy = new(node.Kahuna, serverSet);
-        KvTransactionsManager mgr = new(spy, cache: cache);
+        KvTransactionsManager mgr = new(spy, CamusDBConfig.Ambient, cache: cache);
 
         KvTransaction tx = await mgr.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);

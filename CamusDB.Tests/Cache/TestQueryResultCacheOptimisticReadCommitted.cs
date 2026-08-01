@@ -40,10 +40,10 @@ public sealed class TestQueryResultCacheOptimisticReadCommitted : CommandsExecut
 
     protected override CommandExecutor CreateCommandExecutor()
     {
-        _cache = new QueryResultCache(sweepIntervalMs: -1);
+        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger,
+        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }

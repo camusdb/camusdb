@@ -243,13 +243,13 @@ internal sealed class TestColumnMetadata : SharedNodeBaseTest
     [Test]
     public void DefaultStringMaxLength_Is2621440()
     {
-        Assert.AreEqual(2_621_440, CamusDBConfig.DefaultStringMaxLength);
+        Assert.AreEqual(2_621_440, CamusDBConstants.DefaultStringMaxLength);
     }
 
     [Test]
     public void DefaultBytesMaxLength_Is10MB()
     {
-        Assert.AreEqual(10_485_760, CamusDBConfig.DefaultBytesMaxLength);
+        Assert.AreEqual(10_485_760, CamusDBConstants.DefaultBytesMaxLength);
     }
 
     // ── Schema persist/reload round-trip ─────────────────────────────────────

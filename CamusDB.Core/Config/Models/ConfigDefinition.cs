@@ -58,20 +58,20 @@ public class ConfigDefinition
     /// Minimum interval between background flushes of advisory table statistics to
     /// durable storage, in milliseconds, per table. <c>0</c> flushes after every change;
     /// <c>-1</c> disables auto-flush (persist only on explicit flush / close); a positive
-    /// value caps flush frequency. Maps to <c>CamusDBConfig.StatsFlushIntervalMs</c>.
+    /// value caps flush frequency. Maps to <c>CamusDBOptions.StatsFlushIntervalMs</c>.
     /// </summary>
     public int StatsFlushIntervalMs { get; set; } = 5000;
 
     /// <summary>
     /// Row-count threshold below which manual <c>ANALYZE</c> full-scans a table; above it, the first N
     /// rows in storage order are sampled. <c>0</c> = always full scan. Must be <c>&gt;= 0</c>.
-    /// Maps to <c>CamusDBConfig.StatsAnalyzeSampleRows</c>.
+    /// Maps to <c>CamusDBOptions.StatsAnalyzeSampleRows</c>.
     /// </summary>
     public int StatsAnalyzeSampleRows { get; set; } = 100_000;
 
     /// <summary>
     /// Number of equi-depth histogram buckets <c>ANALYZE</c> builds per column. Must be <c>&gt;= 1</c>.
-    /// Maps to <c>CamusDBConfig.StatsHistogramBuckets</c>.
+    /// Maps to <c>CamusDBOptions.StatsHistogramBuckets</c>.
     /// </summary>
     public int StatsHistogramBuckets { get; set; } = 100;
 
@@ -80,63 +80,63 @@ public class ConfigDefinition
     // lock-free snapshot reads, bounded-memory sampling, a throttled scan, and load backoff. Off by
     // default. See docs/automatic-analyze.md.
 
-    /// <summary>Master switch for automatic background <c>ANALYZE</c>. Maps to <c>CamusDBConfig.AutoAnalyzeEnabled</c>.</summary>
+    /// <summary>Master switch for automatic background <c>ANALYZE</c>. Maps to <c>CamusDBOptions.AutoAnalyzeEnabled</c>.</summary>
     public bool AutoAnalyzeEnabled { get; set; } = false;
 
     /// <summary>
     /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the registry leader
     /// sweeps (once per cluster). <c>&lt;= 0</c> also disables the loop.
-    /// Maps to <c>CamusDBConfig.AutoAnalyzeCheckIntervalMs</c>.
+    /// Maps to <c>CamusDBOptions.AutoAnalyzeCheckIntervalMs</c>.
     /// </summary>
     public int AutoAnalyzeCheckIntervalMs { get; set; } = 60_000;
 
     /// <summary>
     /// Proportional staleness trigger: a table is stale once mutations since the last ANALYZE reach
     /// <c>fraction · row_count + min_stale_rows</c>. Must be <c>&gt;= 0</c>.
-    /// Maps to <c>CamusDBConfig.AutoAnalyzeFractionStaleRows</c>.
+    /// Maps to <c>CamusDBOptions.AutoAnalyzeFractionStaleRows</c>.
     /// </summary>
     public double AutoAnalyzeFractionStaleRows { get; set; } = 0.20;
 
     /// <summary>
     /// Absolute mutation floor before a table is ever considered stale. Must be <c>&gt;= 0</c>.
-    /// Maps to <c>CamusDBConfig.AutoAnalyzeMinStaleRows</c>.
+    /// Maps to <c>CamusDBOptions.AutoAnalyzeMinStaleRows</c>.
     /// </summary>
     public long AutoAnalyzeMinStaleRows { get; set; } = 500;
 
     /// <summary>
     /// Maximum background analyses running at once on a node. Must be <c>&gt;= 1</c>.
-    /// Maps to <c>CamusDBConfig.AutoAnalyzeMaxConcurrent</c>.
+    /// Maps to <c>CamusDBOptions.AutoAnalyzeMaxConcurrent</c>.
     /// </summary>
     public int AutoAnalyzeMaxConcurrent { get; set; } = 1;
 
     /// <summary>
     /// Scan-rate cap for a background analyze, in rows/second (the CPU/IO throttle). <c>&lt;= 0</c>
-    /// disables throttling. Maps to <c>CamusDBConfig.AutoAnalyzeMaxRowsPerSecond</c>.
+    /// disables throttling. Maps to <c>CamusDBOptions.AutoAnalyzeMaxRowsPerSecond</c>.
     /// </summary>
     public int AutoAnalyzeMaxRowsPerSecond { get; set; } = 50_000;
 
     /// <summary>
     /// Reservoir sample size per column for background histograms — the memory bound. Must be
-    /// <c>&gt;= 1</c>. Maps to <c>CamusDBConfig.AutoAnalyzeHistogramSampleRows</c>.
+    /// <c>&gt;= 1</c>. Maps to <c>CamusDBOptions.AutoAnalyzeHistogramSampleRows</c>.
     /// </summary>
     public int AutoAnalyzeHistogramSampleRows { get; set; } = 10_000;
 
     /// <summary>
     /// HyperLogLog precision (index bits) for background NDV sketches; register count is
-    /// <c>2^precision</c>. Must be in <c>4..16</c>. Maps to <c>CamusDBConfig.AutoAnalyzeHllPrecision</c>.
+    /// <c>2^precision</c>. Must be in <c>4..16</c>. Maps to <c>CamusDBOptions.AutoAnalyzeHllPrecision</c>.
     /// </summary>
     public int AutoAnalyzeHllPrecision { get; set; } = 11;
 
     /// <summary>
     /// Foreground-load surge protector: when in-flight foreground work exceeds this, the sweep skips
     /// starting (and cancels a running) background analyze. <c>&lt;= 0</c> disables load backoff.
-    /// Maps to <c>CamusDBConfig.AutoAnalyzeLoadPauseThreshold</c>.
+    /// Maps to <c>CamusDBOptions.AutoAnalyzeLoadPauseThreshold</c>.
     /// </summary>
     public int AutoAnalyzeLoadPauseThreshold { get; set; } = 16;
 
     /// <summary>
     /// Rows the background scan processes between successive mid-scan re-checks of ownership and load.
-    /// Must be <c>&gt;= 1</c>. Maps to <c>CamusDBConfig.AutoAnalyzeOwnershipCheckRows</c>.
+    /// Must be <c>&gt;= 1</c>. Maps to <c>CamusDBOptions.AutoAnalyzeOwnershipCheckRows</c>.
     /// </summary>
     public int AutoAnalyzeOwnershipCheckRows { get; set; } = 1000;
 
@@ -145,7 +145,7 @@ public class ConfigDefinition
     /// Each cache hit extends the deadline by this interval.
     /// <c>0</c> disables the cache entirely (every parse re-lexes from scratch).
     /// Must be <c>&gt;= 0</c>.
-    /// Maps to <c>CamusDBConfig.SqlParserCacheTtlSeconds</c>.
+    /// Maps to <c>CamusDBOptions.SqlParserCacheTtlSeconds</c>.
     /// </summary>
     public int SqlParserCacheTtlSeconds { get; set; } = 300;
 
@@ -154,28 +154,28 @@ public class ConfigDefinition
     /// When the cap is reached, new statements are silently skipped until the background
     /// sweep reclaims expired entries. <c>0</c> = unbounded (no cap).
     /// Must be <c>&gt;= 0</c>.
-    /// Maps to <c>CamusDBConfig.SqlParserCacheMaxEntries</c>.
+    /// Maps to <c>CamusDBOptions.SqlParserCacheMaxEntries</c>.
     /// </summary>
     public int SqlParserCacheMaxEntries { get; set; } = 2048;
 
     /// <summary>
     /// How often, in seconds, the background sweep task removes expired SQL parser cache
     /// entries. Must be <c>&gt; 0</c>.
-    /// Maps to <c>CamusDBConfig.SqlParserCacheSweepSeconds</c>.
+    /// Maps to <c>CamusDBOptions.SqlParserCacheSweepSeconds</c>.
     /// </summary>
     public int SqlParserCacheSweepSeconds { get; set; } = 60;
 
     /// <summary>
     /// Retention window, in milliseconds, for orphaned (deferred-dropped) databases/tables before the
     /// garbage collector may physically reclaim them. <c>&lt;= 0</c> keeps orphans until an explicit
-    /// FORCE drop / manual purge. Maps to <c>CamusDBConfig.OrphanRetentionMs</c> (yml
+    /// FORCE drop / manual purge. Maps to <c>CamusDBOptions.OrphanRetentionMs</c> (yml
     /// <c>orphan_retention_ms</c>). Default 7 days.
     /// </summary>
     public long OrphanRetentionMs { get; set; } = 7L * 24 * 60 * 60 * 1000;
 
     /// <summary>
     /// Interval, in milliseconds, of the background orphan-reclamation sweep. <c>&lt;= 0</c> disables
-    /// the loop. Maps to <c>CamusDBConfig.OrphanReclaimIntervalMs</c> (yml
+    /// the loop. Maps to <c>CamusDBOptions.OrphanReclaimIntervalMs</c> (yml
     /// <c>orphan_reclaim_interval_ms</c>). Default 5 minutes.
     /// </summary>
     public int OrphanReclaimIntervalMs { get; set; } = 5 * 60 * 1000;
@@ -184,7 +184,7 @@ public class ConfigDefinition
     /// Enables cost-based access-path selection in the query planner.
     /// When <c>true</c>, the planner costs all viable index steps and picks the cheapest.
     /// When <c>false</c> (default), the rule-based (score-based) path is used unchanged.
-    /// Maps to <c>CamusDBConfig.CostBasedAccessPathEnabled</c>.
+    /// Maps to <c>CamusDBOptions.CostBasedAccessPathEnabled</c>.
     /// </summary>
     public bool CostBasedAccessPathEnabled { get; set; } = false;
 
@@ -192,7 +192,7 @@ public class ConfigDefinition
     /// Enables cost-based join-order enumeration (System-R–style DP).
     /// When <c>true</c>, the planner prices all left-deep orderings and picks the cheapest.
     /// When <c>false</c> (default), the rule-based heuristic is used unchanged.
-    /// Maps to <c>CamusDBConfig.CostBasedJoinOrderEnabled</c>.
+    /// Maps to <c>CamusDBOptions.CostBasedJoinOrderEnabled</c>.
     /// </summary>
     public bool CostBasedJoinOrderEnabled { get; set; } = false;
 
@@ -200,27 +200,27 @@ public class ConfigDefinition
     /// Enables the query plan cache.
     /// When <c>false</c> (default), the cache is built but never consulted —
     /// consistent with the opt-in convention for all cost-based optimizer features.
-    /// Maps to <c>CamusDBConfig.PlanCacheEnabled</c>.
+    /// Maps to <c>CamusDBOptions.PlanCacheEnabled</c>.
     /// </summary>
     public bool PlanCacheEnabled { get; set; } = false;
 
     /// <summary>
     /// Maximum LRU entries in the plan cache (0 = effectively disabled even when
-    /// <c>plan_cache_enabled</c> is true). Maps to <c>CamusDBConfig.PlanCacheMaxEntries</c>.
+    /// <c>plan_cache_enabled</c> is true). Maps to <c>CamusDBOptions.PlanCacheMaxEntries</c>.
     /// </summary>
     public int PlanCacheMaxEntries { get; set; } = 512;
 
     /// <summary>
     /// Per-match timeout in milliseconds for the regex operators <c>~</c> / <c>~*</c> / <c>!~</c> /
     /// <c>!~*</c>; a match that exceeds it is rejected rather than allowed to run unbounded (ReDoS
-    /// guard). Must be &gt; 0. Maps to <c>CamusDBConfig.RegexMatchTimeoutMs</c>.
+    /// guard). Must be &gt; 0. Maps to <c>CamusDBOptions.RegexMatchTimeoutMs</c>.
     /// </summary>
     public int RegexMatchTimeoutMs { get; set; } = 250;
 
     /// <summary>
     /// Maximum number of compiled regex patterns cached (keyed by pattern + case-sensitivity).
     /// 0 disables caching — patterns are still compiled and evaluated, just never retained.
-    /// Maps to <c>CamusDBConfig.RegexCacheMaxEntries</c>.
+    /// Maps to <c>CamusDBOptions.RegexCacheMaxEntries</c>.
     /// </summary>
     public int RegexCacheMaxEntries { get; set; } = 1024;
 
@@ -251,7 +251,7 @@ public class ConfigDefinition
     /// the environment so they never land in a config file — this is a deployment-topology policy flag
     /// with no secret value, so it is configurable from YAML and the CLI.</para>
     ///
-    /// <para>Maps to <c>CamusDBConfig.RequireTlsWhenAuthEnabled</c>. Inert while authentication is
+    /// <para>Maps to <c>CamusDBOptions.RequireTlsWhenAuthEnabled</c>. Inert while authentication is
     /// disabled.</para>
     /// </summary>
     public bool RequireTlsWhenAuthEnabled { get; set; } = true;
@@ -275,7 +275,7 @@ public class ConfigDefinition
     /// Maximum number of concurrently in-flight operations the server will execute per
     /// <c>CamusSql.BatchExecute</c> duplex stream before applying backpressure (the read loop stops
     /// pulling new requests until a slot frees). Bounds a single client's fan-out. Must be &gt; 0.
-    /// Default 64. Maps to <c>CamusDBConfig.GrpcBatchMaxInFlight</c>.
+    /// Default 64. Maps to <c>CamusDBOptions.GrpcBatchMaxInFlight</c>.
     /// </summary>
     public int GrpcBatchMaxInFlight { get; set; } = 64;
 
@@ -372,27 +372,27 @@ public class ConfigDefinition
     /// <summary>
     /// Max key + stored/payload (<c>INCLUDE</c>) columns in one index. Guards a covering index from
     /// duplicating unbounded row data into every entry. &lt;= 0 disables. Default 32.
-    /// Maps to <c>CamusDBConfig.MaxIndexColumns</c>.
+    /// Maps to <c>CamusDBOptions.MaxIndexColumns</c>.
     /// </summary>
     public int MaxIndexColumns { get; set; } = 32;
 
     /// <summary>
     /// Max encoded byte size of one index entry's key + INCLUDE tuple, checked at write time. &lt;= 0
-    /// disables. Default 4096 (4 KiB). Maps to <c>CamusDBConfig.MaxIndexIncludeTupleBytes</c>.
+    /// disables. Default 4096 (4 KiB). Maps to <c>CamusDBOptions.MaxIndexIncludeTupleBytes</c>.
     /// </summary>
     public int MaxIndexIncludeTupleBytes { get; set; } = 4096;
 
     /// <summary>
     /// Max rows one user transaction may mutate before it is rejected. &lt;= 0 disables (unlimited);
     /// DDL/backfill always run unlimited. Default 20 000. Maps to
-    /// <c>CamusDBConfig.MaxMutationsPerTransaction</c>.
+    /// <c>CamusDBOptions.MaxMutationsPerTransaction</c>.
     /// </summary>
     public int MaxMutationsPerTransaction { get; set; } = 20_000;
 
     /// <summary>
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
     /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
-    /// &gt; 0. Default 300 000 (5 min). Maps to <c>CamusDBConfig.BranchSnapshotHoldLeaseMs</c>.
+    /// &gt; 0. Default 300 000 (5 min). Maps to <c>CamusDBOptions.BranchSnapshotHoldLeaseMs</c>.
     /// </summary>
     public int BranchSnapshotHoldLeaseMs { get; set; } = 300_000;
 
@@ -401,14 +401,14 @@ public class ConfigDefinition
     /// hash join, derived-table materialization, DELETE/UPDATE row buffers).
     /// When <c>false</c> (default), every operator keeps its in-memory path; when <c>true</c>,
     /// each operator spills sorted runs or partitioned rows to temp files once its buffer exceeds
-    /// <see cref="SpillThresholdRows"/>. Maps to <c>CamusDBConfig.SpillEnabled</c>.
+    /// <see cref="SpillThresholdRows"/>. Maps to <c>CamusDBOptions.SpillEnabled</c>.
     /// </summary>
     public bool SpillEnabled { get; set; } = false;
 
     /// <summary>
     /// Per-operator in-memory row cap before the operator begins spilling to disk.
     /// Must be &gt; 0. Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
-    /// Maps to <c>CamusDBConfig.SpillThresholdRows</c>.
+    /// Maps to <c>CamusDBOptions.SpillThresholdRows</c>.
     /// </summary>
     public int SpillThresholdRows { get; set; } = 500_000;
 
@@ -416,7 +416,7 @@ public class ConfigDefinition
     /// Maximum number of simultaneously-open spill-run readers during a k-way merge pass.
     /// When the number of spilled runs exceeds this value, a multi-pass merge is performed.
     /// Must be &gt; 0. Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
-    /// Maps to <c>CamusDBConfig.SpillMergeFanIn</c>.
+    /// Maps to <c>CamusDBOptions.SpillMergeFanIn</c>.
     /// </summary>
     public int SpillMergeFanIn { get; set; } = 16;
 
@@ -430,45 +430,45 @@ public class ConfigDefinition
     // Query result cache
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Enables the per-node in-memory query result cache. Default: true. Maps to <c>CamusDBConfig.QueryResultCacheEnabled</c>.</summary>
+    /// <summary>Enables the per-node in-memory query result cache. Default: true. Maps to <c>CamusDBOptions.QueryResultCacheEnabled</c>.</summary>
     public bool QueryResultCacheEnabled { get; set; } = true;
 
-    /// <summary>Default TTL in milliseconds for cache entries without a per-hint override. Default: 5 000 ms. Maps to <c>CamusDBConfig.QueryResultCacheDefaultTtlMs</c>.</summary>
+    /// <summary>Default TTL in milliseconds for cache entries without a per-hint override. Default: 5 000 ms. Maps to <c>CamusDBOptions.QueryResultCacheDefaultTtlMs</c>.</summary>
     public int QueryResultCacheDefaultTtlMs { get; set; } = 5_000;
 
-    /// <summary>Maximum entries held by the cache (LRU eviction when exceeded). Default: 1 024. Maps to <c>CamusDBConfig.QueryResultCacheMaxEntries</c>.</summary>
+    /// <summary>Maximum entries held by the cache (LRU eviction when exceeded). Default: 1 024. Maps to <c>CamusDBOptions.QueryResultCacheMaxEntries</c>.</summary>
     public int QueryResultCacheMaxEntries { get; set; } = 1_024;
 
-    /// <summary>Maximum total bytes across all cached entries. Default: 64 MiB. Maps to <c>CamusDBConfig.QueryResultCacheMaxBytes</c>.</summary>
+    /// <summary>Maximum total bytes across all cached entries. Default: 64 MiB. Maps to <c>CamusDBOptions.QueryResultCacheMaxBytes</c>.</summary>
     public long QueryResultCacheMaxBytes { get; set; } = 64 * 1024 * 1024;
 
-    /// <summary>Maximum bytes for a single cache entry; oversized results are bypassed. Default: 1 MiB. Maps to <c>CamusDBConfig.QueryResultCacheMaxEntryBytes</c>.</summary>
+    /// <summary>Maximum bytes for a single cache entry; oversized results are bypassed. Default: 1 MiB. Maps to <c>CamusDBOptions.QueryResultCacheMaxEntryBytes</c>.</summary>
     public long QueryResultCacheMaxEntryBytes { get; set; } = 1 * 1024 * 1024;
 
-    /// <summary>Maximum rows in a single cache entry; oversized results are bypassed. Default: 10 000. Maps to <c>CamusDBConfig.QueryResultCacheMaxEntryRows</c>.</summary>
+    /// <summary>Maximum rows in a single cache entry; oversized results are bypassed. Default: 10 000. Maps to <c>CamusDBOptions.QueryResultCacheMaxEntryRows</c>.</summary>
     public int QueryResultCacheMaxEntryRows { get; set; } = 10_000;
 
-    /// <summary>Maximum combined dep facts (range + point + schema) per entry before bypass. Default: 4 096. Maps to <c>CamusDBConfig.QueryResultCacheMaxDeps</c>.</summary>
+    /// <summary>Maximum combined dep facts (range + point + schema) per entry before bypass. Default: 4 096. Maps to <c>CamusDBOptions.QueryResultCacheMaxDeps</c>.</summary>
     public int QueryResultCacheMaxDeps { get; set; } = 4_096;
 
-    /// <summary>Maximum point-key deps per entry before promotion or bypass. Default: 2 048. Maps to <c>CamusDBConfig.QueryResultCacheMaxPointDeps</c>.</summary>
+    /// <summary>Maximum point-key deps per entry before promotion or bypass. Default: 2 048. Maps to <c>CamusDBOptions.QueryResultCacheMaxPointDeps</c>.</summary>
     public int QueryResultCacheMaxPointDeps { get; set; } = 2_048;
 
-    /// <summary>Maximum range deps per entry before promotion or bypass. Default: 256. Maps to <c>CamusDBConfig.QueryResultCacheMaxRanges</c>.</summary>
+    /// <summary>Maximum range deps per entry before promotion or bypass. Default: 256. Maps to <c>CamusDBOptions.QueryResultCacheMaxRanges</c>.</summary>
     public int QueryResultCacheMaxRanges { get; set; } = 256;
 
     /// <summary>
     /// Single-flight waiter timeout in milliseconds before independent execution. Default: 250 ms.
     /// Property spelling is deliberately <c>Singleflight</c> (one word) so the underscored YAML key
     /// binds as <c>query_result_cache_singleflight_wait_ms</c> — the documented key — rather than
-    /// <c>..._single_flight_...</c>. Maps to <c>CamusDBConfig.QueryResultCacheSingleFlightWaitMs</c>.
+    /// <c>..._single_flight_...</c>. Maps to <c>CamusDBOptions.QueryResultCacheSingleFlightWaitMs</c>.
     /// </summary>
     public int QueryResultCacheSingleflightWaitMs { get; set; } = 250;
 
-    /// <summary>Max keys probed during strict validation before treating the entry as invalid. Default: 10 000. Maps to <c>CamusDBConfig.QueryResultCacheStrictValidationMaxKeys</c>.</summary>
+    /// <summary>Max keys probed during strict validation before treating the entry as invalid. Default: 10 000. Maps to <c>CamusDBOptions.QueryResultCacheStrictValidationMaxKeys</c>.</summary>
     public int QueryResultCacheStrictValidationMaxKeys { get; set; } = 10_000;
 
-    /// <summary>Background sweep interval in milliseconds for TTL expiry. Default: 10 000 ms. Maps to <c>CamusDBConfig.QueryResultCacheSweepIntervalMs</c>.</summary>
+    /// <summary>Background sweep interval in milliseconds for TTL expiry. Default: 10 000 ms. Maps to <c>CamusDBOptions.QueryResultCacheSweepIntervalMs</c>.</summary>
     public int QueryResultCacheSweepIntervalMs { get; set; } = 10_000;
 
     public bool IsClusterMode => Mode == "cluster" || Peers.Count > 0;

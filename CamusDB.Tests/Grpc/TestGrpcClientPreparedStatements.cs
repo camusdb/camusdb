@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Catalogs;
@@ -49,10 +50,10 @@ internal sealed class TestGrpcClientPreparedStatements : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogs = new(logger);
-        executor = new(validator, catalogs, logger,
+        executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(executor);
-        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge());
+        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
     }
 
     [TearDown]

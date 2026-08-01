@@ -45,7 +45,7 @@ public sealed class TestIsolationLevelPlumbing
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        return (node, new KvTransactionsManager(node.Kahuna));
+        return (node, new KvTransactionsManager(node.Kahuna, CamusDBConfig.Ambient));
     }
 
     // ------------------------------------------------------------------
@@ -327,7 +327,7 @@ public sealed class TestIsolationLevelPlumbing
         Kommander.Time.HLCTimestamp mintLocalT(Kommander.Time.HLCTimestamp? _) =>
             node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
 
-        KvTransactionsManager mgr = new(node.Kahuna, mintLocalT);
+        KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient, mintLocalT);
 
         KvTransaction tx = await mgr.BeginAsync(deferStart: true);
         Assert.AreEqual(KeyValueTransactionLocking.Pessimistic, tx.Locking);

@@ -905,7 +905,7 @@ public sealed class StatisticsManager
 
     private void ScheduleFlush(DatabaseDescriptor database, TableDescriptor table)
     {
-        int interval = CamusDBConfig.StatsFlushIntervalMs;
+        int interval = database.Options.StatsFlushIntervalMs;
         if (interval < 0)
             return;
 
@@ -1492,7 +1492,7 @@ public sealed class StatisticsManager
 
     /// <summary>
     /// Counts how many times a hash join routed to the Grace/hybrid partitioning path because the
-    /// build side exceeded <c>CamusDBConfig.SpillEffectiveThreshold</c> with spill enabled.
+    /// build side exceeded <c>CamusDBOptions.SpillEffectiveThreshold</c> with spill enabled.
     /// Incremented by <c>QueryJoinExecutor.GraceHashJoinAsync</c>. Lets a test prove the Grace path
     /// was actually taken (vs the in-memory hash join) independent of result values. Test-only;
     /// not thread-safe.
@@ -1502,7 +1502,7 @@ public sealed class StatisticsManager
     /// <summary>
     /// Counts how many times <c>QueryAggregator.AggregatePartitionAsync</c> recursively
     /// repartitioned a GROUP BY partition because its distinct-group count exceeded
-    /// <c>CamusDBConfig.SpillEffectiveThreshold</c>. Lets a test prove the recursion path was
+    /// <c>CamusDBOptions.SpillEffectiveThreshold</c>. Lets a test prove the recursion path was
     /// taken rather than unbounded dictionary growth. Test-only; not thread-safe.
     /// </summary>
     internal int GroupByPartitionRecursionCount { get; set; }

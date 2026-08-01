@@ -43,10 +43,10 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
     {
         CommandValidator validator = new();
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger,
+        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
-        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge());
+        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
     }
 
     [TearDown]
@@ -181,6 +181,11 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
 
         int saved = CamusDBConfig.GrpcMaxPreparedStatementsPerStream;
         CamusDBConfig.GrpcMaxPreparedStatementsPerStream = 2;
+
+        // The service captures its configuration when constructed, so rebuild it now that the
+        // per-stream cap under test is in place.
+        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance,
+            new ForegroundRequestGauge(), CamusDBConfig.Ambient);
         try
         {
             await StreamAsync(async (push, writer) =>
@@ -359,7 +364,7 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
         CamusDBConfig.MaxPreparedStatementBytes = 65_536;
         try
         {
-            StreamPreparedStatements store = new();
+            StreamPreparedStatements store = new(CamusDBConfig.Ambient);
             string padding = new('x', 900);
 
             int admitted = 0;
@@ -393,7 +398,7 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
     [Test]
     public void TheStore_ReturnsQuotaWhenAStatementIsClosed()
     {
-        StreamPreparedStatements store = new();
+        StreamPreparedStatements store = new(CamusDBConfig.Ambient);
 
         int id = store.Add(PreparedStatementBinder.Create("db", "SELECT 1"));
         Assert.That(store.RetainedBytes, Is.GreaterThan(0));
@@ -409,7 +414,7 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
         // Ids are never reused, so the space is finite. Wrapping would produce negative ids — which
         // every resolve rejects — and eventually collide with a live id, handing a client someone
         // else's statement. The seam starts the counter just below the ceiling.
-        StreamPreparedStatements store = new(int.MaxValue - 1);
+        StreamPreparedStatements store = new(CamusDBConfig.Ambient, int.MaxValue - 1);
 
         Assert.That(store.Add(PreparedStatementBinder.Create("db", "SELECT 1")), Is.EqualTo(int.MaxValue));
 

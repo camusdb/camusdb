@@ -29,7 +29,7 @@ internal sealed class CreateUserValidator : ValidatorBase
 /// <summary>
 /// Shared validation for the <c>IDENTIFIED [WITH plugin] BY secret</c> clause: only
 /// <c>sha256_password</c> is accepted, and the password may not exceed
-/// <see cref="CamusDBConfig.MaxPasswordBytes"/> UTF-8 bytes (caps per-hash work).
+/// <see cref="CamusDBConstants.MaxPasswordBytes"/> UTF-8 bytes (caps per-hash work).
 /// </summary>
 internal static class AuthClauseValidator
 {
@@ -42,9 +42,9 @@ internal static class AuthClauseValidator
                 CamusDBErrorCodes.UnsupportedAuthPlugin,
                 $"Unsupported authentication plugin '{plugin}'; only '{Sha256Password}' is supported");
 
-        if (Encoding.UTF8.GetByteCount(password) > CamusDBConfig.MaxPasswordBytes)
+        if (Encoding.UTF8.GetByteCount(password) > CamusDBConstants.MaxPasswordBytes)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Password exceeds the maximum of {CamusDBConfig.MaxPasswordBytes} bytes");
+                $"Password exceeds the maximum of {CamusDBConstants.MaxPasswordBytes} bytes");
     }
 }

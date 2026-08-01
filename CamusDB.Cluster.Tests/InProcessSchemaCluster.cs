@@ -152,7 +152,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                     CommandExecutor executor = new(
                         validator,
                         catalogs,
-                        logger,
+                        logger, CamusDBConfig.Ambient,
                         sharedNode: kahuna,
                         schemaDdlForwarder: forwarder,
                         isClusterMode: true

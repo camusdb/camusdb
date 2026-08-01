@@ -262,17 +262,17 @@ internal static class CostEstimator
     /// Only <see cref="DataDistributionKind.Partitioned"/> nodes incur remote cost.
     /// Gathered (point lookups, coordinator-local) and Replicated nodes pay 0.
     /// </summary>
-    private static double ComputeNetworkFactor(PhysicalPlanNode node, long rows, TableDescriptor? resolvedTable)
+    private static double ComputeNetworkFactor(PhysicalPlanNode node, long rows, TableDescriptor? resolvedTable, CamusDBOptions options)
     {
         if (node.Distribution is not { Kind: DataDistributionKind.Partitioned })
             return 0.0;
 
         double remoteFraction = PlacementReader.GetRemoteFraction();
-        if (remoteFraction <= 0.0 || CamusDBConfig.NetWeight <= 0.0)
+        if (remoteFraction <= 0.0 || options.NetWeight <= 0.0)
             return 0.0;
 
         int rowWidth = RowWidthEstimator.Estimate(resolvedTable);
-        return rows * remoteFraction * rowWidth * CamusDBConfig.NetWeight;
+        return rows * remoteFraction * rowWidth * options.NetWeight;
     }
 
     private static (long Cardinality, PlanCost Cost) EstimateNodeCost(
@@ -296,7 +296,7 @@ internal static class CostEstimator
                     EstimatedRows        = rows,
                     KvPointLookups       = 1,
                     RowFetchesAfterIndex = 1,
-                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable),
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
                 });
             }
 
@@ -314,7 +314,7 @@ internal static class CostEstimator
                     KvPointLookups       = isUnique ? n : 0,
                     KvRangeScanEntries   = isUnique ? 0 : rows,  // non-unique: entries scanned ≈ matched rows
                     RowFetchesAfterIndex = rows,
-                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable),
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
                 });
             }
 
@@ -330,7 +330,7 @@ internal static class CostEstimator
                     EstimatedRows        = rows,
                     KvRangeScanEntries   = rows,
                     RowFetchesAfterIndex = rows,
-                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable),
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
                 });
             }
 
@@ -353,7 +353,7 @@ internal static class CostEstimator
                 {
                     EstimatedRows      = outputCard,
                     KvRangeScanEntries = rows,
-                    NetworkFactor      = ComputeNetworkFactor(node, rows, resolvedTable),
+                    NetworkFactor      = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
                 });
             }
 

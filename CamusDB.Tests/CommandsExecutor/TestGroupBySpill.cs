@@ -130,10 +130,13 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     [Test]
     public async Task GroupBySpill_FlagOff_InMemoryPathUsed()
     {
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
+        CamusDBConfig.SpillEnabled = false;
+
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
             categoryCount: 4, rowsPerCategory: 3);
 
-        CamusDBConfig.SpillEnabled = false;
 
         List<QueryResultRow> rows = await RunGroupBy(dbname, database, executor,
             "SELECT category, SUM(amount) AS total FROM sales GROUP BY category");
@@ -155,13 +158,16 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     [Test]
     public async Task GroupBySpill_FewGroups_ResultMatchesInMemory()
     {
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.ForceSpillThresholdRows = 20;
+        CamusDBConfig.SpillMergeFanIn         = 4;
+
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
             categoryCount: 4, rowsPerCategory: 3);
 
         // threshold=20 → 4 groups per partition easily fit.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 20;
-        CamusDBConfig.SpillMergeFanIn         = 4;
         executor.Statistics.GroupByPartitionRecursionCount = 0;
 
         List<QueryResultRow> rows = await RunGroupBy(dbname, database, executor,
@@ -188,13 +194,16 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
         const int categories = 20;
         const int rowsEach   = 5;
 
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.ForceSpillThresholdRows = 200;
+        CamusDBConfig.SpillMergeFanIn         = 4;
+
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
             categoryCount: categories, rowsPerCategory: rowsEach);
 
         // Threshold exceeds groups-per-partition (with K=4, ~5 groups per partition), no overflow.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 200;
-        CamusDBConfig.SpillMergeFanIn         = 4;
 
         List<QueryResultRow> rows = await RunGroupBy(dbname, database, executor,
             "SELECT category, COUNT(*) AS cnt, SUM(amount) AS total FROM sales GROUP BY category");
@@ -227,14 +236,17 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
         const int categories = 40;
         const int rowsEach   = 3;
 
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
+        CamusDBConfig.SpillEnabled            = true;
+        CamusDBConfig.ForceSpillThresholdRows = 2;
+        CamusDBConfig.SpillMergeFanIn         = 4;
+
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
             categoryCount: categories, rowsPerCategory: rowsEach);
 
         // Threshold = 2 means any partition with ≥3 distinct groups triggers recursion.
         // With 40 groups and K=4 partitions, every partition gets ~10 groups → always overflows.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        CamusDBConfig.SpillMergeFanIn         = 4;
         executor.Statistics.GroupByPartitionRecursionCount = 0;
 
         List<QueryResultRow> rows = await RunGroupBy(dbname, database, executor,
@@ -270,15 +282,21 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
         const string sql = "SELECT category, COUNT(*) AS cnt, SUM(amount) AS total FROM sales GROUP BY category ORDER BY category";
 
         // In-memory reference.
-        (string db1, DatabaseDescriptor d1, CommandExecutor ex1) = await SetupSalesTable(categories, rowsEach);
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
         CamusDBConfig.SpillEnabled = false;
+
+        (string db1, DatabaseDescriptor d1, CommandExecutor ex1) = await SetupSalesTable(categories, rowsEach);
         List<QueryResultRow> reference = await RunGroupBy(db1, d1, ex1, sql);
 
         // Spill path with overflow.
-        (string db2, DatabaseDescriptor d2, CommandExecutor ex2) = await SetupSalesTable(categories, rowsEach);
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
         CamusDBConfig.SpillEnabled            = true;
         CamusDBConfig.ForceSpillThresholdRows = 2;
         CamusDBConfig.SpillMergeFanIn         = 4;
+
+        (string db2, DatabaseDescriptor d2, CommandExecutor ex2) = await SetupSalesTable(categories, rowsEach);
         List<QueryResultRow> spill = await RunGroupBy(db2, d2, ex2, sql);
 
         Assert.That(spill.Count, Is.EqualTo(reference.Count),
@@ -307,12 +325,15 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     {
         const int categories = 20;
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
-            categoryCount: categories, rowsPerCategory: 2);
-
+        // The engine fixes its configuration when it is built, so this is set before the
+        // table (and the executor behind it) are created.
         CamusDBConfig.SpillEnabled            = true;
         CamusDBConfig.ForceSpillThresholdRows = 2;
         CamusDBConfig.SpillMergeFanIn         = 4;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
+            categoryCount: categories, rowsPerCategory: 2);
+
 
         await RunGroupBy(dbname, database, executor,
             "SELECT category, COUNT(*) AS cnt FROM sales GROUP BY category");

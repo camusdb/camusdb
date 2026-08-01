@@ -295,7 +295,7 @@ internal sealed class TestShowBranchTree : BaseTest
 
         // Register a branch of root through a second registry instance ("remote node"): its write
         // lands in the shared KV but not in this executor's registry cache.
-        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!);
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
         string branchName = NewName();
         string branchId = await remoteRegistry.AllocateIdAsync();
         List<DatabaseBranchAncestor> ancestors =

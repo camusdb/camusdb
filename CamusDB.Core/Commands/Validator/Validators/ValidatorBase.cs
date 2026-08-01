@@ -16,7 +16,7 @@ internal abstract class ValidatorBase
 {
     /// <summary>
     /// Validates a user-facing identifier (database, table, column, or index name):
-    /// must be non-empty, within <see cref="CamusDB.Core.CamusDBConfig.MaxIdentifierLength"/>,
+    /// must be non-empty, within <see cref="CamusDB.Core.CamusDBOptions.MaxIdentifierLength"/>,
     /// and composed only of alphanumeric characters and underscores.
     /// </summary>
     protected static void ValidateIdentifier(string name, string kind)
@@ -35,7 +35,7 @@ internal abstract class ValidatorBase
     }
 
     /// <summary>
-    /// Enforces <see cref="CamusDB.Core.CamusDBConfig.MaxCommentLength"/> on one comment.
+    /// Enforces <see cref="CamusDB.Core.CamusDBConstants.MaxCommentLength"/> on one comment.
     ///
     /// <para>Shared rather than inlined because comments arrive through several unrelated tickets —
     /// <c>COMMENT ON</c>, inline <c>CREATE TABLE</c> (table, column, and index positions), and
@@ -51,7 +51,7 @@ internal abstract class ValidatorBase
         if (comment is null)
             return;
 
-        int maxLen = CamusDB.Core.CamusDBConfig.MaxCommentLength;
+        int maxLen = CamusDB.Core.CamusDBConstants.MaxCommentLength;
         if (comment.Length > maxLen)
             throw new CamusDBException(
                 CamusDBErrorCodes.CommentTooLong,
@@ -97,7 +97,7 @@ internal abstract class ValidatorBase
 
         if (column.Type == ColumnType.String)
         {
-            int max = column.MaxLength ?? CamusDBConfig.DefaultStringMaxLength;
+            int max = column.MaxLength ?? CamusDBConstants.DefaultStringMaxLength;
             int length = (coerced.StrValue ?? "").Length;
 
             if (length > max)
@@ -107,7 +107,7 @@ internal abstract class ValidatorBase
         }
         else if (column.Type == ColumnType.Bytes)
         {
-            int max = column.MaxLength ?? CamusDBConfig.DefaultBytesMaxLength;
+            int max = column.MaxLength ?? CamusDBConstants.DefaultBytesMaxLength;
             int length = (coerced.BytesValue ?? []).Length;
 
             if (length > max)

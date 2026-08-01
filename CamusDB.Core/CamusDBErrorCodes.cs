@@ -96,7 +96,7 @@ public static class CamusDBErrorCodes
     public const string TransactionMustRetry = "CADB0504";
 
     /// <summary>
-    /// A Serializable+ReadWrite transaction exceeded <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/>
+    /// A Serializable+ReadWrite transaction exceeded <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/>
     /// while still holding range locks. The transaction has been invalidated to prevent the range
     /// locks from expiring while the transaction is still considered live (which would silently
     /// break the serializable guarantee). The caller must roll back and retry from BeginAsync.
@@ -104,7 +104,7 @@ public static class CamusDBErrorCodes
     public const string TransactionLifetimeExceeded = "CADB0505";
 
     /// <summary>
-    /// A read-write transaction exceeded <see cref="CamusDBConfig.MaxMutationsPerTransaction"/>.
+    /// A read-write transaction exceeded <see cref="CamusDBOptions.MaxMutationsPerTransaction"/>.
     /// Permanent (non-retryable): the transaction must be split into smaller batches. Mirrors
     /// Cloud Spanner's "too many mutations" rejection. One CamusDB mutation = one row-blob
     /// write/delete or one secondary-index entry write/delete.
@@ -155,7 +155,7 @@ public static class CamusDBErrorCodes
 
     /// <summary>
     /// A <c>COMMENT ON</c> (or inline <c>COMMENT</c>) text exceeds
-    /// <see cref="CamusDBConfig.MaxCommentLength"/>. The bound keeps the replicated schema blob from
+    /// <see cref="CamusDBConstants.MaxCommentLength"/>. The bound keeps the replicated schema blob from
     /// growing without limit, since comments ride the per-table metadata. A permanent caller mistake
     /// — maps to HTTP 400.
     /// </summary>
@@ -260,7 +260,7 @@ public static class CamusDBErrorCodes
 
     /// <summary>
     /// A restore requested a point in time outside the recoverable window: in the future, or older than
-    /// <c>now - </c><see cref="CamusDBConfig.PitrWindowSeconds"/>. The window is the upper bound on
+    /// <c>now - </c><see cref="CamusDBOptions.PitrWindowSeconds"/>. The window is the upper bound on
     /// recoverability; actual reach is further limited by which backups survive in the chain. A
     /// permanent caller mistake — maps to HTTP 422.
     /// </summary>

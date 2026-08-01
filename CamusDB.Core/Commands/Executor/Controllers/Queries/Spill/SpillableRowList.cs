@@ -18,13 +18,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// <para>
 /// <b>Memory phase:</b> rows are accumulated in a <see cref="List{T}"/> until the buffer
-/// reaches <see cref="CamusDBConfig.SpillEffectiveThreshold"/>. When the threshold is hit,
+/// reaches <see cref="_context.Options.SpillEffectiveThreshold"/>. When the threshold is hit,
 /// every buffered row is flushed to a single spill file (via <see cref="SpillRowCodec"/>)
 /// and subsequent rows are written directly to that file; the in-memory list is cleared.
 /// </para>
 ///
 /// <para>
-/// <b>Flag-off / under-threshold:</b> when <see cref="CamusDBConfig.SpillEnabled"/> is
+/// <b>Flag-off / under-threshold:</b> when <see cref="_context.Options.SpillEnabled"/> is
 /// <c>false</c>, or when the input ends without the threshold being hit, all rows stay in
 /// memory and no spill file is ever created — byte-identical to a plain
 /// <c>List&lt;QueryResultRow&gt;</c>.
@@ -53,6 +53,11 @@ internal sealed class SpillableRowList : IAsyncDisposable
 {
     private readonly List<QueryResultRow> _memoryRows = [];
 
+    /// <summary>Configuration and spill location for the query this list belongs to.</summary>
+    private readonly QueryExecutionContext _context;
+
+    public SpillableRowList(QueryExecutionContext context) => _context = context;
+
     private SpillScope? _scope;
 
     private string? _spillPath;
@@ -65,8 +70,8 @@ internal sealed class SpillableRowList : IAsyncDisposable
     public int Count { get; private set; }
 
     /// <summary>
-    /// Appends a row to the list. When <see cref="CamusDBConfig.SpillEnabled"/> is
-    /// <c>true</c> and the buffer reaches <see cref="CamusDBConfig.SpillEffectiveThreshold"/>,
+    /// Appends a row to the list. When <see cref="_context.Options.SpillEnabled"/> is
+    /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/>,
     /// all buffered rows are flushed to a spill file and subsequent rows are written
     /// directly to disk. Must not be called after <see cref="SealAsync"/>.
     /// </summary>
@@ -77,7 +82,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
             _memoryRows.Add(row);
             Count++;
 
-            if (CamusDBConfig.SpillEnabled && _memoryRows.Count >= CamusDBConfig.SpillEffectiveThreshold)
+            if (_context.Options.SpillEnabled && _memoryRows.Count >= _context.Options.SpillEffectiveThreshold)
                 await OverflowToSpillAsync(ct).ConfigureAwait(false);
         }
         else
@@ -140,7 +145,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
     /// </summary>
     private async Task OverflowToSpillAsync(CancellationToken ct)
     {
-        _scope = SpillFileManager.CreateScope(CamusDBConfig.DataDirectory);
+        _scope = SpillFileManager.CreateScope(_context.SpillDirectory);
         _spillPath = _scope.OpenWriter(out _spillWriter);
 
         foreach (QueryResultRow r in _memoryRows)

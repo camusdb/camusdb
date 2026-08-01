@@ -49,7 +49,30 @@ ConfigDefinition config = new ConfigReader().Read(configYml);
 // CLI > env > YAML > default — only explicitly provided flags override YAML.
 ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
 config.Validate();
-ConfigResolver.ApplyToCamusDBConfig(config);
+CamusDBOptions camusOptions = ConfigResolver.ApplyToCamusDBConfig(config);
+
+// Authentication policy is resolved here, before anything is registered or the socket is bound, so no
+// component can observe a half-configured policy and no request is served while the flag still holds
+// its default. (The bootstrap superuser is seeded later, after StartAsync — it needs the shared node —
+// and until it exists an auth-enabled server resolves no token and fails closed, which is safe.)
+// Sourced from the environment / secret provider, never config.yml: a plaintext key or bootstrap
+// password in config.yml would be a leak. The flag defaults off, so a deployment that sets nothing
+// keeps today's unauthenticated behavior.
+camusOptions = camusOptions with
+{
+    AuthenticationEnabled = string.Equals(
+        Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase),
+    AccessTokenServerKey =
+        Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? camusOptions.AccessTokenServerKey,
+    BootstrapSuperuser =
+        Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "",
+    BootstrapSuperuserPassword =
+        Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "",
+    NodeSecret =
+        Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "",
+};
+
+CamusDBConfig.SetAmbient(camusOptions);
 
 // Diagnostics are opt-in and standalone-only this phase: enable the Core Meter/ActivitySource gate
 // only for a standalone node with diagnostics turned on. When false, every ServerDiagnostics record
@@ -63,8 +86,8 @@ CamusDB.Core.Diagnostics.ServerDiagnostics.Enabled = diagnosticsActive;
 // cache/gate protocol on the read and write paths with zero overhead — which is what the
 // KvTransactionsManager._cache contract ("null when disabled → gate calls skipped") assumes.
 // QueryResultCache(sweepIntervalMs: 0) reads QueryResultCacheSweepIntervalMs from config.
-IQueryResultCache? queryResultCache = CamusDBConfig.QueryResultCacheEnabled
-    ? new QueryResultCache(sweepIntervalMs: 0)
+IQueryResultCache? queryResultCache = camusOptions.QueryResultCacheEnabled
+    ? new QueryResultCache(camusOptions, sweepIntervalMs: 0)
     : null;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -179,6 +202,7 @@ if (config.IsClusterMode)
             services.GetRequiredService<CommandValidator>(),
             services.GetRequiredService<CatalogsManager>(),
             services.GetRequiredService<ILogger<ICamusDB>>(),
+            services.GetRequiredService<CamusDBOptions>(),
             services.GetRequiredService<EmbeddedKahuna>(),
             services.GetRequiredService<ISchemaDdlForwarder>(),
             isClusterMode: true,
@@ -189,9 +213,9 @@ else
 {
     builder.Services.AddSingleton<EmbeddedKahuna>(services =>
     {
-        string dataPath = CamusDBConfig.DataDirectory;
+        string dataPath = camusOptions.DataDirectory;
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
-        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, CamusDBConfig.Kahuna);
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, camusOptions.Kahuna);
         options.InitialPartitions = config.InitialPartitions;
         return new EmbeddedKahuna(options, loggerFactory);
     });
@@ -201,11 +225,20 @@ else
             services.GetRequiredService<CommandValidator>(),
             services.GetRequiredService<CatalogsManager>(),
             services.GetRequiredService<ILogger<ICamusDB>>(),
+            services.GetRequiredService<CamusDBOptions>(),
             services.GetRequiredService<EmbeddedKahuna>(),
             isClusterMode: false,
             cache: queryResultCache
         ));
 }
+
+// The resolved configuration for this engine. Registered as the instance every component takes by
+// constructor, so nothing needs to reach for a process-wide value.
+//
+// The bootstrap password is stripped from the injected copy: it is a one-shot startup secret used to
+// seed the first user, and the seeding path still reads it from the ambient value, which is cleared
+// immediately afterwards. Keeping it out of the long-lived instance means no component can retain it.
+builder.Services.AddSingleton(camusOptions with { BootstrapSuperuserPassword = "" });
 
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
@@ -316,7 +349,7 @@ WebApplication app = builder.Build();
 // Warn early when key-range sharding is enabled but InitialPartitions < 2.
 // With a single partition Kahuna treats RegisterKeyRangeAsync as a no-op, so the flag is
 // harmless but silent — operators must know they need ≥ 2 partitions to benefit.
-if (CamusDBConfig.KeyRangeShardingEnabled && config.InitialPartitions < 2)
+if (camusOptions.KeyRangeShardingEnabled && config.InitialPartitions < 2)
     app.Logger.LogWarning(
         "key_range_sharding is enabled but initial_partitions={InitialPartitions} < 2; " +
         "key-range routing is a no-op on a single-partition node. " +
@@ -369,25 +402,6 @@ app.UseAuthorization();
 
 app.MapRazorPages();
 
-// Load the authentication policy BEFORE binding the socket, so the auth middleware never serves a
-// request while the flag still holds its default. These are pure environment reads with no dependency
-// on the node being up; the flag/key sourced here decide whether the middleware authenticates. (The
-// bootstrap superuser is seeded after StartAsync — it needs the shared node — and until it exists an
-// auth-enabled server simply resolves no token and fails closed, which is safe.)
-// Sourced from the environment / secret provider, never config.yml (a plaintext key or bootstrap
-// password in config.yml would be a leak). The flag defaults off, so a deployment that sets nothing
-// keeps today's unauthenticated behavior.
-CamusDBConfig.AuthenticationEnabled = string.Equals(
-    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase);
-CamusDBConfig.AccessTokenServerKey =
-    Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? CamusDBConfig.AccessTokenServerKey;
-CamusDBConfig.BootstrapSuperuser =
-    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "";
-CamusDBConfig.BootstrapSuperuserPassword =
-    Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "";
-CamusDBConfig.NodeSecret =
-    Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "";
-
 // Start Kestrel first so the gRPC Raft port is bound before the cluster node
 // begins leader election and tries to reach peers.
 await app.StartAsync();
@@ -403,8 +417,8 @@ if (config.IsClusterMode)
 
 await sharedNode.StartAsync();
 
-SpillFileManager.AcquireInstanceLock(CamusDBConfig.DataDirectory);
-SpillFileManager.RunStartupSweep(CamusDBConfig.DataDirectory);
+SpillFileManager.AcquireInstanceLock(camusOptions.DataDirectory);
+SpillFileManager.RunStartupSweep(camusOptions.DataDirectory);
 
 // Initialize DB system
 CamusStartup camus = new(
@@ -419,8 +433,10 @@ CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecuto
 // start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.
 await commandExecutor.EnsureBootstrapSuperuserAsync();
 
-// The bootstrap password was only needed to seed the first hash — drop it from process memory.
+// The bootstrap password was only needed to seed the first hash — drop it from process memory. Both
+// holders are cleared: the ambient value the seeding path read it from, and this scope's own copy.
 CamusDBConfig.BootstrapSuperuserPassword = "";
+camusOptions = camusOptions with { BootstrapSuperuserPassword = "" };
 
 // Give the background auto-analyze scheduler a foreground-load signal so it backs off under load:
 // explicit transactions plus in-flight autocommit data requests.

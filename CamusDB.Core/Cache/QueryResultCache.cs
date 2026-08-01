@@ -104,14 +104,19 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// Pass a negative value (or omit) to disable the automatic sweep — the timer is created but
     /// never fires (<see cref="Timeout.Infinite"/>). Tests that call <see cref="Sweep"/> manually
     /// should pass -1 so the background timer does not race with their assertions.
-    /// Pass 0 to use <see cref="CamusDBConfig.QueryResultCacheSweepIntervalMs"/>.
+    /// Pass 0 to use <see cref="CamusDBOptions.QueryResultCacheSweepIntervalMs"/>.
     /// </param>
-    public QueryResultCache(int sweepIntervalMs = -1)
+    /// <summary>Configuration for the engine this cache serves; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public QueryResultCache(CamusDBOptions options, int sweepIntervalMs = -1)
     {
+        this.options = options;
+
         int interval = sweepIntervalMs > 0
             ? sweepIntervalMs
             : sweepIntervalMs == 0
-                ? CamusDBConfig.QueryResultCacheSweepIntervalMs
+                ? options.QueryResultCacheSweepIntervalMs
                 : Timeout.Infinite;
 
         _sweepTimer = new Timer(_ => Sweep(), null, interval, interval);
@@ -198,14 +203,14 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     {
         // Per-entry row and byte caps — belt-and-suspenders; CachedQueryRunner's _capBreached
         // flag catches these before TryPublishAsync is called in normal usage.
-        if (result.Rows.Count > CamusDBConfig.QueryResultCacheMaxEntryRows)
+        if (result.Rows.Count > options.QueryResultCacheMaxEntryRows)
             return Task.FromResult((QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.OversizedResult));
 
         long estimatedBytes = EstimateBytes(result.Rows);
-        if (estimatedBytes > CamusDBConfig.QueryResultCacheMaxEntryBytes)
+        if (estimatedBytes > options.QueryResultCacheMaxEntryBytes)
             return Task.FromResult((QueryCacheStatus.EvictedBeforePublish, QueryCacheBypassReason.OversizedResult));
 
-        int ttlMs = result.HintTtlMs ?? CamusDBConfig.QueryResultCacheDefaultTtlMs;
+        int ttlMs = result.HintTtlMs ?? options.QueryResultCacheDefaultTtlMs;
 
         long now = Environment.TickCount64;
         long expiresAtMs = now + ttlMs;
@@ -241,23 +246,23 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
                 // tested; only the per-entry byte cap is. A dedicated test that fills the
                 // cache past QueryResultCacheMaxBytes and asserts the oldest entry is
                 // evicted is still missing.
-                while (_totalBytes + entry.ByteSize > CamusDBConfig.QueryResultCacheMaxBytes
+                while (_totalBytes + entry.ByteSize > options.QueryResultCacheMaxBytes
                        && _lruList.Count > 0)
                 {
                     EvictLruLocked();
                 }
 
                 // Global entry cap
-                while (_entries.Count >= CamusDBConfig.QueryResultCacheMaxEntries
+                while (_entries.Count >= options.QueryResultCacheMaxEntries
                        && _lruList.Count > 0)
                 {
                     EvictLruLocked();
                 }
 
                 // If caps still exceeded after draining all LRU, bypass
-                if (_totalBytes + entry.ByteSize > CamusDBConfig.QueryResultCacheMaxBytes)
+                if (_totalBytes + entry.ByteSize > options.QueryResultCacheMaxBytes)
                     return;
-                if (_entries.Count >= CamusDBConfig.QueryResultCacheMaxEntries)
+                if (_entries.Count >= options.QueryResultCacheMaxEntries)
                     return;
 
                 InsertEntryLocked(entry);

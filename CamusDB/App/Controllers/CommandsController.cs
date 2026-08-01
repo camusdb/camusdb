@@ -28,11 +28,15 @@ public abstract class CommandsController : ControllerBase
 
     protected readonly JsonSerializerOptions jsonOptions;
 
-    public CommandsController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger)
+    /// <summary>Configuration for the engine this controller serves; injected, never ambient.</summary>
+    protected readonly CamusDBOptions options;
+
+    public CommandsController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger, CamusDBOptions options)
     {
         this.executor = executor;
         this.transactions = transactions;
         this.logger = logger;
+        this.options = options;
 
         this.jsonOptions = new JsonSerializerOptions
         {
@@ -42,20 +46,20 @@ public abstract class CommandsController : ControllerBase
 
     /// <summary>
     /// Resolves the authenticated principal for the current request from the <c>Authorization: Bearer</c>
-    /// header. Returns <c>null</c> when <see cref="CamusDBConfig.AuthenticationEnabled"/> is off (no auth
+    /// header. Returns <c>null</c> when <see cref="CamusDBOptions.AuthenticationEnabled"/> is off (no auth
     /// in force). When on, a missing/invalid/expired token throws
     /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/> (HTTP 401) — the engine gate then never sees
     /// a null principal while auth is enabled.
     /// </summary>
     /// <summary>
     /// Refuses a credential-bearing request over a plaintext connection when authentication is enabled
-    /// and <see cref="CamusDBConfig.RequireTlsWhenAuthEnabled"/> is set, so a bearer token or password
+    /// and <see cref="CamusDBOptions.RequireTlsWhenAuthEnabled"/> is set, so a bearer token or password
     /// is never accepted in the clear. A loopback peer is exempted for single-host development. A no-op
     /// when auth or the TLS requirement is off.
     /// </summary>
     protected void EnsureSecureTransport()
     {
-        if (!CamusDBConfig.AuthenticationEnabled || !CamusDBConfig.RequireTlsWhenAuthEnabled)
+        if (!options.AuthenticationEnabled || !options.RequireTlsWhenAuthEnabled)
             return;
 
         if (Request.IsHttps)
@@ -72,7 +76,7 @@ public abstract class CommandsController : ControllerBase
 
     protected async Task<Principal?> ResolveRequestPrincipalAsync()
     {
-        if (!CamusDBConfig.AuthenticationEnabled)
+        if (!options.AuthenticationEnabled)
             return null;
 
         // The transport-wide AuthenticationMiddleware already authenticated the request and stashed the
@@ -129,8 +133,8 @@ public abstract class CommandsController : ControllerBase
     /// <summary>
     /// Parses the optional <c>IsolationLevel</c>, <c>TransactionMode</c>, and <c>Locking</c>
     /// string fields from a request into their typed enum equivalents. A null or absent field
-    /// resolves to <c>null</c> so the server default applies (<see cref="CamusDBConfig.DefaultIsolationLevel"/>,
-    /// <see cref="CamusTransactionMode.ReadWrite"/>, <see cref="CamusDBConfig.DefaultTransactionLocking"/>).
+    /// resolves to <c>null</c> so the server default applies (<see cref="CamusDBOptions.DefaultIsolationLevel"/>,
+    /// <see cref="CamusTransactionMode.ReadWrite"/>, <see cref="CamusDBOptions.DefaultTransactionLocking"/>).
     /// A present-but-unrecognised value for any field throws <see cref="CamusDBException"/> with
     /// <see cref="CamusDBErrorCodes.InvalidInput"/> — the three fields validate identically, and
     /// consistently with the dedicated <c>/start-transaction</c> endpoint, rather than silently

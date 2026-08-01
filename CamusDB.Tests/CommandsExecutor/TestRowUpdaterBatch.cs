@@ -577,6 +577,11 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
         int savedLimit = CamusDBConfig.MaxMutationsPerTransaction;
         try
         {
+            // The limit is fixed when the engine is built, so it is lowered before the database is
+            // created rather than afterwards. The setup inserts below are one row per transaction, so
+            // they stay well under it; only the batched UPDATE reserves enough to trip the guard.
+            CamusDBConfig.MaxMutationsPerTransaction = 10;
+
             (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
             await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, dbname,
                 "CREATE TABLE items (id OBJECT_ID PRIMARY KEY, val INT64)", null));
@@ -591,8 +596,6 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
                 await database.Transactions.CommitAsync(insTx);
             }
 
-            // Now lower the limit; the update's transaction reads it at BeginAsync.
-            CamusDBConfig.MaxMutationsPerTransaction = 10;
             KvTransaction upTx = await database.Transactions.BeginAsync();
             CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
                 await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(

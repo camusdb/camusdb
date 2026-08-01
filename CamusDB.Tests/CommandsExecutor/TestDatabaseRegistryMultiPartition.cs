@@ -56,7 +56,7 @@ internal sealed class TestDatabaseRegistryMultiPartition
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        });
+        }.WithFastTestTimers());
         await sharedNode.StartAsync(CancellationToken.None);
         await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);
     }
@@ -78,7 +78,7 @@ internal sealed class TestDatabaseRegistryMultiPartition
     public async Task OpenRegistry_ThreePartitions_Succeeds()
     {
         // Opening the registry runs the read-only load scan; it must not throw with >1 partition.
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusConfig.Ambient);
         Assert.IsNotNull(registry);
     }
 
@@ -102,14 +102,14 @@ internal sealed class TestDatabaseRegistryMultiPartition
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        });
+        }.WithFastTestTimers());
 
         try
         {
             await coldNode.StartAsync(CancellationToken.None);
 
             // Note: no WaitForLeaderAsync here — open while the node is still electing leaders.
-            await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(coldNode);
+            await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(coldNode, CamusConfig.Ambient);
 
             // Prove it's usable after a cold open.
             string name = NewName();
@@ -131,7 +131,7 @@ internal sealed class TestDatabaseRegistryMultiPartition
     {
         // Register several databases whose ids/keys spread across the 3-partition hash pool.
         Dictionary<string, string> expected = new();
-        await using (DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!))
+        await using (DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusConfig.Ambient))
         {
             for (int i = 0; i < 12; i++)
             {
@@ -145,7 +145,7 @@ internal sealed class TestDatabaseRegistryMultiPartition
         // Reopen: a fresh OpenAsync runs LoadAsync (the read-only scan) from scratch. Every
         // registered database must be reloaded — proving the zero-identity load reads correctly
         // across all partitions with no routed rollback.
-        await using DatabaseRegistry reopened = await DatabaseRegistry.OpenAsync(sharedNode!);
+        await using DatabaseRegistry reopened = await DatabaseRegistry.OpenAsync(sharedNode!, CamusConfig.Ambient);
 
         List<DatabaseRegistryEntry> loaded = reopened.List().ToList();
         Assert.AreEqual(expected.Count, loaded.Count, "reopened registry must load every registered database");

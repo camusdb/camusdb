@@ -18,6 +18,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -68,7 +69,7 @@ public sealed class TestBranchKvTombstone
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
-        return (node, new KvTableStore(node.Kahuna, "testdb", tableId));
+        return (node, new KvTableStore(node.Kahuna, CamusDBConfig.Ambient, "testdb", tableId));
     }
 
     [Test]

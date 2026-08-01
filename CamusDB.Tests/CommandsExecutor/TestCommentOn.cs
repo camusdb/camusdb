@@ -470,7 +470,7 @@ internal sealed class TestCommentOn : BaseTest
         // inline COMMENT form, so a comment stored here could never be rendered or round-tripped.
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.Comment(new CommentTicket(
-                CommentTarget.Index, dbname, "users", CamusDBConfig.PrimaryKeyInternalName, "x")))!;
+                CommentTarget.Index, dbname, "users", CamusDBConstants.PrimaryKeyInternalName, "x")))!;
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
     }
@@ -482,7 +482,7 @@ internal sealed class TestCommentOn : BaseTest
 
         // '~pk' matches neither the bare nor the backtick-escaped identifier pattern.
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await ExecuteDdl(executor, dbname, $"COMMENT ON INDEX users.`{CamusDBConfig.PrimaryKeyInternalName}` IS 'x'"))!;
+            await ExecuteDdl(executor, dbname, $"COMMENT ON INDEX users.`{CamusDBConstants.PrimaryKeyInternalName}` IS 'x'"))!;
 
         Assert.AreEqual(CamusDBErrorCodes.SqlSyntaxError, ex.Code);
     }
@@ -492,7 +492,7 @@ internal sealed class TestCommentOn : BaseTest
     {
         (string dbname, CommandExecutor executor) = await CreateUsersTable(PlainUsers);
 
-        string tooLong = new('x', CamusDBConfig.MaxCommentLength + 1);
+        string tooLong = new('x', CamusDBConstants.MaxCommentLength + 1);
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await ExecuteDdl(executor, dbname, $"COMMENT ON TABLE users IS '{tooLong}'"))!;
@@ -506,7 +506,7 @@ internal sealed class TestCommentOn : BaseTest
     {
         (string dbname, CommandExecutor executor) = await CreateUsersTable(PlainUsers);
 
-        string atLimit = new('x', CamusDBConfig.MaxCommentLength);
+        string atLimit = new('x', CamusDBConstants.MaxCommentLength);
         await ExecuteDdl(executor, dbname, $"COMMENT ON TABLE users IS '{atLimit}'");
 
         Assert.AreEqual(atLimit, (await GetSchemaAsync(executor, dbname, "users")).Comment);
