@@ -128,6 +128,15 @@ internal static class CheckConditionRenderer
                 sb.Append(" IS NOT NULL");
                 return;
 
+            // ── truth tests ─────────────────────────────────────────────────────
+            case NodeType.ExprIsTrue:
+            case NodeType.ExprIsNotTrue:
+            case NodeType.ExprIsFalse:
+            case NodeType.ExprIsNotFalse:
+                RenderOperand(sb, expr.leftAst!);
+                sb.Append(' ').Append(BooleanTruthTest.Describe(expr.nodeType));
+                return;
+
             // ── BETWEEN ─────────────────────────────────────────────────────────
             case NodeType.ExprBetween:
                 RenderOperand(sb, expr.leftAst!);

@@ -428,4 +428,118 @@ public sealed class TestPlanCache : BaseTest
         Assert.AreEqual(29L, booksRows[0],
             "Q2 must return the books price (29), proving the cache hit re-bound the current predicate.");
     }
+
+    private async Task<List<QueryResultRow>> RunQueryAsync(CommandExecutor executor, string dbname, string sql)
+    {
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        KvTransaction txn = await db.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> rows = [];
+        await foreach (QueryResultRow row in cursor) rows.Add(row);
+        await db.Transactions.CommitAsync(txn);
+        return rows;
+    }
+
+    [Test]
+    public async Task CreateIndex_InvalidatesCachedDecision()
+    {
+        // Index DDL deliberately does not bump TableSchema.Version, so the cache's dependency
+        // fingerprint must carry the descriptor's IndexSetGeneration — otherwise a shape cached
+        // as a full scan would never consider a subsequently created index.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        const string sql = "SELECT id FROM products WHERE category = \"electronics\" AND price = 999";
+
+        long missesBefore = executor.PlanCache.Misses;
+        long hitsBefore   = executor.PlanCache.Hits;
+
+        await RunQueryAsync(executor, dbname, sql); // cold miss
+        await RunQueryAsync(executor, dbname, sql); // warm hit
+
+        Assert.AreEqual(missesBefore + 1, executor.PlanCache.Misses);
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits);
+
+        // CREATE INDEX on category+price — bumps the index-set generation, not the schema version.
+        await executor.AlterIndex(new AlterIndexTicket(
+            databaseName: dbname,
+            tableName: "products",
+            indexName: "products_cat_price",
+            columns: [new("category", OrderType.Ascending), new("price", OrderType.Ascending)],
+            operation: AlterIndexOperation.AddIndex));
+
+        List<QueryResultRow> rows = await RunQueryAsync(executor, dbname, sql); // must MISS and replan
+        await RunQueryAsync(executor, dbname, sql);                             // fresh entry → hit
+
+        Assert.AreEqual(missesBefore + 2, executor.PlanCache.Misses,
+            "CREATE INDEX must invalidate the cached decision (index-set generation changed).");
+        Assert.AreEqual(hitsBefore + 2, executor.PlanCache.Hits,
+            "The replanned decision must be re-cached and hit on the next execution.");
+        Assert.AreEqual(1, rows.Count, "Replanned query must return the matching row.");
+    }
+
+    [Test]
+    public async Task DropIndex_InvalidatesAndReplacesCachedEntry()
+    {
+        // DROP INDEX must invalidate the cached decision naming the dead index; the fresh
+        // replan must REPLACE the entry (not leave an immortal stale one that replays and
+        // falls back to a full replan on every execution forever).
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        const string sql = "SELECT id, price FROM products WHERE category = \"electronics\"";
+
+        long missesBefore = executor.PlanCache.Misses;
+        long hitsBefore   = executor.PlanCache.Hits;
+
+        await RunQueryAsync(executor, dbname, sql); // miss — caches decision on products_cat
+        await RunQueryAsync(executor, dbname, sql); // hit
+
+        Assert.AreEqual(missesBefore + 1, executor.PlanCache.Misses);
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits);
+
+        await executor.AlterIndex(new AlterIndexTicket(
+            databaseName: dbname,
+            tableName: "products",
+            indexName: "products_cat",
+            columns: [],
+            operation: AlterIndexOperation.DropIndex));
+
+        List<QueryResultRow> rows = await RunQueryAsync(executor, dbname, sql); // miss → replan → re-Put
+        await RunQueryAsync(executor, dbname, sql);                             // hit on the fresh entry
+
+        Assert.AreEqual(missesBefore + 2, executor.PlanCache.Misses,
+            "DROP INDEX must invalidate the cached decision.");
+        Assert.AreEqual(hitsBefore + 2, executor.PlanCache.Hits,
+            "The fresh full-scan decision must replace the stale entry and hit next time.");
+        Assert.AreEqual(2, rows.Count, "Post-drop replan must still return both electronics rows.");
+    }
+
+    [Test]
+    public async Task Analyze_InvalidatesCachedDecision()
+    {
+        // ANALYZE publishes a new histogram/NDV generation; access-path decisions cached
+        // against the old statistics must be invalidated, not frozen at first execution.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        const string sql = "SELECT id FROM products WHERE category = \"books\"";
+
+        long missesBefore = executor.PlanCache.Misses;
+        long hitsBefore   = executor.PlanCache.Hits;
+
+        await RunQueryAsync(executor, dbname, sql); // cold miss
+        await RunQueryAsync(executor, dbname, sql); // hit
+
+        Assert.AreEqual(missesBefore + 1, executor.PlanCache.Misses);
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits);
+
+        await RunQueryAsync(executor, dbname, "ANALYZE products");
+
+        await RunQueryAsync(executor, dbname, sql); // must MISS: analyze generation changed
+        await RunQueryAsync(executor, dbname, sql); // fresh entry → hit
+
+        Assert.AreEqual(missesBefore + 2, executor.PlanCache.Misses,
+            "ANALYZE must invalidate cached access-path decisions.");
+        Assert.AreEqual(hitsBefore + 2, executor.PlanCache.Hits,
+            "The re-planned decision must be re-cached and hit afterwards.");
+    }
 }

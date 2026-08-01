@@ -196,11 +196,13 @@ public sealed class TestCostEstimator : BaseTest
     }
 
     [Test]
-    public void R9_CostModelKeepsIndexForHalfOpenRange()
+    public void R9_CostModelPrefersFullScanForStatslessHalfOpenRange()
     {
-        // Half-open range (one bound, 40 % default selectivity via OneBoundSelectivity).
-        // BreakevenFraction raised from 0.40 → 0.50, so 40 % of 10,000 = 4,000 entries
-        // is below the breakeven of ceil(10,000 × 0.50) = 5,000 → index scan wins.
+        // Half-open range with no column min/max stats: OneBoundSelectivity is deliberately
+        // equal to BreakevenFraction (0.50), so estimated entries = ceil(10,000 × 0.50) = 5,000
+        // meet the breakeven of ceil(10,000 × 0.50) = 5,000 exactly → flip to full table scan.
+        // This is the safety property: a non-covering index scan of half the table costs ~2×
+        // a full scan, so without stats the half-open range must not keep the index.
         var node = new IndexRangeScanNode(
             index: new TableIndexSchema("year_idx", ["year"], IndexType.Multi),
             fromBound: new CompositeColumnValue([new ColumnValue(ColumnType.Integer64, 2000L)]),
@@ -208,16 +210,16 @@ public sealed class TestCostEstimator : BaseTest
             toBound: null,
             toInclusive: true);
 
-        Assert.IsFalse(
+        Assert.IsTrue(
             CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000),
-            "Half-open range (40 % selectivity) is below the 50 % breakeven — index scan must win");
+            "Stats-free half-open range meets the breakeven exactly — full table scan must win");
     }
 
     [Test]
     public void R9_CostModelKeepsIndexForTightBothBoundsRange()
     {
         // Both-bounds range: 10 % default selectivity.
-        // 10 % of 10,000 = 1,000 entries, well below the 4,000 breakeven → index wins.
+        // 10 % of 10,000 = 1,000 entries, well below the 5,000 breakeven → index wins.
         var node = new IndexRangeScanNode(
             index: new TableIndexSchema("year_idx", ["year"], IndexType.Multi),
             fromBound: new CompositeColumnValue([new ColumnValue(ColumnType.Integer64, 2000L)]),
@@ -291,12 +293,13 @@ public sealed class TestCostEstimator : BaseTest
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
-    public async Task R9_HalfOpenRangeKeepsIndexBelowBreakevenFraction()
+    public async Task R9_HalfOpenRangeWithoutStatsFlipsToTableScan()
     {
-        // A half-open range (year > X, no upper bound) has 40 % default selectivity
-        // when no column min/max stats are available (OneBoundSelectivity heuristic).
-        // BreakevenFraction raised to 0.50, so 40 % of 10,000 = 4,000 entries is
-        // below the 5,000 breakeven → index scan is retained (full table scan is NOT chosen).
+        // A half-open range (year > X, no upper bound) with no column min/max stats falls
+        // back to OneBoundSelectivity, which is deliberately equal to BreakevenFraction
+        // (0.50): estimated entries meet the breakeven exactly, so the planner must flip
+        // the index-range-scan to a full table scan (a non-covering index scan of half
+        // the table costs ~2× a full scan).
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
 
         KvTransaction txn = await database.Transactions.BeginAsync();
@@ -323,10 +326,10 @@ public sealed class TestCostEstimator : BaseTest
         bool hasTableScan = rows.Any(r =>
             r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "table-scan");
 
-        Assert.IsTrue(hasIndexRangeScan,
-            "Half-open range (40 % < 50 % breakeven) must keep the index-range-scan");
-        Assert.IsFalse(hasTableScan,
-            "table-scan must not appear when the cost model keeps the index");
+        Assert.IsFalse(hasIndexRangeScan,
+            "Stats-free half-open range meets the breakeven — index-range-scan must be flipped");
+        Assert.IsTrue(hasTableScan,
+            "Stats-free half-open range must be planned as a full table scan");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

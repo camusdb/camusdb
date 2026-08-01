@@ -793,6 +793,10 @@ expr       : equals_expr { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
            | is_null_expr { $$.n = $1.n; }
            | is_not_null_expr { $$.n = $1.n; }
+           | is_true_expr { $$.n = $1.n; }
+           | is_not_true_expr { $$.n = $1.n; }
+           | is_false_expr { $$.n = $1.n; }
+           | is_not_false_expr { $$.n = $1.n; }
            | in_subquery_expr { $$.n = $1.n; }
            | not_in_subquery_expr { $$.n = $1.n; }
            | exists_subquery_expr { $$.n = $1.n; }
@@ -863,6 +867,21 @@ is_null_expr : condition TIS TNULL { $$.n = new(NodeType.ExprIsNull, $1.n, NodeA
 
 is_not_null_expr : condition TIS TNOT TNULL { $$.n = new(NodeType.ExprIsNotNull, $1.n, $3.n, null, null, null, null, null, null); }
                  ;
+
+/* IS TRUE/FALSE are truth tests, not comparisons: a NULL operand yields FALSE, never unknown.
+   The negated forms therefore match NULL as well, which is why they are distinct node types
+   rather than sugar for `= TRUE` / `= FALSE`. */
+is_true_expr : condition TIS TTRUE { $$.n = new(NodeType.ExprIsTrue, $1.n, null, null, null, null, null, null, null); }
+             ;
+
+is_not_true_expr : condition TIS TNOT TTRUE { $$.n = new(NodeType.ExprIsNotTrue, $1.n, null, null, null, null, null, null, null); }
+                 ;
+
+is_false_expr : condition TIS TFALSE { $$.n = new(NodeType.ExprIsFalse, $1.n, null, null, null, null, null, null, null); }
+              ;
+
+is_not_false_expr : condition TIS TNOT TFALSE { $$.n = new(NodeType.ExprIsNotFalse, $1.n, null, null, null, null, null, null, null); }
+                  ;
 
 in_subquery_expr : condition TIN query_expr { $$.n = new(NodeType.ExprInSubquery, $1.n, $3.n, null, null, null, null, null, null); }
                  | condition TIN LPAREN in_value_list RPAREN { $$.n = new(NodeType.ExprInMembership, $1.n, $4.n, null, null, null, null, null, null); }

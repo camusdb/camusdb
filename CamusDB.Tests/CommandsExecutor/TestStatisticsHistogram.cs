@@ -295,6 +295,91 @@ public sealed class TestStatisticsHistogram
     }
 
     [Test]
+    public void FirstBucketInterpolatesWhenMinValueIsKnown()
+    {
+        // 100 uniform values 1..100 in 4 buckets of 25 rows. The first bucket spans [1, 25]
+        // and holds a quarter of all rows — a value inside it must interpolate, not estimate 0
+        // (a ~0 estimate makes the planner confidently pick an index range scan that actually
+        // touches the whole first bucket).
+        long[] values = new long[100];
+        for (int i = 0; i < 100; i++) values[i] = i + 1;
+
+        ColumnHistogram h = BuildHistogram(values, targetBuckets: 4);
+        h.MinValue = Int(1);
+
+        double f10 = h.CumulativeFraction(Int(10));
+        Assert.That(f10, Is.EqualTo(0.09).Within(0.05),
+            "col <= 10 over uniform 1..100 must estimate ~10%, not 0");
+        Assert.Greater(f10, 0.0, "first-bucket values must not estimate zero rows");
+
+        // Below the observed minimum → genuinely 0.
+        Assert.That(h.CumulativeFraction(Int(0)), Is.EqualTo(0.0));
+    }
+
+    [Test]
+    public void LegacyHistogramWithoutMinValueKeepsConservativeZeroInFirstBucket()
+    {
+        // Histograms persisted before MinValue existed cannot distinguish "below the column
+        // minimum" from "inside the first bucket" — they must keep the historical 0 estimate
+        // until the next ANALYZE rebuilds them with MinValue.
+        long[] values = new long[100];
+        for (int i = 0; i < 100; i++) values[i] = i + 1;
+
+        ColumnHistogram h = BuildHistogram(values, targetBuckets: 4);
+        Assert.IsNull(h.MinValue);
+
+        Assert.That(h.CumulativeFraction(Int(10)), Is.EqualTo(0.0));
+    }
+
+    [Test]
+    public void InclusiveLowerBoundKeepsEqualityMass()
+    {
+        // Heavily skewed: 500 of 1000 rows equal 5. ">= 5" carries the equality mass at the
+        // bound and must estimate ~1.0; "> 5" excludes it (~0.5). Symmetric on the upper side:
+        // "< 5" excludes the mass (~0), "<= 5" keeps it (~0.5).
+        var h = new ColumnHistogram
+        {
+            TotalRows = 1000,
+            MinValue  = Int(5),
+            Buckets =
+            [
+                new() { UpperBound = Int(5),  CumulativeRows = 500,  DistinctInBucket = 1 },
+                new() { UpperBound = Int(45), CumulativeRows = 1000, DistinctInBucket = 40 },
+            ],
+        };
+
+        Assert.That(h.RangeFraction(Int(5), loInclusive: true, null, hiInclusive: true),
+            Is.EqualTo(1.0).Within(0.01), ">= 5 must include the equality mass at 5");
+        Assert.That(h.RangeFraction(Int(5), loInclusive: false, null, hiInclusive: true),
+            Is.EqualTo(0.5).Within(0.01), "> 5 must exclude the equality mass at 5");
+        Assert.That(h.RangeFraction(null, loInclusive: false, Int(5), hiInclusive: false),
+            Is.EqualTo(0.0).Within(0.01), "< 5 must exclude the equality mass at 5");
+        Assert.That(h.RangeFraction(null, loInclusive: false, Int(5), hiInclusive: true),
+            Is.EqualTo(0.5).Within(0.01), "<= 5 must include the equality mass at 5");
+    }
+
+    [Test]
+    public void MinValueSurvivesJsonRoundTrip()
+    {
+        var h = new ColumnHistogram
+        {
+            TotalRows = 10,
+            MinValue  = Int(7),
+            Buckets   = [new() { UpperBound = Int(20), CumulativeRows = 10, DistinctInBucket = 5 }],
+        };
+
+        byte[] bytes = MetaJsonSerializer.Serialize(
+            new TableStatistics { Histograms = new() { ["x"] = h } },
+            MetaJsonContext.Default.TableStatistics);
+        TableStatistics? back = MetaJsonSerializer.DeserializeCompat(bytes, MetaJsonContext.Default.TableStatistics);
+
+        Assert.IsNotNull(back?.Histograms);
+        ColumnHistogram decoded = back!.Histograms!["x"];
+        Assert.IsNotNull(decoded.MinValue, "MinValue must round-trip through JSON persistence");
+        Assert.AreEqual(7, decoded.MinValue!.LongValue);
+    }
+
+    [Test]
     public void MidBucketInterpolationForInteger()
     {
         // 2 equal-depth buckets: [..100] = 100 rows, [101..200] = 100 rows.

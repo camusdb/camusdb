@@ -224,6 +224,19 @@ internal static class IndexScanSelector
                         return false;
 
                     (toBound, toInclusive) = TightenUpperBound(toBound, toInclusive, prefixUpperBound);
+
+                    // When the range column contributed only an upper bound (e.g. a = 5 AND b < 10),
+                    // the scan still needs a LOWER bound at the equality prefix: without it the scan
+                    // starts at the beginning of the index and reads (and discards via the residual
+                    // filter) every row below the prefix — and under Serializable the range lock
+                    // covers that whole low keyspace. The String/Id branch below already caps both
+                    // sides; this is the numeric-prefix mirror.
+                    if (fromBound is null)
+                    {
+                        ColumnValue[] prefixVals = new ColumnValue[equalityPrefixLength];
+                        Array.Copy(equalityValues, prefixVals, equalityPrefixLength);
+                        (fromBound, fromInclusive) = (new CompositeColumnValue(prefixVals), true);
+                    }
                 }
                 else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
                 {
@@ -347,8 +360,9 @@ internal static class IndexScanSelector
     /// <summary>
     /// Returns true when every column of the index is declared NOT NULL. A unique index whose columns
     /// are all NOT NULL can never omit a row, so it remains eligible for an unbounded ordered scan.
+    /// Internal: <see cref="QueryPlanner"/> applies the same guard to user-forced full-index scans.
     /// </summary>
-    private static bool AllColumnsNotNull(TableDescriptor table, TableIndexSchema index)
+    internal static bool AllColumnsNotNull(TableDescriptor table, TableIndexSchema index)
     {
         foreach (string columnName in index.Columns)
         {
@@ -373,7 +387,7 @@ internal static class IndexScanSelector
         if (distinctColumns.Count == 0)
             return null;
 
-        HashSet<string> distinctSet = new(distinctColumns, StringComparer.Ordinal);
+        HashSet<string> distinctSet = new(distinctColumns, StringComparer.OrdinalIgnoreCase);
 
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
@@ -384,7 +398,7 @@ internal static class IndexScanSelector
                 continue;
 
             // The first distinctColumns.Count index columns must form exactly the distinct key set.
-            HashSet<string> prefix = new(StringComparer.Ordinal);
+            HashSet<string> prefix = new(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < distinctColumns.Count; i++)
                 prefix.Add(index.Columns[i]);
 
@@ -409,8 +423,8 @@ internal static class IndexScanSelector
         if (scanStep.Index.Columns.Length < distinctColumns.Count)
             return false;
 
-        HashSet<string> distinctSet = new(distinctColumns, StringComparer.Ordinal);
-        HashSet<string> prefix = new(StringComparer.Ordinal);
+        HashSet<string> distinctSet = new(distinctColumns, StringComparer.OrdinalIgnoreCase);
+        HashSet<string> prefix = new(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < distinctColumns.Count; i++)
             prefix.Add(scanStep.Index.Columns[i]);
 

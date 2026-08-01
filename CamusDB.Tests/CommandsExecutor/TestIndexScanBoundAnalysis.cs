@@ -121,6 +121,43 @@ public sealed class TestIndexScanBoundAnalysis
     }
 
     [Test]
+    public void MixedTypeEqualityIsNotAbsorbedAndDoesNotThrow()
+    {
+        // Point bounds on an Id-typed column with a String constant that failed Id coercion
+        // (e.g. id = '<24-hex>' AND id = 'not-an-id'): ColumnValue.CompareTo throws on a type
+        // mismatch, so absorption must decline instead of erroring the query — the residual
+        // filter then correctly yields zero rows.
+        QueryPlanStep step = new(
+            QueryPlanStepType.QueryFromIndex,
+            abIndex,
+            new ColumnValue(ColumnType.Id, "0123456789abcdef01234567"));
+
+        AnalyzedComparison stringComparison = new(
+            "a",
+            "=",
+            new ColumnValue(ColumnType.String, "not-an-id"),
+            new NodeAst(NodeType.String, null, null, null, null, null, null, null, "not-an-id"));
+
+        Assert.DoesNotThrow(() =>
+            Assert.IsFalse(IndexScanBoundAnalysis.IsComparisonAbsorbedByScan(stringComparison, step, table)));
+    }
+
+    [Test]
+    public void NullColumnValuesCompareEqual()
+    {
+        // NULL == NULL must be 0: a comparator where a < b AND b < a simultaneously is
+        // inconsistent, and List.Sort can throw on it when a sorted column holds several NULLs.
+        ColumnValue null1 = new(ColumnType.Null, 0);
+        ColumnValue null2 = new(ColumnType.Null, 0);
+        ColumnValue value = new(ColumnType.Integer64, 5L);
+
+        Assert.AreEqual(0, null1.CompareTo(null2));
+        Assert.AreEqual(0, null2.CompareTo(null1));
+        Assert.Less(null1.CompareTo(value), 0, "NULL sorts before non-NULL");
+        Assert.Greater(value.CompareTo(null1), 0, "non-NULL sorts after NULL");
+    }
+
+    [Test]
     public void SingleColumnRangeKeepsExclusivity()
     {
         // Single-component bound: the column is terminal, so < (5) exclusive means max = 4 and

@@ -185,6 +185,167 @@ public static class PredicateAnalyzer
     }
 
     /// <summary>
+    /// Rewrites a boolean column tested on its own — <c>WHERE Enabled</c>, <c>WHERE NOT Enabled</c>,
+    /// or an <c>IS [NOT] TRUE/FALSE</c> truth test — into the equivalent equality comparison
+    /// <c>Enabled = true</c> / <c>Enabled = false</c>, moving it out of the residual filter and
+    /// into the indexable set. The negated truth tests also accept NULL, so they are only rewritten
+    /// on a NOT NULL column; see <see cref="TryAnalyzeBareBooleanColumn"/>.
+    ///
+    /// <para>Without this pass a bare column reference matches none of <see cref="Analyze"/>'s
+    /// comparison recognizers and stays residual, so it contributes no equality bound. When such a
+    /// column leads a composite index the entire index becomes unusable — index selection requires
+    /// a contiguous equality prefix starting at the first index column — and the query degrades to
+    /// a full table scan even when every other predicate matches the remaining index columns. ORMs
+    /// emit this shape routinely for boolean columns, so the degradation is easy to hit and
+    /// invisible in the SQL text.</para>
+    ///
+    /// <para>Only <see cref="ColumnType.Bool"/> columns are rewritten. A bare non-boolean column is
+    /// evaluated with numeric truthiness (non-zero is true) by the execution filter, which
+    /// <c>= true</c> would not preserve, so those conjuncts are deliberately left residual.</para>
+    ///
+    /// <para>The promoted comparison keeps the <em>original</em> conjunct node, so whenever the
+    /// chosen scan does not absorb the bound the execution filter re-evaluates exactly the
+    /// expression that was written. Three-valued logic is unchanged either way: a NULL boolean
+    /// satisfies neither <c>Enabled</c> nor <c>NOT Enabled</c>, and an equality seek on true/false
+    /// likewise never matches a NULL index key.</para>
+    ///
+    /// <para>Runs before <see cref="ResolveQualifiedColumnNames"/> so a promoted alias-qualified
+    /// reference (<c>w.Enabled</c>) is reduced to its bare column name by that pass and can match
+    /// an index like any other comparison.</para>
+    /// </summary>
+    public static PredicateAnalysis NormalizeBooleanColumnPredicates(PredicateAnalysis analysis, TableDescriptor table)
+    {
+        List<AnalyzedComparison>? promoted = null;
+        List<NodeAst>? keptResidual = null;
+
+        for (int i = 0; i < analysis.ResidualConjuncts.Count; i++)
+        {
+            NodeAst conjunct = analysis.ResidualConjuncts[i];
+
+            if (!TryAnalyzeBareBooleanColumn(conjunct, table, out AnalyzedComparison? comparison))
+            {
+                keptResidual?.Add(conjunct);
+                continue;
+            }
+
+            if (keptResidual is null)
+            {
+                // First promotion: every conjunct examined so far stays residual.
+                keptResidual = [];
+                for (int j = 0; j < i; j++)
+                    keptResidual.Add(analysis.ResidualConjuncts[j]);
+
+                promoted = [];
+            }
+
+            promoted!.Add(comparison!);
+        }
+
+        if (promoted is null)
+            return analysis;
+
+        return new PredicateAnalysis(
+            [.. analysis.IndexableComparisons, .. promoted],
+            analysis.ColumnComparisons,
+            keptResidual!,
+            analysis.InListComparisons);
+    }
+
+    /// <summary>
+    /// Recognizes a conjunct that tests a boolean column on its own — <c>enabled</c>,
+    /// <c>NOT enabled</c>, or an <c>IS [NOT] TRUE/FALSE</c> truth test — and expresses it as an
+    /// equality against the corresponding boolean constant. Returns false for every other shape,
+    /// including a bare reference to a non-boolean column (see
+    /// <see cref="NormalizeBooleanColumnPredicates"/> for why those must keep truthiness semantics).
+    ///
+    /// <para>The negated truth tests need care: <c>x IS NOT TRUE</c> matches FALSE <em>and NULL</em>,
+    /// so it is only equivalent to <c>x = FALSE</c> when the column cannot be NULL. On a nullable
+    /// column rewriting it would drop the NULL rows, so it is left residual — a single equality bound
+    /// cannot express "false or null". The same applies to <c>IS NOT FALSE</c>.</para>
+    /// </summary>
+    private static bool TryAnalyzeBareBooleanColumn(
+        NodeAst conjunct,
+        TableDescriptor table,
+        out AnalyzedComparison? result)
+    {
+        result = null;
+
+        NodeAst node = conjunct;
+        bool matchTrue;
+        bool matchesNullToo;
+
+        switch (node.nodeType)
+        {
+            // The grammar stores the operand of NOT and of every truth test in leftAst.
+            case NodeType.ExprNot:
+                // NOT x and x = false agree on NULL: both are non-matching.
+                (matchTrue, matchesNullToo) = (false, false);
+                break;
+
+            case NodeType.ExprIsTrue:
+                (matchTrue, matchesNullToo) = (true, false);
+                break;
+
+            case NodeType.ExprIsFalse:
+                (matchTrue, matchesNullToo) = (false, false);
+                break;
+
+            case NodeType.ExprIsNotTrue:
+                (matchTrue, matchesNullToo) = (false, true);
+                break;
+
+            case NodeType.ExprIsNotFalse:
+                (matchTrue, matchesNullToo) = (true, true);
+                break;
+
+            case NodeType.Identifier:
+                // A bare column: no wrapper to unwrap, and it agrees with = true on NULL.
+                (matchTrue, matchesNullToo) = (true, false);
+                break;
+
+            default:
+                return false;
+        }
+
+        if (node.nodeType != NodeType.Identifier)
+        {
+            if (node.leftAst is null)
+                return false;
+
+            node = node.leftAst;
+        }
+
+        if (node.nodeType != NodeType.Identifier || node.yytext is null)
+            return false;
+
+        TableColumnSchema? column = FindColumn(node.yytext, table);
+        if (column is null || column.Type != ColumnType.Bool)
+            return false;
+
+        // An equality bound can never stand in for a predicate that also accepts NULL.
+        if (matchesNullToo && !column.NotNull)
+            return false;
+
+        result = new AnalyzedComparison(node.yytext, "=", ColumnValue.FromBool(matchTrue), conjunct);
+        return true;
+    }
+
+    /// <summary>
+    /// Looks up <paramref name="columnName"/> in <paramref name="table"/>. Handles alias-qualified
+    /// names, which reach predicate analysis before <see cref="ResolveQualifiedColumnNames"/> has
+    /// stripped the prefix.
+    /// </summary>
+    private static TableColumnSchema? FindColumn(string columnName, TableDescriptor table)
+    {
+        int dot = columnName.LastIndexOf('.');
+        if (dot >= 0 && dot < columnName.Length - 1)
+            columnName = columnName[(dot + 1)..];
+
+        return table.Schema.Columns?.Find(
+            c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// Parses bare string literals compared to a <see cref="ColumnType.Uuid"/> or
     /// <see cref="ColumnType.Id"/> column into like-typed constants, using the table schema. Applied
     /// once before access-path selection so the index selector, the bound-absorption check, and the

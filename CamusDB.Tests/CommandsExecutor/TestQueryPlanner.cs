@@ -438,6 +438,123 @@ public class TestQueryPlanner
         Assert.IsNull(plan.ExecutionFilter);
     }
 
+    /// <summary>
+    /// A boolean column written as a bare predicate must contribute the same equality bound as the
+    /// explicit <c>enabled = true</c> form, otherwise it carries no bound at all and any index it
+    /// participates in is left unusable.
+    /// </summary>
+    [Test]
+    public void PlanUsesCompositeIndexWhenBooleanColumnIsWrittenAsBarePredicate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        Assert.AreEqual(2, plan.Steps[0].LookupKey!.Values.Length);
+        Assert.AreEqual(2000, plan.Steps[0].LookupKey!.Values[0].LongValue);
+        Assert.IsTrue(plan.Steps[0].LookupKey!.Values[1].BoolValue);
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
+    /// <summary>
+    /// The negated bare form must seek the complementary key rather than falling back to a scan.
+    /// </summary>
+    [Test]
+    public void PlanUsesCompositeIndexWhenBooleanColumnIsNegatedBarePredicate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND NOT enabled");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        Assert.AreEqual(2, plan.Steps[0].LookupKey!.Values.Length);
+        Assert.AreEqual(2000, plan.Steps[0].LookupKey!.Values[0].LongValue);
+        Assert.IsFalse(plan.Steps[0].LookupKey!.Values[1].BoolValue);
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
+    /// <summary>
+    /// <c>IS TRUE</c> selects the same rows as <c>= true</c> in a WHERE clause, so it must bind the
+    /// index the same way.
+    /// </summary>
+    [Test]
+    public void PlanUsesCompositeIndexForIsTruePredicate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled IS TRUE");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        Assert.IsTrue(plan.Steps[0].LookupKey!.Values[1].BoolValue);
+    }
+
+    [Test]
+    public void PlanUsesCompositeIndexForIsFalsePredicate()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled IS FALSE");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+        Assert.IsFalse(plan.Steps[0].LookupKey!.Values[1].BoolValue);
+    }
+
+    /// <summary>
+    /// <c>IS NOT TRUE</c> matches FALSE <em>and NULL</em>. On a nullable column no single equality
+    /// bound can express that, so it must stay a residual filter — promoting it to <c>= false</c>
+    /// would silently drop the NULL rows. The fixture's <c>enabled</c> column is nullable.
+    /// </summary>
+    [Test]
+    public void PlanDoesNotPromoteIsNotTrueOnNullableColumn()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled IS NOT TRUE");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreNotEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type,
+            "IS NOT TRUE on a nullable column must not become a full-key equality lookup");
+        Assert.IsNotNull(plan.ExecutionFilter,
+            "The NULL-accepting predicate must survive as a residual filter");
+    }
+
+    [Test]
+    public void PlanDoesNotPromoteIsNotFalseOnNullableColumn()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled IS NOT FALSE");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreNotEqual(QueryPlanStepType.QueryFromIndex, plan.Steps[0].Type);
+        Assert.IsNotNull(plan.ExecutionFilter);
+    }
+
+    /// <summary>
+    /// A bare non-boolean column keeps numeric truthiness semantics (non-zero is true), which an
+    /// equality against true would not preserve, so it must stay a residual filter and must not be
+    /// promoted into an index bound.
+    /// </summary>
+    [Test]
+    public void PlanDoesNotPromoteBareNonBooleanColumnToAnIndexBound()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE year");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsInstanceOf<TableScanNode>(ScanRoot(plan));
+        Assert.IsNotNull(plan.ExecutionFilter);
+    }
+
     [Test]
     public void PlanPrefersPrimaryKeyLookupOverSecondaryRange()
     {
@@ -1174,5 +1291,76 @@ public class TestQueryPlanner
 
         Assert.IsFalse(plan.IndexOnly,
             "residual WHERE column absent from the chosen index must prevent index-only, even when the projected column is covered");
+    }
+
+    [Test]
+    public void PlanAddsEqualityPrefixLowerBoundForUpperOnlyTrailingRange()
+    {
+        // "year = 2000 AND enabled < true": the range column contributes only an upper bound,
+        // so without a synthesized lower bound the scan would start at the beginning of the
+        // index and read (then residual-filter away) every row below the equality prefix —
+        // and under Serializable the range lock would cover that whole low keyspace.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 AND enabled < true");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.RangeScanFromIndex, plan.Steps[0].Type);
+        Assert.AreEqual("year_enabled_idx", plan.Steps[0].Index!.Name);
+
+        Assert.IsNotNull(plan.Steps[0].FromBound,
+            "an upper-only trailing range with an equality prefix must still get a lower bound at the prefix");
+        Assert.AreEqual(1, plan.Steps[0].FromBound!.Values.Length);
+        Assert.AreEqual(2000, plan.Steps[0].FromBound!.Values[0].LongValue);
+        Assert.IsTrue(plan.Steps[0].FromInclusive, "the equality-prefix lower bound is inclusive");
+    }
+
+    [Test]
+    public void PlanForcedUniqueIndexOverNullableColumnsFallsBackToPrimaryScan()
+    {
+        // year_enabled_idx is UNIQUE over nullable columns: unique inserts skip NULL-keyed rows,
+        // so an unbounded full scan over it silently drops those rows. The automatic ORDER BY
+        // path refuses it; the user-forced path must apply the same correctness guard and fall
+        // back to a primary-row scan.
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT id FROM robots@{FORCE_INDEX=year_enabled_idx}");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.AreEqual(QueryPlanStepType.FullScanFromTableIndex, plan.Steps[0].Type,
+            "forced unique index over nullable columns must not row-drop; expect primary full scan");
+        Assert.AreEqual(TableScanSource.PrimaryRows, ((TableScanNode)ScanRoot(plan)).Source);
+    }
+
+    [Test]
+    public void HalfOpenRangeWithoutColumnStatsPrefersFullScan()
+    {
+        // Without column stats a half-open range falls back to OneBoundSelectivity, which is
+        // deliberately equal to BreakevenFraction (with ceiling rounding) so the flip to a full
+        // scan happens on EVERY table size — including odd row counts, where truncating
+        // arithmetic used to land one row short of the breakeven and keep the ~2×-cost index.
+        TableIndexSchema idx = context!.Table.Indexes["year_idx"];
+
+        IndexRangeScanNode halfOpen = new(
+            idx,
+            new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2000L) }),
+            fromInclusive: false,
+            toBound: null,
+            toInclusive: true);
+
+        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 5),
+            "odd row count: half-open range without stats must flip to full scan");
+        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 10),
+            "even row count: half-open range without stats must flip to full scan");
+
+        IndexRangeScanNode bothBounds = new(
+            idx,
+            new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2000L) }),
+            fromInclusive: true,
+            toBound: new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2005L) }),
+            toInclusive: true);
+
+        Assert.IsFalse(CostEstimator.ShouldPreferFullScan(bothBounds, tableRowCount: 10),
+            "a two-sided range (10% fallback) must keep the index");
     }
 }

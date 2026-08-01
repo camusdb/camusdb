@@ -350,6 +350,10 @@ public static class PlanRenderer
             NodeType.ExprNot => $"NOT {RenderExpr(expr.leftAst!)}",
             NodeType.ExprIsNull => $"{RenderExpr(expr.leftAst!)} IS NULL",
             NodeType.ExprIsNotNull => $"{RenderExpr(expr.leftAst!)} IS NOT NULL",
+            NodeType.ExprIsTrue => $"{RenderExpr(expr.leftAst!)} IS TRUE",
+            NodeType.ExprIsNotTrue => $"{RenderExpr(expr.leftAst!)} IS NOT TRUE",
+            NodeType.ExprIsFalse => $"{RenderExpr(expr.leftAst!)} IS FALSE",
+            NodeType.ExprIsNotFalse => $"{RenderExpr(expr.leftAst!)} IS NOT FALSE",
 
             NodeType.ExprAdd => $"{RenderExpr(expr.leftAst!)} + {RenderExpr(expr.rightAst!)}",
             NodeType.ExprSub => $"{RenderExpr(expr.leftAst!)} - {RenderExpr(expr.rightAst!)}",

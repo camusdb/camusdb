@@ -64,6 +64,11 @@ public sealed class StatisticsManager
         // 1 while a flush cycle owns this table; 0 otherwise.
         public int FlushPending;
 
+        // Environment.TickCount64 of the last background-load attempt fired by
+        // GetRowCountEstimate. Rate-limits load retries: without it, a persistently failing
+        // Kahuna load (all attempts serialized on LoadLock) becomes a per-query task storm.
+        public long LastLoadAttemptTicks;
+
         // Per-index entry counts. Same Loaded/delta semantics as RowCount.
         // Key = index name; value = entry count (or pending delta if !Loaded).
         public readonly ConcurrentDictionary<string, long> IndexEntries = new(StringComparer.Ordinal);
@@ -89,7 +94,38 @@ public sealed class StatisticsManager
 
         // HLC timestamp the last successful ANALYZE read (advisory). Guarded by ColumnStatsLock.
         public Kommander.Time.HLCTimestamp LastAnalyzedAt;
+
+        // Generation of the last histogram/NDV publish on this node (see GetAnalyzeGeneration).
+        public long AnalyzeGeneration;
+
+        // Set when the table is dropped: fences a background flush already holding this entry
+        // reference so it cannot re-create the persisted stats key after the drop deleted it.
+        public volatile bool Dropped;
+
+        // Serializes flushes for this entry so the delta baselines below have a single writer.
+        public readonly SemaphoreSlim FlushLock = new(1, 1);
+
+        // Counter values already reflected in the persisted blob as of the last successful load
+        // or flush BY THIS NODE. The difference between the live counters and these baselines is
+        // this node's unflushed local delta — the only part a flush may add to the persisted
+        // value. Writing the absolute local view instead would last-writer-wins clobber deltas
+        // flushed by other nodes tracking DML on the same table. Guarded by FlushLock.
+        public long FlushedRowCount;
+        public long FlushedMutations;
+        public Dictionary<string, long> FlushedIndexEntries = new(StringComparer.Ordinal);
+
+        // 1 after an ANALYZE publish: the next flush writes this node's absolute view instead of
+        // delta-merging, because the scan already reconciled the true counts (and the correction
+        // arithmetic in PublishAsync preserved concurrent DML). Consumed with Interlocked.
+        public int ForceAbsoluteFlush;
     }
+
+    /// <summary>
+    /// Process-wide counter backing <see cref="Entry.AnalyzeGeneration"/>. Global (static) so a
+    /// generation value can never repeat after an entry is evicted and rebuilt — a per-entry
+    /// counter restarting at zero could coincidentally match a stale cached value.
+    /// </summary>
+    private static long globalAnalyzeGeneration;
 
     private readonly ConcurrentDictionary<string, Entry> _cache = new(StringComparer.Ordinal);
 
@@ -104,14 +140,45 @@ public sealed class StatisticsManager
     // Public query API
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Returns this node's generation of the last histogram/NDV publish for <paramref name="table"/>
+    /// (0 when statistics were never published on this node). The plan cache includes this value in
+    /// its dependency fingerprint so that an ANALYZE invalidates cached access-path decisions —
+    /// without it, the first plan per query shape would be frozen forever regardless of stats
+    /// refreshes. Per-node by design: caches and stats entries are both node-local.
+    /// </summary>
+    public long GetAnalyzeGeneration(DatabaseDescriptor database, TableDescriptor table)
+    {
+        return _cache.TryGetValue(CacheKey(database.Id, table.Id), out Entry? entry)
+            ? Volatile.Read(ref entry.AnalyzeGeneration)
+            : 0;
+    }
+
+    // Minimum interval between background-load attempts fired by GetRowCountEstimate for one
+    // table. Purely a retry-storm guard; a successful load makes the check moot (Loaded=true).
+    private const int LoadRetryBackoffMs = 1_000;
+
     /// <summary>Returns the estimated row count, or null if no statistics have been collected.</summary>
     public long? GetRowCountEstimate(DatabaseDescriptor database, TableDescriptor table)
     {
         string key = CacheKey(database.Id, table.Id);
-        if (_cache.TryGetValue(key, out Entry? entry) && entry.Loaded)
+        Entry entry = _cache.GetOrAdd(key, _ => new Entry());
+
+        if (entry.Loaded)
             return entry.RowCount >= 0 ? entry.RowCount : null;
 
-        _ = Task.Run(() => LoadAndCacheAsync(database, table));
+        // Fire at most one background load attempt per backoff window: every planner call lands
+        // here while the entry is unloaded, and an unconditional Task.Run per call piles up
+        // tasks serialized on the entry's LoadLock — a per-query retry storm when the load
+        // keeps failing. CAS on the attempt timestamp elects a single firer per window.
+        long now = Environment.TickCount64;
+        long last = Interlocked.Read(ref entry.LastLoadAttemptTicks);
+        if ((last == 0 || now - last >= LoadRetryBackoffMs)
+            && Interlocked.CompareExchange(ref entry.LastLoadAttemptTicks, now, last) == last)
+        {
+            _ = Task.Run(() => LoadAndCacheAsync(database, table));
+        }
+
         return null;
     }
 
@@ -230,6 +297,8 @@ public sealed class StatisticsManager
         {
             if (columnNdv is not null) entry.ColumnNdv = columnNdv;
             if (keyNdv    is not null) entry.KeyNdv    = keyNdv;
+
+            Volatile.Write(ref entry.AnalyzeGeneration, Interlocked.Increment(ref globalAnalyzeGeneration));
         }
 
         await FlushAsync(database, table).ConfigureAwait(false);
@@ -252,6 +321,8 @@ public sealed class StatisticsManager
         lock (entry.ColumnStatsLock)
         {
             entry.Histograms = histograms;
+
+            Volatile.Write(ref entry.AnalyzeGeneration, Interlocked.Increment(ref globalAnalyzeGeneration));
         }
 
         await FlushAsync(database, table).ConfigureAwait(false);
@@ -476,6 +547,14 @@ public sealed class StatisticsManager
                 entry.LastAnalyzedAt = analyzedAt;
 
             entry.Loaded = true;
+
+            // New histogram/NDV generation published: cached plan decisions made against the
+            // old statistics are now invalid (the plan cache carries this generation in its deps).
+            Volatile.Write(ref entry.AnalyzeGeneration, Interlocked.Increment(ref globalAnalyzeGeneration));
+
+            // The scan reconciled the true counts, so the flush below must overwrite the
+            // persisted counters with this node's view instead of delta-merging onto them.
+            Interlocked.Exchange(ref entry.ForceAbsoluteFlush, 1);
         }
 
         // One flush → the whole generation reaches Kahuna in a single transaction.
@@ -869,9 +948,25 @@ public sealed class StatisticsManager
         if (!_cache.TryGetValue(cacheKey, out Entry? entry))
             return;
 
-        if (!entry.Loaded)
+        if (!entry.Loaded || entry.Dropped)
             return;
 
+        // Serialize flushes per entry: the delta baselines (Flushed*) must have a single
+        // writer, and an explicit FlushAsync (ANALYZE publish, close hook) can otherwise run
+        // concurrently with a scheduled background flush.
+        await entry.FlushLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await FlushLockedAsync(database, table, entry).ConfigureAwait(false);
+        }
+        finally
+        {
+            entry.FlushLock.Release();
+        }
+    }
+
+    private async Task FlushLockedAsync(DatabaseDescriptor database, TableDescriptor table, Entry entry)
+    {
         // Snapshot all stats under the column-stats lock to avoid partial reads.
         Dictionary<string, long>? indexSnapshot = null;
         Dictionary<string, ColumnMinMax>? colSnapshot = null;
@@ -920,7 +1015,9 @@ public sealed class StatisticsManager
             LastAnalyzedAt        = ReadLastAnalyzedAt(entry),
         };
 
-        byte[] bytes = MetaJsonSerializer.Serialize(snapshot, MetaJsonContext.Default.TableStatistics);
+        // Consume the ANALYZE overwrite flag; restored in the catch so a failed flush retries
+        // with the same semantics.
+        bool absolute = Interlocked.Exchange(ref entry.ForceAbsoluteFlush, 0) == 1;
 
         string kahunaKey = KahunaKey(database.Id, table.Id);
         KvTransaction tx = await database.Transactions.BeginAsync(
@@ -938,9 +1035,39 @@ public sealed class StatisticsManager
 
             if (lockType != KeyValueResponseType.Locked)
             {
+                if (absolute)
+                    Interlocked.Exchange(ref entry.ForceAbsoluteFlush, 1);
                 await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
                 return;
             }
+
+            // Read-merge-write under the exclusive key lock: another node tracking DML on the
+            // same table flushes its own deltas into this blob, and blindly writing our absolute
+            // view would last-writer-wins discard them. Instead, add only this node's unflushed
+            // delta (live − Flushed* baseline) on top of the current persisted counters. An
+            // ANALYZE publish (absolute=true) skips the merge for counters — the scan already
+            // reconciled the truth — but still resolves histograms/NDV by newest analyze.
+            TableStatistics toWrite = snapshot;
+            if (!absolute)
+            {
+                (KeyValueResponseType getType, ReadOnlyKeyValueEntry? persistedEntry) =
+                    await database.Kahuna.Kahuna.LocateAndTryGetValue(
+                        tx.TransactionId, kahunaKey, -1,
+                        Kommander.Time.HLCTimestamp.Zero,
+                        KeyValueDurability.Persistent, CancellationToken.None
+                    ).ConfigureAwait(false);
+
+                if (getType == KeyValueResponseType.Get && persistedEntry?.Value is not null)
+                {
+                    TableStatistics? persisted = MetaJsonSerializer.DeserializeCompat(
+                        persistedEntry.Value, MetaJsonContext.Default.TableStatistics);
+
+                    if (persisted is not null)
+                        toWrite = MergeForFlush(snapshot, persisted, entry);
+                }
+            }
+
+            byte[] bytes = MetaJsonSerializer.Serialize(toWrite, MetaJsonContext.Default.TableStatistics);
 
             (KeyValueResponseType setType, _, _) = await database.Kahuna.Kahuna.LocateAndTrySetKeyValue(
                 tx.TransactionId, kahunaKey, bytes, null, -1,
@@ -957,19 +1084,179 @@ public sealed class StatisticsManager
                 if (FailFlushForTesting)
                     throw new InvalidOperationException("Injected flush failure (test-only)");
 
+                // Re-check the drop fence as late as possible: a DROP TABLE that raced this flush
+                // deleted the persisted key, and committing now would resurrect it as an orphan.
+                if (entry.Dropped)
+                {
+                    await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                    return;
+                }
+
                 tx.TrackModified(kahunaKey, KeyValueDurability.Persistent);
                 await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+
+                // Advance the baselines: everything up to this snapshot is now reflected in the
+                // persisted blob and must not be re-added by the next delta-merge.
+                entry.FlushedRowCount  = snapshot.RowCount;
+                entry.FlushedMutations = snapshot.MutationsSinceAnalyze;
+                entry.FlushedIndexEntries = indexSnapshot is not null
+                    ? new Dictionary<string, long>(indexSnapshot, StringComparer.Ordinal)
+                    : new Dictionary<string, long>(StringComparer.Ordinal);
             }
             else
             {
+                if (absolute)
+                    Interlocked.Exchange(ref entry.ForceAbsoluteFlush, 1);
                 await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             }
         }
         catch
         {
+            if (absolute)
+                Interlocked.Exchange(ref entry.ForceAbsoluteFlush, 1);
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Merges this node's local statistics snapshot onto the currently persisted blob for the
+    /// counter fields (persisted value + this node's unflushed delta, floored at zero), takes
+    /// the widest min/max union, and resolves histograms/NDV by whichever side has the newest
+    /// <c>LastAnalyzedAt</c>. Runs under the flush's exclusive key lock, so the read-merge-write
+    /// is atomic with respect to other nodes' flushes.
+    /// </summary>
+    private static TableStatistics MergeForFlush(TableStatistics local, TableStatistics persisted, Entry entry)
+    {
+        long persistedRow = persisted.RowCount >= 0 ? persisted.RowCount : 0;
+
+        TableStatistics merged = new()
+        {
+            RowCount = Math.Max(0, persistedRow + (local.RowCount - entry.FlushedRowCount)),
+            MutationsSinceAnalyze = Math.Max(0,
+                Math.Max(0, persisted.MutationsSinceAnalyze) + (local.MutationsSinceAnalyze - entry.FlushedMutations)),
+        };
+
+        // Index counts: persisted base + this node's unflushed delta per index. Indexes only the
+        // other node knows about are preserved; indexes only we know about start from our value.
+        Dictionary<string, long> indexCounts = new(StringComparer.Ordinal);
+        if (persisted.IndexEntryCounts is not null)
+        {
+            foreach (KeyValuePair<string, long> kv in persisted.IndexEntryCounts)
+                indexCounts[kv.Key] = kv.Value;
+        }
+        if (local.IndexEntryCounts is not null)
+        {
+            foreach (KeyValuePair<string, long> kv in local.IndexEntryCounts)
+            {
+                entry.FlushedIndexEntries.TryGetValue(kv.Key, out long flushed);
+                indexCounts.TryGetValue(kv.Key, out long persistedCount);
+                indexCounts[kv.Key] = Math.Max(0, persistedCount + (kv.Value - flushed));
+            }
+        }
+        merged.IndexEntryCounts = indexCounts.Count > 0 ? indexCounts : null;
+
+        // Histograms / NDV / analyzed-at travel together: whichever side ran ANALYZE most
+        // recently wins wholesale (they are one generation, never field-mixed).
+        bool persistedAnalyzeNewer = persisted.LastAnalyzedAt.CompareTo(local.LastAnalyzedAt) > 0;
+        TableStatistics analyzeSource = persistedAnalyzeNewer ? persisted : local;
+        merged.Histograms     = analyzeSource.Histograms;
+        merged.ColumnNdv      = analyzeSource.ColumnNdv;
+        merged.KeyNdv         = analyzeSource.KeyNdv;
+        merged.LastAnalyzedAt = analyzeSource.LastAnalyzedAt;
+
+        // Min/max: widest union of both sides — advisory bounds, so widening is always safe and
+        // the next ANALYZE re-narrows any delete drift.
+        Dictionary<string, ColumnMinMax>? colStats = null;
+        if (persisted.ColumnStats is not null || local.ColumnStats is not null)
+        {
+            colStats = new Dictionary<string, ColumnMinMax>(StringComparer.Ordinal);
+
+            if (persisted.ColumnStats is not null)
+            {
+                foreach (KeyValuePair<string, ColumnMinMax> kv in persisted.ColumnStats)
+                    colStats[kv.Key] = new ColumnMinMax { Min = kv.Value.Min, Max = kv.Value.Max };
+            }
+
+            if (local.ColumnStats is not null)
+            {
+                foreach (KeyValuePair<string, ColumnMinMax> kv in local.ColumnStats)
+                {
+                    if (!colStats.TryGetValue(kv.Key, out ColumnMinMax? existing))
+                    {
+                        colStats[kv.Key] = new ColumnMinMax { Min = kv.Value.Min, Max = kv.Value.Max };
+                        continue;
+                    }
+
+                    if (kv.Value.Min is not null && (existing.Min is null || kv.Value.Min.CompareTo(existing.Min) < 0))
+                        existing.Min = kv.Value.Min;
+
+                    if (kv.Value.Max is not null && (existing.Max is null || kv.Value.Max.CompareTo(existing.Max) > 0))
+                        existing.Max = kv.Value.Max;
+                }
+            }
+        }
+        merged.ColumnStats = colStats;
+
+        return merged;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Drop / eviction
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Evicts the in-memory statistics entry for a dropped table. Without this every table ever
+    /// touched leaks an <c>Entry</c> (plus its <c>SemaphoreSlim</c>) for the process lifetime.
+    /// Sets the entry's drop fence first so a background flush already holding the entry
+    /// reference aborts instead of re-creating the persisted stats key after the drop.
+    /// Used alone by the deferred (recoverable-orphan) DROP TABLE path, which intentionally
+    /// keeps the persisted blob: a later RELINK restores the table and reloads it, and the
+    /// orphan reclaimer deletes it with the rest of the table keyspace otherwise.
+    /// </summary>
+    public void EvictTableStats(DatabaseDescriptor database, string tableId)
+    {
+        if (_cache.TryRemove(CacheKey(database.Id, tableId), out Entry? entry))
+            entry.Dropped = true;
+    }
+
+    /// <summary>
+    /// Evicts the in-memory entry (see <see cref="EvictTableStats"/>) and deletes the persisted
+    /// <c>{dbId}:stats:{tableId}</c> blob inside the caller's DDL transaction. Used by the
+    /// immediate (FORCE / branch) DROP TABLE path, which otherwise orphans the blob until the
+    /// database itself is dropped. The delete joins the DDL transaction so an aborted drop
+    /// restores the blob along with the table.
+    /// </summary>
+    public async Task DropTableStatsAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
+    {
+        EvictTableStats(database, tableId);
+
+        string kahunaKey = KahunaKey(database.Id, tableId);
+
+        (KeyValueResponseType lockType, _, _, _) =
+            await database.Kahuna.Kahuna.LocateAndTryAcquireExclusiveLock(
+                tx.TransactionId, kahunaKey, 0, KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom()
+            ).ConfigureAwait(false);
+
+        if (lockType != KeyValueResponseType.Locked)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Failed to acquire lock on stats key '{kahunaKey}': {lockType}"
+            );
+
+        (KeyValueResponseType deleteType, _, _) = await database.Kahuna.Kahuna.LocateAndTryDeleteKeyValue(
+            tx.TransactionId, kahunaKey, KeyValueDurability.Persistent, CancellationToken.None,
+            coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom()
+        ).ConfigureAwait(false);
+
+        if (deleteType is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Failed to delete stats key '{kahunaKey}': {deleteType}"
+            );
+
+        tx.TrackModified(kahunaKey, KeyValueDurability.Persistent);
     }
 
     private Task LoadAndCacheAsync(DatabaseDescriptor database, TableDescriptor table)
@@ -1010,6 +1297,14 @@ public sealed class StatisticsManager
                 MergeHistograms(entry, loaded.Histograms);
                 MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
                 MergeStaleness(entry, loaded.MutationsSinceAnalyze, loaded.LastAnalyzedAt);
+
+                // Record the persisted base as the flush baseline: everything already in the
+                // blob must not be re-added by a later delta-merge flush, while local deltas
+                // accumulated before this load (merged on top above) remain unflushed.
+                entry.FlushedRowCount  = loaded.RowCount >= 0 ? loaded.RowCount : 0;
+                entry.FlushedMutations = Math.Max(0, loaded.MutationsSinceAnalyze);
+                if (loaded.IndexEntryCounts is not null)
+                    entry.FlushedIndexEntries = new Dictionary<string, long>(loaded.IndexEntryCounts, StringComparer.Ordinal);
             }
 
             entry.Loaded = true;

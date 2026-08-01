@@ -80,13 +80,18 @@ internal sealed class JoinQueryPlanner
         // the potentially-expensive join-order enumeration / DP.
         string shapeId = QueryShapeComputer.Compute(bound.Query);
         IReadOnlyList<(string, int)> schemaDeps = CollectSchemaDeps(bound);
+        IReadOnlyList<PlanCacheDep> cacheDeps = CollectCacheDeps(database, bound);
 
         QuerySource orderedSource;
         bool fromCache = false;
 
+        // Read the config flag once per plan: it is a mutable static, and reading it again at
+        // the Put below could observe a mid-plan flip (Put into a cache the lookup said was off).
+        bool planCacheEnabled = CamusDBConfig.PlanCacheEnabled;
+
         if (_cache is not null
-            && CamusDBConfig.PlanCacheEnabled
-            && _cache.TryGet(database.Id, shapeId, schemaDeps, out PlanCacheEntry? cached)
+            && planCacheEnabled
+            && _cache.TryGet(database.Id, shapeId, cacheDeps, out PlanCacheEntry? cached)
             && cached!.JoinAliasOrder is { } cachedAliasOrder)
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
@@ -125,9 +130,9 @@ internal sealed class JoinQueryPlanner
         // On a cache miss, store the optimized alias ordering (not the source AST) so that
         // subsequent queries with the same shape re-apply the order to their own source tree,
         // preserving their current ON-predicate literals.
-        if (!fromCache && _cache is not null && CamusDBConfig.PlanCacheEnabled)
+        if (!fromCache && _cache is not null && planCacheEnabled)
             _cache.Put(database.Id, shapeId,
-                new PlanCacheEntry(schemaDeps, SingleTable: null,
+                new PlanCacheEntry(cacheDeps, SingleTable: null,
                     JoinAliasOrder: CollectAliasOrder(orderedSource)));
 
         return plan;
@@ -154,6 +159,31 @@ internal sealed class JoinQueryPlanner
 
         foreach (BoundDerivedTableSource d in bound.DerivedSources)
             CollectSchemaDepsInto(d.InnerBound, deps);
+    }
+
+    /// <summary>
+    /// Same traversal as <see cref="CollectSchemaDeps"/> but produces the plan-cache dependency
+    /// fingerprint, which additionally carries each table's index-set and statistics generations
+    /// so index DDL and ANALYZE invalidate cached join orderings (see <see cref="PlanCacheDep"/>).
+    /// </summary>
+    private List<PlanCacheDep> CollectCacheDeps(DatabaseDescriptor database, BoundSelectQuery bound)
+    {
+        var deps = new List<PlanCacheDep>();
+        CollectCacheDepsInto(database, bound, deps);
+        return deps;
+    }
+
+    private void CollectCacheDepsInto(DatabaseDescriptor database, BoundSelectQuery bound, List<PlanCacheDep> deps)
+    {
+        foreach (BoundTableSource s in bound.Sources)
+            deps.Add(new PlanCacheDep(
+                s.Table.Id,
+                s.Table.Schema.Version,
+                s.Table.IndexSetGeneration,
+                _stats?.GetAnalyzeGeneration(database, s.Table) ?? 0));
+
+        foreach (BoundDerivedTableSource d in bound.DerivedSources)
+            CollectCacheDepsInto(database, d.InnerBound, deps);
     }
 
     private static PhysicalPlanNode BuildJoinTree(

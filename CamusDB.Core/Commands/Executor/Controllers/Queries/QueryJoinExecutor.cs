@@ -401,10 +401,17 @@ internal sealed class QueryJoinExecutor
             unique: false,
             trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
         {
-            if (key.Values[0].CompareTo(lookupValue) > 0)
+            int cmp = key.Values[0].CompareTo(lookupValue);
+
+            // Early-exit past the probe value in the index's DECODED order: an ascending first
+            // column streams ascending (past = greater), a descending one streams descending
+            // (past = smaller). Breaking on `> 0` for a DESC column would never fire, silently
+            // downgrading every probe to a full index-tail walk.
+            bool firstColumnDescending = joinNode.Index.DirectionAt(0) == OrderType.Descending;
+            if (firstColumnDescending ? cmp < 0 : cmp > 0)
                 break;
 
-            if (key.Values[0].CompareTo(lookupValue) != 0)
+            if (cmp != 0)
                 continue;
 
             deps?.RecordPoint(table.Store.RowPointKey(rowId));

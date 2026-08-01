@@ -1,0 +1,966 @@
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using CamusDB.Core.Config.Models;
+using CamusDB.Core.Transactions;
+
+namespace CamusDB.Core;
+
+/// <summary>
+/// The complete, immutable configuration of one engine instance: every value that used to live as a
+/// mutable process-wide static now lives here, on an object owned by whoever composed the engine
+/// (the host at startup, or a test in its set-up).
+///
+/// <para>Immutability is the point. A value read at the start of a query cannot change underneath it
+/// mid-execution, and two engines configured differently can run side by side in one process — which
+/// a shared mutable static made impossible, and which is what lets independently-configured tests run
+/// concurrently instead of serializing on global state.</para>
+///
+/// <para>Override with a <c>with</c> expression rather than assignment:
+/// <c>CamusDBOptions.Default with { SpillEnabled = true }</c>. Values that are genuinely fixed (the
+/// primary-key index name, hard format limits) are not here — they are compile-time constants on
+/// <see cref="CamusDBConstants"/>.</para>
+/// </summary>
+public sealed record CamusDBOptions
+{
+    /// <summary>Built-in defaults, used where no configuration file or override applies.</summary>
+    public static readonly CamusDBOptions Default = new();
+
+    private static readonly string DefaultDataDirectory = Path.GetFullPath("Data");
+
+    /// <summary>
+    /// The directory where the database files and directories will be stored. Because it is
+    /// per-instance, two engines in one process can hold separate data directories — which is how a
+    /// test gives itself an isolated directory without an ambient override.
+    /// </summary>
+    public string DataDirectory { get; init; } = DefaultDataDirectory;
+
+    /// <summary>
+    /// Minimum interval, in milliseconds, between background flushes of advisory table
+    /// statistics to durable Kahuna storage, per table. Statistics are updated in
+    /// memory on every DML but only persisted at most once per this interval, so a write
+    /// burst produces a single disk write rather than one per row.
+    ///
+    /// Special values:
+    ///   <c>0</c>  — flush as soon as possible after each change (overlapping flushes are
+    ///              still coalesced); highest durability, highest write amplification.
+    ///   <c>-1</c> — never auto-flush; statistics are persisted only by an explicit
+    ///              <c>FlushAsync</c> (e.g. on database close). Lowest write amplification,
+    ///              but in-memory deltas are lost on a crash.
+    /// Any positive value caps flush frequency to roughly once per interval per table.
+    /// </summary>
+    public int StatsFlushIntervalMs { get; init; } = 5000;
+
+    /// <summary>
+    /// Row count threshold below which ANALYZE performs a full scan; above it, rows are
+    /// sampled by reading the first N rows in storage order. 0 = always full scan.
+    /// </summary>
+    public int StatsAnalyzeSampleRows { get; init; } = 100_000;
+
+    /// <summary>
+    /// Number of equi-depth histogram buckets ANALYZE builds per column.
+    /// </summary>
+    public int StatsHistogramBuckets { get; init; } = 100;
+
+    // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────
+    // Auto-analyze keeps optimizer statistics fresh without a user running ANALYZE, while staying
+    // low-priority: it reads a lock-free snapshot (never blocks/aborts foreground work), bounds
+    // peak memory with sampling, throttles its scan rate, and backs off under load.
+
+    /// <summary>
+    /// Master switch for automatic background <c>ANALYZE</c>. Opt-in for now: while false the
+    /// scheduler never runs and there is zero behavioral change from manual-only ANALYZE.
+    /// </summary>
+    public bool AutoAnalyzeEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the schema/registry
+    /// leader sweeps, so a table is analyzed once per cluster. <c>&lt;= 0</c> also disables the loop.
+    /// </summary>
+    public int AutoAnalyzeCheckIntervalMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// Staleness fraction (CockroachDB's <c>fraction_stale_rows</c>): a table is stale once its
+    /// mutations since the last ANALYZE reach <c>fraction · rowCount + minStaleRows</c>.
+    /// </summary>
+    public double AutoAnalyzeFractionStaleRows { get; init; } = 0.20;
+
+    /// <summary>
+    /// Absolute floor of mutations before a table is ever considered stale (CockroachDB's
+    /// <c>min_stale_rows</c>) — stops tiny tables and light churn from re-analyzing constantly.
+    /// </summary>
+    public long AutoAnalyzeMinStaleRows { get; init; } = 500;
+
+    /// <summary>Maximum background analyses running at once on this node. Keep small (1–2).</summary>
+    public int AutoAnalyzeMaxConcurrent { get; init; } = 1;
+
+    /// <summary>
+    /// Scan-rate cap for a background analyze, in rows/second — the primary CPU/IO throttle that
+    /// keeps a background scan from saturating a core or the KV read path. <c>&lt;= 0</c> disables throttling.
+    /// </summary>
+    public int AutoAnalyzeMaxRowsPerSecond { get; init; } = 50_000;
+
+    /// <summary>
+    /// Reservoir sample size per orderable column for background histograms — the memory bound.
+    /// Peak memory is a function of this, not table size.
+    /// </summary>
+    public int AutoAnalyzeHistogramSampleRows { get; init; } = 10_000;
+
+    /// <summary>
+    /// HyperLogLog precision (index bits) for background NDV sketches; register count is
+    /// <c>2^precision</c>. 11 ⇒ ~2 KB/column, ~2.3% error. Valid range 4..16.
+    /// </summary>
+    public int AutoAnalyzeHllPrecision { get; init; } = 11;
+
+    /// <summary>
+    /// Foreground-load surge protector: when the number of in-flight foreground transactions
+    /// exceeds this, the scheduler skips starting (and cancels a running) background analyze this
+    /// sweep and retries when the node is quieter. <c>&lt;= 0</c> disables load-based backoff.
+    /// </summary>
+    public int AutoAnalyzeLoadPauseThreshold { get; init; } = 16;
+
+    /// <summary>
+    /// How many rows the background scan processes between successive mid-scan re-checks of ownership
+    /// (leadership) and foreground load. Smaller reacts faster to a lost lease or a load surge but adds
+    /// per-batch overhead; larger amortizes the (async) leadership probe. Clamped to at least 1.
+    /// </summary>
+    public int AutoAnalyzeOwnershipCheckRows { get; init; } = 1000;
+
+    /// <summary>
+    /// Max keys the non-transactional <c>DROP DATABASE</c> keyspace purge scans and deletes per batch.
+    /// The purge pages through each bucket one batch at a time so peak memory is bounded to this many
+    /// keys regardless of how large a database (or branch overlay) is — a full database drop can span
+    /// every table and row. Kept modest so the purge never materialises an entire keyspace at once.
+    /// </summary>
+    public int KeyspacePurgeBatchSize { get; init; } = 512;
+
+    /// <summary>
+    /// Retention window, in milliseconds, for orphaned (deferred-dropped) root databases and tables:
+    /// after <c>now - DroppedAt</c> exceeds this, the garbage collector may physically reclaim the
+    /// orphan; until then it stays recoverable via <c>CREATE ... RELINK TO</c>. Independent of the
+    /// Kahuna PITR/WAL window (which is unrelated to physical row keys). A value <c>&lt;= 0</c> disables
+    /// automatic reclamation — orphans are kept until an explicit <c>DROP ... FORCE</c> / manual purge.
+    /// Default is 7 days. Surfaced as <c>expires_at</c> by <c>SHOW ORPHAN DATABASES/TABLES</c>.
+    /// </summary>
+    public long OrphanRetentionMs { get; init; } = 7L * 24 * 60 * 60 * 1000;
+
+    /// <summary>
+    /// Interval, in milliseconds, of the background <c>OrphanReclaimer</c> sweep that physically
+    /// reclaims orphaned databases/tables past <see cref="OrphanRetentionMs"/>. The sweep runs on a
+    /// single elected node (registry-partition leader). A value <c>&lt;= 0</c> disables the loop
+    /// entirely (used by tests that drive a sweep manually). Default is 5 minutes.
+    /// </summary>
+    public int OrphanReclaimIntervalMs { get; init; } = 5 * 60 * 1000;
+
+    /// <summary>
+    /// Lease duration, in milliseconds, of a database-registry drop-intent fence (the mutex taken by
+    /// <c>DROP</c>/<c>RELINK</c>/the orphan GC per database id and per table). The fence's KV key carries
+    /// this as a native expiry: a holder that crashes without releasing frees the fence once the lease
+    /// lapses, so a dead owner can no longer block relink/GC of an id indefinitely. A live holder renews
+    /// the lease in the background every <see cref="FenceLeaseRenewIntervalMs"/> for as long as it holds
+    /// the fence, so a long operation (a large keyspace purge) is never interrupted. Keep it comfortably
+    /// longer than a typical fenced operation and longer than the renew interval. Default is 30 seconds.
+    /// </summary>
+    public int FenceLeaseMs { get; init; } = 30_000;
+
+    /// <summary>
+    /// How often, in milliseconds, a fence holder renews its drop-intent lease
+    /// (see <see cref="FenceLeaseMs"/>). Must be well under the lease so replication lag or a delayed
+    /// tick cannot let a still-live holder's lease lapse. Default is a third of the lease.
+    /// </summary>
+    public int FenceLeaseRenewIntervalMs { get; init; } = 10_000;
+
+    /// <summary>
+    /// Lease duration, in milliseconds, of the Kahuna snapshot-floor hold a branch database
+    /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
+    /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The
+    /// hold must be renewed well inside this window for as long as the branch exists (see the
+    /// leader-owned renewer); if renewal stops, the hold lapses after one lease and the branch's
+    /// frozen view can be reclaimed. Chosen coarse so lease renewals are not a hot Raft path.
+    /// </summary>
+    public int BranchSnapshotHoldLeaseMs { get; init; } = 300_000;
+
+    /// <summary>
+    /// Effective Kahuna point-in-time-recovery retention window, in seconds — how far back a restore may
+    /// target. Mirrors <c>kahuna.pitr_window_seconds</c> (→ <see cref="Kahuna.EmbeddedKahunaOptions.PitrWindow"/>)
+    /// so the restore admin path can reject a target time older than <c>now - window</c> (or in the
+    /// future) without re-reading the embedded node's options. Default 3600 (1 hour), matching Kahuna's
+    /// default; this is an upper bound on recoverability — actual reach is still limited by which backups
+    /// survive in the chain.
+    /// </summary>
+    public int PitrWindowSeconds { get; init; } = 3600;
+
+    /// <summary>
+    /// Sliding TTL for the SQL parser AST cache, in seconds.
+    /// A successfully-parsed <c>NodeAst</c> is kept in the cache for this many seconds after
+    /// the last hit; each cache hit extends the deadline by the same interval.
+    /// <para>
+    /// Special values:
+    ///   <c>&lt;= 0</c> — cache is disabled; every call to <c>SQLParserProcessor.Parse</c>
+    ///                    lexes and parses from scratch.
+    /// </para>
+    /// Default: <c>300</c> (5 minutes), matching Kahuna's script-cache TTL.
+    /// </summary>
+    public int SqlParserCacheTtlSeconds { get; init; } = 300;
+
+    /// <summary>
+    /// Maximum number of entries the SQL parser AST cache may hold at any moment.
+    /// When the cache is at capacity new statements are silently dropped until the background
+    /// sweep reclaims expired entries. This is a safety bound against floods of unique ad-hoc
+    /// SQL, not a precise LRU.
+    /// <para>
+    ///   <c>0</c> — no cap (unbounded, same risk as Kahuna's pure-TTL cache).
+    /// </para>
+    /// Default: <c>2048</c>.
+    /// </summary>
+    public int SqlParserCacheMaxEntries { get; init; } = 2048;
+
+    /// <summary>
+    /// How often, in seconds, the background sweep task removes expired SQL parser cache entries.
+    /// Must be &gt; 0.
+    /// Default: <c>60</c> seconds.
+    /// </summary>
+    public int SqlParserCacheSweepSeconds { get; init; } = 60;
+
+    /// <summary>
+    /// Maximum number of rows the hash-join build phase may materialise before degrading, used
+    /// only when <see cref="SpillEnabled"/> is <c>false</c>: the build falls back to a nested-loop
+    /// join for correctness. When spill is enabled the build instead routes to the Grace/hybrid
+    /// hash join once it exceeds <see cref="SpillEffectiveThreshold"/>, so this cap does not apply.
+    /// Default: 1_000_000 rows.
+    /// </summary>
+    public int HashJoinMaxBuildRows { get; init; } = 1_000_000;
+
+    /// <summary>
+    /// Opt a table's row and eligible secondary-index key spaces into Kahuna key-range routing
+    /// instead of the default hash routing. When enabled,
+    /// <see cref="Commands.Executor.Controllers.TableOpener"/> registers each space on the local
+    /// node at open time (the Kahuna registry is node-local and not replicated, so every node
+    /// opens-and-registers independently), and the range-lock path switches from prefix locks to
+    /// Kahuna range locks (prefix locks are rejected on ranged spaces).
+    ///
+    /// Second slice: secondary indexes whose key columns are all non-String ASCII-encoding
+    /// types (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed
+    /// indexes stay hash-routed until the persistence comparator is aligned. Kahuna
+    /// auto-split/merge is not wired (logical range routing + per-range locks work without it).
+    ///
+    /// <b>Operational requirement:</b> key-range routing requires <c>InitialPartitions ≥ 2</c>
+    /// in <c>config.yml</c>. With a single partition the Kahuna registry call is a silent no-op
+    /// (stays hash-routed, range locks transparently fall back to the single-partition hash path),
+    /// so enabling this flag on a single-partition node is safe but has no effect. A startup
+    /// warning is emitted when the flag is on and <c>InitialPartitions &lt; 2</c>. Production
+    /// clusters must set <c>initial_partitions: 2</c> (or more) to activate key-range sharding.
+    ///
+    /// Default off. Set via <c>key_range_sharding</c> in <c>config.yml</c>; the
+    /// <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable overrides YAML when set.
+    /// </summary>
+    public bool KeyRangeShardingEnabled { get; init; }
+
+    /// <summary>
+    /// Number of Raft data partitions active in this cluster. Populated from the
+    /// <c>initial_partitions</c> config key at startup. Used by <see cref="PlacementReader"/>
+    /// to approximate the remote-data fraction for <c>NetworkFactor</c> cost estimates.
+    ///
+    /// Default: 1 (single-partition / single-node). Tests that do not set this explicitly
+    /// keep the single-node behaviour (NetworkFactor = 0).
+    /// </summary>
+    public int ClusterPartitionCount { get; init; } = 1;
+
+    /// <summary>
+    /// Weight applied to bytes shipped over the network in the network cost model.
+    /// <c>NetworkFactor ≈ remoteRows × rowWidthBytes × NetWeight</c>.
+    ///
+    /// Calibrated so that one remote row fetch (≈ 100 bytes) costs ≈ 1.0 cost unit —
+    /// matching one local KV point lookup. Set to 0.0 to disable network cost entirely
+    /// (equivalent to single-node behaviour).
+    ///
+    /// Default: 0.01 (100 bytes × 0.01 = 1.0 cost unit per remote row).
+    /// </summary>
+    public double NetWeight { get; init; } = 0.01;
+
+    /// <summary>
+    /// Enables cost-based access-path selection in the query planner. When <c>true</c>, the
+    /// planner enumerates all viable index steps, costs each against the full-scan baseline,
+    /// and picks the cheapest. When <c>false</c> (default), the rule-based (score-based) path
+    /// is used unchanged, so plans are byte-identical to the heuristic planner regardless of
+    /// whether statistics have been collected. Set via <c>cost_based_access_path_enabled</c>
+    /// in <c>config.yml</c>.
+    /// </summary>
+    public bool CostBasedAccessPathEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Enables cost-based join-order enumeration (System-R–style DP) in the query planner.
+    /// When <c>true</c>, the planner costs all left-deep orderings and picks the cheapest
+    /// using INLJ vs hash-join cost asymmetry. When <c>false</c> (default), the rule-based
+    /// heuristic (<see cref="JoinOrderOptimizer"/>) is used and plans are byte-identical
+    /// to today's output. Joins wider than <c>JoinEnumerator.MaxTablesForEnumeration</c>
+    /// always fall back to the heuristic regardless of this flag. Set via
+    /// <c>cost_based_join_order_enabled</c> in <c>config.yml</c>.
+    /// </summary>
+    public bool CostBasedJoinOrderEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Enables the per-process query plan cache.
+    ///
+    /// When <c>true</c>, the planner caches its access-path decision (which index or full scan)
+    /// and join ordering keyed by <see cref="QueryShapeId"/> (a literal-independent fingerprint).
+    /// A cache hit skips cost enumeration and re-binds the current query's predicates into the
+    /// cached structural decision.
+    ///
+    /// Plan-stability tradeoff: because the cache key ignores literal values, a non-selective
+    /// query (e.g. <c>WHERE status = 'all'</c>) can inherit the access path cached by a
+    /// selective query of the same shape (e.g. <c>WHERE status = 'rare'</c>). Both decisions
+    /// are correct — the planner would have chosen the same index for both — but the cache
+    /// prevents re-scoring when ANALYZE produces new statistics that would change the choice.
+    /// Schema changes (DDL) do invalidate the cache; ANALYZE alone does not.
+    ///
+    /// Disabled by default following the project convention that all cost-based optimizations
+    /// are opt-in (<c>cost_based_access_path_enabled</c>, <c>cost_based_join_order_enabled</c>).
+    /// Set via <c>plan_cache_enabled</c> in <c>config.yml</c>. The cache size is bounded by
+    /// <see cref="PlanCacheMaxEntries"/>; set either to 0 to disable.
+    /// </summary>
+    public bool PlanCacheEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Maximum number of entries held by the per-process plan cache (LRU eviction when the
+    /// limit is exceeded). Set via <c>plan_cache_max_entries</c> in <c>config.yml</c>.
+    /// </summary>
+    public int PlanCacheMaxEntries { get; init; } = 512;
+
+    /// <summary>
+    /// Cluster-wide default isolation level applied when a transaction is begun without an
+    /// explicit level. Individual transactions may override this via the begin-request field
+    /// or via <c>SET TRANSACTION ISOLATION LEVEL …</c>.
+    ///
+    /// Default: <see cref="CamusIsolationLevel.Serializable"/> — every new transaction is
+    /// serializable unless it overrides this. Set to <see cref="CamusIsolationLevel.ReadCommitted"/>
+    /// (via <c>default_isolation_level: read_committed</c> in <c>config.yml</c>) to opt out.
+    /// </summary>
+    public CamusIsolationLevel DefaultIsolationLevel { get; init; } = CamusIsolationLevel.Serializable;
+
+    /// <summary>
+    /// Default Kahuna concurrency strategy applied when a transaction is begun without an explicit
+    /// locking mode. <see cref="Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic"/>
+    /// (acquire-then-write, block on conflict) preserves the historical behavior. An individual
+    /// transaction can opt into <see cref="Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic"/>
+    /// via the <c>locking</c> argument to <c>KvTransactionsManager.BeginAsync</c>; the coordinator then
+    /// defers <b>write-write</b> conflict detection to commit-time read-set/write-intent validation
+    /// instead of taking explicit exclusive write locks.
+    ///
+    /// <para><b>Scope of "lock-free."</b> Optimistic is fully lock-free only under Read Committed. Under
+    /// the default Serializable isolation, reads and scans still take shared range/point predicate locks
+    /// and a following write upgrades them to exclusive — that gating is on the isolation level, not on
+    /// this setting. So a Serializable+Optimistic transaction is a <b>hybrid</b>: optimistic write and
+    /// read-set validation combined with the predicate locks that keep it phantom-free. Serializable is
+    /// intentionally not weakened to lock-free.</para>
+    /// </summary>
+    public global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking DefaultTransactionLocking { get; init; } = global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic;
+
+    /// <summary>
+    /// Default read-set validation policy applied when a transaction is begun without an explicit
+    /// value. <see cref="Kahuna.Shared.KeyValue.ReadValidation.None"/> keeps the historical behavior:
+    /// pessimistic transactions rely on their locks alone and do not fold read observations. A
+    /// transaction can opt into <see cref="Kahuna.Shared.KeyValue.ReadValidation.TrackAndValidate"/>
+    /// to additionally validate its read set at commit even while pessimistic. Optimistic transactions
+    /// always validate their read set regardless of this value.
+    /// </summary>
+    public global::Kahuna.Shared.KeyValue.ReadValidation DefaultReadValidation { get; init; } = global::Kahuna.Shared.KeyValue.ReadValidation.None;
+
+    /// <summary>
+    /// Default commit-decision durability applied when a transaction is begun without an explicit
+    /// value. <see cref="Kahuna.Shared.KeyValue.DecisionDurability.BestEffort"/> keeps the decision in
+    /// memory (it can be lost if the coordinator crashes before its next checkpoint) and is the
+    /// historical behavior. A transaction can opt into
+    /// <see cref="Kahuna.Shared.KeyValue.DecisionDurability.Durable"/> so the commit decision is
+    /// written to durable storage before the outcome is returned; the coordinator assigns the record
+    /// anchor from the first confirmed persistent write, so no client-side anchor plumbing is needed.
+    /// Durable mode rejects a transaction that confirmed any ephemeral modification.
+    /// </summary>
+    public global::Kahuna.Shared.KeyValue.DecisionDurability DefaultDecisionDurability { get; init; } = global::Kahuna.Shared.KeyValue.DecisionDurability.BestEffort;
+
+    /// <summary>
+    /// Initial TTL, in milliseconds, requested for each Kahuna range lock acquired by a serializable
+    /// read-write transaction. Range-lock acquisitions are registered with the transaction coordinator,
+    /// so once the lock is held the coordinator renews its lease every collection-interval tick for the
+    /// life of the session and releases it on finalize — the client no longer heartbeats it.
+    ///
+    /// <para><b>Timing invariant:</b> this initial TTL must comfortably exceed the coordinator's
+    /// collection interval (its renewal tick period, 60 s by default), because the lock must survive
+    /// from acquisition until the first server renewal. A value below that interval would let the lock
+    /// lapse before the coordinator renews it, silently breaking serializable isolation. 150 s survives
+    /// well past the first 60 s tick.</para>
+    ///
+    /// <para>A zero or negative value tells Kahuna to hold the lock indefinitely (no TTL).</para>
+    ///
+    /// Default: 150 000 ms (150 s).
+    /// </summary>
+    public int RangeLockExpiresMs { get; init; } = 150_000;
+
+    /// <summary>
+    /// Maximum wall-clock lifetime, in milliseconds, for a <see cref="CamusIsolationLevel.Serializable"/>
+    /// + <see cref="CamusTransactionMode.ReadWrite"/> transaction. Acts as an absolute backstop: once
+    /// this duration elapses from <c>BeginAsync</c>, any subsequent operation (range lock acquisition,
+    /// commit) throws <see cref="CamusDBErrorCodes.TransactionLifetimeExceeded"/>.
+    ///
+    /// <para>The coordinator renews a live session's range locks so they never expire due to TTL; this
+    /// cap only bounds runaway transactions. It is also supplied to Kahuna as the session
+    /// <c>Timeout</c>, so an abandoned session's locks are reclaimed by the server reaper after this
+    /// window plus its grace period. A zero or negative value disables the deadline (useful in tests).</para>
+    ///
+    /// Default: 3 600 000 ms (1 hour).
+    /// </summary>
+    public int MaxSerializableTransactionLifetimeMs { get; init; } = 3_600_000;
+
+    /// <summary>
+    /// How long, in milliseconds, an explicit (client-driven) transaction may sit idle — no
+    /// statement issued against it — before the background reaper rolls it back and releases its
+    /// locks. "Idle" is measured from the last time the client referenced the transaction (its
+    /// last statement, or its begin), using a monotonic clock immune to wall-clock jumps.
+    ///
+    /// <para>This targets abandoned transactions: a client that opens a transaction and then
+    /// disconnects, crashes, or forgets to commit/rollback. Such a transaction is otherwise never
+    /// finalized, so the coordinator would keep renewing its Serializable+RW range locks and every
+    /// conflicting transaction would keep aborting. This CamusDB-side reaper reclaims it — freeing the
+    /// locks, rolling back the Kahuna transaction, and dropping it from the in-flight map — as does the
+    /// Kahuna server reaper once the session <c>Timeout</c> lapses.</para>
+    ///
+    /// <para>Only transactions tracked by the HTTP transaction coordinator (explicit
+    /// <c>/start-transaction</c> sessions and promoted read-only scans) are subject to the reaper;
+    /// single-statement autocommit requests finalize within their own request and are never
+    /// tracked. A pause longer than this window inside an interactive session is treated as
+    /// abandonment and rolled back.</para>
+    ///
+    /// <para><c>&lt;= 0</c> disables this CamusDB-side reaper. Even when disabled, an abandoned
+    /// Serializable+RW transaction's locks are still bounded by the Kahuna session <c>Timeout</c>
+    /// (set from <see cref="MaxSerializableTransactionLifetimeMs"/>): the server reaper reclaims the
+    /// session after that window plus its grace period, so a disabled CamusDB reaper degrades the
+    /// worst case from "prompt cleanup" to "reclaimed by the server after the lifetime cap", never
+    /// back to a permanent hold.</para>
+    ///
+    /// Default: 300 000 ms (5 minutes).
+    /// </summary>
+    public int TransactionIdleTimeoutMs { get; init; } = 300_000;
+
+    /// <summary>
+    /// How often, in milliseconds, the background reaper sweeps the in-flight transaction map for
+    /// entries idle longer than <see cref="TransactionIdleTimeoutMs"/>. A single timer scans all
+    /// tracked transactions, so this cost is one periodic pass regardless of transaction count —
+    /// it does not add a timer per transaction.
+    ///
+    /// <para>Must be positive. Set it well under <see cref="TransactionIdleTimeoutMs"/> so an
+    /// abandoned transaction is caught within roughly one sweep of crossing the idle threshold.</para>
+    ///
+    /// Default: 30 000 ms (30 s).
+    /// </summary>
+    public int TransactionReaperIntervalMs { get; init; } = 30_000;
+
+    /// <summary>
+    /// Per-bucket shared-point-lock count at which a Serializable+RW transaction escalates from
+    /// individual singleton <c>[key,key]</c> range locks to one whole-bucket <c>[null,null)</c>
+    /// Shared range lock. Once escalated, subsequent reads on the same bucket need no additional
+    /// lock RPCs — the whole-bucket lock already covers them. Old per-point lock entries remain
+    /// in tracking and are released at commit/rollback.
+    ///
+    /// <para>A lower value escalates earlier (fewer RPCs per read, larger lock granularity);
+    /// a very high value effectively disables escalation. Tests may set this to 1–3 to exercise
+    /// the escalation path without reading thousands of rows.</para>
+    ///
+    /// Default: 50.
+    /// </summary>
+    public int LockEscalationThreshold { get; init; } = 50;
+
+    /// <summary>
+    /// Maximum concurrently in-flight operations the server executes per <c>CamusSql.BatchExecute</c>
+    /// duplex stream before applying backpressure. Bounds one client's fan-out. Default: 64.
+    /// </summary>
+    public int GrpcBatchMaxInFlight { get; init; } = 64;
+
+    /// <summary>
+    /// Maximum live prepared statements one <c>CamusSql.BatchExecute</c> stream may register.
+    /// <c>0</c> = unbounded. Exceeding it fails the PREPARE with
+    /// <see cref="CamusDBErrorCodes.PreparedStatementLimitExceeded"/> rather than evicting an
+    /// existing handle, so a client's live handles never stop working underneath it. Default: 512.
+    /// </summary>
+    public int GrpcMaxPreparedStatementsPerStream { get; init; } = 512;
+
+    /// <summary>
+    /// Maximum live REST prepared statements one principal may hold on this node. <c>0</c> =
+    /// unbounded. Default: 512.
+    /// </summary>
+    public int RestMaxPreparedStatementsPerPrincipal { get; init; } = 512;
+
+    /// <summary>
+    /// Maximum live REST prepared statements this node will hold across all principals. <c>0</c> =
+    /// unbounded. Guards a single node against a fleet of clients each holding its per-principal
+    /// cap. Default: 8192.
+    /// </summary>
+    public int RestMaxPreparedStatements { get; init; } = 8192;
+
+    /// <summary>
+    /// How long a REST prepared statement may sit unused before the reaper drops it, in
+    /// milliseconds. <c>0</c> disables reaping, so entries then live until they are closed or the
+    /// process exits.
+    ///
+    /// <para>REST has no connection-scoped session the server can trust — connections are pooled,
+    /// HTTP/2-multiplexed and load-balanced — so this idle timeout is the backstop for clients that
+    /// never close what they prepared. Expiry is also checked on lookup, so an entry that outlives
+    /// its timeout between sweeps is never executed. Default: 600000 (10 minutes).</para>
+    /// </summary>
+    public int PreparedStatementIdleTimeoutMs { get; init; } = 600_000;
+
+    /// <summary>
+    /// Interval between REST prepared-statement reaper sweeps, in milliseconds. Default: 60000.
+    /// </summary>
+    public int PreparedStatementSweepIntervalMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// Largest statement, in bytes of retained text (database + SQL + parameter names, UTF-16), that
+    /// may be prepared on either transport. <c>0</c> = unlimited.
+    ///
+    /// <para>Counting statements is not the same as bounding memory: a cap of 512 statements permits
+    /// 512 × whatever the transport's maximum request size happens to be. This limit is what makes
+    /// the count caps meaningful, by bounding the per-entry term. A statement over it is rejected as
+    /// invalid input rather than as a quota failure — no amount of closing other statements would
+    /// make it fit. Default: 65536 (64 KiB), which is far above any realistic parameterized
+    /// statement.</para>
+    /// </summary>
+    public int MaxPreparedStatementBytes { get; init; } = 65_536;
+
+    /// <summary>
+    /// Total retained prepared-statement text this node will hold for REST clients, in bytes.
+    /// <c>0</c> = unlimited. Default: 67108864 (64 MiB).
+    /// </summary>
+    public long RestMaxPreparedStatementBytes { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// Retained prepared-statement text one REST principal may hold, in bytes. <c>0</c> = unlimited.
+    /// Matters most when authentication is disabled, since every caller then shares one anonymous
+    /// principal. Default: 8388608 (8 MiB).
+    /// </summary>
+    public long RestMaxPreparedStatementBytesPerPrincipal { get; init; } = 8L * 1024 * 1024;
+
+    /// <summary>
+    /// Retained prepared-statement text one <c>BatchExecute</c> stream may hold, in bytes.
+    /// <c>0</c> = unlimited. Default: 8388608 (8 MiB).
+    /// </summary>
+    public long GrpcMaxPreparedStatementBytesPerStream { get; init; } = 8L * 1024 * 1024;
+
+    /// <summary>
+    /// Maximum number of row + secondary-index mutations a single read-write transaction may
+    /// accumulate, mirroring Cloud Spanner's per-commit mutation cap.
+    ///
+    /// <para>One CamusDB mutation = one row-blob write/delete <em>or</em> one secondary-index
+    /// entry write/delete. Rows are stored as single KV blobs (not column-per-cell), so each
+    /// INSERT counts as <c>1 + K</c> mutations (row + K index entries), and each UPDATE that
+    /// touches an indexed column counts <c>1 + 2</c> per changed index (row rewrite + old-entry
+    /// delete + new-entry insert). The counter is monotonic — updating the same row twice counts
+    /// twice.</para>
+    ///
+    /// <para>A transaction that would exceed this limit throws
+    /// <see cref="CamusDBErrorCodes.TransactionMutationLimitExceeded"/> (<c>CADB0506</c>) before
+    /// any of the offending writes are sent to Kahuna. This error is <b>non-retryable</b>: the
+    /// caller must split the work into smaller transactions.</para>
+    ///
+    /// <para><c>&lt;= 0</c> — limit is disabled; equivalent to today's unlimited behaviour.
+    /// DDL and backfill transactions always run with limit = 0 regardless of this setting.</para>
+    ///
+    /// Default: <c>20_000</c> (matches Spanner's historical default).
+    /// </summary>
+    public int MaxMutationsPerTransaction { get; init; } = 20_000;
+
+    /// <summary>
+    /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
+    /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
+    /// Default: 500 ms.
+    /// </summary>
+    public int LockWaitDeadlineMs { get; init; } = 500;
+
+    /// <summary>
+    /// Maximum length (in UTF-16 <c>string.Length</c> units) for any user-facing identifier:
+    /// database names, table names, column names, and index names (including rename targets).
+    /// <para>
+    /// Replaces the former hard-coded 255-character limit with a tighter, configurable cap.
+    /// Pre-existing names that exceed this value continue to load — the limit gates only new
+    /// creation and rename operations, not existing schema reads.
+    /// </para>
+    /// <para><c>&lt;= 0</c> — limit is disabled (no length enforcement).</para>
+    /// Default: <c>64</c> (matches MySQL / PostgreSQL identifier limits).
+    /// </summary>
+    public int MaxIdentifierLength { get; init; } = 64;
+
+    /// <summary>
+    /// Maximum number of user-declared columns allowed per table. Counts the columns visible in
+    /// <c>CREATE TABLE</c> and after each <c>ALTER TABLE ADD COLUMN</c>. Internal reserved columns
+    /// (e.g. <c>_id</c>) are not user-declarable and do not count toward the cap.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>512</c>.
+    /// </summary>
+    public int MaxColumnsPerTable { get; init; } = 512;
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Spill-to-disk
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Gates all spill-to-disk behaviour. When <c>false</c> (default), blocking query operators
+    /// keep today's unbounded in-memory buffers — callers accept the OOM risk on large inputs.
+    /// When <c>true</c>, each blocking operator spills sorted runs to temp files once its buffer
+    /// exceeds <see cref="SpillThresholdRows"/>. If the temp store is unwritable and spill is
+    /// required, <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> is thrown instead of
+    /// silently buffering unbounded memory.
+    ///
+    /// Default: <c>false</c>.
+    /// </summary>
+    public bool SpillEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Per-operator in-memory row cap before the operator begins spilling to disk.
+    /// Applies independently to each blocking operator (sort, hash-join build, GROUP BY, …).
+    /// The operator accumulates up to this many rows in memory; when the next row would exceed
+    /// the cap, the current in-memory buffer is sorted/serialised and written as a spill run.
+    ///
+    /// Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    ///
+    /// Default: <c>500_000</c>.
+    /// </summary>
+    public int SpillThresholdRows { get; init; } = 500_000;
+
+    /// <summary>
+    /// Maximum number of simultaneously-open spill-run readers during a k-way merge pass.
+    /// When the number of spilled runs exceeds this value, a multi-pass merge is performed:
+    /// runs are merged in groups of <c>SpillMergeFanIn</c> until a single merged output remains.
+    ///
+    /// Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    ///
+    /// Default: <c>16</c>.
+    /// </summary>
+    public int SpillMergeFanIn { get; init; } = 16;
+
+    /// <summary>
+    /// When set, the query decode path produces slot-backed <c>QueryRow</c> rows — one
+    /// <c>ValueSlot[]</c> per row and zero per-cell <c>ColumnValue</c> objects, materialized lazily on
+    /// access — so a filtered-out row never allocates a <c>ColumnValue</c> for its projection cells.
+    /// The eager <c>ColumnValue[]</c> path (the default) decodes each cell to a <c>ColumnValue</c> up
+    /// front. Both paths are value-identical.
+    ///
+    /// <para>
+    /// <b>Default is <c>false</c></b>, and deliberately so: benchmarks show the slot path is a
+    /// selectivity-dependent trade, not a universal win. It allocates ~18% less on a highly selective
+    /// scan (most rows filtered before their projection cells are read), but ~13% more on a
+    /// non-selective scan and ~26% more on <c>SELECT *</c>, because when most cells are read the
+    /// wider slot array plus the lazy materialization cache are pure overhead. Since selectivity is not
+    /// known at decode time, enabling it globally would regress common queries. It stays off until the
+    /// operators consume slots directly (so slots flow without materializing every cell); flip it on
+    /// only for a workload measured to be selective. See BENCH-RESULTS.md → "Slot-backed decode (A/B)".
+    /// </para>
+    /// </summary>
+    public bool SlotBackedDecode { get; init; } = false;
+
+    /// <summary>
+    /// Global policy for borrowed (zero-copy) decode, which backs a decoded scan row with a
+    /// <see cref="CamusDB.Core.Storage.Kv.RowView"/> over the raw KV bytes instead of an eager
+    /// <c>ValueSlot[]</c> — an unread cell then decodes nothing (not even to a slot) and no per-row slot
+    /// array is allocated, a win on selective scans over wide or string/bytes-heavy rows. Three states,
+    /// default <see cref="BorrowedDecodePolicy.Adaptive"/>:
+    /// <list type="bullet">
+    /// <item><see cref="BorrowedDecodePolicy.Adaptive"/> — the scanner opts in per query for the case it
+    ///   strictly wins: a residual filter and no row-retaining operator downstream (see
+    ///   <c>QueryScanner.ShouldUseBorrowedDecode</c>). Unfiltered <c>SELECT *</c> and retaining scans stay
+    ///   eager. This is the production default.</item>
+    /// <item><see cref="BorrowedDecodePolicy.ForceBorrowed"/> — borrowed on <i>every</i> scan, including
+    ///   <c>SELECT *</c> (a small loss with no rejects to save on) and retaining scans (whose
+    ///   retained-memory cost is not yet bounded by copy-on-retain). For A/B measurement.</item>
+    /// <item><see cref="BorrowedDecodePolicy.ForceEager"/> — borrowed off everywhere: the kill-switch /
+    ///   eager A/B baseline.</item>
+    /// </list>
+    /// Takes precedence over <see cref="SlotBackedDecode"/> when both would apply. Per-scan control lives
+    /// on <see cref="CamusDB.Core.Storage.Kv.RowEncoder.RowDecodeState.BorrowedDecode"/>; each accessed
+    /// cell materializes at most once (the row caches it), so borrowed never re-decodes a cell.
+    /// </summary>
+    public BorrowedDecodePolicy BorrowedDecode { get; init; } = BorrowedDecodePolicy.Adaptive;
+
+    /// <summary>
+    /// Upper bound on a single spill-run record's declared payload length, checked before the
+    /// reader allocates or rents a buffer for it. A spill file is trusted engine output, but the
+    /// frame-length prefix is still read straight off disk, so a corrupt or truncated file could
+    /// otherwise name an absurd length and drive an <see cref="OutOfMemoryException"/> or a huge
+    /// pool rent. A length that is negative or exceeds this cap is rejected as
+    /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> instead. Generous by default so it
+    /// never trips on a legitimately wide row (large Bytes/Array columns).
+    ///
+    /// Default: <c>256 MiB</c>.
+    /// </summary>
+    public int SpillMaxFrameBytes { get; init; } = 256 * 1024 * 1024;
+
+    /// <summary>
+    /// <b>Test-only override.</b> When non-null, replaces <see cref="SpillThresholdRows"/> with
+    /// this value for every operator, forcing spill on tiny inputs so the spill code path runs
+    /// deterministically in unit tests without large data sets. Has no production use.
+    ///
+    /// Operators read this via <see cref="SpillEffectiveThreshold"/>.
+    /// </summary>
+    public int? ForceSpillThresholdRows { get; init; } = null;
+
+    /// <summary>
+    /// Returns the effective spill-row threshold: <see cref="ForceSpillThresholdRows"/> when set
+    /// (test override), otherwise <see cref="SpillThresholdRows"/>.
+    /// </summary>
+    public int SpillEffectiveThreshold => ForceSpillThresholdRows ?? SpillThresholdRows;
+
+    /// <summary>
+    /// Maximum number of user-visible secondary indexes allowed per table. The implicit primary-key
+    /// index (<c>~pk</c>) and any internal <c>~</c>-prefixed indexes are exempt and do not count.
+    /// Checked on each <c>ALTER INDEX ADD INDEX / ADD UNIQUE</c> operation.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>64</c> (matches MySQL's per-table secondary-index cap).
+    /// </summary>
+    public int MaxIndexesPerTable { get; init; } = 64;
+
+    /// <summary>
+    /// Maximum number of columns a single index may span, counting <b>both</b> its key columns and its
+    /// stored/payload (<c>INCLUDE</c>) columns. Guards against a covering index that duplicates an
+    /// unbounded amount of row data into every entry value. Checked at DDL time when an index is
+    /// created (standalone <c>CREATE/ALTER INDEX</c> and inline <c>CREATE TABLE</c> constraints).
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>32</c> (matches SQL Server's key+included column ceiling).
+    /// </summary>
+    public int MaxIndexColumns { get; init; } = 32;
+
+    /// <summary>
+    /// Maximum encoded byte size of an index entry's stored/payload (<c>INCLUDE</c>) tuple. Guards
+    /// against a single oversized <c>String</c>/<c>Bytes</c>/<c>Array</c> included value bloating every
+    /// index entry, its replication, and the enclosing transaction batch. Checked at write time
+    /// (INSERT/UPDATE/backfill) after the tuple is encoded and before the KV mutation is issued; a row
+    /// whose tuple exceeds this is rejected with <see cref="CamusDBErrorCodes.SchemaLimitExceeded"/>.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>4096</c> (4 KiB); tune against Kahuna's preferred value/batch sizes.
+    /// </summary>
+    public int MaxIndexIncludeTupleBytes { get; init; } = 4096;
+
+    /// <summary>
+    /// Maximum number of tables allowed in a single database. Checked at <c>CREATE TABLE</c>
+    /// time against the database's current persisted table set. <c>CREATE TABLE IF NOT EXISTS</c>
+    /// that resolves to an already-existing table is exempt — the table already counts.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    public int MaxTablesPerDatabase { get; init; } = 10_000;
+
+    /// <summary>
+    /// PBKDF2-HMAC-SHA256 iteration count used when hashing a user password
+    /// (<c>CREATE USER … IDENTIFIED …</c> / <c>ALTER USER … IDENTIFIED …</c>). Deliberately high so a
+    /// stolen catalog cannot be brute-forced cheaply; the value in force is stored <b>with</b> each
+    /// credential so raising this later does not invalidate existing hashes (they verify at their own
+    /// stored count and can be upgraded on next login in the enforcement phase). OWASP's current
+    /// PBKDF2-HMAC-SHA256 floor is 600,000.
+    /// </summary>
+    public int PasswordHashIterations { get; init; } = 600_000;
+
+    /// <summary>
+    /// Master switch for SQL authentication and authorization. When <c>false</c> (the default and the
+    /// state of every existing deployment), no credentials are required and no privilege checks run —
+    /// the auth catalog is inert metadata and behavior is exactly as before Phase 2. When <c>true</c>,
+    /// requests must present a valid bearer token and every statement is privilege-checked; the server
+    /// refuses to start with auth enabled and an empty catalog unless a bootstrap secret is supplied
+    /// (fail-closed — never an open admin window).
+    /// </summary>
+    public bool AuthenticationEnabled { get; init; } = false;
+
+    /// <summary>
+    /// One-time bootstrap superuser name, read from an external secret provider / environment at
+    /// startup (never a plaintext password in <c>config.yml</c>). Empty when unset. Paired with
+    /// <see cref="BootstrapSuperuserPassword"/>: on first start with an empty catalog they create
+    /// exactly one superuser via a transactional create-if-absent; once any user exists the bootstrap
+    /// values are ignored with a warning.
+    /// </summary>
+    public string BootstrapSuperuser { get; init; } = "";
+
+    /// <summary>Bootstrap superuser cleartext password from the external secret. Empty when unset. Used
+    /// once at first start and never persisted in cleartext — see <see cref="BootstrapSuperuser"/>.</summary>
+    public string BootstrapSuperuserPassword { get; init; } = "";
+
+    /// <summary>
+    /// Server-side key used to HMAC access-token secrets before they are stored in the session
+    /// catalog, so a catalog leak does not yield usable tokens. Common to every cluster node, sourced
+    /// from an external secret/environment, never stored in the catalog. When empty (auth disabled or
+    /// unconfigured) tokens are not issued. A future key id enables rotation.
+    /// </summary>
+    public string AccessTokenServerKey { get; init; } = "";
+
+    /// <summary>
+    /// Absolute lifetime of an access token. Short by design — there is no sliding expiry or refresh
+    /// token initially; re-login is the refresh. Expired tokens are rejected with
+    /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/>.
+    /// </summary>
+    public TimeSpan AccessTokenTtl { get; init; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Maximum staleness of a per-node authorization cache hit. A token/privilege snapshot cached on
+    /// one node is trusted for at most this long before it revalidates the credential/authorization
+    /// epochs against the catalog, so a revoke on another node takes effect within this bound. Set to
+    /// zero to force an authoritative lookup on every request (immediate revocation, higher cost).
+    /// </summary>
+    public TimeSpan AuthenticationCacheTtl { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Maximum number of password-verification (PBKDF2) operations allowed to run concurrently across
+    /// all logins. Bounds the CPU an attacker can tie up with a login flood, since each verification is
+    /// deliberately expensive. Excess logins queue briefly; sustained saturation surfaces as
+    /// <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.
+    /// </summary>
+    public int LoginKdfMaxConcurrency { get; init; } = 8;
+
+    /// <summary>Maximum failed-or-succeeded login attempts per normalized account per rolling minute
+    /// before further attempts are rejected with <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.</summary>
+    public int LoginMaxAttemptsPerMinute { get; init; } = 20;
+
+    /// <summary>Upper bound on the per-node authenticated-principal cache size, so random/invalid token
+    /// ids cannot grow it without bound.</summary>
+    public int AuthenticationCacheMaxEntries { get; init; } = 10_000;
+
+    /// <summary>
+    /// Upper bound on the login rate-limiter's tracked (account, source) keys. Beyond it the limiter
+    /// purges expired windows and, if still full, fails login closed — so a flood of unique account or
+    /// source values cannot grow memory without bound.
+    /// </summary>
+    public int LoginRateLimitMaxEntries { get; init; } = 100_000;
+
+    /// <summary>
+    /// When authentication is enabled, refuse credential-bearing requests that arrive over a plaintext
+    /// (non-TLS) connection, since a bearer token or password on the wire is trivially stolen. A
+    /// loopback peer is exempted so single-host development works without certificates. Default
+    /// <c>true</c> (secure by default); set false only for a trusted network where TLS is terminated
+    /// elsewhere.
+    /// </summary>
+    public bool RequireTlsWhenAuthEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Shared secret authenticating node-to-node cluster forwarding routes (<c>/internal/*</c>) when
+    /// authentication is enabled, so a public user cannot drive them. Sourced from an external secret /
+    /// environment, common to every node. When authentication is enabled and this is empty, the
+    /// internal routes are refused (fail-closed) — they must be configured before a cluster runs with
+    /// auth on.
+    /// </summary>
+    public string NodeSecret { get; init; } = "";
+
+    /// <summary>
+    /// Number of row ids buffered from a non-covering secondary-index scan before issuing one
+    /// <c>GetRowsBatch</c> call. Batching collapses N sequential Kahuna actor round-trips into
+    /// one per page, keeping primary-row fetches snapshot-consistent with the scan via the
+    /// transaction's <c>ReadTimestamp</c>.
+    ///
+    /// <para>Increasing this value reduces the number of batch calls (fewer round-trips) at the
+    /// cost of buffering more ids and deferring the first decoded row further from the first
+    /// index entry seen. Decreasing it reduces latency for the first result but increases the
+    /// per-batch call overhead. A value of 1 degrades to per-entry fetching (no batching).</para>
+    ///
+    /// Default: <c>64</c>.
+    /// </summary>
+    public int IndexScanFetchBatchSize { get; init; } = 64;
+
+    /// <summary>
+    /// Enables per-lock-acquisition debug log lines (<c>LogLevel.Debug</c>). When <c>false</c>
+    /// (default), no lock-trace messages are emitted regardless of the host logging configuration.
+    /// Enable only for targeted diagnostics — a busy workload emits one line per lock acquired.
+    /// </summary>
+    public bool LockTracingEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Enables per-step query-execution trace log lines (<c>LogLevel.Information</c>). When
+    /// <c>false</c> (default), no step-trace messages are emitted. Enable only for targeted
+    /// diagnostics — each query emits one line per plan step executed.
+    /// </summary>
+    public bool QueryTracingEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Maximum time, in milliseconds, allowed for a single POSIX-style regex match evaluation
+    /// (<c>~</c>, <c>~*</c>, <c>!~</c>, <c>!~*</c>). A match that exceeds this limit throws
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> (in WHERE/HAVING) or
+    /// <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> (inside a CHECK constraint) to
+    /// guard against ReDoS on pathological patterns.
+    /// Set via <c>regex_match_timeout_ms</c> in <c>config.yml</c>. Default: <c>250</c> ms.
+    /// </summary>
+    public int RegexMatchTimeoutMs { get; init; } = 250;
+
+    /// <summary>
+    /// Maximum number of compiled <c>Regex</c> instances the engine caches, keyed by
+    /// <c>(pattern, ignoreCase)</c>. When the cache is full, new patterns are still compiled
+    /// and evaluated but the result is not stored. This bounds memory growth from many distinct
+    /// one-off patterns while never failing a query because the cache is full.
+    /// Set via <c>regex_cache_max_entries</c> in <c>config.yml</c>. Default: <c>1024</c>.
+    /// </summary>
+    public int RegexCacheMaxEntries { get; init; } = 1024;
+
+    /// <summary>
+    /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
+    /// nodes in cluster and standalone modes.
+    /// </summary>
+    public Config.Models.KahunaOptionsConfig Kahuna { get; init; } = new();
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Query result cache
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Enables the per-node in-memory query result cache (default <c>true</c>). The cache is
+    /// opt-in per query — only a <c>SELECT</c> carrying a <c>{cache=…}</c> hint is ever cached —
+    /// so with the feature on, hints work without extra configuration. When set to <c>false</c>,
+    /// every <c>{cache=…}</c> hint is a bypass and no cache is constructed, so no per-write gate
+    /// bookkeeping or cache memory is incurred. Set via <c>query_result_cache_enabled</c> in
+    /// <c>config.yml</c>.
+    /// </summary>
+    public bool QueryResultCacheEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Default TTL in milliseconds for cache entries that do not carry a per-hint TTL override.
+    /// Entries that survive this interval without an invalidating write are expired by the
+    /// background sweep. Default: 5 000 ms.
+    /// </summary>
+    public int QueryResultCacheDefaultTtlMs { get; init; } = 5_000;
+
+    /// <summary>Maximum number of entries the cache may hold (LRU eviction when exceeded). Default: 1 024.</summary>
+    public int QueryResultCacheMaxEntries { get; init; } = 1_024;
+
+    /// <summary>Maximum total bytes across all cached entries. Default: 64 MiB.</summary>
+    public long QueryResultCacheMaxBytes { get; init; } = 64 * 1024 * 1024;
+
+    /// <summary>Maximum bytes for a single cache entry. Results larger than this are bypassed. Default: 1 MiB.</summary>
+    public long QueryResultCacheMaxEntryBytes { get; init; } = 1 * 1024 * 1024;
+
+    /// <summary>Maximum rows in a single cache entry. Results larger than this are bypassed. Default: 10 000.</summary>
+    public int QueryResultCacheMaxEntryRows { get; init; } = 10_000;
+
+    /// <summary>
+    /// Maximum number of dependencies (range + point + schema facts combined) per entry.
+    /// When exceeded, the implementation must either promote to a coarser range or bypass
+    /// — never store an entry with an incomplete dependency set. Default: 4 096.
+    /// </summary>
+    public int QueryResultCacheMaxDeps { get; init; } = 4_096;
+
+    /// <summary>Maximum point-key dependencies per entry before promotion or bypass. Default: 2 048.</summary>
+    public int QueryResultCacheMaxPointDeps { get; init; } = 2_048;
+
+    /// <summary>Maximum range dependencies per entry before promotion or bypass. Default: 256.</summary>
+    public int QueryResultCacheMaxRanges { get; init; } = 256;
+
+    /// <summary>
+    /// How long, in milliseconds, a waiter in the single-flight gate may block before giving up
+    /// and executing the query independently. Default: 250 ms.
+    /// </summary>
+    public int QueryResultCacheSingleFlightWaitMs { get; init; } = 250;
+
+    /// <summary>
+    /// Maximum number of keys probed during strict validation before the entry is treated as
+    /// invalid and recomputed. Default: 10 000.
+    /// </summary>
+    public int QueryResultCacheStrictValidationMaxKeys { get; init; } = 10_000;
+
+    /// <summary>
+    /// How often, in milliseconds, the background sweep removes expired entries. Default: 10 000 ms.
+    /// </summary>
+    public int QueryResultCacheSweepIntervalMs { get; init; } = 10_000;
+}

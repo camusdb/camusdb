@@ -46,7 +46,7 @@ internal sealed class BackupManager
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown backup kind '{ticket.Kind}'"),
             };
 
-            Log.LogBackupTaken(logger, ticket.Kind.ToString(), info.BackupId.ToString());
+            Log.LogBackupTaken(logger, ticket.Kind, info.BackupId);
             return Map(info);
         }
         catch (Exception ex) when (Translate(ex) is { } mapped)
@@ -140,7 +140,7 @@ internal sealed class BackupManager
             throw new CamusDBException(CamusDBErrorCodes.RestoreFailed, $"Restore failed: {ex.Message}");
         }
 
-        Log.LogBackupRestored(logger, ticket.LeafBackupId.ToString(), dataRoot);
+        Log.LogBackupRestored(logger, ticket.LeafBackupId, dataRoot);
 
         return new RestoreResult(
             DataRoot: dataRoot,

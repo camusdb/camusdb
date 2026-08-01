@@ -81,7 +81,13 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
     {
         if (!CamusDBConfig.AutoAnalyzeEnabled || intervalMs <= 0)
             return;
-        loop ??= SweepLoopAsync(cts.Token);
+
+        // Serialize concurrent Start calls: an unsynchronized `loop ??=` is check-then-act, and
+        // two racing callers would each launch an independent sweep loop for the process lifetime.
+        lock (this)
+        {
+            loop ??= SweepLoopAsync(cts.Token);
+        }
     }
 
     private async Task SweepLoopAsync(CancellationToken ct)

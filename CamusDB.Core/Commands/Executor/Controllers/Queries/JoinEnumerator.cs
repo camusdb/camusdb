@@ -92,6 +92,14 @@ internal static class JoinEnumerator
         for (int i = 0; i < n; i++)
             EstimateLeaf(i, leaves, pushdown, bound, database, stats, out scanCost[i], out scanCard[i]);
 
+        // Precompute one alias bitmask per pool predicate: the DP evaluates connectivity
+        // ~n·2^(n−1) times, and re-walking each ON AST (allocating a HashSet per probe) at every
+        // (mask, bit) candidate is ~250k AST walks for a 12-table plan. With a bitmask the test
+        // is two integer ops. Aliases that resolve to no leaf set a sentinel bit so a predicate
+        // referencing an unknown alias can never satisfy the subset test (same outcome as the
+        // HashSet-based check, computed once instead of per candidate).
+        long[] predicateAliasMasks = BuildPredicateAliasMasks(predicatePool, leaves, bound);
+
         SubplanEntry?[] dp = new SubplanEntry?[1 << n];
 
         for (int i = 0; i < n; i++)
@@ -110,7 +118,7 @@ internal static class JoinEnumerator
                     if (dp[leftMask] is not { } leftPlan)
                         continue;
 
-                    NodeAst? pred = FindConnectingPredicate(bit, leftMask, leaves, predicatePool, bound);
+                    NodeAst? pred = FindConnectingPredicate(bit, leftMask, predicatePool, predicateAliasMasks);
                     if (pred is null)
                         continue;
 
@@ -185,12 +193,13 @@ internal static class JoinEnumerator
                     && (rStep.FromBound is not null || rStep.ToBound is not null))
                 {
                     var candidate = (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value);
-                    long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, stats, database, table);
 
-                    // Breakeven veto: if the cost model would fall back to a full scan, price as full scan.
-                    long breakeven = (long)Math.Ceiling(tableRows * CostEstimator.BreakevenFraction);
-                    if (rangeRows < breakeven)
+                    // Breakeven veto through the SAME decision the builder (TryBuildIndexLeaf)
+                    // uses — a hand-rolled copy of the comparison can drift and make the DP cost
+                    // a plan shape the builder then refuses to build.
+                    if (!CostEstimator.ShouldPreferFullScan(candidate, tableRows, stats, database, table))
                     {
+                        long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, stats, database, table);
                         cost = rangeRows * 2.0; // index entry + row fetch
                         card = rangeRows;
                         return;
@@ -360,26 +369,57 @@ internal static class JoinEnumerator
 
     // ─── Predicate matching ──────────────────────────────────────────────────
 
+    // Sentinel bit for aliases referenced by a predicate that match no join leaf: it is never
+    // part of any candidate mask, so such predicates fail the subset test (never connect).
+    private const long UnknownAliasBit = 1L << 62;
+
+    /// <summary>
+    /// Walks each pool predicate ONCE and encodes its referenced aliases as a bitmask over the
+    /// leaf indices, so the DP's per-candidate connectivity test is pure integer arithmetic
+    /// instead of an AST walk + HashSet subset check.
+    /// </summary>
+    private static long[] BuildPredicateAliasMasks(
+        List<NodeAst> predicatePool,
+        List<LeafEntry> leaves,
+        BoundSelectQuery bound)
+    {
+        Dictionary<string, int> bitByAlias = new(leaves.Count, StringComparer.Ordinal);
+        for (int i = 0; i < leaves.Count; i++)
+            bitByAlias[leaves[i].Alias] = i;
+
+        long[] masks = new long[predicatePool.Count];
+        for (int p = 0; p < predicatePool.Count; p++)
+        {
+            long mask = 0;
+            foreach (string alias in CollectReferencedAliases(predicatePool[p], bound))
+            {
+                if (bitByAlias.TryGetValue(alias, out int bit))
+                    mask |= 1L << bit;
+                else
+                    mask |= UnknownAliasBit;
+            }
+            masks[p] = mask;
+        }
+
+        return masks;
+    }
+
     private static NodeAst? FindConnectingPredicate(
         int rightBit,
         int leftMask,
-        List<LeafEntry> leaves,
         List<NodeAst> predicatePool,
-        BoundSelectQuery bound)
+        long[] predicateAliasMasks)
     {
-        int combined = leftMask | (1 << rightBit);
-        string rightAlias = leaves[rightBit].Alias;
+        long combined = (uint)(leftMask | (1 << rightBit));
+        long rightMask = 1L << rightBit;
 
-        HashSet<string> allowed = new(StringComparer.Ordinal);
-        for (int i = 0; i < leaves.Count; i++)
-            if ((combined & (1 << i)) != 0)
-                allowed.Add(leaves[i].Alias);
-
-        foreach (NodeAst pred in predicatePool)
+        for (int p = 0; p < predicatePool.Count; p++)
         {
-            HashSet<string> refs = CollectReferencedAliases(pred, bound);
-            if (refs.Contains(rightAlias) && refs.IsSubsetOf(allowed))
-                return pred;
+            long refs = predicateAliasMasks[p];
+            // Must reference the newly added right leaf, and every referenced alias must be
+            // inside the combined set (subset test: no bits outside `combined`).
+            if ((refs & rightMask) != 0 && (refs & ~combined) == 0)
+                return predicatePool[p];
         }
 
         return null;
@@ -416,7 +456,10 @@ internal static class JoinEnumerator
                 return true;
 
             default:
-                return true;
+                // Unknown QuerySource subtype: bail so the caller keeps the ORIGINAL join tree.
+                // Returning true here would accept the node WITHOUT adding it to the leaves,
+                // and the rebuilt tree would silently drop that source's rows.
+                return false;
         }
     }
 

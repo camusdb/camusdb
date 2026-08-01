@@ -31,6 +31,19 @@ internal static class RequiredColumnAnalyzer
         CollectFromExpressionList(ticket.GroupBy, ticket.RowNameResolver, required, ticket);
         CollectFromHaving(ticket, required);
 
+        // API-level filters (ticket.Filters) are evaluated against decoded rows just like WHERE.
+        // Today every filters-carrying call site passes a null projection (forcing full decode),
+        // but a future ticket combining a projection with filters would otherwise silently
+        // filter against undecoded columns — fold them in defensively, as ComputeForLocate does.
+        if (ticket.Filters is { Count: > 0 })
+        {
+            foreach (QueryFilter filter in ticket.Filters)
+            {
+                if (!string.IsNullOrEmpty(filter.ColumnName))
+                    required.Add(filter.ColumnName);
+            }
+        }
+
         // Semi-join outer columns are stripped from WHERE by SemiJoinAnalyzer before binding,
         // so they won't appear in ticket.Where. Add them explicitly so the scan fetches them.
         if (ticket.SemiJoinSpecs is { Count: > 0 })
@@ -117,7 +130,7 @@ internal static class RequiredColumnAnalyzer
             || (expr.extendedTwo is not null && ContainsSubqueryNode(expr.extendedTwo));
     }
 
-    public static Dictionary<string, IReadOnlySet<string>> ComputeJoinPlan(
+    public static Dictionary<string, IReadOnlySet<string>?> ComputeJoinPlan(
         BoundSelectQuery bound,
         QueryTicket ticket,
         NodeAst? postJoinFilter,
@@ -135,7 +148,7 @@ internal static class RequiredColumnAnalyzer
 
         CollectJoinSources(bound.Query.Source, bound, ticket, postJoinFilter, scanFiltersByAlias, requiredByAlias);
 
-        Dictionary<string, IReadOnlySet<string>> output = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, IReadOnlySet<string>?> output = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, HashSet<string>> entry in requiredByAlias)
             output[entry.Key] = entry.Value;
@@ -186,12 +199,15 @@ internal static class RequiredColumnAnalyzer
         }
     }
 
-    private static Dictionary<string, IReadOnlySet<string>> BuildAllColumnsByAlias(BoundSelectQuery bound)
+    private static Dictionary<string, IReadOnlySet<string>?> BuildAllColumnsByAlias(BoundSelectQuery bound)
     {
-        Dictionary<string, IReadOnlySet<string>> output = new(StringComparer.OrdinalIgnoreCase);
+        // The value type is honestly nullable: null means "decode all columns", exactly how
+        // ScanRequiredColumns models it. Storing null! behind a non-nullable signature invites
+        // an NRE in any consumer that trusts the type.
+        Dictionary<string, IReadOnlySet<string>?> output = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (BoundTableSource source in bound.Sources)
-            output[source.Alias] = null!;
+            output[source.Alias] = null;
 
         return output;
     }
@@ -668,6 +684,10 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
+            case NodeType.ExprIsTrue:
+            case NodeType.ExprIsNotTrue:
+            case NodeType.ExprIsFalse:
+            case NodeType.ExprIsNotFalse:
                 if (expression.leftAst is not null)
                 {
                     CollectFromPostAggregateExpression(
@@ -915,6 +935,10 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprNot:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
+            case NodeType.ExprIsTrue:
+            case NodeType.ExprIsNotTrue:
+            case NodeType.ExprIsFalse:
+            case NodeType.ExprIsNotFalse:
                 if (expression.leftAst is not null)
                 {
                     CollectFromPostAggregateExpressionForAlias(

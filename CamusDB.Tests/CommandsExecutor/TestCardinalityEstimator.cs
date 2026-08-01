@@ -1204,11 +1204,13 @@ public sealed class TestCardinalityEstimator : BaseTest
             comparisons, inLists: [],
             database, table, executor.Statistics);
 
-        // The merged path calls EstimateRangeFraction(50, 60) once.
+        // The merged path calls EstimateRangeFraction once with the operators' inclusivity:
+        // ">" excludes the mass at 50 and "<" excludes the mass at 60.
         var loScalar = ScalarBound.FromColumnValue(loBound);
         var hiScalar = ScalarBound.FromColumnValue(hiBound);
         double rangeFrac = CardinalityEstimator.EstimateRangeFraction(
-            loScalar, hiScalar, "value", database, table, executor.Statistics);
+            loScalar, loInclusive: false, hiScalar, hiInclusive: false,
+            "value", database, table, executor.Statistics);
 
         // The old product path would compute sel(>50) × sel(<60) ≈ 0.50 × 0.60 = 0.30,
         // which is strictly greater than rangeFrac ≈ 0.10. The fix must return rangeFrac.
@@ -1271,5 +1273,71 @@ public sealed class TestCardinalityEstimator : BaseTest
         // Expected: independence product = (1/10) × (1/5) = 0.02.
         Assert.That(sel, Is.EqualTo(0.02).Within(1e-9),
             "B3: no composite index → column independence is kept (known limitation, documented)");
+    }
+
+    [Test]
+    public async Task InclusiveLowerBoundSelectivityKeepsEqualityMass()
+    {
+        // Skewed column: 500 of 1000 rows equal 5. ">= 5" matches everything (~1.0); the
+        // exclusive form "> 5" drops the equality mass (~0.5). Treating >= as > would
+        // underestimate by half the table and flip index-vs-full-scan the wrong way.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
+        TableDescriptor table = await OpenTableAsync(database);
+
+        var skewed = new ColumnHistogram
+        {
+            TotalRows = 1000,
+            MinValue  = Int(5),
+            Buckets =
+            [
+                new() { UpperBound = Int(5),  CumulativeRows = 500,  DistinctInBucket = 1 },
+                new() { UpperBound = Int(45), CumulativeRows = 1000, DistinctInBucket = 40 },
+            ],
+        };
+        await executor.Statistics.SetHistogramsAsync(database, table,
+            new Dictionary<string, ColumnHistogram> { ["year"] = skewed });
+
+        double inclusive = CardinalityEstimator.EstimatePredicateSelectivity(
+            [new("year", ">=", new ColumnValue(ColumnType.Integer64, 5L), conjunct: null!)],
+            [], database, table, executor.Statistics);
+
+        double exclusive = CardinalityEstimator.EstimatePredicateSelectivity(
+            [new("year", ">", new ColumnValue(ColumnType.Integer64, 5L), conjunct: null!)],
+            [], database, table, executor.Statistics);
+
+        Assert.That(inclusive, Is.EqualTo(1.0).Within(0.02), "year >= 5 must include the 50% equality mass at 5");
+        Assert.That(exclusive, Is.EqualTo(0.5).Within(0.02), "year > 5 must exclude the equality mass at 5");
+
+        double strictLess = CardinalityEstimator.EstimatePredicateSelectivity(
+            [new("year", "<", new ColumnValue(ColumnType.Integer64, 5L), conjunct: null!)],
+            [], database, table, executor.Statistics);
+
+        Assert.That(strictLess, Is.EqualTo(0.0).Within(0.02), "year < 5 must exclude the equality mass at 5");
+    }
+
+    [Test]
+    public async Task RepeatedBoundsOnSameSideKeepTightest()
+    {
+        // "year > 5 AND year > 50 AND year < 100": the merge must keep the TIGHTER lower
+        // bound (> 50), estimating ~50% — keeping merely the first bound (> 5) would price
+        // the widened range (5, 100) at ~95%.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
+        TableDescriptor table = await OpenTableAsync(database);
+
+        ColumnHistogram uniform = BuildUniformHistogram(0, 100, totalRows: 1000);
+        uniform.MinValue = Int(0);
+        await executor.Statistics.SetHistogramsAsync(database, table,
+            new Dictionary<string, ColumnHistogram> { ["year"] = uniform });
+
+        double sel = CardinalityEstimator.EstimatePredicateSelectivity(
+            [
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 5L),   conjunct: null!),
+                new("year", ">", new ColumnValue(ColumnType.Integer64, 50L),  conjunct: null!),
+                new("year", "<", new ColumnValue(ColumnType.Integer64, 100L), conjunct: null!),
+            ],
+            [], database, table, executor.Statistics);
+
+        Assert.That(sel, Is.EqualTo(0.5).Within(0.1),
+            "The tighter lower bound (> 50) must win the merge, not the first-seen (> 5)");
     }
 }

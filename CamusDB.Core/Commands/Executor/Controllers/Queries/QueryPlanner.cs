@@ -56,6 +56,11 @@ public sealed class QueryPlanner
         PredicateAnalysis analysis = ticket.AnalyzedWhere is not null
             ? PredicateAnalyzer.Merge(ticket.AnalyzedWhere, PredicateAnalyzer.AnalyzeFilters(ticket.Filters))
             : PredicateAnalyzer.AnalyzeTicket(ticket);
+        // Turn a boolean column used directly as a predicate (WHERE enabled / WHERE NOT enabled)
+        // into an explicit equality. It carries no equality bound otherwise, which makes any index
+        // it leads unusable and silently forces a full table scan. Must precede the qualified-name
+        // pass below so a promoted alias-qualified reference still gets reduced to its bare name.
+        analysis = PredicateAnalyzer.NormalizeBooleanColumnPredicates(analysis, table);
         // Resolve alias-qualified column references (u.usersId → usersId) before access-path
         // selection: index columns are stored unqualified, so without this every aliased
         // single-table predicate fails to match any index and degrades to a full table scan.
@@ -72,11 +77,15 @@ public sealed class QueryPlanner
             : null;
 
         List<(string, int)> schemaDeps = [(table.Id, table.Schema.Version)];
-        
+        List<PlanCacheDep> cacheDeps = [MakeCacheDep(database, table)];
+
         if (ticket.SemiJoinSpecs is { Count: > 0 })
         {
             foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
+            {
                 schemaDeps.Add((spec.InnerTable.Id, spec.InnerTable.Schema.Version));
+                cacheDeps.Add(MakeCacheDep(database, spec.InnerTable));
+            }
         }
 
         plan.QueryShapeId = shapeId;
@@ -91,12 +100,17 @@ public sealed class QueryPlanner
         if (shapeId is not null
             && _cache is not null
             && CamusDBConfig.PlanCacheEnabled
-            && _cache.TryGet(database.Id, shapeId, schemaDeps, out PlanCacheEntry? cached)
+            && _cache.TryGet(database.Id, shapeId, cacheDeps, out PlanCacheEntry? cached)
             && cached!.SingleTable is { } cachedDecision)
         {
             (scanNode, scanStep, absorbedInListConjunct) =
-                BuildScanNodeFromCachedDecision(database, table, ticket, analysis, cachedDecision);
-            fromCache = true;
+                BuildScanNodeFromCachedDecision(database, table, ticket, analysis, cachedDecision, out bool replayFailed);
+
+            // A failed replay (cached index no longer usable) fell back to a full replan; keep
+            // fromCache=false so the fresh decision REPLACES the stale entry below. Leaving it
+            // true would skip the Put while every lookup keeps hitting (and LRU-promoting) the
+            // dead entry, paying cache-lookup + full replan on every same-shape query forever.
+            fromCache = !replayFailed;
         }
         else
         {
@@ -146,7 +160,7 @@ public sealed class QueryPlanner
                     TableIndexSchema? distinctIndex = IndexScanSelector.TryFindStreamingDistinctIndex(table, distinctCols);
                     if (distinctIndex is not null)
                     {
-                        scanNode = new TableScanNode(TableScanSource.ForcedIndex, distinctIndex);
+                        scanNode = WithDistribution(new TableScanNode(TableScanSource.ForcedIndex, distinctIndex), table);
                         isStreamingDistinct = true;
                         streamingDistinctOrdering = BuildDistinctOrdering(distinctIndex, distinctCols);
                     }
@@ -336,7 +350,7 @@ public sealed class QueryPlanner
             && s0.Type != QueryPlanStepType.InListScanFromIndex)
         {
             _cache.Put(database.Id, shapeId,
-                new PlanCacheEntry(schemaDeps,
+                new PlanCacheEntry(cacheDeps,
                     SingleTable: new SingleTableDecision(s0.Index?.Name),
                     JoinAliasOrder: null));
         }
@@ -429,7 +443,17 @@ public sealed class QueryPlanner
         {
             PhysicalPlanNode candidateNode = WithDistribution(ToScanNode(step), table);
             double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table);
-            if (cost < bestCost)
+
+            // Deterministic tie-break by index name: candidates arrive in Dictionary iteration
+            // order, which can differ across descriptor rebuilds (and therefore across nodes) —
+            // a strict `<` would then pick different equal-cost plans on different nodes.
+            bool wins = cost < bestCost
+                || (cost == bestCost
+                    && bestStep is { Index: { } bestIdx }
+                    && step.Index is { } candIdx
+                    && string.CompareOrdinal(candIdx.Name, bestIdx.Name) < 0);
+
+            if (wins)
             {
                 bestCost = cost;
                 bestNode = candidateNode;
@@ -459,8 +483,11 @@ public sealed class QueryPlanner
         TableDescriptor table,
         QueryTicket ticket,
         PredicateAnalysis analysis,
-        SingleTableDecision decision)
+        SingleTableDecision decision,
+        out bool replayFailed)
     {
+        replayFailed = false;
+
         if (decision.IndexName is null)
         {
             return (
@@ -471,10 +498,26 @@ public sealed class QueryPlanner
 
         QueryPlanStep? step = IndexScanSelector.TrySelectScanForForcedIndex(table, analysis, decision.IndexName);
         if (step is null)
+        {
+            // Cached index no longer usable: full replan. The caller must treat this as a cache
+            // miss so the fresh decision replaces the stale entry.
+            replayFailed = true;
             return BuildScanNode(database, table, ticket, analysis);
+        }
 
         return (WithDistribution(ToScanNode(step.Value), table), step, null);
     }
+
+    /// <summary>
+    /// Builds one table's plan-cache dependency fingerprint: schema version plus the index-set
+    /// and statistics generations, so index DDL (which doesn't bump the schema version) and
+    /// ANALYZE both invalidate cached decisions. See <see cref="PlanCacheDep"/>.
+    /// </summary>
+    private PlanCacheDep MakeCacheDep(DatabaseDescriptor database, TableDescriptor table) =>
+        new(table.Id,
+            table.Schema.Version,
+            table.IndexSetGeneration,
+            _stats?.GetAnalyzeGeneration(database, table) ?? 0);
 
     private (PhysicalPlanNode ScanNode, QueryPlanStep? ScanStep, NodeAst? AbsorbedInListConjunct) BuildScanNode(
         DatabaseDescriptor database,
@@ -630,6 +673,16 @@ public sealed class QueryPlanner
                 throw new CamusDBException(
                     CamusDBErrorCodes.UnknownKey,
                     $"Key '{ticket.IndexName}' doesn't exist in table '{table.Name}'");
+            }
+
+            // A unique index omits entries for rows with a NULL in any indexed column, so an
+            // unbounded full scan over it would silently drop those rows from the result. The
+            // automatic ORDER BY path already refuses this (TrySelectOrderByScan); the user-forced
+            // path must not bypass that correctness guard — fall back to the primary-row scan.
+            if (index.Type == IndexType.Unique && !IndexScanSelector.AllColumnsNotNull(table, index))
+            {
+                QueryPlanStep nullSafeScanStep = new(QueryPlanStepType.FullScanFromTableIndex);
+                return (WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table), nullSafeScanStep, null);
             }
 
             QueryPlanStep forcedIndexStep = new(QueryPlanStepType.FullScanFromIndex, index);
@@ -870,8 +923,10 @@ public sealed class QueryPlanner
     /// eligibility. Returns null if any projection item is a non-identifier expression (aggregate,
     /// arithmetic, alias over expression, wildcard) — those block streaming.
     /// </summary>
-    // Indexes don't hold NULL-keyed rows (BackfillIndex throws on NULL), so a full index
-    // scan silently omits the NULL group. Gate streaming to NOT NULL columns only.
+    // Unique indexes omit NULL-keyed rows entirely, and even Multi indexes (which do carry
+    // NULL entries) place the NULL group at one end of the scan rather than adjacent to a
+    // hypothetical "NULL value" ordering the sorter agrees on — so gate streaming to
+    // NOT NULL columns, which sidesteps both hazards.
     private static bool AllDistinctColumnsAreNotNull(TableDescriptor table, IReadOnlyList<string> distinctCols)
     {
         if (table.Schema.Columns is null)
@@ -1032,7 +1087,7 @@ public sealed class QueryPlanner
 
         // Columns available without a primary-row fetch: the index key columns plus any stored/payload
         // (INCLUDE) columns materialized into the entry value.
-        HashSet<string> available = new(index.Columns, StringComparer.Ordinal);
+        HashSet<string> available = new(index.Columns, StringComparer.OrdinalIgnoreCase);
         foreach (string includeColumn in index.IncludeColumns)
             available.Add(includeColumn);
 
@@ -1070,7 +1125,7 @@ public sealed class QueryPlanner
         if (required.Count == 0)
             return true;    // row-id only — always available from the index entry
 
-        HashSet<string> available = new(index.Columns, StringComparer.Ordinal);
+        HashSet<string> available = new(index.Columns, StringComparer.OrdinalIgnoreCase);
         foreach (string includeColumn in index.IncludeColumns)
             available.Add(includeColumn);
 

@@ -245,10 +245,10 @@ internal sealed class TableIndexAdder
             database.SystemSchemaSemaphore.Release();
         }
 
-        table.Indexes.Add(
+        table.MutateIndexes(indexes => indexes.Add(
             ticket.IndexName,
             new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections, includeColumns: ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null)
-        );
+        ));
         table.Store.RegisterIndexName(indexId, ticket.IndexName);
         table.Store.RegisterIndexDirections(indexId, columnDirections);
 
@@ -383,8 +383,11 @@ internal sealed class TableIndexAdder
             database.SystemSchemaSemaphore.Release();
         }
 
-        TableIndexSchema current = table.Indexes[ticket.IndexName];
-        table.Indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment);
+        table.MutateIndexes(indexes =>
+        {
+            TableIndexSchema current = indexes[ticket.IndexName];
+            indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment);
+        });
 
         return FluxAction.Continue;
     }

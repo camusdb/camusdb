@@ -89,6 +89,29 @@ public enum NodeType
     ExprDefault,
     ExprIsNull,
     ExprIsNotNull,
+
+    /// <summary>
+    /// <c>x IS TRUE</c>. Unlike <c>x = TRUE</c> this never yields unknown: a NULL operand makes it
+    /// FALSE. The two forms still select the same rows in a WHERE clause, because unknown and false
+    /// are both non-matching there.
+    /// </summary>
+    ExprIsTrue,
+
+    /// <summary>
+    /// <c>x IS NOT TRUE</c> — the exact negation of <see cref="ExprIsTrue"/>, so it matches FALSE
+    /// <em>and NULL</em>. It is therefore NOT equivalent to <c>x = FALSE</c> unless the operand is
+    /// known to be non-nullable.
+    /// </summary>
+    ExprIsNotTrue,
+
+    /// <summary><c>x IS FALSE</c>. NULL operand yields FALSE rather than unknown.</summary>
+    ExprIsFalse,
+
+    /// <summary>
+    /// <c>x IS NOT FALSE</c> — matches TRUE <em>and NULL</em>, so it is not equivalent to
+    /// <c>x = TRUE</c> unless the operand is known to be non-nullable.
+    /// </summary>
+    ExprIsNotFalse,
     ExprScalarSubquery,
     ExprInSubquery,
     ExprInMembership,

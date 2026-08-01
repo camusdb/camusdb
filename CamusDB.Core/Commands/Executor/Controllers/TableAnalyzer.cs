@@ -45,15 +45,16 @@ internal sealed class TableAnalyzer
 
     internal async Task<QueryResultRow> AnalyzeAsync(
         DatabaseDescriptor database,
-        TableDescriptor table,
-        KvTransaction tx)
+        TableDescriptor table)
     {
         int sampleLimit = CamusDBConfig.StatsAnalyzeSampleRows;
         int bucketCount = CamusDBConfig.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
 
-        // Capture the live counter baseline before scanning so any DML that commits during the scan
-        // is preserved at publication (see StatisticsManager.PublishAsync) rather than clobbered.
+        // Capture the live counter baseline BEFORE pinning the scan snapshot (below), mirroring
+        // AnalyzeBackgroundAsync. The reverse order has a systematic under-count: a row committed
+        // between snapshot-pin and baseline-capture is inside the baseline but invisible to the
+        // scan, so PublishAsync's `scanned − baseline` correction subtracts it from the live count.
         StatisticsManager.AnalyzeBaseline baseline =
             await statistics.CaptureAnalyzeBaselineAsync(database, table).ConfigureAwait(false);
 
@@ -97,51 +98,65 @@ internal sealed class TableAnalyzer
         // Request one row past the sample limit so the sentinel can set isSampled=true;
         // the sentinel is detected below and not counted toward rowCount.
         long? scanLimit = limit.HasValue ? limit.Value + 1 : null;
-        // Statistics sampling never folds its reads: the sampled rows are not a correctness
-        // dependency of anything this transaction writes, and letting a concurrent update to a
-        // sampled row abort the analyze would make ANALYZE fail for no reason.
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(tx, maxRows: scanLimit))
+
+        // Scan under our own lock-free read-only snapshot (not the caller's transaction), like
+        // the background path: statistics must reflect committed data — a scan inside a user
+        // transaction would fold that transaction's uncommitted writes into globally published
+        // stats — and the snapshot must be pinned AFTER the baseline capture above. The reads
+        // are never folded into any validation set, so ANALYZE cannot abort foreground work.
+        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false).ConfigureAwait(false);
+        Kommander.Time.HLCTimestamp analyzedAt = tx.ReadTimestamp;
+
+        try
         {
-            if (limit.HasValue && rowCount >= limit.Value)
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(tx, maxRows: scanLimit))
             {
-                isSampled = true;
-                break;
-            }
-
-            Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data.Span);
-            rowCount++;
-
-            foreach (string col in indexedColumns)
-            {
-                if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
-                    continue;
-
-                ScalarBound bound = ScalarBound.FromColumnValue(val);
-                UpdateMinMax(minMax, col, bound);
-                distinctSets[col].Add(BoundKey(bound));
-
-                if (IsOrderable(val.Type))
-                    valueLists[col].Add(bound);
-            }
-
-            // Index entry counts and composite-key NDV.
-            foreach ((string indexName, string[] keyCols) in readableIndexes)
-            {
-                // An index entry exists only when the first key column is non-null.
-                if (!row.TryGetValue(keyCols[0], out ColumnValue? firstVal) || firstVal.Type == ColumnType.Null)
-                    continue;
-
-                indexCounts[indexName]++;
-
-                // Accumulate distinct tuple keys for every prefix length 2..N,
-                // mirroring the initialization above.
-                for (int len = 2; len <= keyCols.Length; len++)
+                if (limit.HasValue && rowCount >= limit.Value)
                 {
-                    string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);
-                    string tupleKey = BuildTupleKey(row, keyCols[..len]);
-                    keyDistinct[sig].Add(tupleKey);
+                    isSampled = true;
+                    break;
+                }
+
+                Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data.Span);
+                rowCount++;
+
+                foreach (string col in indexedColumns)
+                {
+                    if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
+                        continue;
+
+                    ScalarBound bound = ScalarBound.FromColumnValue(val);
+                    UpdateMinMax(minMax, col, bound);
+                    distinctSets[col].Add(BoundKey(bound));
+
+                    if (IsOrderable(val.Type))
+                        valueLists[col].Add(bound);
+                }
+
+                // Index entry counts and composite-key NDV.
+                foreach ((string indexName, string[] keyCols) in readableIndexes)
+                {
+                    // An index entry exists only when the first key column is non-null.
+                    if (!row.TryGetValue(keyCols[0], out ColumnValue? firstVal) || firstVal.Type == ColumnType.Null)
+                        continue;
+
+                    indexCounts[indexName]++;
+
+                    // Accumulate distinct tuple keys for every prefix length 2..N,
+                    // mirroring the initialization above.
+                    for (int len = 2; len <= keyCols.Length; len++)
+                    {
+                        string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);
+                        string tupleKey = BuildTupleKey(row, keyCols[..len]);
+                        keyDistinct[sig].Add(tupleKey);
+                    }
                 }
             }
+        }
+        finally
+        {
+            // A read-only snapshot holds no locks; always finalize so nothing leaks.
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
 
         // --- Build result dicts ---
@@ -166,12 +181,11 @@ internal sealed class TableAnalyzer
         // One atomic generation: merges any DML that committed during the scan, resets staleness, and
         // writes the whole blob in a single transaction. A sampled scan's row count is a sample, not
         // the true size, so it must not correct the live tracked count (scanComplete: !isSampled).
-        // Record the analysis timestamp from the caller's read snapshot when it has one.
         await statistics.PublishAsync(
             database, table,
             rowCount, scanComplete: !isSampled,
             minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
-            baseline, tx.ReadTimestamp).ConfigureAwait(false);
+            baseline, analyzedAt).ConfigureAwait(false);
 
         string status = isSampled
             ? $"sampled {rowCount} rows (table larger than {CamusDBConfig.StatsAnalyzeSampleRows})"
@@ -538,6 +552,13 @@ internal sealed class TableAnalyzer
         if (buckets.Count > 0)
             buckets[^1].CumulativeRows = total;
 
-        return new ColumnHistogram { Buckets = buckets, TotalRows = total };
+        // The observed minimum is the first bucket's lower boundary — without it the first
+        // bucket cannot be interpolated (values inside it would estimate ~0 rows).
+        return new ColumnHistogram
+        {
+            Buckets   = buckets,
+            TotalRows = total,
+            MinValue  = total > 0 ? values[0] : null,
+        };
     }
 }

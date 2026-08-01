@@ -203,10 +203,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableColumnAlterer = new(catalogs, logger);
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
-        tableDropper = new(catalogs, logger);
         rowInserter = new(logger);
         rowUpdater = new(logger);
         statisticsManager = new(logger);
+        tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);
         queryExecutor = new(logger, statisticsManager, sharedNode?.Kahuna);
         sqlExecutor = new();
@@ -1785,7 +1785,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private static async Task CompensateAbortedAddIndexAsync(DatabaseDescriptor database, TableDescriptor table, string indexName)
     {
-        table.Indexes.Remove(indexName);
+        table.MutateIndexes(indexes => indexes.Remove(indexName));
 
         await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
         try
@@ -3830,7 +3830,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.AnalyzeTableSchema;
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
-                    QueryResultRow result = await tableAnalyzer.AnalyzeAsync(database, table, ticket.TxnState).ConfigureAwait(false);
+                    QueryResultRow result = await tableAnalyzer.AnalyzeAsync(database, table).ConfigureAwait(false);
                     return (database, ToAsyncEnumerable(result));
                 }
 

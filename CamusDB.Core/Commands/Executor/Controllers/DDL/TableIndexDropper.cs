@@ -64,7 +64,7 @@ internal sealed class TableIndexDropper
             database.SystemSchemaSemaphore.Release();
         }
 
-        table.Indexes.Remove(ticket.IndexName);
+        table.MutateIndexes(indexes => indexes.Remove(ticket.IndexName));
 
         return FluxAction.Continue;
     }

@@ -79,8 +79,8 @@ public sealed class QueryPlan
     /// <summary>Single-table scan column subset. Null means decode all columns.</summary>
     public IReadOnlySet<string>? ScanRequiredColumns { get; internal set; }
 
-    /// <summary>Per-alias scan column subsets for join plans.</summary>
-    internal Dictionary<string, IReadOnlySet<string>>? RequiredColumnsByAlias { get; set; }
+    /// <summary>Per-alias scan column subsets for join plans. A null set means decode all columns.</summary>
+    internal Dictionary<string, IReadOnlySet<string>?>? RequiredColumnsByAlias { get; set; }
 
     internal Dictionary<string, int> TableSchemaVersionByAlias { get; } = new(StringComparer.Ordinal);
 

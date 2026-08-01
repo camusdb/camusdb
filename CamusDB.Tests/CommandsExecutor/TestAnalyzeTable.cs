@@ -595,4 +595,81 @@ public sealed class TestAnalyzeTable : BaseTest
         Assert.IsNotNull(estimate);
         Assert.AreEqual(N, estimate!.Value);
     }
+
+    /// <summary>
+    /// ANALYZE must record the observed column minimum on the histogram: it is the first
+    /// bucket's lower boundary, without which first-bucket values cannot be interpolated
+    /// (they would estimate ~0 rows).
+    /// </summary>
+    [Test]
+    public async Task AnalyzeRecordsHistogramMinValue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        await InsertRobotsAsync(executor, database, dbname, 20, baseYear: 2000);
+
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+        await RunAnalyzeAsync(executor, database, dbname, "robots");
+
+        CamusDB.Core.Statistics.Models.ColumnHistogram? hist =
+            executor.Statistics.GetColumnHistogram(database, table, "year");
+
+        Assert.IsNotNull(hist, "ANALYZE must build a histogram for the indexed year column");
+        Assert.IsNotNull(hist!.MinValue, "ANALYZE must record the observed minimum");
+        Assert.AreEqual(2000, hist.MinValue!.LongValue, "MinValue must equal the smallest scanned year");
+    }
+
+    /// <summary>
+    /// ANALYZE scans under its own read-only snapshot pinned after the baseline capture, not the
+    /// caller's transaction: statistics must reflect committed data only (a scan inside a user
+    /// transaction would publish that transaction's uncommitted rows into global statistics), and
+    /// pinning after the baseline keeps the `scanned − baseline` row-count correction unbiased.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeIgnoresUncommittedRowsFromCallerTransaction()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        const int committed = 4;
+        await InsertRobotsAsync(executor, database, dbname, committed);
+
+        // Open a transaction and insert rows WITHOUT committing, then run ANALYZE on that
+        // same transaction's ticket.
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        for (int i = 0; i < 5; i++)
+            await executor.Insert(new InsertTicket(
+                txnState: txn,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",   new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new(ColumnType.String, "Uncommitted" + i) },
+                        { "year", new(ColumnType.Integer64, 3000L + i) },
+                    }
+                }));
+
+        try
+        {
+            (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) =
+                await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                    txnState: txn,
+                    database: dbname,
+                    sql: "ANALYZE robots",
+                    parameters: null));
+
+            QueryResultRow? result = null;
+            await foreach (QueryResultRow row in cursor)
+                result = row;
+
+            Assert.IsTrue(result!.Value.Row.TryGetValue("rows", out ColumnValue? rowsVal));
+            Assert.AreEqual(committed, rowsVal!.LongValue,
+                "ANALYZE must count only committed rows, not the caller transaction's uncommitted inserts");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(txn);
+        }
+    }
 }

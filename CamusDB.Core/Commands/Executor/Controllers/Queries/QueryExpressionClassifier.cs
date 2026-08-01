@@ -119,6 +119,10 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprNot:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
+                case NodeType.ExprIsTrue:
+                case NodeType.ExprIsNotTrue:
+                case NodeType.ExprIsFalse:
+                case NodeType.ExprIsNotFalse:
                 case NodeType.ExprInMembership:
                 case NodeType.ExprNotInMembership:
                     return node.leftAst is not null && Walk(node.leftAst);
@@ -237,6 +241,10 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprNot:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
+                case NodeType.ExprIsTrue:
+                case NodeType.ExprIsNotTrue:
+                case NodeType.ExprIsFalse:
+                case NodeType.ExprIsNotFalse:
                 case NodeType.ExprInMembership:
                 case NodeType.ExprNotInMembership:
                     if (node.leftAst is not null) Walk(node.leftAst);
@@ -332,6 +340,10 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprNot:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
+                case NodeType.ExprIsTrue:
+                case NodeType.ExprIsNotTrue:
+                case NodeType.ExprIsFalse:
+                case NodeType.ExprIsNotFalse:
                 case NodeType.ExprInMembership:
                 case NodeType.ExprNotInMembership:
                     if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);

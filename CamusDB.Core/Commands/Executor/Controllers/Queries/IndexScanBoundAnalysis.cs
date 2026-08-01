@@ -49,7 +49,11 @@ internal static class IndexScanBoundAnalysis
         string columnName)
     {
         TableIndexSchema index = scanStep.Index!;
-        int columnIndex = Array.IndexOf(index.Columns, columnName);
+        // Case-insensitive to match index-column matching everywhere else: a differently-cased
+        // predicate column (WHERE NAME = …) selected the index but would otherwise never have
+        // its predicate absorbed, leaving a redundant residual filter on every row.
+        int columnIndex = Array.FindIndex(index.Columns,
+            c => string.Equals(c, columnName, StringComparison.OrdinalIgnoreCase));
         if (columnIndex < 0)
             return null;
 
@@ -190,11 +194,20 @@ internal static class IndexScanBoundAnalysis
         if (comparison.Operator != "=")
             return false;
 
-        return bounds.Lower is not null
-            && bounds.Upper is not null
-            && bounds.LowerInclusive
-            && bounds.UpperInclusive
-            && bounds.Lower.CompareTo(bounds.Upper) == 0
+        if (bounds.Lower is null
+            || bounds.Upper is null
+            || !bounds.LowerInclusive
+            || !bounds.UpperInclusive)
+            return false;
+
+        // Mixed types occur legitimately: with two equalities on an Id column, one constant may
+        // have coerced to Id (driving the point bounds) while an uncoercible literal stayed
+        // String. ColumnValue.CompareTo throws on a type mismatch, so treat it as not absorbed —
+        // the residual filter then correctly yields zero rows for the unsatisfiable conjunction.
+        if (bounds.Lower.Type != bounds.Upper.Type || bounds.Lower.Type != comparison.Constant.Type)
+            return false;
+
+        return bounds.Lower.CompareTo(bounds.Upper) == 0
             && bounds.Lower.CompareTo(comparison.Constant) == 0;
     }
 

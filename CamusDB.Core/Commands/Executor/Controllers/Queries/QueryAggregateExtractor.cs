@@ -144,7 +144,9 @@ internal static class QueryAggregateExtractor
                 node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
                 null, null, null, null, null, null),
 
-            NodeType.ExprNot or NodeType.ExprIsNull or NodeType.ExprIsNotNull => With(node,
+            NodeType.ExprNot or NodeType.ExprIsNull or NodeType.ExprIsNotNull
+                or NodeType.ExprIsTrue or NodeType.ExprIsNotTrue
+                or NodeType.ExprIsFalse or NodeType.ExprIsNotFalse => With(node,
                 node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 null),
 

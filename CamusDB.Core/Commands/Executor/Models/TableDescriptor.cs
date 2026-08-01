@@ -41,11 +41,59 @@ public sealed class TableDescriptor
     public KvTableStore Store { get; }
 
     /// <summary>
+    /// Global monotonic counter backing <see cref="IndexSetGeneration"/>. Process-wide (static)
+    /// so a generation value can never repeat across descriptor rebuilds of the same table —
+    /// a per-instance counter would restart at zero after descriptor eviction and could
+    /// coincidentally match a stale cached value.
+    /// </summary>
+    private static long globalIndexSetGeneration;
+
+    private readonly object indexMutationLock = new();
+
+    private Dictionary<string, TableIndexSchema> indexes = new(StringComparer.OrdinalIgnoreCase);
+
+    private long indexSetGeneration = Interlocked.Increment(ref globalIndexSetGeneration);
+
+    /// <summary>
     /// Indexes on the table, keyed by index name. Uses <see cref="StringComparer.OrdinalIgnoreCase"/>
     /// so an index referenced in SQL (e.g. a <c>FORCE INDEX</c> hint or <c>DROP INDEX</c>) matches
     /// regardless of the case written, while the stored name preserves the case it was created with.
+    ///
+    /// The returned dictionary is an immutable snapshot published by copy-on-write: online DDL
+    /// (index add/publish/drop) runs concurrently with query planning, and planners enumerate this
+    /// dictionary lock-free — an in-place <c>Add</c>/<c>Remove</c> during a concurrent
+    /// <c>foreach</c> throws and a concurrent resize is undefined behavior. NEVER mutate it in
+    /// place from engine code; use <see cref="MutateIndexes"/>, which clones, mutates the clone,
+    /// and swaps the reference. Capture the property once per operation when consistency across
+    /// multiple lookups matters.
     /// </summary>
-    public Dictionary<string, TableIndexSchema> Indexes { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, TableIndexSchema> Indexes => Volatile.Read(ref indexes);
+
+    /// <summary>
+    /// Monotonically increasing generation of the index set, bumped on every
+    /// <see cref="MutateIndexes"/> swap. Used by the plan cache as an invalidation signal for
+    /// index DDL, which deliberately does not bump <see cref="TableSchema.Version"/> (indexes
+    /// are not part of row encoding). Values are process-unique, never reused across
+    /// descriptor rebuilds.
+    /// </summary>
+    public long IndexSetGeneration => Volatile.Read(ref indexSetGeneration);
+
+    /// <summary>
+    /// Applies <paramref name="mutate"/> to a clone of the current index map and atomically
+    /// publishes the clone, so concurrent lock-free readers always observe a complete snapshot
+    /// (old or new, never a mid-mutation dictionary). Serialized against other mutations;
+    /// bumps <see cref="IndexSetGeneration"/> after the swap.
+    /// </summary>
+    public void MutateIndexes(Action<Dictionary<string, TableIndexSchema>> mutate)
+    {
+        lock (indexMutationLock)
+        {
+            Dictionary<string, TableIndexSchema> next = new(indexes, StringComparer.OrdinalIgnoreCase);
+            mutate(next);
+            Volatile.Write(ref indexes, next);
+            Volatile.Write(ref indexSetGeneration, Interlocked.Increment(ref globalIndexSetGeneration));
+        }
+    }
 
     /// <summary>
     /// Compiled positional row codecs, one per stored schema-history version encountered. Built lazily

@@ -83,7 +83,10 @@ internal static class CommaJoinNormalizer
 
         HashSet<NodeAst> remaining = new(conjuncts);
         QuerySource left = sources[0];
-        HashSet<string> leftAliases = new(StringComparer.Ordinal) { GetAlias(sources[0]) };
+        // Case-insensitive to match alias binding everywhere else: "FROM orders O, customers c
+        // WHERE o.id = c.oid" must still hoist the equi-join into ON — an Ordinal mismatch
+        // silently degrades the join to an unindexed cross product with a post-join filter.
+        HashSet<string> leftAliases = new(StringComparer.OrdinalIgnoreCase) { GetAlias(sources[0]) };
 
         for (int i = 1; i < sources.Count; i++)
         {
@@ -142,14 +145,14 @@ internal static class CommaJoinNormalizer
         if (!TrySplitQualified(rightIdentifier, out string resolvedRightAlias, out _))
             return false;
 
-        if (!string.Equals(resolvedRightAlias, rightAlias, StringComparison.Ordinal))
+        if (!string.Equals(resolvedRightAlias, rightAlias, StringComparison.OrdinalIgnoreCase))
             return false;
 
         if (!TrySplitQualified(leftIdentifier, out string leftAlias, out _))
             return false;
 
         return leftAliases.Contains(leftAlias)
-               && !string.Equals(leftAlias, rightAlias, StringComparison.Ordinal);
+               && !string.Equals(leftAlias, rightAlias, StringComparison.OrdinalIgnoreCase);
     }
 
     internal static string GetAlias(QuerySource source) =>

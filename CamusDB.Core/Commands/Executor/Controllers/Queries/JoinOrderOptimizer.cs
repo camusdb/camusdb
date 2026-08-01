@@ -182,7 +182,10 @@ internal static class JoinOrderOptimizer
                 return true;
 
             default:
-                return true;
+                // Unknown QuerySource subtype: bail so the caller keeps the ORIGINAL join tree.
+                // Returning true here would accept the node WITHOUT adding it to the leaves,
+                // and the rebuilt tree would silently drop that source's rows.
+                return false;
         }
     }
 

@@ -109,6 +109,16 @@ internal static class CheckEvaluator
                 return val.Type != ColumnType.Null;
             }
 
+            // ── IS [NOT] TRUE/FALSE: truth tests, also always definite ───────────────
+            case NodeType.ExprIsTrue:
+            case NodeType.ExprIsNotTrue:
+            case NodeType.ExprIsFalse:
+            case NodeType.ExprIsNotFalse:
+            {
+                ColumnValue val = EvalLeaf(condition.leftAst!, row);
+                return BooleanTruthTest.Evaluate(condition.nodeType, val);
+            }
+
             // ── BETWEEN: unknown if subject or either bound is NULL ──────────────────
             case NodeType.ExprBetween:
             {

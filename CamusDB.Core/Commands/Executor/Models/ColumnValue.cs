@@ -272,6 +272,12 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (other is null)
             throw new ArgumentException("Object is not a ColumnValue");
 
+        // NULL == NULL must compare equal: returning non-zero for the symmetric case makes the
+        // comparator inconsistent (a < b AND b < a), which List.Sort can detect and throw on
+        // when a sorted column contains multiple NULLs.
+        if (Type == ColumnType.Null && other.Type == ColumnType.Null)
+            return 0;
+
         if (other.Type == ColumnType.Null)
             return 1;
 
@@ -283,6 +289,10 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
         switch (Type)
         {
+            // Same consistency requirement for the null-string sub-case.
+            case ColumnType.String or ColumnType.Id when StrValue is null && other.StrValue is null:
+                return 0;
+
             case ColumnType.String or ColumnType.Id when StrValue is null:
                 return -1;
 

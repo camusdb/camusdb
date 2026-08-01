@@ -34,23 +34,46 @@ public sealed class ColumnHistogram
     public long TotalRows { get; set; }
 
     /// <summary>
+    /// Smallest value observed when the histogram was built — the lower boundary of the first
+    /// bucket. Without it the first bucket (which holds ~1/B of all rows, spanning
+    /// [column-min, first upper bound]) cannot be interpolated: values inside it would either
+    /// estimate 0 rows (badly under-pricing a range scan that actually touches the whole
+    /// bucket) or the whole bucket. Null on histograms persisted before this field existed —
+    /// interpolation then falls back to mid-bucket.
+    /// </summary>
+    [JsonPropertyName("minValue")]
+    public ScalarBound? MinValue { get; set; }
+
+    /// <summary>
     /// Returns the estimated fraction of rows satisfying <c>column ≤ value</c>.
-    /// Returns 0.0 when <paramref name="value"/> is below the first bucket's upper bound,
-    /// 1.0 when above the last, and 0.5 on an empty histogram.
+    /// Returns 0.0 when <paramref name="value"/> is below <see cref="MinValue"/>,
+    /// 1.0 when above the last bucket, and 0.5 on an empty histogram.
     ///
     /// For values that fall strictly inside a bucket (between the previous bucket's upper
-    /// bound and this bucket's upper bound) linear interpolation over the bucket's row span
-    /// is applied, assuming a uniform value distribution within the bucket.
+    /// bound — or <see cref="MinValue"/> for the first bucket — and this bucket's upper bound)
+    /// linear interpolation over the bucket's row span is applied, assuming a uniform value
+    /// distribution within the bucket.
     /// </summary>
     public double CumulativeFraction(ScalarBound value)
     {
         if (Buckets.Count == 0 || TotalRows <= 0)
             return 0.5;
 
-        // Value is below the lowest recorded upper bound → no rows qualify.
-        ColumnHistogramBucket first = Buckets[0];
-        if (first.UpperBound is not null && value.CompareTo(first.UpperBound) < 0)
+        // Below the observed column minimum → no rows qualify. Values inside the FIRST bucket
+        // (≥ min but below its upper bound) must NOT short-circuit to 0: the first bucket holds
+        // ~1/B of all rows and is interpolated like any other bucket by the loop below.
+        if (MinValue is not null)
+        {
+            if (value.CompareTo(MinValue) < 0)
+                return 0.0;
+        }
+        else if (Buckets[0].UpperBound is { } firstUpper && value.CompareTo(firstUpper) < 0)
+        {
+            // Legacy histogram persisted before MinValue existed: below-min cannot be told apart
+            // from inside-the-first-bucket, so keep the historical conservative 0. The next
+            // ANALYZE rebuilds the histogram with MinValue and enables first-bucket interpolation.
             return 0.0;
+        }
 
         for (int i = 0; i < Buckets.Count; i++)
         {
@@ -86,25 +109,75 @@ public sealed class ColumnHistogram
 
     /// <summary>
     /// Returns the estimated fraction of rows satisfying <c>column &gt; lo AND column ≤ hi</c>
-    /// (half-open on the low side: <c>(lo, hi]</c>). Should account for the inclusive low
-    /// bound <c>lo ≤ col</c> (SQL BETWEEN / <c>≥</c>) by subtracting an equality-selectivity
-    /// term for <c>lo</c> if needed.
+    /// (half-open: <c>(lo, hi]</c>). Prefer the inclusivity-aware overload — on a skewed
+    /// low-NDV column the equality mass at a bound can be most of the table, so treating an
+    /// inclusive <c>≥ lo</c> as exclusive drops that entire mass from the estimate.
     /// Falls back to 0.5 on an empty histogram.
     /// </summary>
-    public double RangeFraction(ScalarBound? lo, ScalarBound? hi)
+    public double RangeFraction(ScalarBound? lo, ScalarBound? hi) =>
+        RangeFraction(lo, loInclusive: false, hi, hiInclusive: true);
+
+    /// <summary>
+    /// Inclusivity-aware range fraction. The cumulative base covers <c>(lo, hi]</c>; an
+    /// inclusive lower bound adds the equality mass at <paramref name="lo"/> and an exclusive
+    /// upper bound subtracts the equality mass at <paramref name="hi"/> (bucket-density
+    /// estimates, see <see cref="EqualityFraction"/>).
+    /// </summary>
+    public double RangeFraction(ScalarBound? lo, bool loInclusive, ScalarBound? hi, bool hiInclusive)
     {
         double upper = hi is not null ? CumulativeFraction(hi) : 1.0;
         double lower = lo is not null ? CumulativeFraction(lo) : 0.0;
-        return Math.Max(0.0, upper - lower);
+        double fraction = upper - lower;
+
+        if (lo is not null && loInclusive)
+            fraction += EqualityFraction(lo);
+
+        if (hi is not null && !hiInclusive)
+            fraction -= EqualityFraction(hi);
+
+        return Math.Clamp(fraction, 0.0, 1.0);
+    }
+
+    /// <summary>
+    /// Estimated fraction of rows equal to <paramref name="value"/>, from the containing
+    /// bucket's density: <c>bucketRows / distinctInBucket / totalRows</c>. Returns 0 for
+    /// out-of-domain values and on an empty histogram.
+    /// </summary>
+    public double EqualityFraction(ScalarBound value)
+    {
+        if (Buckets.Count == 0 || TotalRows <= 0)
+            return 0.0;
+
+        if (MinValue is not null && value.CompareTo(MinValue) < 0)
+            return 0.0;
+
+        for (int i = 0; i < Buckets.Count; i++)
+        {
+            ColumnHistogramBucket b = Buckets[i];
+            if (b.UpperBound is null)
+                continue;
+
+            if (value.CompareTo(b.UpperBound) <= 0)
+            {
+                long prevCumul = i == 0 ? 0 : Buckets[i - 1].CumulativeRows;
+                long bucketRows = b.CumulativeRows - prevCumul;
+                long distinct = Math.Max(1, b.DistinctInBucket);
+                return bucketRows <= 0 ? 0.0 : (double)bucketRows / distinct / TotalRows;
+            }
+        }
+
+        // Above every bucket's upper bound → outside the observed domain.
+        return 0.0;
     }
 
     // Returns the fractional position of value within bucket i, in [0, 1).
     // For Integer64 and Float64 the position is interpolated by value distance.
     // For other types (String, Id) interpolation is not meaningful; returns 0.5
-    // (mid-bucket) as a neutral estimate.
+    // (mid-bucket) as a neutral estimate. The first bucket interpolates from MinValue
+    // (mid-bucket when absent, e.g. a histogram persisted before MinValue existed).
     private double FractionWithinBucket(ScalarBound value, int bucketIndex)
     {
-        ScalarBound? lo = bucketIndex == 0 ? null : Buckets[bucketIndex - 1].UpperBound;
+        ScalarBound? lo = bucketIndex == 0 ? MinValue : Buckets[bucketIndex - 1].UpperBound;
         ScalarBound? hi = Buckets[bucketIndex].UpperBound;
 
         if (lo is null || hi is null || lo.Type != hi.Type || value.Type != hi.Type)

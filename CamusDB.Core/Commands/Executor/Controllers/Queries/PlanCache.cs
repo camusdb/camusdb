@@ -59,7 +59,7 @@ internal sealed class PlanCache
     public bool TryGet(
         string databaseId,
         string shapeId,
-        IReadOnlyList<(string TableId, int SchemaVersion)> currentDeps,
+        IReadOnlyList<PlanCacheDep> currentDeps,
         out PlanCacheEntry? entry)
     {
         string key = MakeKey(databaseId, shapeId);
@@ -131,27 +131,48 @@ internal sealed class PlanCache
         string.Concat(databaseId, ":", shapeId);
 
     private static bool SchemaDepsMatch(
-        IReadOnlyList<(string, int)> cached,
-        IReadOnlyList<(string, int)> current)
+        IReadOnlyList<PlanCacheDep> cached,
+        IReadOnlyList<PlanCacheDep> current)
     {
         if (cached.Count != current.Count)
             return false;
 
         // Use a dictionary so that a reordering of identical deps does not produce a
         // spurious miss (safe direction: a miss causes a replan, never a stale hit).
-        Dictionary<string, int> cachedMap = new(cached.Count, StringComparer.Ordinal);
-        foreach ((string name, int version) in cached)
-            cachedMap[name] = version;
+        Dictionary<string, PlanCacheDep> cachedMap = new(cached.Count, StringComparer.Ordinal);
+        foreach (PlanCacheDep dep in cached)
+            cachedMap[dep.TableId] = dep;
 
-        foreach ((string name, int version) in current)
+        foreach (PlanCacheDep dep in current)
         {
-            if (!cachedMap.TryGetValue(name, out int cachedVersion) || cachedVersion != version)
+            if (!cachedMap.TryGetValue(dep.TableId, out PlanCacheDep cachedDep)
+                || cachedDep.SchemaVersion != dep.SchemaVersion
+                || cachedDep.IndexSetGeneration != dep.IndexSetGeneration
+                || cachedDep.AnalyzeGeneration != dep.AnalyzeGeneration)
                 return false;
         }
 
         return true;
     }
 }
+
+/// <summary>
+/// One table's contribution to a cached plan's dependency fingerprint.
+///
+/// <see cref="SchemaVersion"/> alone is insufficient: index DDL (add/drop/rename/state change)
+/// deliberately does not bump <see cref="Catalogs.Models.TableSchema.Version"/> (indexes are not
+/// part of row encoding), so <see cref="IndexSetGeneration"/> (bumped on every
+/// <see cref="CommandsExecutor.Models.TableDescriptor.MutateIndexes"/> swap) invalidates cached
+/// access-path decisions when the index set changes — otherwise a CREATE INDEX would never be
+/// considered for an already-cached shape. <see cref="AnalyzeGeneration"/> (bumped on every
+/// histogram/NDV publish) does the same for statistics refreshes. Both generations are
+/// process-unique and never reused, so a descriptor rebuild cannot alias a stale value.
+/// </summary>
+internal readonly record struct PlanCacheDep(
+    string TableId,
+    int SchemaVersion,
+    long IndexSetGeneration,
+    long AnalyzeGeneration);
 
 /// <summary>
 /// Immutable optimization decision stored in <see cref="PlanCache"/>.
@@ -165,7 +186,7 @@ internal sealed class PlanCache
 /// and silently return wrong rows for subsequent queries with the same shape but different ON literals.
 /// </summary>
 internal sealed record PlanCacheEntry(
-    IReadOnlyList<(string TableId, int SchemaVersion)> SchemaDeps,
+    IReadOnlyList<PlanCacheDep> SchemaDeps,
     SingleTableDecision? SingleTable,
     IReadOnlyList<string>? JoinAliasOrder);
 

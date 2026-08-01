@@ -553,6 +553,16 @@ internal abstract class SQLExecutorBaseCreator
                     return ColumnValue.FromBool(columnValue.Type != ColumnType.Null);
                 }
 
+            case NodeType.ExprIsTrue:
+            case NodeType.ExprIsNotTrue:
+            case NodeType.ExprIsFalse:
+            case NodeType.ExprIsNotFalse:
+                {
+                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+                    return ColumnValue.FromBool(BooleanTruthTest.Evaluate(expr.nodeType, columnValue));
+                }
+
             case NodeType.ExprLike:
                 {
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);

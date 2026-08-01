@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
@@ -19,11 +20,14 @@ internal sealed class TableDropper
 {
     private readonly CatalogsManager catalogs;
 
+    private readonly StatisticsManager statistics;
+
     private readonly ILogger<ICamusDB> logger;
 
-    public TableDropper(CatalogsManager catalogs, ILogger<ICamusDB> logger)
+    public TableDropper(CatalogsManager catalogs, StatisticsManager statistics, ILogger<ICamusDB> logger)
     {
         this.catalogs = catalogs;
+        this.statistics = statistics;
         this.logger = logger;
     }
 
@@ -89,6 +93,29 @@ internal sealed class TableDropper
                 );
 
                 await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+            }
+        }
+
+        // Statistics cleanup. Both paths evict the in-memory entry (otherwise it leaks for the
+        // process lifetime, and a pending background flush could re-create the persisted blob
+        // after the drop). The deferred path intentionally keeps the persisted blob: a RELINK
+        // restores the table and reloads it, and the orphan reclaimer purges it otherwise. The
+        // immediate path deletes the blob inside this DDL transaction — nothing else ever would.
+        if (deferred)
+        {
+            statistics.EvictTableStats(database, tableId);
+        }
+        else
+        {
+            try
+            {
+                await statistics.DropTableStatsAsync(database, tableId, tx).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort: stats are advisory and table ids are never reused, so a leftover
+                // blob is harmless garbage removed by DROP DATABASE; don't fail the drop over it.
+                logger.LogWarning(ex, "Failed to delete stats blob for dropped table '{TableName}'", ticket.TableName);
             }
         }
 

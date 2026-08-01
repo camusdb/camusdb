@@ -117,6 +117,14 @@ internal static class QueryHavingEvaluator
                 return ColumnValue.FromBool(
                     Evaluate(expression.leftAst!, row, ticket, parameters).Type != ColumnType.Null);
 
+            case NodeType.ExprIsTrue:
+            case NodeType.ExprIsNotTrue:
+            case NodeType.ExprIsFalse:
+            case NodeType.ExprIsNotFalse:
+                return ColumnValue.FromBool(BooleanTruthTest.Evaluate(
+                    expression.nodeType,
+                    Evaluate(expression.leftAst!, row, ticket, parameters)));
+
             default:
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
         }

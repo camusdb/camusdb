@@ -27,6 +27,14 @@ internal static class JoinPredicatePushdown
 
     public static Result Analyze(BoundSelectQuery bound, NodeAst? where)
     {
+        // Pushdown below a join is only sound for INNER joins: pushing a WHERE conjunct into
+        // the null-extending side of an outer join filters rows before null-extension and
+        // changes the result (and removing it from the post-join filter loses the NULL checks).
+        // Only Inner exists today; this guard makes the first outer-join implementation fail
+        // safe (everything stays post-join) instead of silently returning wrong rows.
+        if (ContainsNonInnerJoin(bound.Query.Source))
+            return AnalyzeWithoutPushdown(bound, where);
+
         Dictionary<string, List<NodeAst>> conjunctsByAlias = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (BoundTableSource source in bound.Sources)
@@ -62,6 +70,36 @@ internal static class JoinPredicatePushdown
         {
             ScanFiltersByAlias = scanFilters,
             PostJoinFilter = PredicateAnalyzer.CombineConjuncts(postJoinConjuncts),
+        };
+    }
+
+    private static bool ContainsNonInnerJoin(QuerySource source) => source switch
+    {
+        JoinSource js => js.Kind != JoinKind.Inner
+                         || ContainsNonInnerJoin(js.Left)
+                         || ContainsNonInnerJoin(js.Right),
+        _ => false,
+    };
+
+    /// <summary>
+    /// Fallback for join trees containing a non-inner join: no per-source scan filters are
+    /// derived (every alias maps to null = no pushed filter) and the whole WHERE stays a
+    /// post-join residual — always correct, never optimal.
+    /// </summary>
+    private static Result AnalyzeWithoutPushdown(BoundSelectQuery bound, NodeAst? where)
+    {
+        Dictionary<string, NodeAst?> scanFilters = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (BoundTableSource source in bound.Sources)
+            scanFilters[source.Alias] = null;
+
+        foreach (BoundDerivedTableSource source in bound.DerivedSources)
+            scanFilters[source.Alias] = null;
+
+        return new Result
+        {
+            ScanFiltersByAlias = scanFilters,
+            PostJoinFilter = where,
         };
     }
 

@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -58,10 +59,10 @@ internal static partial class Log
     public static partial void LogDatabaseDropped(ILogger logger, string name);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Took {Kind} backup {BackupId}")]
-    public static partial void LogBackupTaken(ILogger logger, string kind, string backupId);
+    public static partial void LogBackupTaken(ILogger logger, BackupKind kind, Guid backupId);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Restored backup chain {LeafBackupId} into {TargetDir}")]
-    public static partial void LogBackupRestored(ILogger logger, string leafBackupId, string targetDir);
+    public static partial void LogBackupRestored(ILogger logger, Guid leafBackupId, string targetDir);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Database {DbName} opened")]
     public static partial void LogDatabaseOpened(ILogger logger, string dbName);

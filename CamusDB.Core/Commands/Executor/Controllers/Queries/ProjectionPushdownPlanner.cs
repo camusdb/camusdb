@@ -56,7 +56,7 @@ internal static class ProjectionPushdownPlanner
 
     private static void AnnotateJoinScanNodes(
         PhysicalPlanNode node,
-        IReadOnlyDictionary<string, IReadOnlySet<string>> requiredByAlias)
+        IReadOnlyDictionary<string, IReadOnlySet<string>?> requiredByAlias)
     {
         if (node is TableScanNode { BoundSource: not null } scan)
             scan.RequiredColumns = requiredByAlias[scan.BoundSource.Alias];

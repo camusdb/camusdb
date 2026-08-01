@@ -89,8 +89,12 @@ internal static class CardinalityEstimator
         // single one-sided bounds, equalities, and ≠ comparisons remain in the independence loop.
         HashSet<string>? rangePairHandled = null;
 
-        // Bucket comparisons by column → lower bound and upper bound.
-        Dictionary<string, (ScalarBound? lo, ScalarBound? hi)>? rangePairs = null;
+        // Bucket comparisons by column → tightest lower bound and tightest upper bound.
+        // "x > 5 AND x > 10" must keep > 10 (the larger lower bound); "x < 20 AND x <= 15"
+        // must keep <= 15 (the smaller upper bound). On an equal value the exclusive form is
+        // tighter than the inclusive one. Keeping merely the FIRST bound per side would
+        // silently widen the range and overestimate cardinality.
+        Dictionary<string, (ScalarBound? lo, bool loInc, ScalarBound? hi, bool hiInc)>? rangePairs = null;
         foreach (AnalyzedComparison c in comparisons)
         {
             bool isLo = c.Operator is ">" or ">=";
@@ -103,23 +107,44 @@ internal static class CardinalityEstimator
 
             rangePairs ??= new(StringComparer.OrdinalIgnoreCase);
             if (!rangePairs.TryGetValue(c.ColumnName, out var pair))
-                pair = (null, null);
+                pair = (null, false, null, false);
 
             ScalarBound? bound = TryGetBound(c.Constant);
-            if (isLo) pair = (pair.lo ?? bound, pair.hi);
-            else      pair = (pair.lo, pair.hi ?? bound);
+            if (bound is null)
+            {
+                rangePairs[c.ColumnName] = pair;
+                continue;
+            }
+
+            bool inclusive = c.Operator is ">=" or "<=";
+
+            if (isLo)
+            {
+                int cmp = pair.lo is null ? 1 : bound.CompareTo(pair.lo);
+                if (cmp > 0 || (cmp == 0 && !inclusive))
+                    pair = (bound, inclusive, pair.hi, pair.hiInc);
+            }
+            else
+            {
+                int cmp = pair.hi is null ? -1 : bound.CompareTo(pair.hi);
+                if (cmp < 0 || (cmp == 0 && !inclusive))
+                    pair = (pair.lo, pair.loInc, bound, inclusive);
+            }
+
             rangePairs[c.ColumnName] = pair;
         }
 
         if (rangePairs is not null)
         {
-            foreach (KeyValuePair<string, (ScalarBound? lo, ScalarBound? hi)> kv in rangePairs)
+            foreach (KeyValuePair<string, (ScalarBound? lo, bool loInc, ScalarBound? hi, bool hiInc)> kv in rangePairs)
             {
                 // Only merge when BOTH bounds are present — that is the two-sided case.
                 // A single one-sided bound is left for the independence loop below.
                 if (kv.Value.lo is null || kv.Value.hi is null) continue;
 
-                sel *= EstimateRangeFraction(kv.Value.lo, kv.Value.hi, kv.Key, database, table, stats);
+                sel *= EstimateRangeFraction(
+                    kv.Value.lo, kv.Value.loInc, kv.Value.hi, kv.Value.hiInc,
+                    kv.Key, database, table, stats);
                 rangePairHandled ??= new(StringComparer.OrdinalIgnoreCase);
                 rangePairHandled.Add(kv.Key);
             }
@@ -215,13 +240,30 @@ internal static class CardinalityEstimator
         DatabaseDescriptor database,
         TableDescriptor table,
         StatisticsManager stats)
+        => EstimateRangeFraction(loBound, loInclusive: false, hiBound, hiInclusive: true,
+            columnName, database, table, stats);
+
+    /// <summary>
+    /// Inclusivity-aware variant: an inclusive lower bound keeps the equality mass at
+    /// <paramref name="loBound"/> and an exclusive upper bound drops the mass at
+    /// <paramref name="hiBound"/> (see <see cref="ColumnHistogram.RangeFraction(ScalarBound?, bool, ScalarBound?, bool)"/>).
+    /// </summary>
+    public static double EstimateRangeFraction(
+        ScalarBound? loBound,
+        bool loInclusive,
+        ScalarBound? hiBound,
+        bool hiInclusive,
+        string columnName,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        StatisticsManager stats)
     {
         columnName = StripAliasPrefix(columnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
         if (hist is null || hist.TotalRows == 0)
             return FallbackSelectivity;
 
-        return Clamp(hist.RangeFraction(loBound, hiBound));
+        return Clamp(hist.RangeFraction(loBound, loInclusive, hiBound, hiInclusive));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -410,14 +452,17 @@ internal static class CardinalityEstimator
 
             case ">":
             case ">=":
+                // ">=" carries the equality mass at the bound; on a skewed low-NDV column
+                // that mass can be most of the table, so dropping it flips scan decisions.
                 if (bound is not null && hist is not null && hist.TotalRows > 0)
-                    return Clamp(hist.RangeFraction(bound, null));
+                    return Clamp(hist.RangeFraction(bound, loInclusive: op == ">=", null, hiInclusive: true));
                 return FallbackSelectivity;
 
             case "<":
             case "<=":
+                // "<" must exclude the equality mass at the bound (cumulative is ≤-based).
                 if (bound is not null && hist is not null && hist.TotalRows > 0)
-                    return Clamp(hist.RangeFraction(null, bound));
+                    return Clamp(hist.RangeFraction(null, loInclusive: false, bound, hiInclusive: op == "<="));
                 return FallbackSelectivity;
 
             default:
@@ -445,6 +490,11 @@ internal static class CardinalityEstimator
         // 2. Histogram bucket: rows-in-bucket / totalRows / distinct-in-bucket.
         if (bound is not null && hist is not null && hist.TotalRows > 0)
         {
+            // Out-of-domain: equality on a value above every bucket (or below the observed
+            // minimum) matches ~nothing — estimate one row rather than last-bucket density.
+            if (IsOutsideHistogramDomain(hist, bound))
+                return Math.Min(1.0, 1.0 / hist.TotalRows);
+
             int bi = FindBucketIndex(hist, bound);
             if (bi >= 0)
             {
@@ -492,6 +542,20 @@ internal static class CardinalityEstimator
                 return i;
         }
         return hist.Buckets.Count > 0 ? hist.Buckets.Count - 1 : -1;
+    }
+
+    // True when the value lies outside the histogram's observed [min, max] domain: above the
+    // last bucket's upper bound, or (when the histogram records MinValue) below the minimum.
+    private static bool IsOutsideHistogramDomain(ColumnHistogram hist, ScalarBound bound)
+    {
+        if (hist.Buckets.Count == 0)
+            return false;
+
+        if (hist.MinValue is not null && bound.CompareTo(hist.MinValue) < 0)
+            return true;
+
+        ColumnHistogramBucket last = hist.Buckets[^1];
+        return last.UpperBound is not null && bound.CompareTo(last.UpperBound) > 0;
     }
 
     private static ScalarBound? TryGetBound(ColumnValue val) =>

@@ -65,9 +65,12 @@ internal static class CostEstimator
     private const double BothBoundsSelectivity = 0.10;
 
     // When column min/max is available, real selectivity replaces this constant.
-    // Without stats the pessimistic 0.40 (= BreakevenFraction) ensures every half-open
-    // range flips to a full table scan, which is safe but sub-optimal.
-    private const double OneBoundSelectivity   = 0.40;
+    // Deliberately equal to BreakevenFraction: without stats a half-open range's estimated
+    // rows (computed with Math.Ceiling in the fallback) meet the breakeven exactly, so the
+    // scan flips to a full table scan — safe (a non-covering index scan of half the table
+    // costs ~2× a full scan) but sub-optimal. If the two constants ever diverge again, that
+    // safety property silently disappears.
+    private const double OneBoundSelectivity   = BreakevenFraction;
     private const double FilterSelectivity     = 0.10;
     private const double AggregateSelectivity  = 0.20;
     private const double DistinctSelectivity   = 0.70;
@@ -420,8 +423,11 @@ internal static class CostEstimator
 
                 return (rows, new PlanCost
                 {
+                    // Saturating multiply: deep join trees can each carry multi-billion-row
+                    // estimates, and a raw long multiply wraps negative — poisoning the
+                    // annotated cost (and any future cost-driven join choice) silently.
+                    KvRangeScanEntries = SaturatingMultiply(inputCardinality, innerRows),
                     EstimatedRows      = rows,
-                    KvRangeScanEntries = inputCardinality * innerRows,
                 });
             }
 
@@ -520,8 +526,8 @@ internal static class CostEstimator
 
             case SemiJoinNode:
             {
-                // Conservative estimate: semi-join passes at most inputCardinality rows (semi) or
-                // fewer (anti). Use a fixed 0.5 selectivity as a rough heuristic.
+                // Semi-join passes at most inputCardinality rows (semi) or fewer (anti); with no
+                // membership statistics, price it like a generic filter (FilterSelectivity).
                 long rows = Math.Max(1, (long)(inputCardinality * FilterSelectivity));
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
@@ -751,7 +757,11 @@ internal static class CostEstimator
                 {
                     ScalarBound? fb = rangeFrom is not null ? ScalarBound.FromColumnValue(rangeFrom) : null;
                     ScalarBound? tb = rangeTo   is not null ? ScalarBound.FromColumnValue(rangeTo)   : null;
-                    double histSel = CardinalityEstimator.EstimateRangeFraction(fb, tb, rangeCol, database, table, stats);
+                    // The range column is the terminal component of its bound, so the scan's
+                    // composite inclusivity flags apply to it directly; an inclusive lower
+                    // bound keeps the equality mass at the bound value.
+                    double histSel = CardinalityEstimator.EstimateRangeFraction(
+                        fb, node.FromInclusive, tb, node.ToInclusive, rangeCol, database, table, stats);
                     return Math.Max(1, (long)(tableRowCount * prefixSel * histSel));
                 }
 
@@ -775,12 +785,22 @@ internal static class CostEstimator
             }
         }
 
-        // Fallback: fixed heuristic selectivities.
+        // Fallback: fixed heuristic selectivities. Ceiling so that a stats-free half-open
+        // range (OneBoundSelectivity == BreakevenFraction) meets ShouldPreferFullScan's
+        // ceiling-based breakeven on every table size, including odd row counts — truncation
+        // would land one row short and keep the index.
         double selectivity = (hasFrom && hasTo) ? BothBoundsSelectivity
                            : (hasFrom || hasTo) ? OneBoundSelectivity
                            : 1.0;
 
-        return Math.Max(1, (long)(tableRowCount * selectivity));
+        return Math.Max(1, (long)Math.Ceiling(tableRowCount * selectivity));
+    }
+
+    // Multiplies two non-negative row counts, saturating at long.MaxValue instead of wrapping.
+    private static long SaturatingMultiply(long a, long b)
+    {
+        double product = (double)a * b;
+        return product >= long.MaxValue ? long.MaxValue : (long)product;
     }
 
     // Computes the fraction of values in [columnMin, columnMax] that satisfy the predicate
@@ -811,7 +831,11 @@ internal static class CostEstimator
                 : max;
 
             if (hi < lo) return 0.0;
-            return Math.Min(1.0, (double)(hi - lo) / (max - min));
+            // Inclusive integer ranges span (hi − lo + 1) of (max − min + 1) values — without
+            // the +1 a single-value range on a 10-value domain estimates 0 instead of 0.1.
+            // Compute in double so extreme values near long.Min/MaxValue cannot overflow the
+            // subtraction into a negative selectivity.
+            return Math.Min(1.0, ((double)hi - lo + 1) / ((double)max - min + 1));
         }
 
         if (colMin.Type == CamusDB.Core.Catalogs.Models.ColumnType.Float64)
