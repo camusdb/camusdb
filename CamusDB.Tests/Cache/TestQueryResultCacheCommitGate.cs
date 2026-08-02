@@ -26,12 +26,18 @@ namespace CamusDB.Tests.Cache;
 /// These tests use <see cref="QueryResultCache"/> directly (no Kahuna / SQL layer).
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryResultCacheCommitGate
 {
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Baseline configuration for a cache under test. These tests drive <see cref="QueryResultCache"/>
+    /// on its own, with no engine to take configuration from, and a case that needs a particular cap or
+    /// TTL builds its own copy with <c>with</c> rather than changing anything shared.
+    /// </summary>
+    private static CamusDBOptions CacheOptions => CamusDBOptions.Default;
 
     private static CachedQueryResult MakeResult(
         string dbId,
@@ -264,7 +270,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task HitAfterPublish()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
         CachedQueryResult result = MakeResult("db", "c", fp);
         CacheGenerationToken token = EmptyToken(cache);
@@ -280,7 +286,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task MissWhenNotPublished()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
 
         CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
@@ -290,7 +296,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task DifferentDatabaseIds_Miss()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
         string fp = ResultFingerprintBuilder.Build("db1", "c", "s", null, null, NoOpts);
         string fpOther = ResultFingerprintBuilder.Build("db2", "c", "s", null, null, NoOpts);
 
@@ -305,7 +311,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task DifferentSchemaVersion_AfterDropRecreate_Miss()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         // Cache entry for schema version 1
         string fp1 = ResultFingerprintBuilder.Build("db", "c", "s", null, SchemaDeps("orders", 1), NoOpts);
@@ -324,55 +330,40 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task OversizedRowCount_IsRejected()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxEntryRows;
-        try
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheMaxEntryRows = 2 }, sweepIntervalMs: -1);
+
+        // Build 3 rows — exceeds the cap of 2
+        var rows = new List<QueryResultRow>
         {
-            CamusDBConfig.QueryResultCacheMaxEntryRows = 2;
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+            MakeRow("col", "a"), MakeRow("col", "b"), MakeRow("col", "c"),
+        };
+        string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
+        CachedQueryResult result = MakeResult("db", "c", fp, rows);
 
-            // Build 3 rows — exceeds the cap of 2
-            var rows = new List<QueryResultRow>
-            {
-                MakeRow("col", "a"), MakeRow("col", "b"), MakeRow("col", "c"),
-            };
-            string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
-            CachedQueryResult result = MakeResult("db", "c", fp, rows);
+        (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(result, EmptyToken(cache));
+        Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish),
+            "Oversized row count must be bypassed");
+        Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
 
-            (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(result, EmptyToken(cache));
-            Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish),
-                "Oversized row count must be bypassed");
-            Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
-
-            CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
-            Assert.That(hit, Is.Null, "Bypassed entry must not be stored");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryRows = origMax;
-        }
+        CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
+        Assert.That(hit, Is.Null, "Bypassed entry must not be stored");
     }
 
     [Test]
     public async Task OversizedBytes_IsRejected()
     {
-        long origMaxBytes = CamusDBConfig.QueryResultCacheMaxEntryBytes;
-        try
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryBytes = 1; // 1 byte — any row exceeds this
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        // 1 byte — any row exceeds this
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheMaxEntryBytes = 1 }, sweepIntervalMs: -1);
 
-            var rows = new List<QueryResultRow> { MakeRow("col", "hello") };
-            string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
+        var rows = new List<QueryResultRow> { MakeRow("col", "hello") };
+        string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
 
-            (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(
-                MakeResult("db", "c", fp, rows), EmptyToken(cache));
-            Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish));
-            Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryBytes = origMaxBytes;
-        }
+        (QueryCacheStatus status, QueryCacheBypassReason reason) = await cache.TryPublishAsync(
+            MakeResult("db", "c", fp, rows), EmptyToken(cache));
+        Assert.That(status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish));
+        Assert.That(reason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -382,34 +373,26 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task LruEviction_WhenMaxEntriesReached()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxEntries;
-        try
-        {
-            CamusDBConfig.QueryResultCacheMaxEntries = 2;
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheMaxEntries = 2 }, sweepIntervalMs: -1);
 
-            string fp1 = ResultFingerprintBuilder.Build("db", "c", "s1", null, null, NoOpts);
-            string fp2 = ResultFingerprintBuilder.Build("db", "c", "s2", null, null, NoOpts);
-            string fp3 = ResultFingerprintBuilder.Build("db", "c", "s3", null, null, NoOpts);
+        string fp1 = ResultFingerprintBuilder.Build("db", "c", "s1", null, null, NoOpts);
+        string fp2 = ResultFingerprintBuilder.Build("db", "c", "s2", null, null, NoOpts);
+        string fp3 = ResultFingerprintBuilder.Build("db", "c", "s3", null, null, NoOpts);
 
-            await cache.TryPublishAsync(MakeResult("db", "c", fp1), EmptyToken(cache));
-            await cache.TryPublishAsync(MakeResult("db", "c", fp2), EmptyToken(cache));
+        await cache.TryPublishAsync(MakeResult("db", "c", fp1), EmptyToken(cache));
+        await cache.TryPublishAsync(MakeResult("db", "c", fp2), EmptyToken(cache));
 
-            // Touch fp1 so it becomes MRU; fp2 becomes LRU
-            await cache.TryGetAsync("db", "c", fp1);
+        // Touch fp1 so it becomes MRU; fp2 becomes LRU
+        await cache.TryGetAsync("db", "c", fp1);
 
-            // Insert fp3 — fp2 should be evicted
-            await cache.TryPublishAsync(MakeResult("db", "c", fp3), EmptyToken(cache));
+        // Insert fp3 — fp2 should be evicted
+        await cache.TryPublishAsync(MakeResult("db", "c", fp3), EmptyToken(cache));
 
-            Assert.That(cache.EntryCount, Is.EqualTo(2), "Cache must stay at max entries");
-            Assert.That(await cache.TryGetAsync("db", "c", fp1), Is.Not.Null, "MRU entry must survive");
-            Assert.That(await cache.TryGetAsync("db", "c", fp2), Is.Null, "LRU entry must be evicted");
-            Assert.That(await cache.TryGetAsync("db", "c", fp3), Is.Not.Null, "New entry must be present");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxEntries = origMax;
-        }
+        Assert.That(cache.EntryCount, Is.EqualTo(2), "Cache must stay at max entries");
+        Assert.That(await cache.TryGetAsync("db", "c", fp1), Is.Not.Null, "MRU entry must survive");
+        Assert.That(await cache.TryGetAsync("db", "c", fp2), Is.Null, "LRU entry must be evicted");
+        Assert.That(await cache.TryGetAsync("db", "c", fp3), Is.Not.Null, "New entry must be present");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -419,50 +402,35 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task TtlExpiry_EntryMissesAfterExpiry()
     {
-        int origTtl = CamusDBConfig.QueryResultCacheDefaultTtlMs;
-        try
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = 0; // expires immediately (TTL = 0 ms)
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        // TTL 0 — expires immediately
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheDefaultTtlMs = 0 }, sweepIntervalMs: -1);
 
-            string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
-            await cache.TryPublishAsync(MakeResult("db", "c", fp), EmptyToken(cache));
+        string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
+        await cache.TryPublishAsync(MakeResult("db", "c", fp), EmptyToken(cache));
 
-            // No sleep needed — TTL of 0 means expiry is at TickCount64 + 0 = the moment it was stored.
-            // Wait a tiny bit to ensure TickCount64 advances.
-            await Task.Delay(10);
+        // No sleep needed — TTL of 0 means expiry is at TickCount64 + 0 = the moment it was stored.
+        // Wait a tiny bit to ensure TickCount64 advances.
+        await Task.Delay(10);
 
-            CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
-            Assert.That(hit, Is.Null, "Entry with elapsed TTL must miss on probe");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = origTtl;
-        }
+        CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
+        Assert.That(hit, Is.Null, "Entry with elapsed TTL must miss on probe");
     }
 
     [Test]
     public async Task Sweep_RemovesExpiredEntries()
     {
-        int origTtl = CamusDBConfig.QueryResultCacheDefaultTtlMs;
-        try
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = 0;
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheDefaultTtlMs = 0 }, sweepIntervalMs: -1);
 
-            string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
-            await cache.TryPublishAsync(MakeResult("db", "c", fp), EmptyToken(cache));
-            Assert.That(cache.EntryCount, Is.EqualTo(1));
+        string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
+        await cache.TryPublishAsync(MakeResult("db", "c", fp), EmptyToken(cache));
+        Assert.That(cache.EntryCount, Is.EqualTo(1));
 
-            await Task.Delay(10);
-            cache.Sweep();
+        await Task.Delay(10);
+        cache.Sweep();
 
-            Assert.That(cache.EntryCount, Is.EqualTo(0), "Sweep must remove expired entries");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = origTtl;
-        }
+        Assert.That(cache.EntryCount, Is.EqualTo(0), "Sweep must remove expired entries");
     }
 
     [Test]
@@ -470,78 +438,60 @@ public sealed class TestQueryResultCacheCommitGate
     {
         // An entry published with HintTtlMs = 1 must expire well before an entry
         // published with the global default TTL (5 000 ms by default).
-        int origDefault = CamusDBConfig.QueryResultCacheDefaultTtlMs;
-        try
-        {
-            // Keep the global default comfortably long so the second entry doesn't expire
-            // during the test.
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = 60_000;
+        // The default TTL is kept comfortably long so the second entry cannot expire during the test.
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheDefaultTtlMs = 60_000 }, sweepIntervalMs: -1);
 
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        // Entry with a per-hint TTL of 1 ms
+        string fpShort = ResultFingerprintBuilder.Build("db", "short", "s", null, null, NoOpts);
+        var shortResult = new CachedQueryResult(
+            CacheName: "short",
+            DatabaseId: "db",
+            Rows: [],
+            ResultFingerprint: fpShort,
+            CachedAt: default(HLCTimestamp),
+            Status: QueryCacheStatus.Miss,
+            HintTtlMs: 1);            // 1 ms — expires almost immediately
+        await cache.TryPublishAsync(shortResult, EmptyToken(cache));
 
-            // Entry with a per-hint TTL of 1 ms
-            string fpShort = ResultFingerprintBuilder.Build("db", "short", "s", null, null, NoOpts);
-            var shortResult = new CachedQueryResult(
-                CacheName: "short",
-                DatabaseId: "db",
-                Rows: [],
-                ResultFingerprint: fpShort,
-                CachedAt: default(HLCTimestamp),
-                Status: QueryCacheStatus.Miss,
-                HintTtlMs: 1);            // 1 ms — expires almost immediately
-            await cache.TryPublishAsync(shortResult, EmptyToken(cache));
+        // Entry using the global default TTL (60 s)
+        string fpLong = ResultFingerprintBuilder.Build("db", "long", "s", null, null, NoOpts);
+        await cache.TryPublishAsync(MakeResult("db", "long", fpLong), EmptyToken(cache));
 
-            // Entry using the global default TTL (60 s)
-            string fpLong = ResultFingerprintBuilder.Build("db", "long", "s", null, null, NoOpts);
-            await cache.TryPublishAsync(MakeResult("db", "long", fpLong), EmptyToken(cache));
+        // Let the 1 ms hint TTL elapse
+        await Task.Delay(20);
 
-            // Let the 1 ms hint TTL elapse
-            await Task.Delay(20);
+        CachedQueryResult? hitShort = await cache.TryGetAsync("db", "short", fpShort);
+        CachedQueryResult? hitLong  = await cache.TryGetAsync("db", "long",  fpLong);
 
-            CachedQueryResult? hitShort = await cache.TryGetAsync("db", "short", fpShort);
-            CachedQueryResult? hitLong  = await cache.TryGetAsync("db", "long",  fpLong);
-
-            Assert.That(hitShort, Is.Null,
-                "Entry with HintTtlMs=1 must miss after 20 ms");
-            Assert.That(hitLong, Is.Not.Null,
-                "Entry with default TTL (60 s) must still be alive");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = origDefault;
-        }
+        Assert.That(hitShort, Is.Null,
+            "Entry with HintTtlMs=1 must miss after 20 ms");
+        Assert.That(hitLong, Is.Not.Null,
+            "Entry with default TTL (60 s) must still be alive");
     }
 
     [Test]
     public async Task PerHintTtl_Null_FallsBackToDefault()
     {
-        // HintTtlMs = null must behave identically to using the global default.
-        int origDefault = CamusDBConfig.QueryResultCacheDefaultTtlMs;
-        try
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = 60_000;
-            using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        // HintTtlMs = null must behave identically to using the configured default.
+        using var cache = new QueryResultCache(
+            CacheOptions with { QueryResultCacheDefaultTtlMs = 60_000 }, sweepIntervalMs: -1);
 
-            string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
-            var result = new CachedQueryResult(
-                CacheName: "c",
-                DatabaseId: "db",
-                Rows: [],
-                ResultFingerprint: fp,
-                CachedAt: default(HLCTimestamp),
-                Status: QueryCacheStatus.Miss,
-                HintTtlMs: null);         // explicit null → must use default
-            await cache.TryPublishAsync(result, EmptyToken(cache));
+        string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
+        var result = new CachedQueryResult(
+            CacheName: "c",
+            DatabaseId: "db",
+            Rows: [],
+            ResultFingerprint: fp,
+            CachedAt: default(HLCTimestamp),
+            Status: QueryCacheStatus.Miss,
+            HintTtlMs: null);         // explicit null → must use default
+        await cache.TryPublishAsync(result, EmptyToken(cache));
 
-            // Should still be live immediately after publish
-            CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
-            Assert.That(hit, Is.Not.Null,
-                "Entry with HintTtlMs=null must use the global default TTL and still be live");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheDefaultTtlMs = origDefault;
-        }
+        // Should still be live immediately after publish
+        CachedQueryResult? hit = await cache.TryGetAsync("db", "c", fp);
+        Assert.That(hit, Is.Not.Null,
+            "Entry with HintTtlMs=null must use the configured default TTL and still be live");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -551,7 +501,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateCacheName_RemovesMatchingEntries()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         string fp1 = ResultFingerprintBuilder.Build("db", "orders", "s1", null, null, NoOpts);
         string fp2 = ResultFingerprintBuilder.Build("db", "customers", "s2", null, null, NoOpts);
@@ -570,7 +520,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateDatabase_RemovesAllEntriesForDatabase()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         string fp1 = ResultFingerprintBuilder.Build("db1", "c1", "s1", null, null, NoOpts);
         string fp2 = ResultFingerprintBuilder.Build("db1", "c2", "s2", null, null, NoOpts);
@@ -591,7 +541,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateCacheName_OtherDatabaseUnaffected()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         // Both databases have a cache named "orders"
         string fp1 = ResultFingerprintBuilder.Build("db1", "orders", "s1", null, null, NoOpts);
@@ -614,7 +564,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task GenerationFence_BlocksPublishAfterWrite()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
         string keyspace = "db:table1:r";
 
         // Snapshot generations before query starts
@@ -642,7 +592,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task ByteAccounting_IncreasesOnPublish_DecreasesOnRemove()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         string fp = ResultFingerprintBuilder.Build("db", "c", "s", null, null, NoOpts);
         var rows = new List<QueryResultRow> { MakeRow("col", "hello world") };
@@ -671,7 +621,7 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public async Task InvalidateByModifiedKeys_RowKey_RemovesMatchingEntry()
     {
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         // Publish an entry whose fingerprint maps to "db1:tbl1" in the dep index.
         // Since entries currently carry QueryDependencySet.Empty, we verify the row-key
@@ -703,7 +653,7 @@ public sealed class TestQueryResultCacheCommitGate
         //
         // We test the extraction logic directly through InvalidateByModifiedKeys + a manually
         // constructed dep. Since QueryDependencySet is public we can build a non-empty dep set.
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         // Real row key: "mydb:orders:r/000000000000000000000001"
         // Expected bucket: "mydb:orders:r"
@@ -728,7 +678,7 @@ public sealed class TestQueryResultCacheCommitGate
         // Real index key format: "{dbId}:{tableId}:i:{indexId}/{encodedKey}"
         // Example: "mydb:orders:i:idx-name/0031003200330034"
         // Expected bucket: "mydb:orders:i:idx-name"
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         string indexKey = "mydb:orders:i:idx-name/0031003200330034";
 
@@ -747,7 +697,7 @@ public sealed class TestQueryResultCacheCommitGate
         // That format does not exist in production — the real format has a colon.
         // Passing a key in the old format should return an empty bucket (no match),
         // not silently extract a wrong bucket.
-        using var cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
         // Old format (never actually written by KvTableStore): "db:tbl:i/idx/key"
         // The new code requires key[colonAfterI] == ':', so this should produce no bucket.
@@ -784,25 +734,32 @@ public sealed class TestQueryResultCacheCommitGate
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Config wiring — ConfigDefinition defaults match CamusDBConfig defaults
+    // Config wiring — an absent config file must leave the cache at its built-in defaults
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// A config file that mentions none of the cache keys must leave every cache setting exactly where
+    /// the built-in defaults put it. Asserting against <see cref="CamusDBOptions.Default"/> rather than
+    /// repeated literals means the two cannot drift apart silently: changing a default in one place and
+    /// not the other fails here.
+    /// </summary>
     [Test]
-    public void ConfigDefinition_DefaultsMatchCamusDBConfigDefaults()
+    public void ConfigDefinition_DefaultsMatchTheBuiltInOptionDefaults()
     {
         var def = new CamusDB.Core.Config.Models.ConfigDefinition();
+        CamusDBOptions defaults = CamusDBOptions.Default;
 
-        Assert.That(def.QueryResultCacheEnabled,              Is.EqualTo(true));
-        Assert.That(def.QueryResultCacheDefaultTtlMs,         Is.EqualTo(5_000));
-        Assert.That(def.QueryResultCacheMaxEntries,           Is.EqualTo(1_024));
-        Assert.That(def.QueryResultCacheMaxBytes,             Is.EqualTo(64 * 1024 * 1024));
-        Assert.That(def.QueryResultCacheMaxEntryBytes,        Is.EqualTo(1 * 1024 * 1024));
-        Assert.That(def.QueryResultCacheMaxEntryRows,         Is.EqualTo(10_000));
-        Assert.That(def.QueryResultCacheMaxDeps,              Is.EqualTo(4_096));
-        Assert.That(def.QueryResultCacheMaxPointDeps,         Is.EqualTo(2_048));
-        Assert.That(def.QueryResultCacheMaxRanges,            Is.EqualTo(256));
-        Assert.That(def.QueryResultCacheSingleflightWaitMs,   Is.EqualTo(250));
-        Assert.That(def.QueryResultCacheStrictValidationMaxKeys, Is.EqualTo(10_000));
-        Assert.That(def.QueryResultCacheSweepIntervalMs,      Is.EqualTo(10_000));
+        Assert.That(def.QueryResultCacheEnabled,                 Is.EqualTo(defaults.QueryResultCacheEnabled));
+        Assert.That(def.QueryResultCacheDefaultTtlMs,            Is.EqualTo(defaults.QueryResultCacheDefaultTtlMs));
+        Assert.That(def.QueryResultCacheMaxEntries,              Is.EqualTo(defaults.QueryResultCacheMaxEntries));
+        Assert.That(def.QueryResultCacheMaxBytes,                Is.EqualTo(defaults.QueryResultCacheMaxBytes));
+        Assert.That(def.QueryResultCacheMaxEntryBytes,           Is.EqualTo(defaults.QueryResultCacheMaxEntryBytes));
+        Assert.That(def.QueryResultCacheMaxEntryRows,            Is.EqualTo(defaults.QueryResultCacheMaxEntryRows));
+        Assert.That(def.QueryResultCacheMaxDeps,                 Is.EqualTo(defaults.QueryResultCacheMaxDeps));
+        Assert.That(def.QueryResultCacheMaxPointDeps,            Is.EqualTo(defaults.QueryResultCacheMaxPointDeps));
+        Assert.That(def.QueryResultCacheMaxRanges,               Is.EqualTo(defaults.QueryResultCacheMaxRanges));
+        Assert.That(def.QueryResultCacheSingleflightWaitMs,      Is.EqualTo(defaults.QueryResultCacheSingleFlightWaitMs));
+        Assert.That(def.QueryResultCacheStrictValidationMaxKeys, Is.EqualTo(defaults.QueryResultCacheStrictValidationMaxKeys));
+        Assert.That(def.QueryResultCacheSweepIntervalMs,         Is.EqualTo(defaults.QueryResultCacheSweepIntervalMs));
     }
 }

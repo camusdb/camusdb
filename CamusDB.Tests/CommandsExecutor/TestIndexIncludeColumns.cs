@@ -31,9 +31,10 @@ internal sealed class TestIndexIncludeColumns : BaseTest
 {
     private const string TableName = "orders";
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateOrdersTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateOrdersTable(
+        CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
         await ExecDDL(executor, dbname,
             $"CREATE TABLE {TableName} (id oid primary key, customer_id int64 not null, status string(32) not null, total float64 not null)");
         return (dbname, database, executor);
@@ -570,74 +571,46 @@ internal sealed class TestIndexIncludeColumns : BaseTest
     [NonParallelizable]
     public async Task ColumnCountLimit_RejectsIndex_ExceedingKeyPlusIncludeCeiling()
     {
-        // The validator fixes its configuration when the engine is built, so the ceiling is lowered
-        // before the table (and the executor behind it) are created.
-        int saved = CamusDBConfig.MaxIndexColumns;
-        CamusDBConfig.MaxIndexColumns = 2; // key(1) + include(2) = 3 > 2
+        // key(1) + include(2) = 3, one past this engine's ceiling of 2.
+        (string dbname, _, CommandExecutor executor) = await CreateOrdersTable(Options with { MaxIndexColumns = 2 });
 
-        (string dbname, _, CommandExecutor executor) = await CreateOrdersTable();
-        try
-        {
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await ExecDDL(executor, dbname,
-                    $"CREATE INDEX idx_wide ON {TableName} (customer_id) INCLUDE (status, total)"));
-            Assert.That(ex!.Message, Does.Contain("exceeding the maximum"));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex.Code);
-        }
-        finally
-        {
-            CamusDBConfig.MaxIndexColumns = saved;
-        }
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDDL(executor, dbname,
+                $"CREATE INDEX idx_wide ON {TableName} (customer_id) INCLUDE (status, total)"));
+        Assert.That(ex!.Message, Does.Contain("exceeding the maximum"));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex.Code);
     }
 
     [Test]
     [NonParallelizable]
     public async Task ColumnCountLimit_RejectsInlineCreateTableIndex()
     {
-        // Lowered before the engine that must enforce it is created.
-        int saved = CamusDBConfig.MaxIndexColumns;
-        CamusDBConfig.MaxIndexColumns = 2;
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxIndexColumns = 2 });
 
-        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-        try
-        {
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await ExecDDL(executor, dbname,
-                    $"CREATE TABLE {TableName} (id oid primary key, customer_id int64 not null, status string(32) not null, total float64 not null, KEY `idx_wide` (customer_id) INCLUDE (status, total))"));
-            Assert.That(ex!.Message, Does.Contain("exceeding the maximum"));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex.Code);
-        }
-        finally
-        {
-            CamusDBConfig.MaxIndexColumns = saved;
-        }
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDDL(executor, dbname,
+                $"CREATE TABLE {TableName} (id oid primary key, customer_id int64 not null, status string(32) not null, total float64 not null, KEY `idx_wide` (customer_id) INCLUDE (status, total))"));
+        Assert.That(ex!.Message, Does.Contain("exceeding the maximum"));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex.Code);
     }
 
     [Test]
     [NonParallelizable]
     public async Task PayloadByteLimit_RejectsInsert_WithOversizedIncludeTuple()
     {
-        // The encoder fixes its ceiling when the engine is built, so it is lowered first.
-        int saved = CamusDBConfig.MaxIndexIncludeTupleBytes;
-        CamusDBConfig.MaxIndexIncludeTupleBytes = 8; // a short string encodes to > 8 bytes
+        // An 8-byte payload ceiling — even a short status string encodes larger than that.
+        (string dbname, _, CommandExecutor executor) = await CreateOrdersTable(
+            Options with { MaxIndexIncludeTupleBytes = 8 });
 
-        (string dbname, _, CommandExecutor executor) = await CreateOrdersTable();
         // Index created on the empty table, so backfill writes nothing — this isolates the INSERT path.
         await ExecDDL(executor, dbname,
             $"CREATE INDEX idx_customer ON {TableName} (customer_id) INCLUDE (status)");
 
-        try
-        {
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await ExecNonQuery(executor, dbname,
-                    $"INSERT INTO {TableName} (id, customer_id, status, total) VALUES (gen_id(), 1, 'shipped', 1.0)"));
-            Assert.That(ex!.Message, Does.Contain("INCLUDE payload"));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex.Code);
-        }
-        finally
-        {
-            CamusDBConfig.MaxIndexIncludeTupleBytes = saved;
-        }
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecNonQuery(executor, dbname,
+                $"INSERT INTO {TableName} (id, customer_id, status, total) VALUES (gen_id(), 1, 'shipped', 1.0)"));
+        Assert.That(ex!.Message, Does.Contain("INCLUDE payload"));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex.Code);
 
         // The rejected insert must not have persisted a row (transaction rolled back).
         List<QueryResultRow> rows = await ExecSelect(executor, dbname,
@@ -651,33 +624,26 @@ internal sealed class TestIndexIncludeColumns : BaseTest
     [NonParallelizable]
     public async Task Insert_NullUniqueKey_DoesNotSerializeOrCheckIncludePayload()
     {
-        // The encoder fixes its ceiling when the engine is built, so it is lowered first.
-        int saved = CamusDBConfig.MaxIndexIncludeTupleBytes;
-        CamusDBConfig.MaxIndexIncludeTupleBytes = 8; // any real 'big' string encodes larger than this
+        // An 8-byte payload ceiling — any real 'big' string encodes larger than that.
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(
+            Options with { MaxIndexIncludeTupleBytes = 8 });
 
-        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
         await ExecDDL(executor, dbname,
             $"CREATE TABLE {TableName} (id oid primary key, code int64, big string(200))");
         // Unique index on a nullable key column with an INCLUDE payload.
         await ExecDDL(executor, dbname,
             $"CREATE UNIQUE INDEX ux_code ON {TableName} (code) INCLUDE (big)");
-        try
-        {
-            // NULL unique key → NULLs are distinct → no index entry is written. With lazy
-            // serialization the oversized payload is never encoded or byte-checked, so the row inserts.
-            await ExecNonQuery(executor, dbname,
-                $"INSERT INTO {TableName} (id, big) VALUES (gen_id(), 'a-very-long-payload-value-well-over-eight-bytes')");
 
-            // A row WITH a non-null key does emit an entry, so the byte gate fires for it.
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await ExecNonQuery(executor, dbname,
-                    $"INSERT INTO {TableName} (id, code, big) VALUES (gen_id(), 5, 'a-very-long-payload-value-well-over-eight-bytes')"));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-        }
-        finally
-        {
-            CamusDBConfig.MaxIndexIncludeTupleBytes = saved;
-        }
+        // NULL unique key → NULLs are distinct → no index entry is written. With lazy
+        // serialization the oversized payload is never encoded or byte-checked, so the row inserts.
+        await ExecNonQuery(executor, dbname,
+            $"INSERT INTO {TableName} (id, big) VALUES (gen_id(), 'a-very-long-payload-value-well-over-eight-bytes')");
+
+        // A row WITH a non-null key does emit an entry, so the byte gate fires for it.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecNonQuery(executor, dbname,
+                $"INSERT INTO {TableName} (id, code, big) VALUES (gen_id(), 5, 'a-very-long-payload-value-well-over-eight-bytes')"));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
 
         // The NULL-key row persisted; the oversized-key row did not.
         List<QueryResultRow> rows = await ExecSelect(executor, dbname, $"SELECT id FROM {TableName}");

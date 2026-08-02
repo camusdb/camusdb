@@ -50,31 +50,21 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     private HttpTransactionCoordinator coordinator = null!;
     private PreparedStatementRegistry registry = null!;
 
-    private int savedIdleTimeout;
-    private int savedPerPrincipal;
-    private int savedGlobal;
 
     [SetUp]
     public void SetUpRest()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogs = new(logger);
-        executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
+        executor = new(validator, catalogs, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(executor);
-        registry = new(CamusDBConfig.Ambient);
-
-        savedIdleTimeout = CamusConfig.PreparedStatementIdleTimeoutMs;
-        savedPerPrincipal = CamusConfig.RestMaxPreparedStatementsPerPrincipal;
-        savedGlobal = CamusConfig.RestMaxPreparedStatements;
+        registry = new(Limits());
     }
 
     [TearDown]
     public async Task TearDownRest()
     {
-        CamusConfig.PreparedStatementIdleTimeoutMs = savedIdleTimeout;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = savedPerPrincipal;
-        CamusConfig.RestMaxPreparedStatements = savedGlobal;
         try { await executor.DisposeAsync(); } catch { }
     }
 
@@ -91,10 +81,10 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     }
 
     private ExecuteSQLController Sql(object body) =>
-        new(executor, coordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
+        new(executor, coordinator, registry, logger, Options) { ControllerContext = Context(body) };
 
     private PreparedStatementsController Statements(object body) =>
-        new(executor, coordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
+        new(executor, coordinator, registry, logger, Options) { ControllerContext = Context(body) };
 
     private async Task<string> CreateDatabaseWithTableAsync(string createTableSql)
     {
@@ -421,13 +411,31 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         Assert.That(registry.Resolve(alice, handle), Is.Not.Null);
     }
 
+    /// <summary>
+    /// Prepared-statement limits for a case. The registry fixes these when it is constructed, so a case
+    /// states what it needs here rather than assigning process-wide values and rebuilding afterwards.
+    /// </summary>
+    private static CamusDBOptions Limits(
+        int? idleTimeoutMs = null,
+        int? perPrincipal = null,
+        int? nodeWide = null,
+        int? statementBytes = null,
+        long? nodeBytes = null,
+        long? principalBytes = null) =>
+        CamusDBOptions.Default with
+        {
+            PreparedStatementIdleTimeoutMs = idleTimeoutMs ?? CamusDBOptions.Default.PreparedStatementIdleTimeoutMs,
+            RestMaxPreparedStatementsPerPrincipal = perPrincipal ?? CamusDBOptions.Default.RestMaxPreparedStatementsPerPrincipal,
+            RestMaxPreparedStatements = nodeWide ?? CamusDBOptions.Default.RestMaxPreparedStatements,
+            MaxPreparedStatementBytes = statementBytes ?? CamusDBOptions.Default.MaxPreparedStatementBytes,
+            RestMaxPreparedStatementBytes = nodeBytes ?? CamusDBOptions.Default.RestMaxPreparedStatementBytes,
+            RestMaxPreparedStatementBytesPerPrincipal = principalBytes ?? CamusDBOptions.Default.RestMaxPreparedStatementBytesPerPrincipal,
+        };
+
     [Test]
     public async Task AnIdleHandleExpiresAndIsReportedAsUnknown()
     {
-        CamusConfig.PreparedStatementIdleTimeoutMs = 1;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(idleTimeoutMs: 1));
 
         (string handle, _) = registry.Prepare(null, "db", "SELECT 1");
         await Task.Delay(30);
@@ -440,11 +448,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     [Test]
     public async Task TheReaperDropsIdleHandlesAndKeepsTheOwnerCountHonest()
     {
-        CamusConfig.PreparedStatementIdleTimeoutMs = 1;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = 2;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(idleTimeoutMs: 1, perPrincipal: 2));
 
         registry.Prepare(null, "db", "SELECT 1");
         registry.Prepare(null, "db", "SELECT 2");
@@ -461,11 +465,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     [Test]
     public void OverThePerPrincipalCap_RefusesRatherThanEvictingALiveHandle()
     {
-        CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = 2;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(idleTimeoutMs: 600_000, perPrincipal: 2));
 
         (string first, _) = registry.Prepare(null, "db", "SELECT 1");
         registry.Prepare(null, "db", "SELECT 2");
@@ -484,12 +484,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     [Test]
     public void OverTheNodeWideCap_RefusesEvenWhenNoPrincipalIsAtItsOwnCap()
     {
-        CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = 100;
-        CamusConfig.RestMaxPreparedStatements = 2;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(idleTimeoutMs: 600_000, perPrincipal: 100, nodeWide: 2));
 
         Principal alice = new("alice", isSuperuser: false, []);
         Principal bob = new("bob", isSuperuser: false, []);
@@ -509,11 +504,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         // The published-then-counted order used to let a close decrement a counter that did not exist
         // yet, install zero, and leave the owner permanently one statement over. Sequential tests
         // cannot see it — the interleaving has to be produced.
-        CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = 4;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(idleTimeoutMs: 600_000, perPrincipal: 4));
 
         for (int round = 0; round < 200; round++)
         {
@@ -553,12 +544,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     {
         // Check-then-insert let every concurrent caller observe the same free slot and publish. With
         // admission taken atomically, exactly one of them can win.
-        CamusConfig.PreparedStatementIdleTimeoutMs = 600_000;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = 4;
-        CamusConfig.RestMaxPreparedStatements = 4;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(idleTimeoutMs: 600_000, perPrincipal: 4, nodeWide: 4));
 
         registry.Prepare(null, "db", "SELECT 1");
         registry.Prepare(null, "db", "SELECT 2");
@@ -588,41 +574,22 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     [Test]
     public void AStatementLargerThanThePerStatementLimitIsRejected()
     {
-        int savedMax = CamusConfig.MaxPreparedStatementBytes;
-        CamusConfig.MaxPreparedStatementBytes = 256;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
-        try
-        {
-            string padding = new('x', 4096);
-            CamusDBException tooBig = Assert.Throws<CamusDBException>(
-                () => registry.Prepare(null, "db", $"SELECT 1 -- {padding}"))!;
+        registry = new(Limits(statementBytes: 256));
 
-            // Invalid input, not a quota failure: closing other statements would not make it fit.
-            Assert.That(tooBig.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
-            Assert.That(registry.Count, Is.Zero);
-            Assert.That(registry.RetainedBytes, Is.Zero, "a rejected statement must reserve nothing");
-        }
-        finally
-        {
-            CamusConfig.MaxPreparedStatementBytes = savedMax;
-        }
+        string padding = new('x', 4096);
+        CamusDBException tooBig = Assert.Throws<CamusDBException>(
+            () => registry.Prepare(null, "db", $"SELECT 1 -- {padding}"))!;
+
+        // Invalid input, not a quota failure: closing other statements would not make it fit.
+        Assert.That(tooBig.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
+        Assert.That(registry.Count, Is.Zero);
+        Assert.That(registry.RetainedBytes, Is.Zero, "a rejected statement must reserve nothing");
     }
 
     [Test]
     public void TheRetainedByteBudgetRefusesEvenWhenTheCountCapWouldNot()
     {
-        long savedNodeBytes = CamusConfig.RestMaxPreparedStatementBytes;
-        long savedOwnerBytes = CamusConfig.RestMaxPreparedStatementBytesPerPrincipal;
-        CamusConfig.RestMaxPreparedStatementsPerPrincipal = 1000;
-        CamusConfig.RestMaxPreparedStatements = 1000;
-        CamusConfig.RestMaxPreparedStatementBytesPerPrincipal = 8 * 1024;
-        CamusConfig.RestMaxPreparedStatementBytes = 1024 * 1024;
-        CamusConfig.MaxPreparedStatementBytes = 65_536;
-        // The registry captures its configuration when constructed, so rebuild it now that the
-        // limits under test are in place.
-        registry = new(CamusDBConfig.Ambient);
+        registry = new(Limits(perPrincipal: 1000, nodeWide: 1000, principalBytes: 8 * 1024, nodeBytes: 1024 * 1024, statementBytes: 65_536));
 
         try
         {
@@ -651,8 +618,6 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         }
         finally
         {
-            CamusConfig.RestMaxPreparedStatementBytes = savedNodeBytes;
-            CamusConfig.RestMaxPreparedStatementBytesPerPrincipal = savedOwnerBytes;
         }
     }
 
@@ -722,14 +687,14 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     public async Task ACacheHintedPreparedSelect_MissesThenHitsLikeAnInlineOne()
     {
         // A real cache, or the executor reports "cache-disabled" and a broken hit path would pass.
-        QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        QueryResultCache cache = new(Options, sweepIntervalMs: -1);
         CommandExecutor cachedExecutor = new(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: cache);
         HttpTransactionCoordinator cachedCoordinator = new(cachedExecutor);
 
         ExecuteSQLController CachedSql(object body) =>
-            new(cachedExecutor, cachedCoordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
+            new(cachedExecutor, cachedCoordinator, registry, logger, Options) { ControllerContext = Context(body) };
 
         try
         {
@@ -747,7 +712,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
             }).ExecuteNonSQLQuery();
 
             JsonResult prepareResult = await new PreparedStatementsController(
-                cachedExecutor, cachedCoordinator, registry, logger, CamusDBConfig.Ambient)
+                cachedExecutor, cachedCoordinator, registry, logger, Options)
             {
                 ControllerContext = Context(new
                 {

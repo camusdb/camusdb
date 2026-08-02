@@ -53,9 +53,9 @@ public sealed class TestHashJoinExecutor : SharedNodeBaseTest
     /// orders / line_items schema (same shape as TestJoinParityOracle).
     /// No index on line_items.order_id → planner picks HashJoinNode.
     /// </summary>
-    private async Task<HJFixture> SetupOrdersItems(bool includeNullKey = false)
+    private async Task<HJFixture> SetupOrdersItems(bool includeNullKey = false, CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -332,36 +332,25 @@ public sealed class TestHashJoinExecutor : SharedNodeBaseTest
     [NonParallelizable]
     public async Task HashJoin_BuildCapFallback_StillCorrect()
     {
-        int saved = CamusDBConfig.HashJoinMaxBuildRows;
+        // A cap of 1 means the build phase is exceeded immediately — falls back to nested-loop.
+        HJFixture f = await SetupOrdersItems(options: Options with { HashJoinMaxBuildRows = 1 });
 
-        try
-        {
-            // A cap of 1 means the build phase is exceeded immediately — falls back to nested-loop.
-            CamusDBConfig.HashJoinMaxBuildRows = 1;
+        List<QueryResultRow> rows = await Run(f,
+            "SELECT o.name, li.product " +
+            "FROM orders o JOIN line_items li ON li.order_id = o.id " +
+            "ORDER BY o.name, li.product");
 
-            HJFixture f = await SetupOrdersItems();
+        // Same result as the normal run — correctness preserved through fallback.
+        Assert.AreEqual(4, rows.Count);
 
-            List<QueryResultRow> rows = await Run(f,
-                "SELECT o.name, li.product " +
-                "FROM orders o JOIN line_items li ON li.order_id = o.id " +
-                "ORDER BY o.name, li.product");
-
-            // Same result as the normal run — correctness preserved through fallback.
-            Assert.AreEqual(4, rows.Count);
-
-            Assert.AreEqual("Order-A", rows[0].Row["name"].StrValue);
-            Assert.AreEqual("Widget",  rows[0].Row["product"].StrValue);
-            Assert.AreEqual("Order-B",   rows[1].Row["name"].StrValue);
-            Assert.AreEqual("Doohickey", rows[1].Row["product"].StrValue);
-            Assert.AreEqual("Order-B", rows[2].Row["name"].StrValue);
-            Assert.AreEqual("Gadget",  rows[2].Row["product"].StrValue);
-            Assert.AreEqual("Order-D",  rows[3].Row["name"].StrValue);
-            Assert.AreEqual("Sprocket", rows[3].Row["product"].StrValue);
-        }
-        finally
-        {
-            CamusDBConfig.HashJoinMaxBuildRows = saved;
-        }
+        Assert.AreEqual("Order-A", rows[0].Row["name"].StrValue);
+        Assert.AreEqual("Widget",  rows[0].Row["product"].StrValue);
+        Assert.AreEqual("Order-B",   rows[1].Row["name"].StrValue);
+        Assert.AreEqual("Doohickey", rows[1].Row["product"].StrValue);
+        Assert.AreEqual("Order-B", rows[2].Row["name"].StrValue);
+        Assert.AreEqual("Gadget",  rows[2].Row["product"].StrValue);
+        Assert.AreEqual("Order-D",  rows[3].Row["name"].StrValue);
+        Assert.AreEqual("Sprocket", rows[3].Row["product"].StrValue);
     }
 
     [Test]

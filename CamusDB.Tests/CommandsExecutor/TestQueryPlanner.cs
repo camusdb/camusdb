@@ -33,7 +33,7 @@ public class TestQueryPlanner
 {
     private static QueryPlannerTestContext? context;
 
-    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
+    private readonly QueryPlanner queryPlanner = new(CamusDBOptions.Default);
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
@@ -1348,9 +1348,9 @@ public class TestQueryPlanner
             toBound: null,
             toInclusive: true);
 
-        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 5, CamusDBConfig.Ambient),
+        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 5, CamusDBOptions.Default),
             "odd row count: half-open range without stats must flip to full scan");
-        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 10, CamusDBConfig.Ambient),
+        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 10, CamusDBOptions.Default),
             "even row count: half-open range without stats must flip to full scan");
 
         IndexRangeScanNode bothBounds = new(
@@ -1360,7 +1360,7 @@ public class TestQueryPlanner
             toBound: new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2005L) }),
             toInclusive: true);
 
-        Assert.IsFalse(CostEstimator.ShouldPreferFullScan(bothBounds, tableRowCount: 10, CamusDBConfig.Ambient),
+        Assert.IsFalse(CostEstimator.ShouldPreferFullScan(bothBounds, tableRowCount: 10, CamusDBOptions.Default),
             "a two-sided range (10% fallback) must keep the index");
     }
 }

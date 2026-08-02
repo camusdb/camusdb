@@ -30,7 +30,7 @@ namespace CamusDB.Tests.Transactions;
 ///   - Default begin → ReadCommitted / ReadWrite (zero observable change).
 ///   - Explicit Serializable / ReadOnly round-trips through KvTransactionsManager.
 ///   - All four {level} × {mode} combinations are readable from KvTransaction.
-///   - CamusDBConfig.DefaultIsolationLevel is honoured when no explicit level is passed.
+///   - the configured default isolation level is honoured when no explicit level is passed.
 ///   - SET TRANSACTION ISOLATION LEVEL SERIALIZABLE parses to NodeType.SetTransaction with
 ///     correct yytext ("Serializable") and leftAst.yytext ("ReadWrite").
 ///   - SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY / READ WRITE parse correctly.
@@ -40,12 +40,16 @@ namespace CamusDB.Tests.Transactions;
 [TestFixture]
 public sealed class TestIsolationLevelPlumbing
 {
-    private static async Task<(EmbeddedKahuna node, KvTransactionsManager mgr)> CreateAsync(string tag)
+    /// <summary>Baseline configuration — no engine is involved in these tests.</summary>
+    private static CamusDBOptions TransactionOptions => CamusDBOptions.Default;
+
+    private static async Task<(EmbeddedKahuna node, KvTransactionsManager mgr)> CreateAsync(
+        string tag, CamusDBOptions? options = null)
     {
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        return (node, new KvTransactionsManager(node.Kahuna, CamusDBConfig.Ambient));
+        return (node, new KvTransactionsManager(node.Kahuna, options ?? TransactionOptions));
     }
 
     // ------------------------------------------------------------------
@@ -114,55 +118,37 @@ public sealed class TestIsolationLevelPlumbing
     }
 
     // ------------------------------------------------------------------
-    // 3. CamusDBConfig.DefaultIsolationLevel is honoured
+    // 3. The configured default isolation level is honoured
     // ------------------------------------------------------------------
 
     [Test]
-    [NonParallelizable] // mutates the global CamusDBConfig.DefaultIsolationLevel static
     public async Task BeginAsync_HonoursConfigDefault_WhenLevelNotSpecified()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("iso-config-default");
+        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync(
+            "iso-config-default", TransactionOptions with { DefaultIsolationLevel = CamusIsolationLevel.Serializable });
         await using EmbeddedKahuna __ = node;
 
-        CamusIsolationLevel saved = CamusDBConfig.DefaultIsolationLevel;
-        try
-        {
-            CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-            KvTransaction tx = await mgr.BeginAsync();
+        KvTransaction tx = await mgr.BeginAsync();
 
-            Assert.AreEqual(CamusIsolationLevel.Serializable, tx.IsolationLevel,
-                "BeginAsync with no explicit level should honour CamusDBConfig.DefaultIsolationLevel");
+        Assert.AreEqual(CamusIsolationLevel.Serializable, tx.IsolationLevel,
+            "BeginAsync with no explicit level must honour the manager's configured default");
 
-            await mgr.RollbackAsync(tx);
-        }
-        finally
-        {
-            CamusDBConfig.DefaultIsolationLevel = saved;
-        }
+        await mgr.RollbackAsync(tx);
     }
 
     [Test]
-    [NonParallelizable] // mutates the global CamusDBConfig.DefaultIsolationLevel static
     public async Task BeginAsync_ExplicitLevelOverridesConfigDefault()
     {
-        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("iso-config-override");
+        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync(
+            "iso-config-override", TransactionOptions with { DefaultIsolationLevel = CamusIsolationLevel.Serializable });
         await using EmbeddedKahuna __ = node;
 
-        CamusIsolationLevel saved = CamusDBConfig.DefaultIsolationLevel;
-        try
-        {
-            CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-            KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.ReadCommitted);
+        KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.ReadCommitted);
 
-            Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel,
-                "Explicit ReadCommitted must override the Serializable config default");
+        Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel,
+            "Explicit ReadCommitted must override the Serializable configured default");
 
-            await mgr.RollbackAsync(tx);
-        }
-        finally
-        {
-            CamusDBConfig.DefaultIsolationLevel = saved;
-        }
+        await mgr.RollbackAsync(tx);
     }
 
     // ------------------------------------------------------------------
@@ -327,7 +313,7 @@ public sealed class TestIsolationLevelPlumbing
         Kommander.Time.HLCTimestamp mintLocalT(Kommander.Time.HLCTimestamp? _) =>
             node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
 
-        KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient, mintLocalT);
+        KvTransactionsManager mgr = new(node.Kahuna, TransactionOptions, mintLocalT);
 
         KvTransaction tx = await mgr.BeginAsync(deferStart: true);
         Assert.AreEqual(KeyValueTransactionLocking.Pessimistic, tx.Locking);

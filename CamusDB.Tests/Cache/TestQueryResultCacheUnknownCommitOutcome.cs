@@ -141,13 +141,13 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
     public async Task UnresolvedCommitOutcome_EvictsEntriesForTheWrittenKeyspace()
     {
         await using EmbeddedKahuna node = await StartNodeAsync("unknown-a");
-        using QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using QueryResultCache cache = new(CamusDBOptions.Default, sweepIntervalMs: -1);
 
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.MustRetry, PersistentHiddenResponses);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBConfig.Ambient, cache: cache);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, DatabaseId, "unknown-a");
+        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-a");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-unresolved");
         Assert.That(await cache.TryGetAsync(DatabaseId, "c", fp), Is.Not.Null,
@@ -183,13 +183,13 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
     public async Task UnresolvedCommitOutcome_FencesLaterPublishesUnderAPreWriteToken()
     {
         await using EmbeddedKahuna node = await StartNodeAsync("unknown-b");
-        using QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using QueryResultCache cache = new(CamusDBOptions.Default, sweepIntervalMs: -1);
 
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.MustRetry, PersistentHiddenResponses);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBConfig.Ambient, cache: cache);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, DatabaseId, "unknown-b");
+        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-b");
 
         // A query in flight since before the write holds a token minted at the old generation.
         CacheGenerationToken preWriteToken = cache.PublishGate.SnapshotGenerations([store.RowKeySpace]);
@@ -218,14 +218,14 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
     public async Task ErroredCommitOutcome_EvictsEntriesForTheWrittenKeyspace()
     {
         await using EmbeddedKahuna node = await StartNodeAsync("unknown-c");
-        using QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using QueryResultCache cache = new(CamusDBOptions.Default, sweepIntervalMs: -1);
 
         // One hidden response is enough: Errored is terminal, so there is no retry loop.
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.Errored, hideCount: 1);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBConfig.Ambient, cache: cache);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, DatabaseId, "unknown-c");
+        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-c");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-errored");
 
@@ -247,10 +247,10 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
     public async Task DefiniteAbort_PreservesCachedEntries()
     {
         await using EmbeddedKahuna node = await StartNodeAsync("unknown-d");
-        using QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using QueryResultCache cache = new(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        KvTransactionsManager mgr = new(new AbortingCommitKahuna(node.Kahuna), CamusDBConfig.Ambient, cache: cache);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, DatabaseId, "unknown-d");
+        KvTransactionsManager mgr = new(new AbortingCommitKahuna(node.Kahuna), CamusDBOptions.Default, cache: cache);
+        KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-d");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-aborted");
 
@@ -273,14 +273,14 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
     public async Task ResolvingAnUnresolvedCommitLater_RepeatsTheEvictionHarmlessly()
     {
         await using EmbeddedKahuna node = await StartNodeAsync("unknown-e");
-        using QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using QueryResultCache cache = new(CamusDBOptions.Default, sweepIntervalMs: -1);
 
         // Hide only the first round of responses; the retry that follows resolves normally.
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.MustRetry, PersistentHiddenResponses);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBConfig.Ambient, cache: cache);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, DatabaseId, "unknown-e");
+        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-e");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-resolved-later");
 

@@ -368,7 +368,7 @@ public sealed class TestCardinalityEstimator : BaseTest
             toInclusive: true);
 
         long estimated = CostEstimator.EstimateRangeScanRows(
-            rangeScan, tableRowCount: 1000, CamusDBConfig.Ambient,
+            rangeScan, tableRowCount: 1000, Options,
             stats: executor.Statistics, database: database, table: table);
 
         // Histogram gives ~900; the fixed 10% heuristic gives 100. Threshold set at 500 so

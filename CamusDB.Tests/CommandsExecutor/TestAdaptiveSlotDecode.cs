@@ -25,12 +25,11 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
 /// Locks the per-scan slot-decode selection plumbing: <see cref="RowEncoder.RowDecodeState.SlotBackedDecode"/>
-/// overrides the global <see cref="CamusDBConfig.SlotBackedDecode"/> so a scan can opt in (rejecting
+/// overrides the configured <see cref="CamusDBOptions.SlotBackedDecode"/> so a scan can opt in (rejecting
 /// filter present) or out (full-materialize) per query. The scanner's policy — enable slots when a
 /// residual filter exists — is asserted end-to-end by <see cref="TestSlotBackedDecodeParity"/> for value
 /// parity; here we pin that the override actually drives the decode backing.
 /// </summary>
-[NonParallelizable]
 public sealed class TestAdaptiveSlotDecode
 {
     private static readonly ObjectIdValue RowId = new(1, 2, 3);
@@ -65,10 +64,14 @@ public sealed class TestAdaptiveSlotDecode
         return (schema, env.Payload);
     }
 
-    private static async Task<QueryRow> Decode(TableSchema schema, ReadOnlyMemory<byte> payload, bool? slotOverride)
+    /// <summary>Baseline configuration — these tests drive the decoder directly, with no engine.</summary>
+    private static CamusDBOptions DecodeOptions => CamusDBOptions.Default;
+
+    private static async Task<QueryRow> Decode(
+        TableSchema schema, ReadOnlyMemory<byte> payload, bool? slotOverride, CamusDBOptions? options = null)
     {
         RowEncoder.RowDecodeState state = new() { SlotBackedDecode = slotOverride };
-        return await RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, CamusDBConfig.Ambient, decodeState: state);
+        return await RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, options ?? DecodeOptions, decodeState: state);
     }
 
     [Test]
@@ -91,21 +94,16 @@ public sealed class TestAdaptiveSlotDecode
     }
 
     [Test]
-    public async Task NoOverride_FollowsGlobalFlag()
+    public async Task NoOverride_FollowsConfiguredFlag()
     {
         (TableSchema schema, ReadOnlyMemory<byte> payload) = BuildRow();
-        bool original = CamusDBConfig.SlotBackedDecode;
-        try
-        {
-            CamusDBConfig.SlotBackedDecode = true;
-            Assert.IsTrue((await Decode(schema, payload, slotOverride: null)).IsSlotBacked);
 
-            CamusDBConfig.SlotBackedDecode = false;
-            Assert.IsFalse((await Decode(schema, payload, slotOverride: null)).IsSlotBacked);
-        }
-        finally
-        {
-            CamusDBConfig.SlotBackedDecode = original;
-        }
+        // With no per-row override the configured flag decides.
+        Task<QueryRow> DecodeUnder(bool slotBacked)
+            => Decode(schema, payload, slotOverride: null,
+                      options: DecodeOptions with { SlotBackedDecode = slotBacked });
+
+        Assert.IsTrue((await DecodeUnder(true)).IsSlotBacked);
+        Assert.IsFalse((await DecodeUnder(false)).IsSlotBacked);
     }
 }

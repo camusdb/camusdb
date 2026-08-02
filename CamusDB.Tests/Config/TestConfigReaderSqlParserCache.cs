@@ -25,7 +25,7 @@ public class TestConfigReaderSqlParserCache
     // ── Parsing — defaults ────────────────────────────────────────────────────
 
     [Test]
-    public void ReadsDefaults_AllThreeKnobsMatchCamusDBConfigDefaults()
+    public void ReadsDefaults_AllThreeKnobsMatchTheBuiltInDefaults()
     {
         ConfigDefinition config = new ConfigReader().Read("mode: standalone");
 

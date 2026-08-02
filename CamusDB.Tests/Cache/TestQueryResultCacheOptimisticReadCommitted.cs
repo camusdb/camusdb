@@ -38,12 +38,17 @@ public sealed class TestQueryResultCacheOptimisticReadCommitted : CommandsExecut
 {
     private QueryResultCache? _cache;
 
-    protected override CommandExecutor CreateCommandExecutor()
+    /// <summary>
+    /// Every engine this fixture builds gets its own cache, and honours <paramref name="options"/>.
+    /// The options-taking overload is the one to override: the parameterless factory routes through it,
+    /// so a test that asks for particular cache limits still gets the injected cache.
+    /// </summary>
+    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        _cache = new QueryResultCache(options, sweepIntervalMs: -1);
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        return new(validator, catalogsManager, logger, options,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }

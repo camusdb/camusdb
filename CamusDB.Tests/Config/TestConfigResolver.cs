@@ -73,43 +73,23 @@ public sealed class TestConfigResolver
     }
 
     [Test]
-    public void ApplyToCamusDBConfig_SetsDefaultIsolationLevelFromYaml()
+    public void Resolve_SetsDefaultIsolationLevelFromYaml()
     {
-        bool prevSharding = CamusDBConfig.KeyRangeShardingEnabled;
-        int prevDeadline = CamusDBConfig.LockWaitDeadlineMs;
-        CamusIsolationLevel prevIso = CamusDBConfig.DefaultIsolationLevel;
 
-        try
-        {
             ConfigDefinition config = new ConfigReader().Read("default_isolation_level: read_committed");
-            ConfigResolver.ApplyToCamusDBConfig(config);
+            CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-            Assert.That(CamusDBConfig.DefaultIsolationLevel, Is.EqualTo(CamusIsolationLevel.ReadCommitted));
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = prevSharding;
-            CamusDBConfig.LockWaitDeadlineMs = prevDeadline;
-            CamusDBConfig.DefaultIsolationLevel = prevIso;
-        }
+            Assert.That(resolved.DefaultIsolationLevel, Is.EqualTo(CamusIsolationLevel.ReadCommitted));
     }
 
     [Test]
-    public void ApplyToCamusDBConfig_SetsDefaultTransactionLockingFromYaml()
+    public void Resolve_SetsDefaultTransactionLockingFromYaml()
     {
-        KeyValueTransactionLocking prevLocking = CamusDBConfig.DefaultTransactionLocking;
 
-        try
-        {
             ConfigDefinition config = new ConfigReader().Read("default_transaction_locking: optimistic");
-            ConfigResolver.ApplyToCamusDBConfig(config);
+            CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-            Assert.That(CamusDBConfig.DefaultTransactionLocking, Is.EqualTo(KeyValueTransactionLocking.Optimistic));
-        }
-        finally
-        {
-            CamusDBConfig.DefaultTransactionLocking = prevLocking;
-        }
+            Assert.That(resolved.DefaultTransactionLocking, Is.EqualTo(KeyValueTransactionLocking.Optimistic));
     }
 
     [Test]
@@ -121,72 +101,56 @@ public sealed class TestConfigResolver
     }
 
     [Test]
-    public void ApplyToCamusDBConfig_KeyRangeShardingFromYaml()
+    public void Resolve_KeyRangeShardingFromYaml()
     {
-        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         string? prevEnv = Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING");
-
         try
         {
             Environment.SetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING", null);
 
             ConfigDefinition config = new ConfigReader().Read("key_range_sharding: true");
-            ConfigResolver.ApplyToCamusDBConfig(config);
+            CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-            Assert.That(CamusDBConfig.KeyRangeShardingEnabled, Is.True);
+            Assert.That(resolved.KeyRangeShardingEnabled, Is.True);
         }
         finally
         {
-            CamusDBConfig.KeyRangeShardingEnabled = prev;
             Environment.SetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING", prevEnv);
         }
     }
 
     [Test]
-    public void ApplyToCamusDBConfig_EnvVarOverridesYamlKeyRangeSharding()
+    public void Resolve_EnvVarOverridesYamlKeyRangeSharding()
     {
-        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
         string? prevEnv = Environment.GetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING");
-
         try
         {
             Environment.SetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING", "1");
 
             ConfigDefinition config = new ConfigReader().Read("key_range_sharding: false");
-            ConfigResolver.ApplyToCamusDBConfig(config);
+            CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-            Assert.That(CamusDBConfig.KeyRangeShardingEnabled, Is.True);
+            Assert.That(resolved.KeyRangeShardingEnabled, Is.True);
         }
         finally
         {
-            CamusDBConfig.KeyRangeShardingEnabled = prev;
             Environment.SetEnvironmentVariable("CAMUS_KEY_RANGE_SHARDING", prevEnv);
         }
     }
 
     [Test]
-    public void ApplyToCamusDBConfig_RegexKnobsRoundTrip()
+    public void Resolve_RegexKnobsRoundTrip()
     {
-        int prevTimeout = CamusDBConfig.RegexMatchTimeoutMs;
-        int prevCache = CamusDBConfig.RegexCacheMaxEntries;
 
-        try
-        {
             string yml =
                 "regex_match_timeout_ms: 500\n" +
                 "regex_cache_max_entries: 64";
 
             ConfigDefinition config = new ConfigReader().Read(yml);
-            ConfigResolver.ApplyToCamusDBConfig(config);
+            CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-            Assert.That(CamusDBConfig.RegexMatchTimeoutMs, Is.EqualTo(500));
-            Assert.That(CamusDBConfig.RegexCacheMaxEntries, Is.EqualTo(64));
-        }
-        finally
-        {
-            CamusDBConfig.RegexMatchTimeoutMs = prevTimeout;
-            CamusDBConfig.RegexCacheMaxEntries = prevCache;
-        }
+            Assert.That(resolved.RegexMatchTimeoutMs, Is.EqualTo(500));
+            Assert.That(resolved.RegexCacheMaxEntries, Is.EqualTo(64));
     }
 
     [Test]
@@ -198,13 +162,9 @@ public sealed class TestConfigResolver
     }
 
     [Test]
-    public void ApplyToCamusDBConfig_LockKnobsRoundTrip()
+    public void Resolve_LockKnobsRoundTrip()
     {
-        int prevDeadline = CamusDBConfig.LockWaitDeadlineMs;
-        int prevEscalation = CamusDBConfig.LockEscalationThreshold;
 
-        try
-        {
             // range_lock_expires_ms must clear the renewal-margin cross-check (>= 2x the 60 s default
             // collection interval), so use a valid value that still exercises the round-trip.
             string yml =
@@ -213,43 +173,30 @@ public sealed class TestConfigResolver
                 "range_lock_expires_ms: 150000";
 
             ConfigDefinition config = new ConfigReader().Read(yml);
-            ConfigResolver.ApplyToCamusDBConfig(config);
+            CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-            Assert.That(CamusDBConfig.LockWaitDeadlineMs, Is.EqualTo(250));
-            Assert.That(CamusDBConfig.LockEscalationThreshold, Is.EqualTo(12));
-            Assert.That(CamusDBConfig.RangeLockExpiresMs, Is.EqualTo(150_000));
-        }
-        finally
-        {
-            CamusDBConfig.LockWaitDeadlineMs = prevDeadline;
-            CamusDBConfig.LockEscalationThreshold = prevEscalation;
-        }
+            Assert.That(resolved.LockWaitDeadlineMs, Is.EqualTo(250));
+            Assert.That(resolved.LockEscalationThreshold, Is.EqualTo(12));
+            Assert.That(resolved.RangeLockExpiresMs, Is.EqualTo(150_000));
     }
 
     [Test]
     [NonParallelizable]
     public async Task ReadCommittedYamlDefault_MakesNewTransactionsReadCommitted()
     {
-        CamusIsolationLevel saved = CamusDBConfig.DefaultIsolationLevel;
+        ConfigDefinition config = new ConfigReader().Read("default_isolation_level: read_committed");
+        CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
-        try
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await using (node)
         {
-            ConfigDefinition config = new ConfigReader().Read("default_isolation_level: read_committed");
-            ConfigResolver.ApplyToCamusDBConfig(config);
-
-            EmbeddedKahuna node = new();
-            await node.StartAsync(CancellationToken.None);
-            await using (node)
-            {
-                KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient);
-                KvTransaction tx = await mgr.BeginAsync();
-                Assert.That(tx.IsolationLevel, Is.EqualTo(CamusIsolationLevel.ReadCommitted));
-                await mgr.RollbackAsync(tx);
-            }
-        }
-        finally
-        {
-            CamusDBConfig.DefaultIsolationLevel = saved;
+            // The manager is built from the resolved options — that is the property under test: what
+            // the YAML says must reach a transaction begun with no explicit level.
+            KvTransactionsManager mgr = new(node.Kahuna, resolved);
+            KvTransaction tx = await mgr.BeginAsync();
+            Assert.That(tx.IsolationLevel, Is.EqualTo(CamusIsolationLevel.ReadCommitted));
+            await mgr.RollbackAsync(tx);
         }
     }
 }

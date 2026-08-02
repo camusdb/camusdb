@@ -69,9 +69,9 @@ internal sealed class TestRowUpdaterBatchBranch : BaseTest
     /// rows val=0..rowCount-1, then branches from it and returns both descriptors.
     /// </summary>
     private async Task<(string rootName, DatabaseDescriptor rootDb, string branchName, DatabaseDescriptor branchDb, CommandExecutor executor)>
-        CreateRootAndBranch(int rowCount, bool uniqueIndex)
+        CreateRootAndBranch(int rowCount, bool uniqueIndex, CamusDBOptions? options = null)
     {
-        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateDatabase();
+        (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateDatabase(options ?? Options);
         TrackDatabase(rootName, executor);
 
         await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, rootName,
@@ -98,34 +98,26 @@ internal sealed class TestRowUpdaterBatchBranch : BaseTest
         // Non-indexed column update on a branch, forced into chunks. Exercises the branch row-blob
         // batch write (batchItems with Set, no index mutations). Branch sees new values; root is
         // untouched (COW isolation).
-        int saved = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        try
-        {
-            (string rootName, DatabaseDescriptor rootDb, string branchName, DatabaseDescriptor branchDb, CommandExecutor executor) =
-                await CreateRootAndBranch(rowCount: 10, uniqueIndex: false);
+        // A forced threshold of 3 so the update spans several chunks.
+        (string rootName, DatabaseDescriptor rootDb, string branchName, DatabaseDescriptor branchDb, CommandExecutor executor) =
+            await CreateRootAndBranch(rowCount: 10, uniqueIndex: false, options: Options with { ForceSpillThresholdRows = 3 });
 
-            KvTransaction upTx = await branchDb.Transactions.BeginAsync();
-            ExecuteNonSQLResult res = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
-                upTx, branchName, "UPDATE items SET val = val + 1000 WHERE val >= 0", null));
-            await branchDb.Transactions.CommitAsync(upTx);
+        KvTransaction upTx = await branchDb.Transactions.BeginAsync();
+        ExecuteNonSQLResult res = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            upTx, branchName, "UPDATE items SET val = val + 1000 WHERE val >= 0", null));
+        await branchDb.Transactions.CommitAsync(upTx);
 
-            Assert.AreEqual(10, res.ModifiedRows);
+        Assert.AreEqual(10, res.ModifiedRows);
 
-            List<long> branchVals = (await SelectAllAsync(executor, branchDb, branchName))
-                .Select(r => r.Row["val"].LongValue).OrderBy(v => v).ToList();
-            Assert.AreEqual(Enumerable.Range(1000, 10).Select(i => (long)i).ToList(), branchVals,
-                "Branch must see the updated values across all chunks");
+        List<long> branchVals = (await SelectAllAsync(executor, branchDb, branchName))
+            .Select(r => r.Row["val"].LongValue).OrderBy(v => v).ToList();
+        Assert.AreEqual(Enumerable.Range(1000, 10).Select(i => (long)i).ToList(), branchVals,
+            "Branch must see the updated values across all chunks");
 
-            List<long> rootVals = (await SelectAllAsync(executor, rootDb, rootName))
-                .Select(r => r.Row["val"].LongValue).OrderBy(v => v).ToList();
-            Assert.AreEqual(Enumerable.Range(0, 10).Select(i => (long)i).ToList(), rootVals,
-                "Root must be unchanged by the branch update");
-        }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = saved == 0 ? null : saved;
-        }
+        List<long> rootVals = (await SelectAllAsync(executor, rootDb, rootName))
+            .Select(r => r.Row["val"].LongValue).OrderBy(v => v).ToList();
+        Assert.AreEqual(Enumerable.Range(0, 10).Select(i => (long)i).ToList(), rootVals,
+            "Root must be unchanged by the branch update");
     }
 
     [Test]
@@ -136,37 +128,29 @@ internal sealed class TestRowUpdaterBatchBranch : BaseTest
         // Exercises tombstoning inherited index entries + the per-item branch unique write. The new
         // keys must be findable on the branch, the old keys gone on the branch, and the root's index
         // must still resolve the original values.
-        int saved = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        try
+        // A forced threshold of 3 so the update spans several chunks.
+        (string rootName, DatabaseDescriptor rootDb, string branchName, DatabaseDescriptor branchDb, CommandExecutor executor) =
+            await CreateRootAndBranch(rowCount: 8, uniqueIndex: true, options: Options with { ForceSpillThresholdRows = 3 });
+
+        KvTransaction upTx = await branchDb.Transactions.BeginAsync();
+        ExecuteNonSQLResult res = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            upTx, branchName, "UPDATE items SET val = val + 100 WHERE val >= 0", null));
+        await branchDb.Transactions.CommitAsync(upTx);
+
+        Assert.AreEqual(8, res.ModifiedRows);
+
+        for (int i = 0; i < 8; i++)
         {
-            (string rootName, DatabaseDescriptor rootDb, string branchName, DatabaseDescriptor branchDb, CommandExecutor executor) =
-                await CreateRootAndBranch(rowCount: 8, uniqueIndex: true);
+            Assert.AreEqual(1, (await SelectByValAsync(executor, branchDb, branchName, 100 + i)).Count,
+                $"Branch index must resolve new value {100 + i}");
+            Assert.AreEqual(0, (await SelectByValAsync(executor, branchDb, branchName, i)).Count,
+                $"Branch index must no longer resolve old value {i}");
 
-            KvTransaction upTx = await branchDb.Transactions.BeginAsync();
-            ExecuteNonSQLResult res = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
-                upTx, branchName, "UPDATE items SET val = val + 100 WHERE val >= 0", null));
-            await branchDb.Transactions.CommitAsync(upTx);
-
-            Assert.AreEqual(8, res.ModifiedRows);
-
-            for (int i = 0; i < 8; i++)
-            {
-                Assert.AreEqual(1, (await SelectByValAsync(executor, branchDb, branchName, 100 + i)).Count,
-                    $"Branch index must resolve new value {100 + i}");
-                Assert.AreEqual(0, (await SelectByValAsync(executor, branchDb, branchName, i)).Count,
-                    $"Branch index must no longer resolve old value {i}");
-
-                // Root's index is untouched: original value present, branch's new value absent.
-                Assert.AreEqual(1, (await SelectByValAsync(executor, rootDb, rootName, i)).Count,
-                    $"Root index must still resolve original value {i}");
-                Assert.AreEqual(0, (await SelectByValAsync(executor, rootDb, rootName, 100 + i)).Count,
-                    $"Root index must not resolve the branch-only value {100 + i}");
-            }
-        }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = saved == 0 ? null : saved;
+            // Root's index is untouched: original value present, branch's new value absent.
+            Assert.AreEqual(1, (await SelectByValAsync(executor, rootDb, rootName, i)).Count,
+                $"Root index must still resolve original value {i}");
+            Assert.AreEqual(0, (await SelectByValAsync(executor, rootDb, rootName, 100 + i)).Count,
+                $"Root index must not resolve the branch-only value {100 + i}");
         }
     }
 

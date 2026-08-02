@@ -39,9 +39,9 @@ public class TestQueryScannerIndexOnly : BaseTest
     /// selective predicates (≤ ~10 rows returned).
     /// </summary>
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
-        SetupRobotsWithYearIndex()
+        SetupRobotsWithYearIndex(CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
@@ -378,35 +378,26 @@ public class TestQueryScannerIndexOnly : BaseTest
         // "name" is not in year_idx, so the scan is non-covering (batched primary-row fetch);
         // ORDER BY year makes the expected order contractual so a page-boundary drop or
         // reordering fails loudly.
-        int prev = CamusDBConfig.IndexScanFetchBatchSize;
-        CamusDBConfig.IndexScanFetchBatchSize = 2;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
-                await SetupRobotsWithYearIndex();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await SetupRobotsWithYearIndex(Options with { IndexScanFetchBatchSize = 2 });
 
-            List<QueryResultRow> baseline = await RunSql(executor, database, dbname,
-                "SELECT * FROM robots WHERE year > 95 ORDER BY year");
-            List<QueryResultRow> nonCovered = await RunSql(executor, database, dbname,
-                "SELECT name FROM robots WHERE year > 95 ORDER BY year");
+        List<QueryResultRow> baseline = await RunSql(executor, database, dbname,
+            "SELECT * FROM robots WHERE year > 95 ORDER BY year");
+        List<QueryResultRow> nonCovered = await RunSql(executor, database, dbname,
+            "SELECT name FROM robots WHERE year > 95 ORDER BY year");
 
-            Assert.AreEqual(5, baseline.Count, "years 96..100 → 5 rows");
-            Assert.AreEqual(baseline.Count, nonCovered.Count,
-                "paged batched fetch must return the same row count as the baseline");
+        Assert.AreEqual(5, baseline.Count, "years 96..100 → 5 rows");
+        Assert.AreEqual(baseline.Count, nonCovered.Count,
+            "paged batched fetch must return the same row count as the baseline");
 
-            List<string?> expectedNames = baseline.Select(r => r.Row["name"].StrValue).ToList();
-            List<string?> actualNames   = nonCovered.Select(r => r.Row["name"].StrValue).ToList();
-            Assert.That(actualNames, Is.EqualTo(expectedNames),
-                "paged batched fetch must yield rows in index order across all pages (no drop/reorder)");
+        List<string?> expectedNames = baseline.Select(r => r.Row["name"].StrValue).ToList();
+        List<string?> actualNames   = nonCovered.Select(r => r.Row["name"].StrValue).ToList();
+        Assert.That(actualNames, Is.EqualTo(expectedNames),
+            "paged batched fetch must yield rows in index order across all pages (no drop/reorder)");
 
-            long? rowsRead = await ExplainAnalyzeScanRowsRead(executor, database, dbname,
-                "SELECT name FROM robots WHERE year > 95 ORDER BY year");
-            Assert.AreEqual(5L, rowsRead!.Value,
-                "every matched primary row must be fetched exactly once across the pages");
-        }
-        finally
-        {
-            CamusDBConfig.IndexScanFetchBatchSize = prev;
-        }
+        long? rowsRead = await ExplainAnalyzeScanRowsRead(executor, database, dbname,
+            "SELECT name FROM robots WHERE year > 95 ORDER BY year");
+        Assert.AreEqual(5L, rowsRead!.Value,
+        "every matched primary row must be fetched exactly once across the pages");
     }
 }

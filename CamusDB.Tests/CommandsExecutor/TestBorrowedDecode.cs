@@ -29,7 +29,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <c>ValueSlot[]</c>, and every value it yields must be identical to the eager and slot backings for the
 /// same bytes — across all column types, nulls, projection, and schema-history default injection.
 /// </summary>
-[NonParallelizable]
 public sealed class TestBorrowedDecode
 {
     private static readonly ObjectIdValue RowId = new(7, 8, 9);
@@ -52,10 +51,15 @@ public sealed class TestBorrowedDecode
     private static ReadOnlyMemory<byte> Encode(TableSchema schema, Dictionary<string, ColumnValue> row)
         => BranchKvCodec.Decode(RowEncoder.EncodeStorageValue(schema, row, RowId)).Payload;
 
-    private static Task<QueryRow> DecodeAsync(TableSchema schema, ReadOnlyMemory<byte> payload, bool? borrowed, IReadOnlySet<string>? required = null, long? visibility = null)
+    /// <summary>Baseline configuration — these tests drive the decoder directly, with no engine.</summary>
+    private static CamusDBOptions DecodeOptions => CamusDBOptions.Default;
+
+    private static Task<QueryRow> DecodeAsync(
+        TableSchema schema, ReadOnlyMemory<byte> payload, bool? borrowed,
+        IReadOnlySet<string>? required = null, long? visibility = null, CamusDBOptions? options = null)
     {
         RowEncoder.RowDecodeState state = new() { BorrowedDecode = borrowed };
-        return RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, CamusDBConfig.Ambient, requiredColumns: required, visibilitySchemaVersion: visibility, decodeState: state).AsTask();
+        return RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, options ?? DecodeOptions, requiredColumns: required, visibilitySchemaVersion: visibility, decodeState: state).AsTask();
     }
 
     /// <summary>Asserts the borrowed backing yields the same layout and cell values as the eager backing.</summary>
@@ -215,27 +219,19 @@ public sealed class TestBorrowedDecode
     }
 
     [Test]
-    public async Task NoOverride_FollowsGlobalFlag()
+    public async Task NoOverride_FollowsConfiguredPolicy()
     {
         TableSchema schema = Schema(0, Col("n", ColumnType.Integer64));
         ReadOnlyMemory<byte> payload = Encode(schema, new Dictionary<string, ColumnValue> { ["n"] = new(ColumnType.Integer64, 1L) });
 
-        BorrowedDecodePolicy original = CamusDBConfig.BorrowedDecode;
-        try
-        {
-            // This facade (no scanner/plan) treats only ForceBorrowed as on; Adaptive/ForceEager are eager.
-            CamusDBConfig.BorrowedDecode = BorrowedDecodePolicy.ForceBorrowed;
-            Assert.IsTrue((await DecodeAsync(schema, payload, borrowed: null)).IsBorrowedBacked);
+        // With no per-row override the configured policy decides. This entry point has no scanner or
+        // plan to consult, so only ForceBorrowed turns borrowing on; Adaptive falls back to eager.
+        Task<QueryRow> DecodeUnder(BorrowedDecodePolicy policy)
+            => DecodeAsync(schema, payload, borrowed: null,
+                           options: DecodeOptions with { BorrowedDecode = policy });
 
-            CamusDBConfig.BorrowedDecode = BorrowedDecodePolicy.ForceEager;
-            Assert.IsFalse((await DecodeAsync(schema, payload, borrowed: null)).IsBorrowedBacked);
-
-            CamusDBConfig.BorrowedDecode = BorrowedDecodePolicy.Adaptive;
-            Assert.IsFalse((await DecodeAsync(schema, payload, borrowed: null)).IsBorrowedBacked);
-        }
-        finally
-        {
-            CamusDBConfig.BorrowedDecode = original;
-        }
+        Assert.IsTrue((await DecodeUnder(BorrowedDecodePolicy.ForceBorrowed)).IsBorrowedBacked);
+        Assert.IsFalse((await DecodeUnder(BorrowedDecodePolicy.ForceEager)).IsBorrowedBacked);
+        Assert.IsFalse((await DecodeUnder(BorrowedDecodePolicy.Adaptive)).IsBorrowedBacked);
     }
 }

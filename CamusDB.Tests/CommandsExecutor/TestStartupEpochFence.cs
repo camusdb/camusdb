@@ -30,8 +30,8 @@ internal sealed class TestStartupEpochFence : BaseTest
     {
         // Two registries on the SAME node share the node id but each mints a fresh startup epoch — the
         // second stands in for a process restart.
-        DatabaseRegistry current = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
-        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        DatabaseRegistry current = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, Options);
 
         try
         {

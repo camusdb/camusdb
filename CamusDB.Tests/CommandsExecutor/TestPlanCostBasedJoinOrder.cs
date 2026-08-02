@@ -31,7 +31,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Acceptance tests for cost-based join-order enumeration (System-R–style DP).
 ///
-/// The DP enumerator is gated by <see cref="CamusDBConfig.CostBasedJoinOrderEnabled"/>.
+/// The DP enumerator is gated by <see cref="CamusDBOptions.CostBasedJoinOrderEnabled"/>.
 /// When the flag is off, plans are byte-identical to the heuristic output; when on,
 /// the planner picks the cheapest left-deep ordering based on INLJ vs hash-join cost.
 ///
@@ -48,9 +48,11 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   avoids the 10 000-row events full scan that the heuristic must pay up-front).
 /// </summary>
 [TestFixture]
-// Mutates the process-wide static CamusDBConfig.CostBasedJoinOrderEnabled. Under the assembly's
-// ParallelScope.Fixtures this would race any concurrent fixture that plans a join and reads that flag
-// (e.g. TestJoinQueryPlanner), flipping join order mid-plan. NonParallelizable isolates the toggle.
+// The planner cases now state their configuration as options passed to the planner they construct, so
+// they no longer touch the process-wide flag. A few executor-level cases below still toggle it — those
+// drive a shared executor that was built before the toggle — and under the assembly's
+// ParallelScope.Fixtures that would race any concurrent fixture reading the same flag, flipping join
+// order mid-plan. NonParallelizable isolates those remaining toggles until they are converted too.
 [NonParallelizable]
 public sealed class TestPlanCostBasedJoinOrder : BaseTest
 {
@@ -158,15 +160,20 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
 
     // ─── Tests ───────────────────────────────────────────────────────────────
 
+    /// <summary>Cost-based join ordering off — the rule-based heuristic.</summary>
+    private static CamusDBOptions DpOff => CamusDBOptions.Default with { CostBasedJoinOrderEnabled = false };
+
+    /// <summary>Cost-based join ordering on — System-R style DP enumeration.</summary>
+    private static CamusDBOptions DpOn => CamusDBOptions.Default with { CostBasedJoinOrderEnabled = true };
+
     [Test]
     public async Task FlagOff_HeuristicKeepsEventsDeclaredFirst()
     {
-        CamusDBConfig.CostBasedJoinOrderEnabled = false;
 
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindStarJoin(StarJoinSql);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(DpOff, executor.Statistics).GetPlan(database, bound, ticket);
 
         // Heuristic: events(score 1) and sessions(score 1) tie; declared order → events is outermost.
         Assert.AreEqual("e", GetLeftmostScanAlias(plan.Root),
@@ -176,24 +183,15 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task FlagOn_DpPicksSessionsFirst()
     {
-        CamusDBConfig.CostBasedJoinOrderEnabled = true;
+        (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
+            = await BindStarJoin(StarJoinSql);
 
-        try
-        {
-            (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
-                = await BindStarJoin(StarJoinSql);
+        QueryPlan plan = new JoinQueryPlanner(DpOn, executor.Statistics).GetPlan(database, bound, ticket);
 
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
-
-            // DP: sessions (50 filtered rows) first → INLJ into events.session_id index costs 50×2=100.
-            // events first → must full-scan events (5 000 rows × 2 = 10 000) before filtering.
-            Assert.AreEqual("s", GetLeftmostScanAlias(plan.Root),
-                "DP must put sessions first: INLJ from 50 sessions into events avoids the 10 000-cost events scan.");
-        }
-        finally
-        {
-            CamusDBConfig.CostBasedJoinOrderEnabled = false;
-        }
+        // DP: sessions (50 filtered rows) first → INLJ into events.session_id index costs 50×2=100.
+        // events first → must full-scan events (5 000 rows × 2 = 10 000) before filtering.
+        Assert.AreEqual("s", GetLeftmostScanAlias(plan.Root),
+            "DP must put sessions first: INLJ from 50 sessions into events avoids the 10 000-cost events scan.");
     }
 
     [Test]
@@ -246,7 +244,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
 
         async Task<QueryPlan> GetPlanWithFlag(bool flagOn)
         {
-            CamusDBConfig.CostBasedJoinOrderEnabled = flagOn;
             ExecuteSQLTicket executeTicket = new(
                 txnState: await database.Transactions.BeginAsync(),
                 database: dbname, sql: sql, parameters: null);
@@ -254,7 +251,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             BoundSelectQuery bound = await new QueryBinder(new TableOpener(catalogs, logger))
                 .BindAsync(database, sq);
             QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
-            return new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            return new JoinQueryPlanner(flagOn ? DpOn : DpOff, executor.Statistics).GetPlan(database, bound, ticket);
         }
 
         try
@@ -270,7 +267,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         }
         finally
         {
-            CamusDBConfig.CostBasedJoinOrderEnabled = false;
         }
     }
 
@@ -290,8 +286,8 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
 
         // A planner takes its configuration when it is constructed, so the two settings under
         // comparison are two planners rather than one planner and a flag flipped between calls.
-        CamusDBOptions flagOff = CamusDBConfig.Ambient with { CostBasedJoinOrderEnabled = false };
-        CamusDBOptions flagOn  = CamusDBConfig.Ambient with { CostBasedJoinOrderEnabled = true };
+        CamusDBOptions flagOff = Options with { CostBasedJoinOrderEnabled = false };
+        CamusDBOptions flagOn  = Options with { CostBasedJoinOrderEnabled = true };
 
         // Plan A: flag off, stats available.  Dispatcher goes: flag=false → heuristic.
         QueryPlan planOff = new JoinQueryPlanner(flagOff, executor.Statistics).GetPlan(database, bound, ticket);
@@ -329,11 +325,15 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         // a wrong INLJ direction, or any other correctness bug introduced by reordering.
 
         string dbname = await CreateStarJoinDatabase();
-        CommandExecutor executor = CreateCommandExecutor();
-        TrackDatabase(dbname, executor);
 
-        List<(string region, string name)> rowsOff = await ExecuteStarJoin(executor, dbname, flagOn: false);
-        List<(string region, string name)> rowsOn  = await ExecuteStarJoin(executor, dbname, flagOn: true);
+        // One engine per ordering: each fixes its own configuration when built, so the two plans are
+        // produced under genuinely independent settings rather than a value flipped between the runs.
+        CommandExecutor heuristic = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = false });
+        CommandExecutor costBased = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = true });
+        TrackDatabase(dbname, heuristic);
+
+        List<(string region, string name)> rowsOff = await ExecuteStarJoin(heuristic, dbname);
+        List<(string region, string name)> rowsOn  = await ExecuteStarJoin(costBased, dbname);
 
         // Both orderings must return the same result set (sorted for stable comparison).
         rowsOff.Sort((a, b) => string.Compare(a.name, b.name, StringComparison.Ordinal));
@@ -357,10 +357,10 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         // Verifies that WHERE predicates (type="click" on events, region="eu" on sessions)
         // are correctly applied after reordering. Rows that fail either filter must be absent.
         string dbname = await CreateStarJoinDatabase();
-        CommandExecutor executor = CreateCommandExecutor();
+        CommandExecutor executor = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = true });
         TrackDatabase(dbname, executor);
 
-        List<(string region, string name)> rows = await ExecuteStarJoin(executor, dbname, flagOn: true);
+        List<(string region, string name)> rows = await ExecuteStarJoin(executor, dbname);
         rows.Sort((a, b) => string.Compare(a.name, b.name, StringComparison.Ordinal));
 
         // Only 2 events match: click+eu1→alice, click+eu2→bob.
@@ -486,34 +486,31 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         return dbname;
     }
 
+    /// <summary>
+    /// Runs the star join through <paramref name="executor"/>, whose own configuration decides whether
+    /// the cost-based join order is used. Comparing the two orderings therefore means passing two
+    /// engines, not toggling anything between the runs.
+    /// </summary>
     private async Task<List<(string region, string name)>> ExecuteStarJoin(
-        CommandExecutor executor, string dbname, bool flagOn)
+        CommandExecutor executor, string dbname)
     {
-        CamusDBConfig.CostBasedJoinOrderEnabled = flagOn;
-        try
-        {
-            KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
+        KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
 
-            ExecuteSQLTicket ticket = new(
-                txnState: txn,
-                database: dbname,
-                sql: StarJoinSql,
-                parameters: null);
+        ExecuteSQLTicket ticket = new(
+            txnState: txn,
+            database: dbname,
+            sql: StarJoinSql,
+            parameters: null);
 
-            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
-                = await executor.ExecuteSQLQuery(ticket);
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
+            = await executor.ExecuteSQLQuery(ticket);
 
-            List<(string region, string name)> rows = [];
-            await foreach (QueryResultRow row in cursor)
-                rows.Add((row.Row["region"].StrValue!, row.Row["name"].StrValue!));
+        List<(string region, string name)> rows = [];
+        await foreach (QueryResultRow row in cursor)
+            rows.Add((row.Row["region"].StrValue!, row.Row["name"].StrValue!));
 
-            await database.Transactions.CommitAsync(txn);
-            return rows;
-        }
-        finally
-        {
-            CamusDBConfig.CostBasedJoinOrderEnabled = false;
-        }
+        await database.Transactions.CommitAsync(txn);
+        return rows;
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -618,7 +615,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(DpOff, executor.Statistics).GetPlan(database, bound, ticket);
 
         // Find the orders leaf scan node — the leftmost TableScanNode with an ExecutionFilter.
         TableScanNode? ordersLeaf = FindLeafWithFilter(plan.Root, "o");
@@ -646,7 +643,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(DpOff, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
             "Selective filter on outer side must make INLJ cheaper than hash join");
@@ -660,7 +657,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(DpOff, executor.Statistics).GetPlan(database, bound, ticket);
 
         long? joinCard = plan.Root.EstimatedCardinality;
         Assert.IsNotNull(joinCard, "Join root EstimatedCardinality must be populated by CostEstimator");
@@ -778,16 +775,17 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task FlagOn_FilteredJoinLeafBecomesIndexRangeScan()
     {
+
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
         // Validates that BuildJoinTree emits IndexRangeScanNode for the orders leaf when
         // CostBasedAccessPathEnabled is true and status has a usable index with low NDV.
         // With the flag off the leaf is always TableScanNode(PrimaryRows) regardless of indexes.
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
         try
         {
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindIndexedJoinLeafSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
             // Walk the plan to find the orders leaf.
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
@@ -801,21 +799,22 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         }
         finally
         {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
         }
     }
 
     [Test]
     public async Task FlagOff_FilteredJoinLeafRemainsTableScan()
     {
+
+
+        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false };
         // Regression guard: when CostBasedAccessPathEnabled=false the behaviour is unchanged —
         // join leaves remain TableScanNode(PrimaryRows) with a residual ExecutionFilter.
-        CamusDBConfig.CostBasedAccessPathEnabled = false;
 
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindIndexedJoinLeafSetup();
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
         IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
         Assert.IsNull(rangeLeaf,
@@ -829,11 +828,14 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         // the default full-scan plan — any dropped predicate, wrong range, or missing row fetch
         // would diverge here.
         string dbname = await CreateIndexedJoinDatabase();
-        CommandExecutor executor = CreateCommandExecutor();
-        TrackDatabase(dbname, executor);
 
-        List<(string id, string name)> rowsOff = await ExecuteIndexedJoinPlan(executor, dbname, accessPathOn: false);
-        List<(string id, string name)> rowsOn  = await ExecuteIndexedJoinPlan(executor, dbname, accessPathOn: true);
+        // One engine per access-path setting — see the star-join equivalence test above.
+        CommandExecutor fullScan  = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = false });
+        CommandExecutor indexScan = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = true });
+        TrackDatabase(dbname, fullScan);
+
+        List<(string id, string name)> rowsOff = await ExecuteIndexedJoinPlan(fullScan, dbname);
+        List<(string id, string name)> rowsOn  = await ExecuteIndexedJoinPlan(indexScan, dbname);
 
         rowsOff.Sort((a, b) => string.Compare(a.id, b.id, StringComparison.Ordinal));
         rowsOn .Sort((a, b) => string.Compare(a.id, b.id, StringComparison.Ordinal));
@@ -922,37 +924,33 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         return dbname;
     }
 
+    /// <summary>
+    /// Runs the indexed join through <paramref name="executor"/>, whose own configuration decides
+    /// whether the cost-based access path is considered.
+    /// </summary>
     private async Task<List<(string id, string name)>> ExecuteIndexedJoinPlan(
-        CommandExecutor executor, string dbname, bool accessPathOn)
+        CommandExecutor executor, string dbname)
     {
-        CamusDBConfig.CostBasedAccessPathEnabled = accessPathOn;
-        try
-        {
-            KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
+        KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
 
-            const string sql =
-                "SELECT o.id, p.name " +
-                "FROM orders o " +
-                "JOIN products p ON o.product_id = p.id " +
-                "WHERE o.status = \"urgent\"";
+        const string sql =
+            "SELECT o.id, p.name " +
+            "FROM orders o " +
+            "JOIN products p ON o.product_id = p.id " +
+            "WHERE o.status = \"urgent\"";
 
-            ExecuteSQLTicket ticket = new(
-                txnState: txn, database: dbname, sql: sql, parameters: null);
+        ExecuteSQLTicket ticket = new(
+            txnState: txn, database: dbname, sql: sql, parameters: null);
 
-            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
-                = await executor.ExecuteSQLQuery(ticket);
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
+            = await executor.ExecuteSQLQuery(ticket);
 
-            List<(string id, string name)> rows = [];
-            await foreach (QueryResultRow row in cursor)
-                rows.Add((row.Row["id"].StrValue ?? "", row.Row["name"].StrValue ?? ""));
+        List<(string id, string name)> rows = [];
+        await foreach (QueryResultRow row in cursor)
+            rows.Add((row.Row["id"].StrValue ?? "", row.Row["name"].StrValue ?? ""));
 
-            await database.Transactions.CommitAsync(txn);
-            return rows;
-        }
-        finally
-        {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
-        }
+        await database.Transactions.CommitAsync(txn);
+        return rows;
     }
 
     // ─── Index-range-leaf annotation tests ───────────────────────────────────
@@ -1042,57 +1040,58 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task IndexRangeLeafAnnotation_MatchesEstimatePhysicalNodeRows()
     {
+
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
         // With CostBasedAccessPathEnabled=true and seeded NDV, AnnotatePlan must assign the
         // same EstimatedCardinality to the IndexRangeScanNode leaf as EstimatePhysicalNodeRows.
         // EstimateNodeCost passes resolvedTable (not null primaryTable) to EstimateRangeScanRows
         // so the stats branch is used rather than the 10% fallback.
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
         try
         {
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindIndexedLeafAnnotationSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
             Assert.IsNotNull(rangeLeaf, "Expected an IndexRangeScanNode for the orders leaf with CostBasedAccessPathEnabled=true");
 
             // AnnotatePlan fills EstimatedCardinality.
-            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
+            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, planning);
             long annotated = rangeLeaf!.EstimatedCardinality ?? 0L;
 
             // EstimatePhysicalNodeRows is the reference — it passes the table correctly.
-            long reference = new JoinQueryPlanner(CamusDBConfig.Ambient).EstimatePhysicalNodeRows(rangeLeaf, database, executor.Statistics);
+            long reference = new JoinQueryPlanner(planning).EstimatePhysicalNodeRows(rangeLeaf, database, executor.Statistics);
 
             Assert.AreEqual(reference, annotated,
                 "AnnotatePlan leaf cardinality must equal EstimatePhysicalNodeRows for an IndexRangeScanNode join leaf.");
         }
         finally
         {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
         }
     }
 
     [Test]
     public async Task IndexRangeLeafAnnotation_UsesSeededStatsNotFallback()
     {
+
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
         // The annotated leaf cardinality must differ from the fixed-heuristic fallback
         // (10% of trc = 1000) when NDV is seeded.
         // With NDV=5: stats branch → 10000/5 = 2000 rows.
         // Without seeded stats (or with a null table reaching EstimateRangeScanRows):
         // fallback → 10000 × 0.10 = 1000 rows.
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
         try
         {
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindIndexedLeafAnnotationSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
             Assert.IsNotNull(rangeLeaf);
 
-            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
+            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, planning);
 
             Assert.AreNotEqual(1_000L, rangeLeaf!.EstimatedCardinality,
                 "Annotated leaf cardinality must not equal the 10% heuristic fallback when NDV stats are seeded.");
@@ -1101,7 +1100,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         }
         finally
         {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
         }
     }
 
@@ -1189,19 +1187,20 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task HashJoinWithIndexedLeftLeaf_ResolveLeftTableForCardinality()
     {
+
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
         // When the left input to a hash/NLJ join is an IndexRangeScanNode with BoundSource,
         // TryResolveLeftTable must return its table so the unique-key check on the left join
         // key fires.  Here o.id is a unique PK (left join key) and log_entries.order_id is
         // non-unique (right join key): EstimateJoinCardinality returns rightRows (5000).
         // Without the IndexRangeScanNode arm in TryResolveLeftTable, leftTable is null →
         // unique check skipped → fallback product or NDV-only path, both ≠ 5000.
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
         try
         {
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindUniqueLeftKeyJoinSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
             // Precondition: the orders left leaf must actually be an IndexRangeScanNode. If a future
             // breakeven/estimate change turned it into a TableScanNode, the always-present TableScanNode
@@ -1210,7 +1209,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             Assert.IsNotNull(FindIndexRangeLeaf(plan.Root, "o"),
                 "Precondition: orders left leaf must be an IndexRangeScanNode (CostBasedAccessPathEnabled + selective status index).");
 
-            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
+            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, planning);
 
             // The left key (o.id) is unique → unique-left-key formula → join cardinality = rightRows.
             long joinCard = plan.Root.EstimatedCardinality ?? 0L;
@@ -1223,7 +1222,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         }
         finally
         {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
         }
     }
 
@@ -1314,13 +1312,14 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task FlagOn_InListJoinLeafBecomesIndexInListScan()
     {
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
+
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
         try
         {
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
                 = await BindInListJoinLeafSetup();
 
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexInListScanNode? inListLeaf = FindIndexInListLeaf(plan.Root, "o");
             Assert.IsNotNull(inListLeaf,
@@ -1333,19 +1332,20 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         }
         finally
         {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
         }
     }
 
     [Test]
     public async Task FlagOff_InListJoinLeafRemainsTableScan()
     {
-        CamusDBConfig.CostBasedAccessPathEnabled = false;
+
+
+        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false };
 
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindInListJoinLeafSetup();
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
         IndexInListScanNode? inListLeaf = FindIndexInListLeaf(plan.Root, "o");
         Assert.IsNull(inListLeaf,
@@ -1355,8 +1355,9 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task LowNdv_InListJoinLeaf_FallsBackToTableScan()
     {
+
+        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false };
         // NDV=2, trc=10000, n=2 values → estimated = trc*(2/NDV) = 10000 → breakeven fires.
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
         try
         {
             CommandExecutor executor = CreateCommandExecutor();
@@ -1427,7 +1428,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
                 .BindAsync(database, selectQuery);
 
             QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
-            QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+            QueryPlan plan = new JoinQueryPlanner(planning, executor.Statistics).GetPlan(database, bound, ticket);
 
             IndexInListScanNode? inListLeaf = FindIndexInListLeaf(plan.Root, "o");
             Assert.IsNull(inListLeaf,
@@ -1435,7 +1436,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         }
         finally
         {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
         }
     }
 
@@ -1444,11 +1444,14 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     {
         // Result-equivalence: flag on and flag off must return identical rows for an IN-list join.
         string dbname = await CreateInListJoinDatabase();
-        CommandExecutor executor = CreateCommandExecutor();
-        TrackDatabase(dbname, executor);
 
-        List<(string id, string name)> rowsOff = await ExecuteInListJoinPlan(executor, dbname, accessPathOn: false);
-        List<(string id, string name)> rowsOn  = await ExecuteInListJoinPlan(executor, dbname, accessPathOn: true);
+        // One engine per access-path setting — see the star-join equivalence test above.
+        CommandExecutor fullScan  = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = false });
+        CommandExecutor indexScan = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = true });
+        TrackDatabase(dbname, fullScan);
+
+        List<(string id, string name)> rowsOff = await ExecuteInListJoinPlan(fullScan, dbname);
+        List<(string id, string name)> rowsOn  = await ExecuteInListJoinPlan(indexScan, dbname);
 
         rowsOff.Sort((a, b) => string.Compare(a.id, b.id, StringComparison.Ordinal));
         rowsOn .Sort((a, b) => string.Compare(a.id, b.id, StringComparison.Ordinal));
@@ -1544,37 +1547,33 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         return dbname;
     }
 
+    /// <summary>
+    /// Runs the IN-list join through <paramref name="executor"/>, whose own configuration decides
+    /// whether the cost-based access path is considered.
+    /// </summary>
     private async Task<List<(string id, string name)>> ExecuteInListJoinPlan(
-        CommandExecutor executor, string dbname, bool accessPathOn)
+        CommandExecutor executor, string dbname)
     {
-        CamusDBConfig.CostBasedAccessPathEnabled = accessPathOn;
-        try
-        {
-            KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
+        KvTransaction txn = await (await executor.OpenDatabase(dbname)).Transactions.BeginAsync();
 
-            const string sql =
-                "SELECT o.id, p.name " +
-                "FROM orders o " +
-                "JOIN products p ON o.product_id = p.id " +
-                "WHERE o.priority IN (1, 2)";
+        const string sql =
+            "SELECT o.id, p.name " +
+            "FROM orders o " +
+            "JOIN products p ON o.product_id = p.id " +
+            "WHERE o.priority IN (1, 2)";
 
-            ExecuteSQLTicket ticket = new(
-                txnState: txn, database: dbname, sql: sql, parameters: null);
+        ExecuteSQLTicket ticket = new(
+            txnState: txn, database: dbname, sql: sql, parameters: null);
 
-            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
-                = await executor.ExecuteSQLQuery(ticket);
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)
+            = await executor.ExecuteSQLQuery(ticket);
 
-            List<(string id, string name)> rows = [];
-            await foreach (QueryResultRow row in cursor)
-                rows.Add((row.Row["id"].StrValue ?? "", row.Row["name"].StrValue ?? ""));
+        List<(string id, string name)> rows = [];
+        await foreach (QueryResultRow row in cursor)
+            rows.Add((row.Row["id"].StrValue ?? "", row.Row["name"].StrValue ?? ""));
 
-            await database.Transactions.CommitAsync(txn);
-            return rows;
-        }
-        finally
-        {
-            CamusDBConfig.CostBasedAccessPathEnabled = false;
-        }
+        await database.Transactions.CommitAsync(txn);
+        return rows;
     }
 
     private static IndexInListScanNode? FindIndexInListLeaf(PhysicalPlanNode node, string alias)

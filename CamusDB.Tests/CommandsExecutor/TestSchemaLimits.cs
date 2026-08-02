@@ -23,15 +23,13 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Validates the schema limits:
-///   identifier length (MaxIdentifierLength)
-///   columns per table (MaxColumnsPerTable)
-///   indexes per table (MaxIndexesPerTable)
-///   tables per database (MaxTablesPerDatabase)
-/// Each test restores the overridden config knob in TearDown via NUnit's
-/// [TearDown] attribute on a nested helper or via the shared TearDown in BaseTest.
-/// Config is overridden locally because it's a static knob — tests that modify it
-/// are marked [NonParallelizable] to prevent interference with parallel fixtures.
+/// Validates the schema limits: identifier length, columns per table, indexes per table, and tables
+/// per database.
+///
+/// <para>Each case builds an engine carrying the ceiling it wants to exercise, so the limit under test
+/// applies to that engine alone and nothing has to be saved and restored. A ceiling is fixed when the
+/// engine is built, so a case that must first create an object under the default ceiling and only then
+/// exercise a tighter one uses a second engine rather than changing a limit in between.</para>
 /// </summary>
 [TestFixture]
 public sealed class TestSchemaLimits : BaseTest
@@ -158,21 +156,13 @@ public sealed class TestSchemaLimits : BaseTest
     [NonParallelizable]
     public void IdentifierLimitDisabled_ZeroMeansNoCheck()
     {
-        int saved = CamusDBConfig.MaxIdentifierLength;
-        CamusDBConfig.MaxIdentifierLength = 0;
-        try
-        {
-            // ValidateIdentifier must not throw for a very long name when limit is 0.
-            Assert.DoesNotThrow(() =>
-            {
-                // Invoke via CreateDatabaseValidator directly — avoids spinning up a DB.
-                var validator = new CamusDB.Core.CommandsValidator.CommandValidator(CamusDBConfig.Ambient);
-                // A 300-char name — would have failed under the old 255 limit.
-                string longName = new('a', 300);
-                validator.Validate(new CreateDatabaseTicket(longName, ifNotExists: false));
-            });
-        }
-        finally { CamusDBConfig.MaxIdentifierLength = saved; }
+        // Zero means "no ceiling", so a name far past any previous limit must be accepted.
+        CommandValidator validator = new(Options with { MaxIdentifierLength = 0 });
+
+        // Validated directly rather than through an engine — this needs no database.
+        string longName = new('a', 300);
+
+        Assert.DoesNotThrow(() => validator.Validate(new CreateDatabaseTicket(longName, ifNotExists: false)));
     }
 
     // ── columns per table ──────────────────────────────────────────────────────
@@ -181,59 +171,43 @@ public sealed class TestSchemaLimits : BaseTest
     [NonParallelizable]
     public async Task CreateTable_TooManyColumns_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxColumnsPerTable;
-        CamusDBConfig.MaxColumnsPerTable = 3;
-        try
-        {
-            // 4 columns (id + col_0 + col_1 + col_2) — one over the limit of 3.
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxColumnsPerTable = 3 });
 
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.CreateTable(BasicTable(dbname, "wide", extraColumns: 3)));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-            Assert.That(ex.Message, Does.Contain("3"));
-        }
-        finally { CamusDBConfig.MaxColumnsPerTable = saved; }
+        // 4 columns (id + col_0 + col_1 + col_2) — one over the limit of 3.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.CreateTable(BasicTable(dbname, "wide", extraColumns: 3)));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
+        Assert.That(ex.Message, Does.Contain("3"));
     }
 
     [Test]
     [NonParallelizable]
     public async Task CreateTable_AtColumnLimit_Succeeds()
     {
-        int saved = CamusDBConfig.MaxColumnsPerTable;
-        CamusDBConfig.MaxColumnsPerTable = 3;
-        try
-        {
-            // exactly 3 columns (id + col_0 + col_1).
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            bool ok = (await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 2))).Success;
-            Assert.IsTrue(ok);
-        }
-        finally { CamusDBConfig.MaxColumnsPerTable = saved; }
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxColumnsPerTable = 3 });
+
+        // exactly 3 columns (id + col_0 + col_1).
+        bool ok = (await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 2))).Success;
+        Assert.IsTrue(ok);
     }
 
     [Test]
     [NonParallelizable]
     public async Task AlterTable_AddColumnExceedsLimit_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxColumnsPerTable;
-        CamusDBConfig.MaxColumnsPerTable = 2;
-        try
-        {
-            // Create table with 2 columns (id + col_0) — at the limit.
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 1));
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxColumnsPerTable = 2 });
 
-            // Adding a third column should be rejected.
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.AlterTable(new AlterTableTicket(
-                    databaseName: dbname,
-                    tableName: "t",
-                    column: new ColumnInfo("extra", ColumnType.String),
-                    operation: AlterTableOperation.AddColumn)));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-        }
-        finally { CamusDBConfig.MaxColumnsPerTable = saved; }
+        // Create table with 2 columns (id + col_0) — at the limit.
+        await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 1));
+
+        // Adding a third column should be rejected.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.AlterTable(new AlterTableTicket(
+                databaseName: dbname,
+                tableName: "t",
+                column: new ColumnInfo("extra", ColumnType.String),
+                operation: AlterTableOperation.AddColumn)));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
     }
 
     // ── indexes per table ──────────────────────────────────────────────────────
@@ -242,40 +216,30 @@ public sealed class TestSchemaLimits : BaseTest
     [NonParallelizable]
     public async Task AlterIndex_TooManyIndexes_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxIndexesPerTable;
-        CamusDBConfig.MaxIndexesPerTable = 1;
-        try
-        {
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 2));
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxIndexesPerTable = 1 });
 
-            // First user index — allowed.
-            await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_0", "idx0"));
+        await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 2));
 
-            // Second user index — exceeds limit.
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_1", "idx1")));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-        }
-        finally { CamusDBConfig.MaxIndexesPerTable = saved; }
+        // First user index — allowed.
+        await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_0", "idx0"));
+
+        // Second user index — exceeds limit.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_1", "idx1")));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
     }
 
     [Test]
     [NonParallelizable]
     public async Task AlterIndex_PrimaryKeyDoesNotCountTowardLimit()
     {
-        int saved = CamusDBConfig.MaxIndexesPerTable;
-        CamusDBConfig.MaxIndexesPerTable = 1;
-        try
-        {
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 1));
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxIndexesPerTable = 1 });
 
-            // The PK is already present (~pk); adding one user index must succeed.
-            bool ok = (await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_0", "idx0")));
-            Assert.IsTrue(ok);
-        }
-        finally { CamusDBConfig.MaxIndexesPerTable = saved; }
+        await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 1));
+
+        // The PK is already present (~pk); adding one user index must succeed.
+        bool ok = (await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_0", "idx0")));
+        Assert.IsTrue(ok);
     }
 
     // ── tables per database ────────────────────────────────────────────────────
@@ -284,44 +248,34 @@ public sealed class TestSchemaLimits : BaseTest
     [NonParallelizable]
     public async Task CreateTable_TooManyTables_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxTablesPerDatabase;
-        CamusDBConfig.MaxTablesPerDatabase = 2;
-        try
-        {
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "t1"));
-            await executor.CreateTable(BasicTable(dbname, "t2"));
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxTablesPerDatabase = 2 });
 
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.CreateTable(BasicTable(dbname, "t3")));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-            Assert.That(ex.Message, Does.Contain("2"));
-        }
-        finally { CamusDBConfig.MaxTablesPerDatabase = saved; }
+        await executor.CreateTable(BasicTable(dbname, "t1"));
+        await executor.CreateTable(BasicTable(dbname, "t2"));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.CreateTable(BasicTable(dbname, "t3")));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
+        Assert.That(ex.Message, Does.Contain("2"));
     }
 
     [Test]
     [NonParallelizable]
     public async Task CreateTable_IfNotExists_ExistingTableAtLimit_IsNoOp()
     {
-        int saved = CamusDBConfig.MaxTablesPerDatabase;
-        CamusDBConfig.MaxTablesPerDatabase = 1;
-        try
-        {
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "t1"));
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options with { MaxTablesPerDatabase = 1 });
 
-            // IF NOT EXISTS on the existing table must succeed even though db is at the limit.
-            CreateTableTicket ifNotExists = new(
-                databaseName: dbname,
-                tableName: "t1",
-                columns: [new("id", ColumnType.Id)],
-                constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
-                ifNotExists: true
-            );
-            bool result = (await executor.CreateTable(ifNotExists)).Success;
-            Assert.IsFalse(result, "IF NOT EXISTS on an existing table returns false");
-        }
-        finally { CamusDBConfig.MaxTablesPerDatabase = saved; }
+        await executor.CreateTable(BasicTable(dbname, "t1"));
+
+        // IF NOT EXISTS on the existing table must succeed even though db is at the limit.
+        CreateTableTicket ifNotExists = new(
+            databaseName: dbname,
+            tableName: "t1",
+            columns: [new("id", ColumnType.Id)],
+            constraints: [new(ConstraintType.PrimaryKey, "~pk", [new("id", OrderType.Ascending)])],
+            ifNotExists: true
+        );
+        bool result = (await executor.CreateTable(ifNotExists)).Success;
+        Assert.IsFalse(result, "IF NOT EXISTS on an existing table returns false");
     }
 }

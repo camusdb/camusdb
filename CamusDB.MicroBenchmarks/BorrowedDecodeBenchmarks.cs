@@ -61,13 +61,20 @@ public class BorrowedDecodeBenchmarks
     private static readonly ObjectIdValue RowId = new(1, 2, 3);
     private static readonly HLCTimestamp TxId = default;
 
+    private CamusDBOptions _options = CamusDBOptions.Default;
+
     [GlobalSetup]
     public void GlobalSetup()
     {
-        CamusDBConfig.SlotBackedDecode = Mode == DecodeMode.Slot;
-        CamusDBConfig.BorrowedDecode = Mode == DecodeMode.Borrowed
-            ? BorrowedDecodePolicy.ForceBorrowed
-            : BorrowedDecodePolicy.ForceEager;
+        // The decode path under measurement is carried in the options handed to the decoder, so each
+        // benchmark run decodes under exactly the mode it reports.
+        _options = CamusDBOptions.Default with
+        {
+            SlotBackedDecode = Mode == DecodeMode.Slot,
+            BorrowedDecode = Mode == DecodeMode.Borrowed
+                ? BorrowedDecodePolicy.ForceBorrowed
+                : BorrowedDecodePolicy.ForceEager,
+        };
 
         _schema = new TableSchema
         {
@@ -126,7 +133,7 @@ public class BorrowedDecodeBenchmarks
     private async Task<QueryRow> DecodeAsync(int i, RowEncoder.RowDecodeState cache)
     {
         BranchKvValue env = BranchKvCodec.Decode(_payloads[i]);
-        return await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, env.Payload, CamusDBConfig.Ambient, decodeState: cache)
+        return await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, env.Payload, _options, decodeState: cache)
             .ConfigureAwait(false);
     }
 

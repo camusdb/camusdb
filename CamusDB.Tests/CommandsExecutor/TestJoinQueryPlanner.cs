@@ -40,7 +40,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE u.role = \"admin\"");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Unindexed equi-join → HashJoinNode; the WHERE predicate is pushed to the users scan.
         HashJoinNode joinNode = FindHashJoinNode(plan.Root);
@@ -57,7 +57,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE p.published = true");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Unindexed equi-join → HashJoinNode; the WHERE predicate is pushed to the build side.
         HashJoinNode joinNode = FindHashJoinNode(plan.Root);
@@ -74,7 +74,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT u.email FROM app_users u JOIN posts p ON p.user_id = u.id WHERE p.user_id = u.id AND u.role = \"admin\"");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Unindexed equi-join → HashJoinNode.
         TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
@@ -92,7 +92,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id",
             indexPostsUserId: false);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Equi-join with no index on the right key → HashJoinNode (not NestedLoopJoinNode).
         Assert.IsInstanceOf<HashJoinNode>(plan.Root);
@@ -107,7 +107,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id",
             indexPostsUserId: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root);
 
@@ -124,7 +124,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "SELECT u.email, p.title FROM app_users u, posts p WHERE p.user_id = u.id",
             indexPostsUserId: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root);
     }
@@ -135,7 +135,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT u.email, p.title FROM app_users u, posts p WHERE p.user_id = u.id AND u.role = \"admin\"");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
         Assert.IsNotNull(usersScan.ExecutionFilter);
@@ -148,7 +148,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE u.role = \"admin\"");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         TableScanNode usersScan = FindScanForAlias(plan.Root, "u");
 
@@ -164,7 +164,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "SELECT u.email, d.post_count FROM (SELECT user_id, COUNT(*) AS post_count FROM posts GROUP BY user_id) d "
             + "JOIN app_users u ON u.id = d.user_id");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         Assert.IsFalse(plan.RequiredColumnsByAlias!.ContainsKey("d"));
         CollectionAssert.AreEquivalent(new[] { "email", "id" }, plan.RequiredColumnsByAlias["u"]);
@@ -250,7 +250,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "SELECT p.title, u.email FROM posts p JOIN app_users u ON p.user_id = u.id WHERE u.id = '507f1f77bcf86cd799439011'",
             indexPostsUserId: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Root is a join node; its Input (left) must be the users scan.
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root);
@@ -266,7 +266,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket) = await BindJoinQuery(
             "SELECT p.title, u.email FROM posts p JOIN app_users u ON p.user_id = u.id");
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // The outer scan should still be 'p' (declared first, equal priority).
         TableScanNode outerScan = FindScanForAlias(plan.Root, "p");
@@ -281,7 +281,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id WHERE u.id = '507f1f77bcf86cd799439011'",
             indexPostsUserId: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Root must still be an INLJ with users on the outer (left) side.
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root);
@@ -301,7 +301,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             indexPostsUserId: true,
             indexCommentsPostId: false);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Outermost left scan should be 'u' (moved to front).
         TableScanNode outerScan = FindScanForAlias(plan.Root, "u");
@@ -321,7 +321,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             indexPostsUserId: false,
             indexCommentsPostId: false);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options).GetPlan(database, bound, ticket);
 
         // Declared order: u → p → c.  The outermost-left scan must be 'u'.
         TableScanNode outerScan = FindScanForAlias(plan.Root, "u");
@@ -665,7 +665,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, usersTable, 10);
         executor.Statistics.SeedRowCountForTesting(database, postsTable, 10_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         HashJoinNode join = FindHashJoinNode(plan.Root);
         Assert.AreEqual(HashJoinBuildSide.Left, join.BuildSide,
@@ -685,7 +685,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, usersTable, 50_000);
         executor.Statistics.SeedRowCountForTesting(database, postsTable, 200);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         HashJoinNode join = FindHashJoinNode(plan.Root);
         Assert.AreEqual(HashJoinBuildSide.Right, join.BuildSide,
@@ -705,7 +705,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, usersTable, 1_000);
         executor.Statistics.SeedRowCountForTesting(database, postsTable, 1_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         HashJoinNode join = FindHashJoinNode(plan.Root);
         Assert.AreEqual(HashJoinBuildSide.Right, join.BuildSide,
@@ -720,7 +720,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
                 "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.user_id = u.id");
 
         // No stats injected — planner has no StatisticsManager.
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, stats: null).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, stats: null).GetPlan(database, bound, ticket);
 
         HashJoinNode join = FindHashJoinNode(plan.Root);
         Assert.AreEqual(HashJoinBuildSide.Right, join.BuildSide,
@@ -744,7 +744,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         // database/stats are unused on this arm; a StackOverflow here (the old bug) would crash the
         // process rather than fail the assert, so reaching the assert at all proves no recursion.
-        long rows = new JoinQueryPlanner(CamusDBConfig.Ambient).EstimatePhysicalNodeRows(node, database: null!, stats: null);
+        long rows = new JoinQueryPlanner(Options).EstimatePhysicalNodeRows(node, database: null!, stats: null);
 
         Assert.AreEqual(CostEstimator.DefaultTableRowCount, rows);
     }
@@ -755,7 +755,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         TableIndexSchema index = new("idx", ["col"], IndexType.Unique);
         IndexLookupNode node = new(index, new ColumnValue(ColumnType.Integer64, 1L));
 
-        long rows = new JoinQueryPlanner(CamusDBConfig.Ambient).EstimatePhysicalNodeRows(node, database: null!, stats: null);
+        long rows = new JoinQueryPlanner(Options).EstimatePhysicalNodeRows(node, database: null!, stats: null);
         Assert.AreEqual(1, rows);
     }
 
@@ -784,13 +784,13 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, postsTable, N);
 
         // Hash-join plan (unindexed equi-join → planner picks HashJoinNode).
-        QueryPlan hashPlan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan hashPlan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
         HashJoinNode hashJoin = FindHashJoinNode(hashPlan.Root);
 
         // Manually build an equivalent NestedLoopJoinNode plan and annotate it.
         // We reuse the same left input and right source so the stats context is identical.
         NestedLoopJoinNode nljNode = new(hashJoin.Input!, hashJoin.BuildSource, hashJoin.OnPredicate!);
-        CostEstimator.AnnotatePlan(nljNode, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
+        CostEstimator.AnnotatePlan(nljNode, database, table: null, executor.Statistics, Options);
 
         Assert.IsNotNull(hashJoin.Cost, "hash join cost must be annotated");
         Assert.IsNotNull(nljNode.Cost,  "NLJ cost must be annotated");
@@ -828,7 +828,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, usersTable, N);
         executor.Statistics.SeedRowCountForTesting(database, postsTable, N);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
         HashJoinNode join = FindHashJoinNode(plan.Root);
 
         Assert.IsNotNull(join.EstimatedCardinality, "EstimatedCardinality must be set by AnnotatePlan");
@@ -856,7 +856,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, usersTable, 10);
         executor.Statistics.SeedRowCountForTesting(database, postsTable, 100_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
             "Small outer (10) + large indexed right (100 000) → INLJ is cheaper");
@@ -877,7 +877,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, usersTable, 100_000);
         executor.Statistics.SeedRowCountForTesting(database, postsTable, 10);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<HashJoinNode>(plan.Root,
             "Large outer (100 000) + small indexed right (10) → hash join is cheaper");
@@ -893,7 +893,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
                 indexPostsUserId: true);
 
         // Pass null stats — planner must fall back to INLJ.
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, stats: null).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, stats: null).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(plan.Root,
             "Absent stats must fall back to INLJ");
@@ -908,7 +908,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
                 "SELECT u.email, p.title FROM app_users u JOIN posts p ON p.published = true",
                 indexPostsUserId: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, stats: null).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, stats: null).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<NestedLoopJoinNode>(plan.Root,
             "Non-equi join must use nested-loop regardless of index");
@@ -1023,7 +1023,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
             await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: false, indexRightJoinKey: false);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
         MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
@@ -1052,7 +1052,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
             await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: true, indexRightJoinKey: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
         MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
@@ -1090,7 +1090,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
             await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: false, indexRightJoinKey: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
         MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
@@ -1114,7 +1114,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
             await BindMergeJoinQuery(MjJoinSql, indexLeftJoinKey: true, indexRightJoinKey: false);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
         MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
@@ -1190,7 +1190,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
             .BindAsync(database, selectQuery);
         QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root);
         MergeJoinNode mergeJoin = (MergeJoinNode)plan.Root;
@@ -1313,7 +1313,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
             await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: false, indexRightJoinKey: false);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<HashJoinNode>(plan.Root,
             "No index on either side → hash join (no free ordering for merge)");
@@ -1329,7 +1329,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor) =
             await BindCostSelectionQuery(CostSelectionSql, indexLeftJoinKey: false, indexRightJoinKey: true);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
             "Only right side indexed → left not free-ordered → planner must NOT pick merge join");
@@ -1351,7 +1351,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, ordersTable,    10_000);
         executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root,
             "Both sides indexed + large input → cost-based selection must pick merge join");
@@ -1376,7 +1376,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, ordersTable,    5);
         executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
             "Small outer (5 rows) → INLJ preferred over merge join even with both sides indexed");
@@ -1403,7 +1403,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, ordersTable,    5);
         executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsNotInstanceOf<MergeJoinNode>(plan.Root,
             "Composite right index + small outer → threshold not met → must NOT pick merge join");
@@ -1428,7 +1428,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         executor.Statistics.SeedRowCountForTesting(database, ordersTable,    10_000);
         executor.Statistics.SeedRowCountForTesting(database, lineItemsTable, 50_000);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<MergeJoinNode>(plan.Root,
             "Composite right index + large input → unindexed branch must pick merge join (same threshold as indexed branch)");
@@ -1480,7 +1480,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         await executor.Statistics.SetNdvAsync(database, lineItemsTable,
             new() { { "product", productNdv } }, keyNdv: null);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         // With the fix the planner sees filteredRight ≈ 100 < leftRows 1 000 → build = Right.
         // Without the fix rawRight 10 000 > leftRows 1 000 → build = Left.
@@ -1512,7 +1512,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         await executor.Statistics.SetNdvAsync(database, lineItemsTable,
             new() { { "product", 100L } }, keyNdv: null);
 
-        QueryPlan plan = new JoinQueryPlanner(CamusDBConfig.Ambient, executor.Statistics).GetPlan(database, bound, ticket);
+        QueryPlan plan = new JoinQueryPlanner(Options, executor.Statistics).GetPlan(database, bound, ticket);
 
         Assert.IsInstanceOf<HashJoinNode>(plan.Root);
         HashJoinNode hashJoin = (HashJoinNode)plan.Root;
@@ -1547,7 +1547,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         execBase.Statistics.SeedRowCountForTesting(dbBase, lineItemsBase, 10_000);
         await execBase.Statistics.SetNdvAsync(dbBase, lineItemsBase, new Dictionary<string, long>() { { "product", 100L } }, keyNdv: null);
 
-        QueryPlan planBase = new JoinQueryPlanner(CamusDBConfig.Ambient, execBase.Statistics).GetPlan(dbBase, boundBase, ticketBase);
+        QueryPlan planBase = new JoinQueryPlanner(Options, execBase.Statistics).GetPlan(dbBase, boundBase, ticketBase);
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(planBase.Root,
             "No right filter: left (1 000) < right (10 000) → INLJ wins (left is small outer)");
 
@@ -1566,7 +1566,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         execFilt.Statistics.SeedRowCountForTesting(dbFilt, lineItemsFilt, 10_000);
         await execFilt.Statistics.SetNdvAsync(dbFilt, lineItemsFilt, new Dictionary<string, long>() { { "product", 100L } }, keyNdv: null);
 
-        QueryPlan planFilt = new JoinQueryPlanner(CamusDBConfig.Ambient, execFilt.Statistics).GetPlan(dbFilt, boundFilt, ticketFilt);
+        QueryPlan planFilt = new JoinQueryPlanner(Options, execFilt.Statistics).GetPlan(dbFilt, boundFilt, ticketFilt);
         Assert.IsInstanceOf<HashJoinNode>(planFilt.Root,
             "Right filter reduces right to ≈100 rows < left 1 000 → hash beats INLJ at the filtered threshold");
     }

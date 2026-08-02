@@ -43,9 +43,9 @@ internal sealed class TestBranchAwareStorage : BaseTest
     private static string NewName() => "db_" + Guid.NewGuid().ToString("n");
 
     private async Task<(string dbName, DatabaseDescriptor db, CommandExecutor executor)>
-        CreateRootWithTable(string tableSql)
+        CreateRootWithTable(string tableSql, CamusDBOptions? options = null)
     {
-        (string dbName, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options ?? Options);
         TrackDatabase(dbName, executor);
 
         await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
@@ -1349,7 +1349,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // A "remote node" registers the branch target name into the shared KV registry (a valid entry),
         // leaving it absent from this executor's sharedRegistry cache.
-        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
         string branchName = NewName();
         string remoteId = await remoteRegistry.AllocateIdAsync();
         await remoteRegistry.RegisterAsync(branchName, remoteId);
@@ -1446,7 +1446,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // Simulate DropDatabase on another cluster node: it passed the descendant scan (saw no
         // children) and now holds the drop-intent marker — the keyspace purge is about to run.
         // Use a second registry instance (independent cache) to represent the remote node's registry.
-        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
         bool acquired = await remoteRegistry.AcquireDropIntentAsync(rootEntry.Id);
         Assert.IsTrue(acquired, "drop-intent must be acquirable when no other drop is in progress");
 
@@ -1521,7 +1521,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // epoch, standing in for this node after a restart. The stale intent (written by the prior
         // instance's epoch) is then a prior-run remnant the scrub reclaims; a marker from the current
         // run would be protected as a live fence.
-        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, Options);
         await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, afterRestart);
         await afterRestart.DisposeAsync();
 
@@ -1613,7 +1613,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // Startup scrub on a FRESH registry (new epoch = post-restart) must resume the interrupted
         // purge: the dropping marker was written by the prior instance's epoch, so it is a genuine
         // crash remnant this run reclaims.
-        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, Options);
         await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, afterRestart);
         await afterRestart.DisposeAsync();
 
@@ -1637,13 +1637,13 @@ internal sealed class TestBranchAwareStorage : BaseTest
     [NonParallelizable]
     public async Task DropDatabase_KeyspacePurge_PagesInBoundedBatches()
     {
-        int originalBatch = CamusDBConfig.KeyspacePurgeBatchSize;
-        CamusDBConfig.KeyspacePurgeBatchSize = 1; // one key per batch — maximise batch count
         DatabaseDropper.PurgeBatchesForTesting = 0;
         try
         {
-            (string dbName, DatabaseDescriptor db, CommandExecutor executor) =
-                await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
+            // One key per batch — maximises the batch count, so paging is unmistakable.
+            (string dbName, DatabaseDescriptor db, CommandExecutor executor) = await CreateRootWithTable(
+                "CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)",
+                Options with { KeyspacePurgeBatchSize = 1 });
 
             for (int i = 0; i < 5; i++)
                 await InsertRow(dbName, db, executor, $"INSERT INTO t (id, v) VALUES (gen_id(), \"v{i}\")");
@@ -1672,7 +1672,6 @@ internal sealed class TestBranchAwareStorage : BaseTest
         }
         finally
         {
-            CamusDBConfig.KeyspacePurgeBatchSize = originalBatch;
             DatabaseDropper.PurgeBatchesForTesting = 0;
         }
     }
@@ -1722,9 +1721,9 @@ internal sealed class TestBranchAwareStorage : BaseTest
     public async Task CreateIfNotExists_TargetInKvButNotLocalCache_OpensExisting()
     {
         // "Remote node": independent registry + executor over the same Kahuna node.
-        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
         await using CommandExecutor remote = new(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
             sharedNode: TestNode!, registry: remoteRegistry, isClusterMode: false);
 
         string target = "t_" + Guid.NewGuid().ToString("n");
@@ -1751,9 +1750,9 @@ internal sealed class TestBranchAwareStorage : BaseTest
     [NonParallelizable]
     public async Task CreateBranchIfNotExists_TargetInKvButNotLocalCache_OpensWithoutNewHold()
     {
-        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
         await using CommandExecutor remote = new(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
             sharedNode: TestNode!, registry: remoteRegistry, isClusterMode: false);
 
         string source = "src_" + Guid.NewGuid().ToString("n");

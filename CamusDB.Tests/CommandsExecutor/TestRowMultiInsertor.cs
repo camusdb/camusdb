@@ -21,9 +21,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
 {
-    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase()
+    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SetupDatabase(CamusDBOptions? options = null)
     {
-        return await CreateDatabase();
+        return await CreateDatabase(options ?? Options);
     }
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupMultiIndexTable()
@@ -168,9 +168,10 @@ internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
         return rows;
     }
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupUniqueIndexTable()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupUniqueIndexTable(
+        CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase(options);
 
         KvTransaction txnState = await database.Transactions.BeginAsync();
 
@@ -203,33 +204,25 @@ internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
     {
         // Force small chunks so 15 rows span multiple batches — verifies chunking produces
         // correct results with no missed or double-applied mutations.
-        int savedThreshold = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 4;
-        try
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await SetupUniqueIndexTable(Options with { ForceSpillThresholdRows = 4 });
+
+        List<Dictionary<string, ColumnValue>> rows = new();
+        for (int i = 0; i < 15; i++)
+        rows.Add(new()
         {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupUniqueIndexTable();
+            { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+            { "code", new ColumnValue(ColumnType.String, $"C{i:D4}") },
+            { "value", new ColumnValue(ColumnType.Integer64, i) }
+        });
 
-            List<Dictionary<string, ColumnValue>> rows = new();
-            for (int i = 0; i < 15; i++)
-                rows.Add(new()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "code", new ColumnValue(ColumnType.String, $"C{i:D4}") },
-                    { "value", new ColumnValue(ColumnType.Integer64, i) }
-                });
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        InsertTicket ticket = new(txnState: tx, databaseName: dbname, tableName: "items", values: rows);
+        await executor.Insert(ticket);
+        await database.Transactions.CommitAsync(tx);
 
-            KvTransaction tx = await database.Transactions.BeginAsync();
-            InsertTicket ticket = new(txnState: tx, databaseName: dbname, tableName: "items", values: rows);
-            await executor.Insert(ticket);
-            await database.Transactions.CommitAsync(tx);
-
-            List<QueryResultRow> result = await QueryAllAsync(executor, database, dbname, "items");
-            Assert.AreEqual(15, result.Count, "All rows must be present after chunked insert");
-        }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = savedThreshold == 0 ? null : savedThreshold;
-        }
+        List<QueryResultRow> result = await QueryAllAsync(executor, database, dbname, "items");
+        Assert.AreEqual(15, result.Count, "All rows must be present after chunked insert");
     }
 
     [Test]
@@ -240,38 +233,30 @@ internal sealed class TestRowMultiInsertor : SharedNodeBaseTest
         // Row 12 carries the same unique 'code' as row 0, which was already committed in the
         // first chunk. The insert must throw DuplicateUniqueKeyValue and no row from any chunk
         // must survive — the shared KvTransaction rolls back all staged writes on abort.
-        int savedThreshold = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 4;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupUniqueIndexTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await SetupUniqueIndexTable(Options with { ForceSpillThresholdRows = 4 });
 
-            List<Dictionary<string, ColumnValue>> rows = new();
-            for (int i = 0; i < 13; i++)
-                rows.Add(new()
-                {
-                    { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                    { "code", new ColumnValue(ColumnType.String, i == 12 ? "C0000" : $"C{i:D4}") },
-                    { "value", new ColumnValue(ColumnType.Integer64, i) }
-                });
+        List<Dictionary<string, ColumnValue>> rows = new();
+        for (int i = 0; i < 13; i++)
+            rows.Add(new()
+            {
+                { "id", new ColumnValue(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                { "code", new ColumnValue(ColumnType.String, i == 12 ? "C0000" : $"C{i:D4}") },
+                { "value", new ColumnValue(ColumnType.Integer64, i) }
+            });
 
-            KvTransaction tx = await database.Transactions.BeginAsync();
-            InsertTicket ticket = new(txnState: tx, databaseName: dbname, tableName: "items", values: rows);
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        InsertTicket ticket = new(txnState: tx, databaseName: dbname, tableName: "items", values: rows);
 
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
-            Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code,
-                "A duplicate unique key in a later chunk must throw DuplicateUniqueKeyValue");
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () => await executor.Insert(ticket));
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ex!.Code,
+            "A duplicate unique key in a later chunk must throw DuplicateUniqueKeyValue");
 
-            await database.Transactions.RollbackAsync(tx);
+        await database.Transactions.RollbackAsync(tx);
 
-            List<QueryResultRow> result = await QueryAllAsync(executor, database, dbname, "items");
-            Assert.AreEqual(0, result.Count,
-                "No rows from any chunk must survive after a rolled-back chunked insert");
-        }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = savedThreshold == 0 ? null : savedThreshold;
-        }
+        List<QueryResultRow> result = await QueryAllAsync(executor, database, dbname, "items");
+        Assert.AreEqual(0, result.Count,
+            "No rows from any chunk must survive after a rolled-back chunked insert");
     }
 
     [Test]

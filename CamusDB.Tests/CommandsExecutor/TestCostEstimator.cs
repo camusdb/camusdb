@@ -191,7 +191,7 @@ public sealed class TestCostEstimator : BaseTest
             toInclusive: true);
 
         Assert.IsTrue(
-            CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000, CamusDBConfig.Ambient),
+            CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000, Options),
             "Unbounded secondary index scan (100 % selectivity) must lose to full table scan");
     }
 
@@ -211,7 +211,7 @@ public sealed class TestCostEstimator : BaseTest
             toInclusive: true);
 
         Assert.IsTrue(
-            CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000, CamusDBConfig.Ambient),
+            CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000, Options),
             "Stats-free half-open range meets the breakeven exactly — full table scan must win");
     }
 
@@ -228,7 +228,7 @@ public sealed class TestCostEstimator : BaseTest
             toInclusive: false);
 
         Assert.IsFalse(
-            CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000, CamusDBConfig.Ambient),
+            CostEstimator.ShouldPreferFullScan(node, tableRowCount: 10_000, Options),
             "Tight both-bounds range (10 % selectivity) must keep the index (cheaper than full scan)");
     }
 
@@ -432,7 +432,7 @@ public sealed class TestCostEstimator : BaseTest
             toInclusive: true);
 
         long estimated = CostEstimator.EstimateRangeScanRows(
-            node, tableRows, CamusDBConfig.Ambient,
+            node, tableRows, Options,
             executor.Statistics, database, table);
 
         long expectedApprox = tableRows / compositeKeyNdv; // = 20

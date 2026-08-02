@@ -91,7 +91,7 @@ internal sealed class TestPurgeVerification : SharedNodeBaseTest
         (string dbId, string tableId) = await SetupDroppedTableOrphan(5);
         Assert.IsTrue(await OrphanRecordExists(dbId, tableId), "sanity: orphan record present after deferred drop");
 
-        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, CamusDBConfig.Ambient);
+        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, Options);
         // Fail deletes of the table's row keys → the row bucket never drains → purge is incomplete.
         IKahuna faulty = new FailDeleteKahuna(SharedKahuna, $"{dbId}:{tableId}:r/");
 
@@ -108,7 +108,7 @@ internal sealed class TestPurgeVerification : SharedNodeBaseTest
     {
         (string dbId, string tableId) = await SetupDroppedTableOrphan(5);
 
-        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, CamusDBConfig.Ambient);
+        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, Options);
         bool completed = await dropper.PurgeTableKeyspaceAsync(SharedKahuna, dbId, tableId);
 
         Assert.IsTrue(completed, "a fully-verified purge must report completion");

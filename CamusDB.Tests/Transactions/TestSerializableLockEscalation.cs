@@ -32,7 +32,7 @@ namespace CamusDB.Tests.Transactions;
 /// <see cref="KvTableStore.GetRow"/> is called per-row and triggers per-row point locks —
 /// the full query executor always takes a whole-bucket scan lock instead.
 ///
-/// Tests set <see cref="CamusDBConfig.LockEscalationThreshold"/> to 3 so escalation triggers
+/// Tests build their manager with <see cref="CamusDBOptions.LockEscalationThreshold"/> at 3 so escalation triggers
 /// after a few reads rather than the default 50.
 ///
 /// [NonParallelizable] because config knobs are process-global.
@@ -41,29 +41,24 @@ namespace CamusDB.Tests.Transactions;
 [NonParallelizable]
 public sealed class TestSerializableLockEscalation
 {
-    private int savedThreshold;
-
-    [SetUp]
-    public void SetLowThreshold()
-    {
-        savedThreshold = CamusDBConfig.LockEscalationThreshold;
-        CamusDBConfig.LockEscalationThreshold = 3;
-    }
-
-    [TearDown]
-    public void RestoreThreshold()
-    {
-        CamusDBConfig.LockEscalationThreshold = savedThreshold;
-    }
+    /// <summary>
+    /// A deliberately low escalation threshold, so a handful of row locks is enough to trip escalation
+    /// without inserting thousands of rows. No engine is involved here — the manager and store are
+    /// constructed directly with these options.
+    /// </summary>
+    private static CamusDBOptions EscalatingOptions =>
+        CamusDBOptions.Default with { LockEscalationThreshold = 3 };
 
     private static async Task<(EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store)>
-        CreateAsync(string tag)
+        CreateAsync(string tag, CamusDBOptions? options = null)
     {
+        CamusDBOptions effective = options ?? EscalatingOptions;
+
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", tag);
+        KvTransactionsManager mgr = new(node.Kahuna, effective);
+        KvTableStore store = new(node.Kahuna, effective, "testdb", tag);
         return (node, mgr, store);
     }
 
@@ -284,6 +279,7 @@ public sealed class TestSerializableLockEscalation
     [Test]
     public void DefaultThresholdIsFifty()
     {
-        Assert.AreEqual(50, savedThreshold, "LockEscalationThreshold default must be 50");
+        Assert.AreEqual(50, CamusDBOptions.Default.LockEscalationThreshold,
+            "LockEscalationThreshold default must be 50");
     }
 }

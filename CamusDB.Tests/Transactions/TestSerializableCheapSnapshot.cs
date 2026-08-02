@@ -35,31 +35,24 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <see cref="KvTransaction"/> carrying <c>ReadTimestamp = T</c> — no Kahuna
 /// StartTransaction/CommitTransaction round-trip, no session, no cleanup.
 ///
-/// Tests run non-parallel because they modify <see cref="CamusDBConfig.DefaultIsolationLevel"/>.
+/// Every engine this fixture builds defaults to Serializable; the one case that needs Read Committed
+/// builds its own engine rather than changing anything the others can see.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
 {
-    private CamusIsolationLevel savedDefaultLevel;
-
-    [SetUp]
-    public void SetSerializableDefault()
-    {
-        savedDefaultLevel = CamusDBConfig.DefaultIsolationLevel;
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-    }
-
-    [TearDown]
-    public void RestoreDefaultLevel()
-    {
-        CamusDBConfig.DefaultIsolationLevel = savedDefaultLevel;
-    }
+    /// <summary>
+    /// The cheap snapshot is a Serializable-only path, so every engine this fixture builds defaults to
+    /// Serializable unless a test asks for something else.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { DefaultIsolationLevel = CamusIsolationLevel.Serializable };
 
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>
-        SetupTableAsync()
+        SetupTableAsync(CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
@@ -104,8 +97,6 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     {
         (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync();
 
-        Assert.AreEqual(CamusIsolationLevel.Serializable, CamusDBConfig.DefaultIsolationLevel);
-
         KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false);
 
         Assert.AreEqual(HLCTimestamp.Zero, tx.TransactionId,
@@ -124,9 +115,8 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     [Test]
     public async Task BeginReadOnly_ReadCommittedDefault_HasZeroReadTimestamp()
     {
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
-
-        (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync();
+        (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync(
+            Options with { DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted });
 
         KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false);
 

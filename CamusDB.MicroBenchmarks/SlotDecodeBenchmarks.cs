@@ -20,7 +20,7 @@ using Kommander.Time;
 namespace CamusDB.MicroBenchmarks;
 
 /// <summary>
-/// End-to-end allocation A/B for slot-backed decode (<see cref="CamusDBConfig.SlotBackedDecode"/>).
+/// End-to-end allocation A/B for slot-backed decode (<see cref="CamusDBOptions.SlotBackedDecode"/>).
 /// Models the real scan segment: the decode plan is already pruned to the required columns (filter +
 /// projection), each row is decoded, the filter column is read, and only rows that pass the predicate
 /// have their projection cells read (materialized). The <c>Slot</c> param flips the config flag so the
@@ -55,10 +55,13 @@ public class SlotDecodeBenchmarks
     private static readonly ObjectIdValue RowId = new(1, 2, 3);
     private static readonly HLCTimestamp TxId = default;
 
+    private CamusDBOptions _options = CamusDBOptions.Default;
+
     [GlobalSetup]
     public void GlobalSetup()
     {
-        CamusDBConfig.SlotBackedDecode = Slot;
+        // The decode path under measurement is carried in the options handed to the decoder.
+        _options = CamusDBOptions.Default with { SlotBackedDecode = Slot };
 
         _schema = new TableSchema
         {
@@ -112,7 +115,7 @@ public class SlotDecodeBenchmarks
     private async Task<QueryRow> DecodeAsync(int i, RowEncoder.RowDecodeState cache)
     {
         BranchKvValue env = BranchKvCodec.Decode(_payloads[i]);
-        return await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, env.Payload, CamusDBConfig.Ambient, decodeState: cache)
+        return await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, env.Payload, _options, decodeState: cache)
             .ConfigureAwait(false);
     }
 

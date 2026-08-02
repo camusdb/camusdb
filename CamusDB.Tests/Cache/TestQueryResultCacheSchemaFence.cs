@@ -50,12 +50,17 @@ public sealed class TestQueryResultCacheSchemaFence : CommandsExecutor.BaseTest
 {
     private QueryResultCache? _cache;
 
-    protected override CommandExecutor CreateCommandExecutor()
+    /// <summary>
+    /// Every engine this fixture builds gets its own cache, and honours <paramref name="options"/>.
+    /// The options-taking overload is the one to override: the parameterless factory routes through it,
+    /// so a test that asks for particular cache limits still gets the injected cache.
+    /// </summary>
+    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        _cache = new QueryResultCache(options, sweepIntervalMs: -1);
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        return new(validator, catalogsManager, logger, options,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }
@@ -262,28 +267,21 @@ public sealed class TestQueryResultCacheSchemaFence : CommandsExecutor.BaseTest
     {
         const string cacheName = "promoted_cache";
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        // Promotion only happens under key-range sharding, so this engine is built with it enabled.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(
+            Options with { KeyRangeShardingEnabled = true });
+
         await CreateItems(dbname, database, executor);
         await InsertItem(dbname, database, executor, "p1", 100);
 
-        bool origSharding = CamusDBConfig.KeyRangeShardingEnabled;
-        try
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = true;
+        CacheMetadataHolder miss = await SelectItemsPromoted(dbname, database, executor, cacheName);
+        Assert.That(miss.Status, Is.EqualTo(QueryCacheStatus.Miss),
+            "first promoted-read query must execute live and populate the cache");
 
-            CacheMetadataHolder miss = await SelectItemsPromoted(dbname, database, executor, cacheName);
-            Assert.That(miss.Status, Is.EqualTo(QueryCacheStatus.Miss),
-                "first promoted-read query must execute live and populate the cache");
-
-            CacheMetadataHolder hit = await SelectItemsPromoted(dbname, database, executor, cacheName);
-            Assert.That(hit.Status, Is.EqualTo(QueryCacheStatus.Hit),
-                "second promoted-read query must be served from cache: " +
-                "the promoted read has ReadTimestamp == Zero so the gate admits it");
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
-        }
+        CacheMetadataHolder hit = await SelectItemsPromoted(dbname, database, executor, cacheName);
+        Assert.That(hit.Status, Is.EqualTo(QueryCacheStatus.Hit),
+            "second promoted-read query must be served from cache: " +
+            "the promoted read has ReadTimestamp == Zero so the gate admits it");
     }
 
     /// <summary>

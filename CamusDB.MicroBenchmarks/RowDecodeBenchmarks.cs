@@ -203,7 +203,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _fullRows[i],
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 decodeState: cache).ConfigureAwait(false);
         return last!;
     }
@@ -215,7 +215,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _fullRows[i],
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 decodeState: null).ConfigureAwait(false);
         return last!;
     }
@@ -238,7 +238,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _projRows[i],
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 _projected, decodeState: cache).ConfigureAwait(false);
         return last!;
     }
@@ -263,7 +263,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaHistory, TxId, RowId, _historyRows[i],
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 visibilitySchemaVersion: 1, decodeState: cache).ConfigureAwait(false);
         return last!;
     }

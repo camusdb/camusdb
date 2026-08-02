@@ -49,14 +49,14 @@ public sealed class TestGrpcQueryCacheMetadata : BaseTest
     public void SetUpGrpcCacheService()
     {
         // sweepIntervalMs: -1 keeps the background sweeper off so an entry cannot expire mid-test.
-        cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        cache = new QueryResultCache(Options, sweepIntervalMs: -1);
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: cache);
         service = new CamusSqlService(
             serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
     }
 
     [TearDown]

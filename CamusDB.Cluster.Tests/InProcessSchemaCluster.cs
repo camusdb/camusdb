@@ -56,9 +56,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         int partitions = 1,
         ILoggerFactory? loggerFactory = null,
         ILogger<ICamusDB>? logger = null,
-        bool wireLeaderForwarder = false
+        bool wireLeaderForwarder = false,
+        CamusDBOptions? options = null
     )
     {
+        // Every node in the cluster is built with the same configuration, fixed when the cluster
+        // starts. A test wanting different settings starts its own cluster.
+        CamusDBOptions effective = options ?? CamusDBOptions.Default;
+
         if (nodeCount < 1)
             throw new ArgumentOutOfRangeException(nameof(nodeCount), "Node count must be positive");
 
@@ -147,12 +152,12 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
                 {
-                    CommandValidator validator = new(CamusDBConfig.Ambient);
+                    CommandValidator validator = new(effective);
                     CatalogsManager catalogs = new(logger);
                     CommandExecutor executor = new(
                         validator,
                         catalogs,
-                        logger, CamusDBConfig.Ambient,
+                        logger, effective,
                         sharedNode: kahuna,
                         schemaDdlForwarder: forwarder,
                         isClusterMode: true

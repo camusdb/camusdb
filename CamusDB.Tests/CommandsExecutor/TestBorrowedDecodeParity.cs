@@ -22,7 +22,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Proves the borrowed (zero-copy) decode path (<see cref="CamusDBConfig.BorrowedDecode"/> == true)
+/// Proves the borrowed (zero-copy) decode path (<see cref="CamusDBOptions.BorrowedDecode"/> forced on)
 /// produces results identical to the eager path across representative query shapes, end to end through
 /// the real pipeline. The flag ships off by default (a selectivity-dependent perf trade pending Phase 6
 /// benchmarks), so without this test the borrowed path would never be exercised by the suite. It also
@@ -33,14 +33,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestBorrowedDecodeParity : SharedNodeBaseTest
 {
-    private BorrowedDecodePolicy _original;
-
-    [SetUp]
-    public void SaveFlag() => _original = CamusDBConfig.BorrowedDecode;
-
-    [TearDown]
-    public void RestoreFlag() => CamusDBConfig.BorrowedDecode = _original;
-
     private static async Task<List<object?[]>> RunAsync(
         CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
     {
@@ -62,17 +54,20 @@ public sealed class TestBorrowedDecodeParity : SharedNodeBaseTest
             CollectionAssert.AreEqual(eager[r], borrowed[r], $"row {r}");
     }
 
-    private async Task AssertParity(CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
+    /// <summary>
+    /// Runs <paramref name="sql"/> through two engines that differ only in the decode path, and requires
+    /// identical rows. Each engine forces its policy explicitly: ForceEager rather than the default
+    /// Adaptive matters, because under Adaptive the scanner would turn borrowed decode on for these
+    /// filtered queries and the "eager" arm would silently be borrowed-vs-borrowed. ForceBorrowed
+    /// likewise exercises borrowing on every shape, including the row-retaining ones.
+    /// </summary>
+    private static async Task AssertParity(
+        CommandExecutor eagerEngine, DatabaseDescriptor eagerDb,
+        CommandExecutor borrowedEngine, DatabaseDescriptor borrowedDb,
+        string dbname, string sql)
     {
-        // Force each path explicitly. ForceEager (not the default Adaptive) is essential: under Adaptive
-        // the scanner would enable borrowed decode for these filtered queries, so the "eager" arm would
-        // actually run borrowed and the comparison would be borrowed-vs-borrowed. ForceBorrowed likewise
-        // exercises borrowed on every shape, including the retaining ones.
-        CamusDBConfig.BorrowedDecode = BorrowedDecodePolicy.ForceEager;
-        List<object?[]> eager = await RunAsync(executor, database, dbname, sql);
-
-        CamusDBConfig.BorrowedDecode = BorrowedDecodePolicy.ForceBorrowed;
-        List<object?[]> borrowed = await RunAsync(executor, database, dbname, sql);
+        List<object?[]> eager    = await RunAsync(eagerEngine,    eagerDb,    dbname, sql);
+        List<object?[]> borrowed = await RunAsync(borrowedEngine, borrowedDb, dbname, sql);
 
         AssertRowsEqual(eager, borrowed);
     }
@@ -80,7 +75,8 @@ public sealed class TestBorrowedDecodeParity : SharedNodeBaseTest
     [Test]
     public async Task BorrowedPath_MatchesEager_AcrossQueryShapes()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await CreateDatabase(Options with { BorrowedDecode = BorrowedDecodePolicy.ForceEager });
 
         KvTransaction ddl = await database.Transactions.BeginAsync();
         await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddl, dbname,
@@ -104,21 +100,28 @@ public sealed class TestBorrowedDecodeParity : SharedNodeBaseTest
             "INSERT INTO u (id, tid, note) VALUES (99, 99, NULL)", null));
         await database.Transactions.CommitAsync(ins);
 
+        // A second engine over the same data, differing only in the decode path under test.
+        CommandExecutor borrowedEngine = CreateCommandExecutor(
+            Options with { BorrowedDecode = BorrowedDecodePolicy.ForceBorrowed });
+        DatabaseDescriptor borrowedDb = await borrowedEngine.OpenDatabase(dbname);
+
+        Task Parity(string sql) => AssertParity(executor, database, borrowedEngine, borrowedDb, dbname, sql);
+
         // Scan + projection, SELECT *, selective filter, ORDER BY, GROUP BY, DISTINCT, and a join —
         // the last four retain decoded rows across scan iterations (borrowed-view lifetime coverage).
-        await AssertParity(executor, database, dbname, "SELECT id, cat, val FROM t");
-        await AssertParity(executor, database, dbname, "SELECT * FROM t");
-        await AssertParity(executor, database, dbname, "SELECT id, val FROM t WHERE val < 30");
+        await Parity("SELECT id, cat, val FROM t");
+        await Parity("SELECT * FROM t");
+        await Parity("SELECT id, val FROM t WHERE val < 30");
         // String-equality fast path (byte-native compare on the borrowed path): equality, inequality,
         // a literal that matches nothing, and a NULL cell that must not equal any literal.
-        await AssertParity(executor, database, dbname, "SELECT id, cat FROM t WHERE cat = \"c1\"");
-        await AssertParity(executor, database, dbname, "SELECT id, cat FROM t WHERE cat <> \"c1\"");
-        await AssertParity(executor, database, dbname, "SELECT id FROM t WHERE cat = \"nope\"");
-        await AssertParity(executor, database, dbname, "SELECT id, note FROM u WHERE note = \"n5\"");
-        await AssertParity(executor, database, dbname, "SELECT id FROM u WHERE note <> \"n5\"");
-        await AssertParity(executor, database, dbname, "SELECT id, val FROM t ORDER BY val DESC");
-        await AssertParity(executor, database, dbname, "SELECT cat, COUNT(*), SUM(val) FROM t GROUP BY cat");
-        await AssertParity(executor, database, dbname, "SELECT DISTINCT cat FROM t");
-        await AssertParity(executor, database, dbname, "SELECT t.id, t.cat, u.note FROM t JOIN u ON t.id = u.tid");
+        await Parity("SELECT id, cat FROM t WHERE cat = \"c1\"");
+        await Parity("SELECT id, cat FROM t WHERE cat <> \"c1\"");
+        await Parity("SELECT id FROM t WHERE cat = \"nope\"");
+        await Parity("SELECT id, note FROM u WHERE note = \"n5\"");
+        await Parity("SELECT id FROM u WHERE note <> \"n5\"");
+        await Parity("SELECT id, val FROM t ORDER BY val DESC");
+        await Parity("SELECT cat, COUNT(*), SUM(val) FROM t GROUP BY cat");
+        await Parity("SELECT DISTINCT cat FROM t");
+        await Parity("SELECT t.id, t.cat, u.note FROM t JOIN u ON t.id = u.tid");
     }
 }

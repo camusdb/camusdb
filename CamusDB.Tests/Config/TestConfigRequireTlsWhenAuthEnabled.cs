@@ -26,7 +26,7 @@ namespace CamusDB.Tests.Config;
 /// re-enable it over an operator's YAML choice.</para>
 ///
 /// <para>Marked non-parallelizable because one test mutates the process-wide
-/// <see cref="CamusDBConfig.RequireTlsWhenAuthEnabled"/>.</para>
+/// <see cref="CamusDBOptions.RequireTlsWhenAuthEnabled"/>.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -107,24 +107,21 @@ public sealed class TestConfigRequireTlsWhenAuthEnabled
             "A CLI run that says nothing about TLS must not re-enable it over the operator's YAML");
     }
 
-    // ─── Applied to the process-wide knob ─────────────────────────────────────
+    // ─── Carried onto the resolved options ────────────────────────────────────
 
+    /// <summary>
+    /// Both values must survive resolution: the request gates read this from the options an engine was
+    /// built with, so a YAML/CLI value the resolver drops silently does nothing.
+    /// </summary>
     [Test]
-    public void ApplyToCamusDBConfig_PropagatesBothValues()
+    public void Resolve_PropagatesBothValues()
     {
-        bool previous = CamusDBConfig.RequireTlsWhenAuthEnabled;
-        try
-        {
-            ConfigResolver.ApplyToCamusDBConfig(new ConfigReader().Read("require_tls_when_auth_enabled: false"));
-            Assert.That(CamusDBConfig.RequireTlsWhenAuthEnabled, Is.False,
-                "The request gates read the static, so a YAML/CLI value that never reaches it does nothing");
+        CamusDBOptions off = ConfigResolver.Resolve(
+            new ConfigReader().Read("require_tls_when_auth_enabled: false"));
+        Assert.That(off.RequireTlsWhenAuthEnabled, Is.False);
 
-            ConfigResolver.ApplyToCamusDBConfig(new ConfigReader().Read("require_tls_when_auth_enabled: true"));
-            Assert.That(CamusDBConfig.RequireTlsWhenAuthEnabled, Is.True);
-        }
-        finally
-        {
-            CamusDBConfig.RequireTlsWhenAuthEnabled = previous;
-        }
+        CamusDBOptions on = ConfigResolver.Resolve(
+            new ConfigReader().Read("require_tls_when_auth_enabled: true"));
+        Assert.That(on.RequireTlsWhenAuthEnabled, Is.True);
     }
 }

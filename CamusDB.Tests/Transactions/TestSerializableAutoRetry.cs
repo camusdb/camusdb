@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -31,32 +32,34 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// isolation level is Serializable. These tests simulate that pattern end-to-end at the
 /// executor level using the same begin→execute→commit body the controllers use.
 ///
-/// Tests run non-parallel because they modify the static
-/// <see cref="CamusDBConfig.DefaultIsolationLevel"/> knob.
+/// Each test mirrors the controller's own branch — wrap in the retry helper only when the engine's
+/// resolved default is Serializable — against the configuration its engine was built with.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
 {
-    private CamusIsolationLevel savedDefaultLevel;
+    /// <summary>
+    /// The retry wrapper is a Serializable-only path, so every engine here defaults to Serializable
+    /// unless a test asks for something else.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { DefaultIsolationLevel = CamusIsolationLevel.Serializable };
 
-    [SetUp]
-    public void SetSerializableDefault()
-    {
-        savedDefaultLevel = CamusDBConfig.DefaultIsolationLevel;
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-    }
-
-    [TearDown]
-    public void RestoreDefaultLevel()
-    {
-        CamusDBConfig.DefaultIsolationLevel = savedDefaultLevel;
-    }
+    /// <summary>
+    /// The controller's own branch: autocommit is wrapped in the retry helper only when the engine
+    /// resolves to Serializable. Reproduced here so the tests exercise the real decision rather than
+    /// hard-coding which arm they expect.
+    /// </summary>
+    private static Task RunAutocommitAsync(CamusDBOptions options, Func<CancellationToken, Task> body)
+        => options.DefaultIsolationLevel == CamusIsolationLevel.Serializable
+            ? SerializableRetryHelper.ExecuteAutocommitAsync(body)
+            : body(CancellationToken.None);
 
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>
-        SetupAccountsAsync()
+        SetupAccountsAsync(CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
@@ -164,11 +167,7 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
         }
 
         // Controller path: Serializable default → retry helper engaged.
-        Assert.AreEqual(CamusIsolationLevel.Serializable, CamusDBConfig.DefaultIsolationLevel);
-        if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-            await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody);
-        else
-            await AutocommitBody(CancellationToken.None);
+        await RunAutocommitAsync(Options, AutocommitBody);
 
         await aliceTask;
 
@@ -225,10 +224,7 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
 
         try
         {
-            if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody);
-            else
-                await AutocommitBody(CancellationToken.None);
+            await RunAutocommitAsync(Options, AutocommitBody);
         }
         catch (CamusDBException ex)
         {
@@ -250,9 +246,9 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
     [Test]
     public async Task AutocommitInsert_ReadCommittedDefault_RunsOnceNoRetryWrap()
     {
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
+        CamusDBOptions readCommitted = Options with { DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted };
 
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupAccountsAsync();
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupAccountsAsync(readCommitted);
 
         string id = ObjectIdGenerator.Generate().ToString();
         int attempts = 0;
@@ -279,10 +275,7 @@ public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
         }
 
         // Controller path: RC default → body runs once directly, no retry wrapper.
-        if (CamusDBConfig.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-            await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody);
-        else
-            await AutocommitBody(CancellationToken.None);
+        await RunAutocommitAsync(readCommitted, AutocommitBody);
 
         Assert.AreEqual(1, attempts, "RC autocommit runs exactly once without the retry wrapper");
     }

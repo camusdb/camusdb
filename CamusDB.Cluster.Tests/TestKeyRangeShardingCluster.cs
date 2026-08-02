@@ -23,7 +23,6 @@ using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.Cluster;
 
@@ -48,7 +47,7 @@ namespace CamusDB.Tests.Cluster;
 /// </list>
 ///
 /// <para>Sharding is opt-in (<c>CAMUS_KEY_RANGE_SHARDING</c>), so these tests flip
-/// <see cref="CamusConfig.KeyRangeShardingEnabled"/> for their duration and restore it on
+/// <see cref="CamusDBOptions.KeyRangeShardingEnabled"/> on the cluster they start and restore it on
 /// teardown. <c>partitions: 2</c> gives a real data-partition pool ([1, 2]) distinct from the
 /// reserved meta partition 0.</para>
 /// </summary>
@@ -68,20 +67,8 @@ public sealed class TestKeyRangeShardingCluster
     private static readonly ILogger<ICamusDB> logger =
         sharedLoggerFactory.CreateLogger<ICamusDB>();
 
-    private bool originalShardingEnabled;
 
-    [SetUp]
-    public void SetUp()
-    {
-        originalShardingEnabled = CamusConfig.KeyRangeShardingEnabled;
-        CamusConfig.KeyRangeShardingEnabled = true;
-    }
 
-    [TearDown]
-    public void TearDown()
-    {
-        CamusConfig.KeyRangeShardingEnabled = originalShardingEnabled;
-    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -91,7 +78,8 @@ public sealed class TestKeyRangeShardingCluster
     {
         InProcessSchemaCluster cluster =
             await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: Partitions,
-                loggerFactory: sharedLoggerFactory, logger: logger);
+                loggerFactory: sharedLoggerFactory, logger: logger,
+                options: CamusDBOptions.Default with { KeyRangeShardingEnabled = true });
 
         string db = cluster.NextSchemaLogDatabaseName();
         await cluster.OpenDatabaseOnAllNodesAsync(db);

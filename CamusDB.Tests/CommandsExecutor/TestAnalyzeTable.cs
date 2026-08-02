@@ -43,9 +43,9 @@ public sealed class TestAnalyzeTable : BaseTest
     /// Creates a "robots" table: id (Id PK), name (String), year (Integer64 indexed).
     /// </summary>
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
-        SetupRobotsTable()
+        SetupRobotsTable(CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         KvTransaction txn = await database.Transactions.BeginAsync();
         await executor.CreateTable(new CreateTableTicket(
@@ -411,33 +411,24 @@ public sealed class TestAnalyzeTable : BaseTest
     [Test]
     public async Task AnalyzeHistogram_TrailingPartialBucket_UpperBoundEqualsColumnMax()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        // A small bucket count makes the tail partial bucket clearly visible:
+        // 10 rows / 3 buckets → bucketSize = ceil(10/3) = 4 → runs cover [0..3],[4..7], leaving [8..9].
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await SetupRobotsTable(Options with { StatsHistogramBuckets = 3 });
 
-        // Use a small bucket count so the tail partial bucket is clearly visible.
-        // 10 rows / 3 buckets → bucketSize = ceil(10/3) = 4 → loop covers [0..3],[4..7], drops [8..9].
-        int originalBuckets = CamusDBConfig.StatsHistogramBuckets;
-        try
-        {
-            CamusDBConfig.StatsHistogramBuckets = 3;
+        // Insert 10 rows with years 2000–2009; max is 2009.
+        await InsertRobotsAsync(executor, database, dbname, count: 10, baseYear: 2000);
 
-            // Insert 10 rows with years 2000–2009; max is 2009.
-            await InsertRobotsAsync(executor, database, dbname, count: 10, baseYear: 2000);
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+        await RunAnalyzeAsync(executor, database, dbname, "robots");
 
-            TableDescriptor table = await OpenTableAsync(database, "robots");
-            await RunAnalyzeAsync(executor, database, dbname, "robots");
-
-            ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
-            Assert.IsNotNull(hist, "Histogram must be populated after ANALYZE");
-            Assert.AreEqual(10L, hist!.TotalRows, "TotalRows must equal 10");
-            Assert.AreEqual(10L, hist.Buckets[^1].CumulativeRows,
-                "Last bucket CumulativeRows must equal TotalRows");
-            Assert.AreEqual(2009L, hist.Buckets[^1].UpperBound!.LongValue,
-                "Last bucket UpperBound must equal the column maximum (2009), not the pre-tail value (2007)");
-        }
-        finally
-        {
-            CamusDBConfig.StatsHistogramBuckets = originalBuckets;
-        }
+        ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
+        Assert.IsNotNull(hist, "Histogram must be populated after ANALYZE");
+        Assert.AreEqual(10L, hist!.TotalRows, "TotalRows must equal 10");
+        Assert.AreEqual(10L, hist.Buckets[^1].CumulativeRows,
+            "Last bucket CumulativeRows must equal TotalRows");
+        Assert.AreEqual(2009L, hist.Buckets[^1].UpperBound!.LongValue,
+            "Last bucket UpperBound must equal the column maximum (2009), not the pre-tail value (2007)");
     }
 
     /// <summary>
@@ -450,40 +441,31 @@ public sealed class TestAnalyzeTable : BaseTest
     [Test]
     public async Task AnalyzeHistogram_BucketOvershoot_EmitsNoEmptyTrailingBuckets()
     {
-        int originalBuckets = CamusDBConfig.StatsHistogramBuckets;
-        try
-        {
-            // 6 rows / 4 buckets → bucketSize = ceil(6/4) = 2 → only 3 buckets hold data;
-            // a 4th would be empty (start index 6 past the last row 5). The analyzer fixes its
-            // configuration when the engine is built, so this is set before the table is created.
-            CamusDBConfig.StatsHistogramBuckets = 4;
+        // 6 rows / 4 buckets → bucketSize = ceil(6/4) = 2 → only 3 buckets hold data;
+        // a 4th would be empty (start index 6 is past the last row, 5).
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await SetupRobotsTable(Options with { StatsHistogramBuckets = 4 });
 
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
-            await InsertRobotsAsync(executor, database, dbname, count: 6, baseYear: 2000);
+        await InsertRobotsAsync(executor, database, dbname, count: 6, baseYear: 2000);
 
-            TableDescriptor table = await OpenTableAsync(database, "robots");
-            await RunAnalyzeAsync(executor, database, dbname, "robots");
+        TableDescriptor table = await OpenTableAsync(database, "robots");
+        await RunAnalyzeAsync(executor, database, dbname, "robots");
 
-            ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
-            Assert.IsNotNull(hist, "Histogram must be populated after ANALYZE");
+        ColumnHistogram? hist = executor.Statistics.GetColumnHistogram(database, table, "year");
+        Assert.IsNotNull(hist, "Histogram must be populated after ANALYZE");
 
-            // No bucket may be empty — a real (start ≤ end) bucket always spans ≥ 1 value, so a
-            // DistinctInBucket of 0 can only come from a degenerate trailing bucket.
-            foreach (ColumnHistogramBucket b in hist!.Buckets)
-                Assert.Greater(b.DistinctInBucket, 0,
-                    "no histogram bucket may be empty (DistinctInBucket == 0 signals a degenerate trailing bucket)");
+        // No bucket may be empty — a real (start ≤ end) bucket always spans ≥ 1 value, so a
+        // DistinctInBucket of 0 can only come from a degenerate trailing bucket.
+        foreach (ColumnHistogramBucket b in hist!.Buckets)
+            Assert.Greater(b.DistinctInBucket, 0,
+                "no histogram bucket may be empty (DistinctInBucket == 0 signals a degenerate trailing bucket)");
 
-            Assert.AreEqual(3, hist.Buckets.Count,
-                "6 rows at bucketSize 2 must yield exactly 3 buckets, not 4 with an empty tail");
-            Assert.AreEqual(2005L, hist.Buckets[^1].UpperBound!.LongValue,
-                "Last bucket UpperBound must still equal the column maximum (2005)");
-            Assert.AreEqual(6L, hist.Buckets[^1].CumulativeRows,
-                "Last bucket CumulativeRows must equal TotalRows");
-        }
-        finally
-        {
-            CamusDBConfig.StatsHistogramBuckets = originalBuckets;
-        }
+        Assert.AreEqual(3, hist.Buckets.Count,
+            "6 rows at bucketSize 2 must yield exactly 3 buckets, not 4 with an empty tail");
+        Assert.AreEqual(2005L, hist.Buckets[^1].UpperBound!.LongValue,
+            "Last bucket UpperBound must still equal the column maximum (2005)");
+        Assert.AreEqual(6L, hist.Buckets[^1].CumulativeRows,
+            "Last bucket CumulativeRows must equal TotalRows");
     }
 
     /// <summary>
@@ -496,36 +478,25 @@ public sealed class TestAnalyzeTable : BaseTest
     [Test]
     public async Task AnalyzeDetectsSamplingWhenTableExceedsSampleLimit()
     {
-        // Use a very small sample limit so we can insert past it without a large insert loop.
-        int originalLimit = CamusDBConfig.StatsAnalyzeSampleRows;
-        try
-        {
-            const int sampleLimit = 10;
+        // A very small sample limit, so the table can exceed it without a large insert loop.
+        const int sampleLimit = 10;
 
-            // The analyzer fixes its configuration when the engine is built, so the limit is in place
-            // before the table is created.
-            CamusDBConfig.StatsAnalyzeSampleRows = sampleLimit;
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await SetupRobotsTable(Options with { StatsAnalyzeSampleRows = sampleLimit });
 
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        // Insert more rows than the sample limit.
+        await InsertRobotsAsync(executor, database, dbname, count: sampleLimit + 5);
 
-            // Insert more rows than the sample limit.
-            await InsertRobotsAsync(executor, database, dbname, count: sampleLimit + 5);
+        QueryResultRow resultRow = await RunAnalyzeAsync(executor, database, dbname, "robots");
 
-            QueryResultRow resultRow = await RunAnalyzeAsync(executor, database, dbname, "robots");
+        // Status must say "sampled", not "analyzed".
+        string status = resultRow.Row["status"].StrValue!;
+        StringAssert.Contains("sampled", status,
+            "ANALYZE status must report 'sampled' when the table exceeds the sample limit");
 
-            // Status must say "sampled", not "analyzed".
-            string status = resultRow.Row["status"].StrValue!;
-            StringAssert.Contains("sampled", status,
-                "ANALYZE status must report 'sampled' when the table exceeds StatsAnalyzeSampleRows");
-
-            // Reported row count must equal the sample limit, not the total inserted count.
-            Assert.AreEqual(sampleLimit, resultRow.Row["rows"].LongValue,
-                "ANALYZE rows must equal the sample limit when the table is larger");
-        }
-        finally
-        {
-            CamusDBConfig.StatsAnalyzeSampleRows = originalLimit;
-        }
+        // Reported row count must equal the sample limit, not the total inserted count.
+        Assert.AreEqual(sampleLimit, resultRow.Row["rows"].LongValue,
+            "ANALYZE rows must equal the sample limit when the table is larger");
     }
 
     /// <summary>

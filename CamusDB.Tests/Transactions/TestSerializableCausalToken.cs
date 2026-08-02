@@ -35,9 +35,14 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestSerializableCausalToken : SharedNodeBaseTest
 {
-    private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)> SetupDbAsync()
+    /// <summary>Engine whose transactions default to Serializable, as the causal-token tests require.</summary>
+    private CamusDBOptions SerializableByDefault =>
+        Options with { DefaultIsolationLevel = CamusIsolationLevel.Serializable };
+
+    private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)> SetupDbAsync(
+        CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         KvTransaction tx = await db.Transactions.BeginAsync();
         await executor.CreateTable(new CreateTableTicket(
@@ -162,40 +167,24 @@ public sealed class TestSerializableCausalToken : SharedNodeBaseTest
     [Test]
     public async Task ReadSnapshot_IsAtLeastCausalToken()
     {
-        CamusIsolationLevel saved = CamusDBConfig.DefaultIsolationLevel;
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-        try
-        {
-            (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
-            (_, HLCTimestamp writeToken) = await InsertAccount(dbname, db, executor, 600);
-            KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false, writeToken);
-            Assert.That(tx.ReadTimestamp.CompareTo(writeToken), Is.GreaterThanOrEqualTo(0),
-                "snapshot ReadTimestamp must be >= the supplied causal token");
-            await db.Transactions.CommitAsync(tx);
-        }
-        finally
-        {
-            CamusDBConfig.DefaultIsolationLevel = saved;
-        }
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync(SerializableByDefault);
+        (_, HLCTimestamp writeToken) = await InsertAccount(dbname, db, executor, 600);
+
+        KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false, writeToken);
+        Assert.That(tx.ReadTimestamp.CompareTo(writeToken), Is.GreaterThanOrEqualTo(0),
+            "snapshot ReadTimestamp must be >= the supplied causal token");
+        await db.Transactions.CommitAsync(tx);
     }
 
     /// The causal token returned by a serializable read is >= the token that was supplied to it.
     [Test]
     public async Task ReadToken_IsAtLeastInputToken()
     {
-        CamusIsolationLevel saved = CamusDBConfig.DefaultIsolationLevel;
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-        try
-        {
-            (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
-            (string id, HLCTimestamp writeToken) = await InsertAccount(dbname, db, executor, 700);
-            (_, HLCTimestamp readToken) = await ReadBalance(dbname, db, executor, id, causalToken: writeToken);
-            Assert.That(readToken.CompareTo(writeToken), Is.GreaterThanOrEqualTo(0),
-                "token returned from a read must be >= the token supplied to that read");
-        }
-        finally
-        {
-            CamusDBConfig.DefaultIsolationLevel = saved;
-        }
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync(SerializableByDefault);
+        (string id, HLCTimestamp writeToken) = await InsertAccount(dbname, db, executor, 700);
+
+        (_, HLCTimestamp readToken) = await ReadBalance(dbname, db, executor, id, causalToken: writeToken);
+        Assert.That(readToken.CompareTo(writeToken), Is.GreaterThanOrEqualTo(0),
+            "token returned from a read must be >= the token supplied to that read");
     }
 }

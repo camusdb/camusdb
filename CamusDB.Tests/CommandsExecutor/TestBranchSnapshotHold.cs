@@ -77,7 +77,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
         // Drive one renew sweep directly (standalone node leads the registry partition, so the sweep
         // acts). Renewing an already-live hold extends its lease and must not change the floor.
         SnapshotHoldRenewer renewer = new(
-            TestNode!, sharedRegistry!, logger, CamusDB.Core.CamusDBConfig.BranchSnapshotHoldLeaseMs);
+            TestNode!, sharedRegistry!, logger, Options.BranchSnapshotHoldLeaseMs);
         int renewed = await renewer.RenewDueHoldsAsync(CancellationToken.None);
 
         Assert.That(renewed, Is.EqualTo(1),
@@ -134,7 +134,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
 
         // The renewer still finds and renews the renamed branch's hold.
         SnapshotHoldRenewer renewer = new(
-            TestNode!, sharedRegistry!, logger, CamusDB.Core.CamusDBConfig.BranchSnapshotHoldLeaseMs);
+            TestNode!, sharedRegistry!, logger, Options.BranchSnapshotHoldLeaseMs);
         int renewed = await renewer.RenewDueHoldsAsync(CancellationToken.None);
         Assert.That(renewed, Is.EqualTo(1), "renewer must still renew the hold after rename");
         await renewer.DisposeAsync();
@@ -162,7 +162,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
         HLCTimestamp forkT = sharedRegistry!.Get(branchName)!.Ancestors[0].ForkTimestamp;
 
         SnapshotHoldRenewer renewer = new(
-            TestNode!, sharedRegistry!, logger, CamusDB.Core.CamusDBConfig.BranchSnapshotHoldLeaseMs)
+            TestNode!, sharedRegistry!, logger, Options.BranchSnapshotHoldLeaseMs)
         {
             IntervalMsForTesting = 150,
         };
@@ -225,7 +225,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
 
         // registryB = the "creating node" registry, an independent instance on the same Kahuna node.
         // It registers the branch into KV (and its own cache) but does not touch registryA's cache.
-        await using DatabaseRegistry registryB = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registryB = await DatabaseRegistry.OpenAsync(TestNode!, Options);
 
         // Create a root database using registryA so the hold Kahuna-object (the parent's partition)
         // is reachable. The root itself only needs a name and an id in the KV; use registryB
@@ -239,7 +239,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
         HLCTimestamp forkT = TestNode!.Raft.HybridLogicalClock.SendOrLocalEvent(TestNode!.Raft.GetLocalNodeId());
         string branchId = await registryB.AllocateIdAsync();
         (KeyValueResponseType holdType, string holdId, _) = await TestNode!.Kahuna
-            .LocateAndAcquireSnapshotHold(branchId, forkT, CamusDB.Core.CamusDBConfig.BranchSnapshotHoldLeaseMs, CancellationToken.None);
+            .LocateAndAcquireSnapshotHold(branchId, forkT, Options.BranchSnapshotHoldLeaseMs, CancellationToken.None);
         Assert.That(holdType, Is.EqualTo(KeyValueResponseType.Set), "hold acquisition must succeed");
 
         // Register the branch using registryB so the entry lands in persistent KV but NOT in registryA's cache.
@@ -253,7 +253,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
 
         // The renewer backed by registryA must still find and renew the hold via the persistent scan.
         SnapshotHoldRenewer renewer = new(
-            TestNode!, registryA, logger, CamusDB.Core.CamusDBConfig.BranchSnapshotHoldLeaseMs);
+            TestNode!, registryA, logger, Options.BranchSnapshotHoldLeaseMs);
         int renewed = await renewer.RenewDueHoldsAsync(CancellationToken.None);
         await renewer.DisposeAsync();
 

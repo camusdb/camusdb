@@ -33,35 +33,21 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestAutoAnalyzeTableSetting : BaseTest
 {
-    private bool savedEnabled;
-    private double savedFraction;
-    private long savedMinRows;
-    private int savedMaxRowsPerSecond;
-    private int savedCheckRows;
-
-    [SetUp]
-    public void SnapshotConfig()
+    /// <summary>
+    /// Auto-analyze triggered by staleness alone: no fraction threshold, and only a handful of stale
+    /// rows needed, so a sweep over a small table decides to analyze it.
+    /// </summary>
+    private CamusDBOptions EagerAutoAnalyze => Options with
     {
-        savedEnabled          = CamusDBConfig.AutoAnalyzeEnabled;
-        savedFraction         = CamusDBConfig.AutoAnalyzeFractionStaleRows;
-        savedMinRows          = CamusDBConfig.AutoAnalyzeMinStaleRows;
-        savedMaxRowsPerSecond = CamusDBConfig.AutoAnalyzeMaxRowsPerSecond;
-        savedCheckRows        = CamusDBConfig.AutoAnalyzeOwnershipCheckRows;
-    }
+        AutoAnalyzeEnabled = true,
+        AutoAnalyzeFractionStaleRows = 0.0,
+        AutoAnalyzeMinStaleRows = 5,
+    };
 
-    [TearDown]
-    public void RestoreConfig()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupRobotsTable(
+        CamusDBOptions? options = null)
     {
-        CamusDBConfig.AutoAnalyzeEnabled            = savedEnabled;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows   = savedFraction;
-        CamusDBConfig.AutoAnalyzeMinStaleRows        = savedMinRows;
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond    = savedMaxRowsPerSecond;
-        CamusDBConfig.AutoAnalyzeOwnershipCheckRows  = savedCheckRows;
-    }
-
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupRobotsTable()
-    {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         KvTransaction txn = await database.Transactions.BeginAsync();
         await executor.CreateTable(new CreateTableTicket(
@@ -124,11 +110,7 @@ public sealed class TestAutoAnalyzeTableSetting : BaseTest
     [Test]
     public async Task SetFalseSkipsAutoAnalyzeThenReEnableResumes()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(EagerAutoAnalyze);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 20);
 
@@ -258,10 +240,13 @@ public sealed class TestAutoAnalyzeTableSetting : BaseTest
     [Test]
     public async Task DisableDuringScanAbortsPublication()
     {
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond = 50;   // slow scan so the opt-out lands mid-scan
-        CamusDBConfig.AutoAnalyzeOwnershipCheckRows = 25; // re-check the setting frequently
+        CamusDBOptions slowScan = Options with
+        {
+            AutoAnalyzeMaxRowsPerSecond = 50,    // slow enough that the opt-out lands mid-scan
+            AutoAnalyzeOwnershipCheckRows = 25,  // re-read the setting often enough to notice
+        };
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(slowScan);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 300);
 

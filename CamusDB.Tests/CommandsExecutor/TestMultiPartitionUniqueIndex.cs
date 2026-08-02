@@ -77,11 +77,15 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
         catch { /* best-effort */ }
     }
 
-    protected override CommandExecutor CreateCommandExecutor()
+    /// <summary>
+    /// A cluster-mode engine over this fixture's own node. The options-taking overload is the one to
+    /// override, so the parameterless factory and <c>CreateDatabase(options)</c> both route through it.
+    /// </summary>
+    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient, sharedNode: node!, isClusterMode: true);
+        return new(validator, catalogsManager, logger, options, sharedNode: node!, isClusterMode: true);
     }
 
     private static async Task CreateTeams(string dbname, DatabaseDescriptor database, CommandExecutor executor)

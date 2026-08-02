@@ -184,7 +184,7 @@ public class EnvelopeRoundTripBenchmarks
             byte[] storageValue = RowEncoder.EncodeStorageValue(_schema, _rows[i], RowId);
             BranchKvValue decoded = BranchKvCodec.Decode(storageValue);
             last = await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, decoded.Payload,
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 decodeState: cache).ConfigureAwait(false);
         }
         return last!;

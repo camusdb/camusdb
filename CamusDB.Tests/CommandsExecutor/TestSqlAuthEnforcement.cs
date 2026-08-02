@@ -30,39 +30,20 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestSqlAuthEnforcement : BaseTest
 {
-    private bool savedEnabled;
-    private string savedServerKey = "";
-    private string savedBootstrapUser = "";
-    private string savedBootstrapPassword = "";
-    private TimeSpan savedCacheTtl;
 
-    [SetUp]
-    public void SaveAuthConfig()
+    /// <summary>
+    /// Auth on, with a known signing key and bootstrap superuser — the baseline every test here starts
+    /// from. A test needing different auth settings derives its own options and builds its own engine.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
-        savedEnabled = CamusConfig.AuthenticationEnabled;
-        savedServerKey = CamusConfig.AccessTokenServerKey;
-        savedBootstrapUser = CamusConfig.BootstrapSuperuser;
-        savedBootstrapPassword = CamusConfig.BootstrapSuperuserPassword;
-        savedCacheTtl = CamusConfig.AuthenticationCacheTtl;
-    }
+        AuthenticationEnabled = true,
+        AccessTokenServerKey = "test-server-key",
+        BootstrapSuperuser = "root",
+        BootstrapSuperuserPassword = "root-password",
+    };
 
-    [TearDown]
-    public void RestoreAuthConfig()
-    {
-        CamusConfig.AuthenticationEnabled = savedEnabled;
-        CamusConfig.AccessTokenServerKey = savedServerKey;
-        CamusConfig.BootstrapSuperuser = savedBootstrapUser;
-        CamusConfig.BootstrapSuperuserPassword = savedBootstrapPassword;
-        CamusConfig.AuthenticationCacheTtl = savedCacheTtl;
-    }
 
-    private static void EnableAuth()
-    {
-        CamusConfig.AccessTokenServerKey = "test-server-key";
-        CamusConfig.BootstrapSuperuser = "root";
-        CamusConfig.BootstrapSuperuserPassword = "root-password";
-        CamusConfig.AuthenticationEnabled = true;
-    }
 
     private static async Task<Principal> LoginAsync(CommandExecutor executor, string user, string password)
     {
@@ -100,13 +81,12 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     }
 
     // Builds a database with a superuser (bootstrapped) and a table, all before/with auth as noted.
-    private async Task<(string dbname, CommandExecutor executor, Principal root)> SetupWithSuperuser()
+    private async Task<(string dbname, CommandExecutor executor, Principal root)> SetupWithSuperuser(
+        CamusDBOptions? options = null)
     {
-        EnableAuth();
-
         // CreateDatabase is a direct API call (not a SQL statement), so it bypasses the SQL gate — fine
         // for test setup. Use a letter-prefixed name so it is a valid bare identifier in SQL.
-        CommandExecutor executor = CreateCommandExecutor();
+        CommandExecutor executor = CreateCommandExecutor(options ?? Options);
         string dbname = "authdb" + Guid.NewGuid().ToString("n");
         await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
         TrackDatabase(dbname, executor);
@@ -122,8 +102,6 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     public async Task Disabled_NoPrincipalRequired()
     {
         // Auth off (default in teardown state): statements run with no principal, as before Phase 2.
-        CamusConfig.AuthenticationEnabled = false;
-
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
         await RunTxnDdl(executor, dbname, "CREATE TABLE t (id int64 PRIMARY KEY NOT NULL)", principal: null);
         await RunQuery(executor, dbname, "SELECT id FROM t", principal: null);
@@ -217,11 +195,9 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     {
         // Force authoritative validation on every resolve so the old token is checked against the
         // catalog immediately (the default 1s cache would otherwise serve it until the TTL elapses —
-        // that documented staleness bound is covered by the token-cache tests, not here). The auth
-        // service fixes this when it is constructed, so it is set before the engine is built.
-        CamusConfig.AuthenticationCacheTtl = TimeSpan.Zero;
-
-        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+        // that documented staleness bound is covered by the token-cache tests, not here).
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser(
+            Options with { AuthenticationCacheTtl = TimeSpan.Zero });
 
         await RunDdl(executor, "", "CREATE USER rot IDENTIFIED BY 'old-pw'", root);
         string token = (await executor.LoginAsync("rot", "old-pw")).Token;
@@ -288,11 +264,6 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     [Test]
     public async Task BootstrapFailsClosed_WhenNoSecret()
     {
-        CamusConfig.AccessTokenServerKey = "test-server-key";
-        CamusConfig.BootstrapSuperuser = "";
-        CamusConfig.BootstrapSuperuserPassword = "";
-        CamusConfig.AuthenticationEnabled = true;
-
         CommandExecutor executor = CreateCommandExecutor();
         string dbname = "authdb" + Guid.NewGuid().ToString("n");
         await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));

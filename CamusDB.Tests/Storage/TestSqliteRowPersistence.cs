@@ -53,14 +53,14 @@ public sealed class TestSqliteRowPersistence
 
             ILogger<ICamusDB> logger = LoggerFactory.CreateLogger<ICamusDB>();
 
-            EmbeddedKahuna node = EmbeddedKahuna.CreateSqlite(dataPath, CamusDBConfig.Ambient, LoggerFactory);
+            EmbeddedKahuna node = EmbeddedKahuna.CreateSqlite(dataPath, CamusDBOptions.Default, LoggerFactory);
             await node.StartAsync(CancellationToken.None);
             await node.WaitForLeaderAsync("warmup", CancellationToken.None);
             await node.FlushAsync();
 
-            CommandValidator validator = new(CamusDBConfig.Ambient);
+            CommandValidator validator = new(CamusDBOptions.Default);
             CatalogsManager catalogs = new(logger);
-            CommandExecutor executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
+            CommandExecutor executor = new(validator, catalogs, logger, CamusDBOptions.Default,
                 sharedNode: node, isClusterMode: true);
 
             DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));

@@ -20,7 +20,6 @@ public sealed class TestSpillFileManager
 {
     private string _dataDir = null!;
     private string _savedInstanceId = null!;
-    private bool _savedSpillEnabled;
 
     [SetUp]
     public void SetUp()
@@ -28,7 +27,6 @@ public sealed class TestSpillFileManager
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_spill_tests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
         _savedInstanceId = SpillFileManager.InstanceId;
-        _savedSpillEnabled = CamusDBConfig.SpillEnabled;
     }
 
     [TearDown]
@@ -36,8 +34,6 @@ public sealed class TestSpillFileManager
     {
         SpillFileManager.ReleaseInstanceLock();
         SpillFileManager.InstanceId = _savedInstanceId;
-        CamusDBConfig.SpillEnabled = _savedSpillEnabled;
-        CamusDBConfig.ForceSpillThresholdRows = null;
 
         try { Directory.Delete(_dataDir, recursive: true); }
         catch { /* ignore */ }
@@ -376,19 +372,25 @@ public sealed class TestSpillFileManager
     [Test]
     public void Config_DefaultValues()
     {
-        Assert.That(CamusDBConfig.SpillEnabled, Is.False);
-        Assert.That(CamusDBConfig.SpillThresholdRows, Is.EqualTo(500_000));
-        Assert.That(CamusDBConfig.SpillMergeFanIn, Is.EqualTo(16));
-        Assert.That(CamusDBConfig.ForceSpillThresholdRows, Is.Null);
+        CamusDBOptions defaults = CamusDBOptions.Default;
+
+        Assert.That(defaults.SpillEnabled, Is.False);
+        Assert.That(defaults.SpillThresholdRows, Is.EqualTo(500_000));
+        Assert.That(defaults.SpillMergeFanIn, Is.EqualTo(16));
+        Assert.That(defaults.ForceSpillThresholdRows, Is.Null);
     }
 
+    /// <summary>
+    /// The forced threshold exists so tests can make spilling happen on small inputs; when it is unset
+    /// the effective threshold must fall back to the real one rather than to zero.
+    /// </summary>
     [Test]
     public void Config_ForceThreshold_OverridesEffective()
     {
-        CamusDBConfig.ForceSpillThresholdRows = 10;
-        Assert.That(CamusDBConfig.SpillEffectiveThreshold, Is.EqualTo(10));
+        CamusDBOptions forced = CamusDBOptions.Default with { ForceSpillThresholdRows = 10 };
+        Assert.That(forced.SpillEffectiveThreshold, Is.EqualTo(10));
 
-        CamusDBConfig.ForceSpillThresholdRows = null;
-        Assert.That(CamusDBConfig.SpillEffectiveThreshold, Is.EqualTo(CamusDBConfig.SpillThresholdRows));
+        CamusDBOptions unforced = CamusDBOptions.Default with { ForceSpillThresholdRows = null };
+        Assert.That(unforced.SpillEffectiveThreshold, Is.EqualTo(unforced.SpillThresholdRows));
     }
 }

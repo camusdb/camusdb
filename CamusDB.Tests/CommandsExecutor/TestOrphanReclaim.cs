@@ -30,20 +30,15 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
 /// Reclamation: the <c>OrphanReclaimer</c> garbage collector physically reclaims
-/// deferred-dropped databases/tables once past <see cref="CamusConfig.OrphanRetentionMs"/>, leaves
+/// deferred-dropped databases/tables once past <see cref="CamusDBOptions.OrphanRetentionMs"/>, leaves
 /// unexpired ones alone, respects the disable switch, and (crash-window guard) never purges an object
 /// that has since been relinked.
 /// </summary>
 [NonParallelizable]
 internal sealed class TestOrphanReclaim : SharedNodeBaseTest
 {
-    private long originalRetention;
 
-    [SetUp]
-    public void SaveRetention() => originalRetention = CamusConfig.OrphanRetentionMs;
 
-    [TearDown]
-    public void RestoreRetention() => CamusConfig.OrphanRetentionMs = originalRetention;
 
     private async Task<int> CountKeysAsync(string bucket, string keyPrefix)
     {
@@ -58,10 +53,10 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         return count;
     }
 
-    private async Task<(string dbName, DatabaseDescriptor db, CommandExecutor executor, string dbId, string tableId)> SetupDbWithRows(int rows)
+    private async Task<(string dbName, DatabaseDescriptor db, CommandExecutor executor, string dbId, string tableId)> SetupDbWithRows(int rows, CamusDBOptions? options = null)
     {
         string dbName = "db_" + Guid.NewGuid().ToString("n");
-        CommandExecutor executor = CreateCommandExecutor();
+        CommandExecutor executor = CreateCommandExecutor(options ?? Options);
         TrackDatabase(dbName, executor);
 
         DatabaseDescriptor db = await executor.CreateDatabase(new CreateDatabaseTicket(dbName, ifNotExists: false));
@@ -88,10 +83,9 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     [NonParallelizable]
     public async Task Gc_ReclaimsExpiredDatabaseOrphan()
     {
-        // The reclaimer fixes its retention when the engine is built, so it is set before setup.
-        CamusConfig.OrphanRetentionMs = 1;
+        CamusDBOptions options = Options with { OrphanRetentionMs = 1 };
 
-        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(5);
+        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(5, options);
         await executor.DropDatabase(new DropDatabaseTicket(dbName));
 
         Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present after deferred drop");
@@ -125,10 +119,10 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     [NonParallelizable]
     public async Task Gc_DisabledWhenRetentionNonPositive()
     {
-        (string dbName, _, CommandExecutor executor, string dbId, _) = await SetupDbWithRows(2);
+        CamusDBOptions options = Options with { OrphanRetentionMs = 0 }; // reclamation disabled
+        (string dbName, _, CommandExecutor executor, string dbId, _) = await SetupDbWithRows(2, options);
         await executor.DropDatabase(new DropDatabaseTicket(dbName));
 
-        CamusConfig.OrphanRetentionMs = 0; // reclamation disabled
         await Task.Delay(50);
 
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
@@ -144,7 +138,8 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         // A live (registered) database with a stale orphan record for its id — simulates a relink that
         // crashed after re-registering but before deleting the orphan record. The GC must clean the
         // stale record and NOT purge the live database's data.
-        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(4);
+        CamusDBOptions options = Options with { OrphanRetentionMs = 1 };
+        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(4, options);
 
         await sharedRegistry!.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
         {
@@ -153,7 +148,6 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
             DroppedAt = HLCTimestamp.Zero, // always past any retention window
         });
 
-        CamusConfig.OrphanRetentionMs = 1;
         await Task.Delay(50);
 
         await executor.RunOrphanReclaimForTestsAsync();
@@ -170,10 +164,9 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     [NonParallelizable]
     public async Task Gc_ReclaimsExpiredTableOrphan()
     {
-        // The reclaimer fixes its retention when the engine is built, so it is set before setup.
-        CamusConfig.OrphanRetentionMs = 1;
+        CamusDBOptions options = Options with { OrphanRetentionMs = 1 };
 
-        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(6);
+        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(6, options);
         await executor.DropTable(new DropTableTicket(dbName, "robots", ifExists: false));
 
         await Task.Delay(50);
@@ -190,7 +183,8 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     {
         // A live table with a stale orphan record for its id (relink crash window). The GC must clean
         // the record and keep the table's rows.
-        (string dbName, DatabaseDescriptor db, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(4);
+        CamusDBOptions options = Options with { OrphanRetentionMs = 1 };
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(4, options);
 
         // Write a stale orphan record for the still-live "robots" table (its meta/table key exists).
         byte[] recordBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
@@ -205,7 +199,6 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
             HLCTimestamp.Zero, $"{dbId}/meta/orphan:{tableId}", recordBytes, null, -1,
             KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
 
-        CamusConfig.OrphanRetentionMs = 1;
         await Task.Delay(50);
 
         await executor.RunOrphanReclaimForTestsAsync();
@@ -225,10 +218,10 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     [NonParallelizable]
     public async Task RelinkVsGc_Contention_ExactlyOneWins_NeverHalfState()
     {
-        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(6);
+        CamusDBOptions options = Options with { OrphanRetentionMs = 1 }; // GC is eligible
+        (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(6, options);
         await executor.DropDatabase(new DropDatabaseTicket(dbName));
 
-        CamusConfig.OrphanRetentionMs = 1; // GC is eligible
         await Task.Delay(50);
 
         string recovered = "db_" + Guid.NewGuid().ToString("n");

@@ -43,12 +43,17 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
 {
     private QueryResultCache? _cache;
 
-    protected override CommandExecutor CreateCommandExecutor()
+    /// <summary>
+    /// Every engine this fixture builds gets its own cache, and honours <paramref name="options"/>.
+    /// The options-taking overload is the one to override: the parameterless factory routes through it,
+    /// so a test that asks for particular cache limits still gets the injected cache.
+    /// </summary>
+    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        _cache = new QueryResultCache(options, sweepIntervalMs: -1);
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        return new(validator, catalogsManager, logger, options,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }
@@ -359,39 +364,33 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// When point deps exceed <see cref="CamusDBConfig.QueryResultCacheStrictValidationMaxKeys"/>,
+    /// When point deps exceed <see cref="CamusDBOptions.QueryResultCacheStrictValidationMaxKeys"/>,
     /// <see cref="StrictValidator.ValidateAsync"/> must return <c>false</c> (fail closed).
     /// </summary>
     [Test]
     public async Task StrictValidator_ProbeLimitExceeded_ReturnsFalseFailClosed()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        // The validator reads its probe limit from the database's own options, so the ceiling is part of
+        // how this database is created.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(
+            Options with { QueryResultCacheStrictValidationMaxKeys = 2 });
         TrackDatabase(dbname, executor);
 
         await CreateOrdersTable(dbname, database, executor);
 
         var staleResult = MakeStrictResult("orders_limit", database.Id, [], "test-fp-limit");
 
-        int origLimit = CamusDBConfig.QueryResultCacheStrictValidationMaxKeys;
-        CamusDBConfig.QueryResultCacheStrictValidationMaxKeys = 2;
-        try
-        {
-            // 3 point deps exceeds the limit of 2.
-            var deps = new QueryDependencySet(
-                rangeDeps: [],
-                pointDeps: ["fake-key-1", "fake-key-2", "fake-key-3"],
-                schemaDeps: []);
+        // 3 point deps exceeds the limit of 2.
+        var deps = new QueryDependencySet(
+            rangeDeps: [],
+            pointDeps: ["fake-key-1", "fake-key-2", "fake-key-3"],
+            schemaDeps: []);
 
-            bool valid = await StrictValidator.ValidateAsync(
-                staleResult, deps, database, TestNode!.Kahuna, default);
+        bool valid = await StrictValidator.ValidateAsync(
+            staleResult, deps, database, TestNode!.Kahuna, default);
 
-            Assert.That(valid, Is.False,
-                "Exceeding the probe limit must fail closed (return false)");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheStrictValidationMaxKeys = origLimit;
-        }
+        Assert.That(valid, Is.False,
+            "Exceeding the probe limit must fail closed (return false)");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -491,7 +490,7 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// When a strict query fetches more rows than <see cref="CamusDBConfig.QueryResultCacheMaxPointDeps"/>,
+    /// When a strict query fetches more rows than <see cref="CamusDBOptions.QueryResultCacheMaxPointDeps"/>,
     /// <see cref="QueryDependencyCollector.PointDepsTruncated"/> is set. A physical delete of
     /// an untracked row would be invisible to strict validation — the deleted key is gone from
     /// Kahuna and the range scan finds nothing newer than <c>CachedAt</c>. Publishing such an
@@ -504,42 +503,34 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
     [Test]
     public async Task StrictCollector_PointDepsTruncated_BypassesPublish()
     {
-        // Lower the point-dep cap to 1 so a 2-row result forces truncation.
-        int origPointCap = CamusDBConfig.QueryResultCacheMaxPointDeps;
-        CamusDBConfig.QueryResultCacheMaxPointDeps = 1;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-            TrackDatabase(dbname, executor);
+        // A point-dep cap of 1, so a 2-row result forces truncation.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(
+        Options with { QueryResultCacheMaxPointDeps = 1 });
+        TrackDatabase(dbname, executor);
 
-            await CreateOrdersTable(dbname, database, executor);
-            await InsertOrder(dbname, database, executor, "o1", 1);
-            await InsertOrder(dbname, database, executor, "o2", 2);
+        await CreateOrdersTable(dbname, database, executor);
+        await InsertOrder(dbname, database, executor, "o1", 1);
+        await InsertOrder(dbname, database, executor, "o2", 2);
 
-            // Non-strict SELECT with 2 rows: point-dep cap=1, one dep truncated, but non-strict
-            // entries are exempt — the entry IS published (range dep covers the bucket).
-            List<QueryResultRow> nonStrictRows = await SelectAll(dbname, executor, "ns_ptcap");
-            Assert.That(nonStrictRows, Has.Count.EqualTo(2));
-            Assert.That(Cache.EntryCount, Is.EqualTo(1),
-                "Non-strict entry must still publish when point deps are truncated");
+        // Non-strict SELECT with 2 rows: point-dep cap=1, one dep truncated, but non-strict
+        // entries are exempt — the entry IS published (range dep covers the bucket).
+        List<QueryResultRow> nonStrictRows = await SelectAll(dbname, executor, "ns_ptcap");
+        Assert.That(nonStrictRows, Has.Count.EqualTo(2));
+        Assert.That(Cache.EntryCount, Is.EqualTo(1),
+            "Non-strict entry must still publish when point deps are truncated");
 
-            Cache.InvalidateCacheName(database.Id, "ns_ptcap");
+        Cache.InvalidateCacheName(database.Id, "ns_ptcap");
 
-            // Strict SELECT with 2 rows: point-dep cap=1, one dep truncated, must bypass publish.
-            List<QueryResultRow> strictRows = await SelectAllStrict(dbname, executor, "s_ptcap");
-            Assert.That(strictRows, Has.Count.EqualTo(2), "Live rows must still be delivered");
-            Assert.That(Cache.EntryCount, Is.EqualTo(0),
-                "Strict entry with truncated point deps must be bypassed, not published");
+        // Strict SELECT with 2 rows: point-dep cap=1, one dep truncated, must bypass publish.
+        List<QueryResultRow> strictRows = await SelectAllStrict(dbname, executor, "s_ptcap");
+        Assert.That(strictRows, Has.Count.EqualTo(2), "Live rows must still be delivered");
+        Assert.That(Cache.EntryCount, Is.EqualTo(0),
+            "Strict entry with truncated point deps must be bypassed, not published");
 
-            // Running again still bypasses (the condition is structural, not transient).
-            List<QueryResultRow> strictRows2 = await SelectAllStrict(dbname, executor, "s_ptcap");
-            Assert.That(strictRows2, Has.Count.EqualTo(2));
-            Assert.That(Cache.EntryCount, Is.EqualTo(0),
-                "Strict entry with truncated point deps must never populate the cache");
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxPointDeps = origPointCap;
-        }
+        // Running again still bypasses (the condition is structural, not transient).
+        List<QueryResultRow> strictRows2 = await SelectAllStrict(dbname, executor, "s_ptcap");
+        Assert.That(strictRows2, Has.Count.EqualTo(2));
+        Assert.That(Cache.EntryCount, Is.EqualTo(0),
+        "Strict entry with truncated point deps must never populate the cache");
     }
 }

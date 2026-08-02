@@ -257,18 +257,12 @@ public sealed class TestSchemaDdlForwarding
     //   3. SELECT from a third node — asserts all rows are visible and no "no range descriptor
     //      covers key" surfaces anywhere in the path.
     //
-    // [NonParallelizable] because the test temporarily sets the process-static
-    // CamusDBConfig.KeyRangeShardingEnabled to true.
     [Test]
     [NonParallelizable]
     public async Task ThreeNodeCluster_KeyRangeEnabled_InsertFromNonLeader_SelectFromThirdNode()
     {
-        bool prevFlag = CamusConfig.KeyRangeShardingEnabled;
-        CamusConfig.KeyRangeShardingEnabled = true;
-
-        try
-        {
-            await using ClusterHarness cluster = await ClusterHarness.StartAsync();
+        await using ClusterHarness cluster = await ClusterHarness.StartAsync(
+            options: CamusDBOptions.Default with { KeyRangeShardingEnabled = true });
             string db = cluster.NextSchemaLogDatabaseName();
 
             // ── DDL on the schema leader ──────────────────────────────────────────
@@ -334,12 +328,7 @@ public sealed class TestSchemaDdlForwarding
                 $"All {RowCount} rows inserted from the non-leader node must be visible from a third node. " +
                 $"Got {rows.Count}. If 0, K1 seed-forwarding is broken; if < {RowCount}, replication or routing is incomplete.");
 
-            await CleanupDatabaseAsync(db, [leaderExecutor, nonLeaderExecutor, thirdExecutor, creatorExecutor]);
-        }
-        finally
-        {
-            CamusConfig.KeyRangeShardingEnabled = prevFlag;
-        }
+        await CleanupDatabaseAsync(db, [leaderExecutor, nonLeaderExecutor, thirdExecutor, creatorExecutor]);
     }
 
     /// <summary>
@@ -583,17 +572,27 @@ public sealed class TestSchemaDdlForwarding
     {
         private static int nextPortBase = 9300;
 
-        private ClusterHarness(EmbeddedKahuna[] nodes, DatabaseRegistry sharedRegistry)
+        private ClusterHarness(EmbeddedKahuna[] nodes, DatabaseRegistry sharedRegistry, CamusDBOptions options)
         {
             Nodes = nodes;
             SharedRegistry = sharedRegistry;
+            Options = options;
         }
 
         public EmbeddedKahuna[] Nodes { get; }
         public DatabaseRegistry SharedRegistry { get; }
 
-        public static async Task<ClusterHarness> StartAsync()
+        /// <summary>
+        /// Configuration every node and executor in this harness is built with. Fixed at start, so a
+        /// test wanting a different cluster shape starts its own harness rather than changing anything
+        /// the running one already captured.
+        /// </summary>
+        public CamusDBOptions Options { get; }
+
+        public static async Task<ClusterHarness> StartAsync(CamusDBOptions? options = null)
         {
+            CamusDBOptions effective = options ?? CamusDBOptions.Default;
+
             InMemoryCommunication raftCommunication = new();
             MemoryInterNodeCommmunication interNode = new();
 
@@ -619,16 +618,16 @@ public sealed class TestSchemaDdlForwarding
 
             // One shared registry for the whole cluster — all executors share the same
             // in-memory name→id cache so CreateDatabase on any node is visible to all.
-            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(nodes[0], CamusDBConfig.Ambient).ConfigureAwait(false);
+            DatabaseRegistry sharedRegistry = await DatabaseRegistry.OpenAsync(nodes[0], effective).ConfigureAwait(false);
 
-            return new(nodes, sharedRegistry);
+            return new(nodes, sharedRegistry, effective);
         }
 
         public CommandExecutor CreateExecutor(EmbeddedKahuna node, ISchemaDdlForwarder? forwarder = null)
         {
-            CommandValidator validator = new(CamusDBConfig.Ambient);
+            CommandValidator validator = new(Options);
             CatalogsManager catalogs = new(Logger);
-            return new(validator, catalogs, Logger, CamusDBConfig.Ambient,
+            return new(validator, catalogs, Logger, Options,
                 sharedNode: node,
                 schemaDdlForwarder: forwarder,
                 registry: SharedRegistry,

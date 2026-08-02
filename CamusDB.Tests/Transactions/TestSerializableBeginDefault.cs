@@ -28,35 +28,27 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Verifies Task 3 — explicit BEGIN under Serializable default.
 ///
-/// When <see cref="CamusDBConfig.DefaultIsolationLevel"/> is Serializable, an explicit
+/// When an engine's <see cref="CamusDBOptions.DefaultIsolationLevel"/> is Serializable, an explicit
 /// <c>BEGIN</c> (no level/mode) must open a Serializable+ReadWrite transaction that enforces
 /// S2PL. An explicit RC override must still work.
 ///
-/// Tests run non-parallel because they modify <see cref="CamusDBConfig.DefaultIsolationLevel"/>.
+/// The Read Committed case builds its own engine rather than changing what the others see.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestSerializableBeginDefault : SharedNodeBaseTest
 {
-    private CamusIsolationLevel savedDefaultLevel;
-
-    [SetUp]
-    public void SetSerializableDefault()
-    {
-        savedDefaultLevel = CamusDBConfig.DefaultIsolationLevel;
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.Serializable;
-    }
-
-    [TearDown]
-    public void RestoreDefaultLevel()
-    {
-        CamusDBConfig.DefaultIsolationLevel = savedDefaultLevel;
-    }
+    /// <summary>
+    /// These tests are about what an explicit BEGIN inherits, so every engine here defaults to
+    /// Serializable unless a test asks for something else.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { DefaultIsolationLevel = CamusIsolationLevel.Serializable };
 
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>
-        SetupTableAsync()
+        SetupTableAsync(CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
@@ -227,14 +219,13 @@ public sealed class TestSerializableBeginDefault : SharedNodeBaseTest
     [Test]
     public async Task ExplicitBegin_ReadCommittedDefault_NoOptions_IsReadCommittedReadWrite()
     {
-        CamusDBConfig.DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted;
-
-        (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync();
+        (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync(
+            Options with { DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted });
 
         KvTransaction tx = await db.Transactions.BeginAsync(null, null);
 
         Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel,
-            "BEGIN with no options must inherit DefaultIsolationLevel = ReadCommitted");
+            "BEGIN with no options must inherit the engine's default of ReadCommitted");
         Assert.AreEqual(CamusTransactionMode.ReadWrite, tx.TransactionMode);
 
         await db.Transactions.RollbackAsync(tx);

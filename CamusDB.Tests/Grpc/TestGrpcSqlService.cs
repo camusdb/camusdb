@@ -46,12 +46,12 @@ public class TestGrpcSqlService : BaseTest
     [SetUp]
     public void SetUpGrpcService()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        serviceExecutor = new(validator, catalogsManager, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
-        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), CamusDBConfig.Ambient);
+        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), Options);
     }
 
     [TearDown]
@@ -701,7 +701,7 @@ public class TestGrpcSqlService : BaseTest
         try
         {
             KvTransaction tx = coordinator.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
-            Assert.That(tx.Locking, Is.EqualTo(CamusDBConfig.DefaultTransactionLocking),
+            Assert.That(tx.Locking, Is.EqualTo(CamusDBOptions.Default.DefaultTransactionLocking),
                 "Unset locking must fall back to the server default");
         }
         finally

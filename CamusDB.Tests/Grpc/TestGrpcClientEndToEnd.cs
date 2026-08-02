@@ -41,12 +41,12 @@ public class TestGrpcClientEndToEnd : BaseTest
     [SetUp]
     public void SetUpService()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogs = new(logger);
-        executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
+        executor = new(validator, catalogs, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(executor);
-        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), CamusDBConfig.Ambient);
+        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), Options);
     }
 
     [TearDown]

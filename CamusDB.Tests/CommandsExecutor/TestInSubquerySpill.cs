@@ -26,7 +26,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Verifies that the spillable IN/NOT IN subquery value list bounds collection-time memory by
 /// spilling values to disk when the inner subquery exceeds
-/// <c>CamusDBConfig.SpillEffectiveThreshold</c>.
+/// <c>CamusDBOptions.SpillEffectiveThreshold</c>.
 ///
 /// <para>
 /// The discriminator for the spill path is
@@ -46,9 +46,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestInSubquerySpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
 
     [SetUp]
     public void SetUpSpill()
@@ -56,11 +53,6 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_in_spill_" + System.Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
 
-        _savedSpillEnabled   = CamusDBConfig.SpillEnabled;
-        _savedThreshold      = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -69,15 +61,25 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
     {
         SpillFileManager.ReleaseInstanceLock();
 
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.DataDirectory           = null!;
-
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
 
     // ─── helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>Spill disabled — the value list stays a plain in-memory list.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced once the inner subquery has produced <paramref name="thresholdRows"/> values, so the
+    /// overflow path runs on inputs small enough to assert on exactly.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows) =>
+        Options with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            DataDirectory = _dataDir,
+        };
 
     /// <summary>
     /// Creates two tables:
@@ -87,9 +89,9 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
     /// </list>
     /// </summary>
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
-        SetupTablesAsync(int categoryCount, int itemsPerCategory)
+        SetupTablesAsync(CamusDBOptions options, int categoryCount, int itemsPerCategory)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -169,9 +171,8 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
     public async Task InSubquerySpill_FlagOff_CorrectResultFromInMemoryPath()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor)
-            = await SetupTablesAsync(categoryCount: 4, itemsPerCategory: 3);
+            = await SetupTablesAsync(SpillOff, categoryCount: 4, itemsPerCategory: 3);
 
-        CamusDBConfig.SpillEnabled = false;
         executor.Statistics.InSubqueryValueListSpillCount = 0;
 
         // GROUP BY (not DISTINCT — inner DISTINCT is now semi-join-eligible) keeps the subquery
@@ -201,13 +202,9 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
         const int categories = 20;
         const int itemsEach  = 2;
 
-        // threshold=3 → the inner subquery (20 rows) will spill after the 3rd value. The engine fixes
-        // its configuration when it is built, so this is set before the tables are created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-
+        // threshold=3 → the inner subquery (20 rows) spills after the 3rd value.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor)
-            = await SetupTablesAsync(categoryCount: categories, itemsPerCategory: itemsEach);
+            = await SetupTablesAsync(SpillOn(thresholdRows: 3), categoryCount: categories, itemsPerCategory: itemsEach);
         executor.Statistics.InSubqueryValueListSpillCount = 0;
 
         List<QueryResultRow> rows = await RunQueryAsync(dbname, database, executor,
@@ -233,12 +230,8 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
         const int categories = 10;
         const int itemsEach  = 2;
 
-        // Configured before the engine is built, which is when it fixes its configuration.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-
         (string dbname, DatabaseDescriptor database, CommandExecutor executor)
-            = await SetupTablesAsync(categoryCount: categories, itemsPerCategory: itemsEach);
+            = await SetupTablesAsync(SpillOn(thresholdRows: 3), categoryCount: categories, itemsPerCategory: itemsEach);
 
         // Insert a second set of categories that the NOT IN subquery will exclude.
         // We want items whose category_id is NOT IN the first 5 categories.
@@ -278,20 +271,14 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
             "WHERE i.category_id IN (SELECT c.id FROM categories c GROUP BY c.id) " +
             "ORDER BY i.name";
 
-        // In-memory reference. The engine fixes its configuration when it is built, so the setting is
-        // in place before the tables (and the executor) are created.
-        CamusDBConfig.SpillEnabled = false;
-
+        // Two engines over the same data, one per path — the comparison is the point of the test, so
+        // neither configuration can be allowed to disturb the other.
         (string db1, DatabaseDescriptor d1, CommandExecutor ex1)
-            = await SetupTablesAsync(categories, itemsEach);
+            = await SetupTablesAsync(SpillOff, categories, itemsEach);
         List<QueryResultRow> reference = await RunQueryAsync(db1, d1, ex1, sql);
 
-        // Spill path — again configured before the engine that must honour it is built.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-
         (string db2, DatabaseDescriptor d2, CommandExecutor ex2)
-            = await SetupTablesAsync(categories, itemsEach);
+            = await SetupTablesAsync(SpillOn(thresholdRows: 2), categories, itemsEach);
         List<QueryResultRow> spill = await RunQueryAsync(db2, d2, ex2, sql);
 
         Assert.That(spill.Count, Is.EqualTo(reference.Count),
@@ -313,12 +300,8 @@ public sealed class TestInSubquerySpill : SharedNodeBaseTest
     [Test]
     public async Task InSubquerySpill_SpillFilesRemovedAfterCompletion()
     {
-        // Configured before the engine is built, which is when it fixes its configuration.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-
         (string dbname, DatabaseDescriptor database, CommandExecutor executor)
-            = await SetupTablesAsync(categoryCount: 12, itemsPerCategory: 2);
+            = await SetupTablesAsync(SpillOn(thresholdRows: 2), categoryCount: 12, itemsPerCategory: 2);
 
         await RunQueryAsync(dbname, database, executor,
             "SELECT i.name FROM items i WHERE i.category_id IN (SELECT c.id FROM categories c GROUP BY c.id)");

@@ -29,26 +29,20 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestSqlAuthPerObject : BaseTest
 {
-    private bool savedEnabled;
-    private string savedServerKey = "", savedUser = "", savedPassword = "";
 
-    [SetUp]
-    public void Save()
+    /// <summary>
+    /// Auth on, with a known signing key and bootstrap superuser — the baseline every test here starts
+    /// from. A test needing different auth settings derives its own options and builds its own engine.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
-        savedEnabled = CamusConfig.AuthenticationEnabled;
-        savedServerKey = CamusConfig.AccessTokenServerKey;
-        savedUser = CamusConfig.BootstrapSuperuser;
-        savedPassword = CamusConfig.BootstrapSuperuserPassword;
-    }
+        AuthenticationEnabled = true,
+        AccessTokenServerKey = "test-key",
+        BootstrapSuperuser = "root",
+        BootstrapSuperuserPassword = "root-pw",
+    };
 
-    [TearDown]
-    public void Restore()
-    {
-        CamusConfig.AuthenticationEnabled = savedEnabled;
-        CamusConfig.AccessTokenServerKey = savedServerKey;
-        CamusConfig.BootstrapSuperuser = savedUser;
-        CamusConfig.BootstrapSuperuserPassword = savedPassword;
-    }
+
 
     private static async Task<Principal> Login(CommandExecutor ex, string u, string p)
         => await ex.ResolvePrincipalAsync((await ex.LoginAsync(u, p)).Token);
@@ -77,11 +71,6 @@ internal sealed class TestSqlAuthPerObject : BaseTest
     // Enables auth, creates a db with two tables (t1, t2) as the superuser, returns (db, executor, root).
     private async Task<(string db, CommandExecutor ex, Principal root)> Setup()
     {
-        CamusConfig.AccessTokenServerKey = "test-key";
-        CamusConfig.BootstrapSuperuser = "root";
-        CamusConfig.BootstrapSuperuserPassword = "root-pw";
-        CamusConfig.AuthenticationEnabled = true;
-
         CommandExecutor ex = CreateCommandExecutor();
         string db = "authdb" + Guid.NewGuid().ToString("n");
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));

@@ -66,8 +66,21 @@ public class TestPlanDistributedProperties
     /// A planner fixes its configuration when constructed, so a fixture-level instance would plan every
     /// case under whatever settings happened to hold when the fixture was created.
     /// </summary>
+    /// <summary>Plans <paramref name="sql"/> under the engine defaults.</summary>
     private QueryPlan Plan(string sql, Dictionary<string, ColumnValue>? parameters = null) =>
-        new QueryPlanner(CamusDBConfig.Ambient).GetPlan(ctx!.Database, ctx!.Table, Ticket(sql, parameters));
+        Plan(CamusDBOptions.Default, sql, parameters);
+
+    /// <summary>
+    /// Plans <paramref name="sql"/> with a planner configured by <paramref name="options"/>. A planner
+    /// fixes its configuration when constructed, so the settings a case needs are supplied here rather
+    /// than assigned to a process-wide value around it.
+    /// </summary>
+    private QueryPlan Plan(CamusDBOptions options, string sql, Dictionary<string, ColumnValue>? parameters = null) =>
+        new QueryPlanner(options).GetPlan(ctx!.Database, ctx!.Table, Ticket(sql, parameters));
+
+    /// <summary>Key-range sharding on, with <paramref name="partitions"/> data partitions.</summary>
+    private static CamusDBOptions Sharded(int partitions = 1) =>
+        CamusDBOptions.Default with { KeyRangeShardingEnabled = true, ClusterPartitionCount = partitions };
 
     /// <summary>Walk the plan tree in DFS order and collect all nodes.</summary>
     private static List<PhysicalPlanNode> AllNodes(QueryPlan plan)
@@ -398,24 +411,15 @@ public class TestPlanDistributedProperties
     [Test]
     public void Distribution_IndexRangeScan_IsPartitionedWhenShardingOn()
     {
-        bool original = CamusDBConfig.KeyRangeShardingEnabled;
-        try
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = true;
 
-            // year_idx is a multi-column index on [year]; a range on year selects it.
-            QueryPlan plan = Plan("SELECT * FROM robots WHERE year > 2020");
-            IndexRangeScanNode? rangeScan = AllNodes(plan).OfType<IndexRangeScanNode>().FirstOrDefault();
-            Assert.IsNotNull(rangeScan, "Expected IndexRangeScanNode for year > 2020");
-            Assert.AreEqual(DataDistributionKind.Partitioned, rangeScan!.Distribution?.Kind,
-                "IndexRangeScanNode.Distribution should be Partitioned when sharding is on");
-            CollectionAssert.AreEqual(new[] { "year" }, rangeScan.Distribution!.KeyColumns,
-                "Partitioned key columns should match the index columns");
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = original;
-        }
+        // year_idx is a multi-column index on [year]; a range on year selects it.
+        QueryPlan plan = Plan(Sharded(), "SELECT * FROM robots WHERE year > 2020");
+        IndexRangeScanNode? rangeScan = AllNodes(plan).OfType<IndexRangeScanNode>().FirstOrDefault();
+        Assert.IsNotNull(rangeScan, "Expected IndexRangeScanNode for year > 2020");
+        Assert.AreEqual(DataDistributionKind.Partitioned, rangeScan!.Distribution?.Kind,
+            "IndexRangeScanNode.Distribution should be Partitioned when sharding is on");
+        CollectionAssert.AreEqual(new[] { "year" }, rangeScan.Distribution!.KeyColumns,
+            "Partitioned key columns should match the index columns");
     }
 
     /// <summary>
@@ -425,20 +429,11 @@ public class TestPlanDistributedProperties
     [Test]
     public void Distribution_UniqueLookup_IsAlwaysGathered()
     {
-        bool original = CamusDBConfig.KeyRangeShardingEnabled;
-        try
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = true;
-            QueryPlan plan = Plan("SELECT * FROM robots WHERE id = 'abc'");
-            IndexLookupNode? lookup = AllNodes(plan).OfType<IndexLookupNode>().FirstOrDefault();
-            Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
-            Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
-                "IndexLookupNode.Distribution must be Gathered even when sharding is on");
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = original;
-        }
+        QueryPlan plan = Plan(Sharded(), "SELECT * FROM robots WHERE id = 'abc'");
+        IndexLookupNode? lookup = AllNodes(plan).OfType<IndexLookupNode>().FirstOrDefault();
+        Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
+        Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
+            "IndexLookupNode.Distribution must be Gathered even when sharding is on");
     }
 
     /// <summary>
@@ -579,38 +574,28 @@ public class TestPlanDistributedProperties
     [Test]
     public void NetworkFactor_IsPositiveForScansWhenShardingOn_AndFullScanBeatsRangeScan()
     {
-        bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
-        int  origPartitions = CamusDBConfig.ClusterPartitionCount;
-        try
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = true;
-            CamusDBConfig.ClusterPartitionCount   = 3;
+        // Three partitions, sharding on — the configuration this case is about.
+        CamusDBOptions sharded = Sharded(3);
 
-            // Full table scan.
-            QueryPlan fullScanPlan = Plan("SELECT * FROM robots");
-            TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
-            Assert.IsNotNull(fullScan, "Expected TableScanNode");
-            double fullScanNF = fullScan!.Cost?.NetworkFactor ?? 0.0;
-            Assert.Greater(fullScanNF, 0.0,
-                "Full table scan must have NetworkFactor > 0 when sharding is on with N=3");
+        // Full table scan.
+        QueryPlan fullScanPlan = Plan(sharded, "SELECT * FROM robots");
+        TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
+        Assert.IsNotNull(fullScan, "Expected TableScanNode");
+        double fullScanNF = fullScan!.Cost?.NetworkFactor ?? 0.0;
+        Assert.Greater(fullScanNF, 0.0,
+            "Full table scan must have NetworkFactor > 0 when sharding is on with N=3");
 
-            // Selective index range scan on year (uses year_idx).
-            QueryPlan rangePlan = Plan("SELECT * FROM robots WHERE year > 2020");
-            IndexRangeScanNode? rangeScan = AllNodes(rangePlan).OfType<IndexRangeScanNode>().FirstOrDefault();
-            Assert.IsNotNull(rangeScan, "Expected IndexRangeScanNode for year > 2020");
-            double rangeScanNF = rangeScan!.Cost?.NetworkFactor ?? 0.0;
-            Assert.Greater(rangeScanNF, 0.0,
-                "Index range scan must have NetworkFactor > 0 when sharding is on with N=3");
+        // Selective index range scan on year (uses year_idx).
+        QueryPlan rangePlan = Plan(sharded, "SELECT * FROM robots WHERE year > 2020");
+        IndexRangeScanNode? rangeScan = AllNodes(rangePlan).OfType<IndexRangeScanNode>().FirstOrDefault();
+        Assert.IsNotNull(rangeScan, "Expected IndexRangeScanNode for year > 2020");
+        double rangeScanNF = rangeScan!.Cost?.NetworkFactor ?? 0.0;
+        Assert.Greater(rangeScanNF, 0.0,
+            "Index range scan must have NetworkFactor > 0 when sharding is on with N=3");
 
-            // Full scan ships more rows → higher NetworkFactor than the selective range scan.
-            Assert.Greater(fullScanNF, rangeScanNF,
-                "Full table scan NetworkFactor must exceed selective range scan NetworkFactor");
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
-            CamusDBConfig.ClusterPartitionCount   = origPartitions;
-        }
+        // Full scan ships more rows → higher NetworkFactor than the selective range scan.
+        Assert.Greater(fullScanNF, rangeScanNF,
+            "Full table scan NetworkFactor must exceed selective range scan NetworkFactor");
     }
 
     /// <summary>
@@ -620,23 +605,13 @@ public class TestPlanDistributedProperties
     [Test]
     public void NetworkFactor_IsZeroWhenShardingOnButSinglePartition()
     {
-        bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
-        int  origPartitions = CamusDBConfig.ClusterPartitionCount;
-        try
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = true;
-            CamusDBConfig.ClusterPartitionCount   = 1;
+        // Sharding on with 1 partition(s) — the configuration this case is about.
+        CamusDBOptions sharded = Sharded(1);
 
-            QueryPlan plan = Plan("SELECT * FROM robots");
-            foreach (PhysicalPlanNode node in AllNodes(plan))
-                Assert.AreEqual(0.0, node.Cost?.NetworkFactor ?? 0.0,
-                    $"{node.GetType().Name}.Cost.NetworkFactor must be 0 when partition count = 1");
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
-            CamusDBConfig.ClusterPartitionCount   = origPartitions;
-        }
+        QueryPlan plan = Plan(sharded, "SELECT * FROM robots");
+        foreach (PhysicalPlanNode node in AllNodes(plan))
+            Assert.AreEqual(0.0, node.Cost?.NetworkFactor ?? 0.0,
+                $"{node.GetType().Name}.Cost.NetworkFactor must be 0 when partition count = 1");
     }
 
     /// <summary>
@@ -646,32 +621,22 @@ public class TestPlanDistributedProperties
     [Test]
     public void NetworkFactor_GatheredLookup_IsZeroEvenWithShardingOn()
     {
-        bool origSharding   = CamusDBConfig.KeyRangeShardingEnabled;
-        int  origPartitions = CamusDBConfig.ClusterPartitionCount;
-        try
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = true;
-            CamusDBConfig.ClusterPartitionCount   = 3;
+        // Sharding on with 3 partition(s) — the configuration this case is about.
+        CamusDBOptions sharded = Sharded(3);
 
-            QueryPlan lookupPlan = Plan("SELECT * FROM robots WHERE id = 'abc'");
-            IndexLookupNode? lookup = AllNodes(lookupPlan).OfType<IndexLookupNode>().FirstOrDefault();
-            Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
-            Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
-                "PK lookup must be classified Gathered by PlacementReader");
-            Assert.AreEqual(0.0, lookup.Cost?.NetworkFactor ?? 0.0,
-                "Gathered lookup must have NetworkFactor = 0 (local, no bytes shipped)");
+        QueryPlan lookupPlan = Plan(sharded, "SELECT * FROM robots WHERE id = 'abc'");
+        IndexLookupNode? lookup = AllNodes(lookupPlan).OfType<IndexLookupNode>().FirstOrDefault();
+        Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
+        Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
+            "PK lookup must be classified Gathered by PlacementReader");
+        Assert.AreEqual(0.0, lookup.Cost?.NetworkFactor ?? 0.0,
+            "Gathered lookup must have NetworkFactor = 0 (local, no bytes shipped)");
 
-            // Partitioned full scan on same table must still carry cost — confirms the gate works.
-            QueryPlan fullScanPlan = Plan("SELECT * FROM robots");
-            TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
-            Assert.Greater(fullScan?.Cost?.NetworkFactor ?? 0.0, 0.0,
-                "Partitioned full scan must have NetworkFactor > 0 when sharding is on with N=3");
-        }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = origSharding;
-            CamusDBConfig.ClusterPartitionCount   = origPartitions;
-        }
+        // Partitioned full scan on same table must still carry cost — confirms the gate works.
+        QueryPlan fullScanPlan = Plan(sharded, "SELECT * FROM robots");
+        TableScanNode? fullScan = AllNodes(fullScanPlan).OfType<TableScanNode>().FirstOrDefault();
+        Assert.Greater(fullScan?.Cost?.NetworkFactor ?? 0.0, 0.0,
+            "Partitioned full scan must have NetworkFactor > 0 when sharding is on with N=3");
     }
 }
 

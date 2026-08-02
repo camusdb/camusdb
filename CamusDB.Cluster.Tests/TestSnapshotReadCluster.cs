@@ -100,9 +100,9 @@ public sealed class TestSnapshotReadCluster
                 await node.WaitForLeaderAsync(key, CancellationToken.None);
         }
 
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(CamusDBOptions.Default);
         CatalogsManager catalogs = new(logger);
-        CommandExecutor executor = new(validator, catalogs, logger, CamusDBConfig.Ambient, sharedNode: node, isClusterMode: true);
+        CommandExecutor executor = new(validator, catalogs, logger, CamusDBOptions.Default, sharedNode: node, isClusterMode: true);
 
         string dbname = Guid.NewGuid().ToString("n");
         DatabaseDescriptor database = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));

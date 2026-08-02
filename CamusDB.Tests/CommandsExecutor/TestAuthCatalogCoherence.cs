@@ -33,8 +33,8 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
     // generation revalidation on a read — the path under test. In standalone mode a read is trusted
     // without revalidation, which is not what these tests exercise.
     private async Task<(AuthCatalog a, AuthCatalog b)> TwoNodesAsync()
-        => (await AuthCatalog.OpenAsync(TestNode!, CamusDBConfig.Ambient, isClusterMode: true),
-            await AuthCatalog.OpenAsync(TestNode!, CamusDBConfig.Ambient, isClusterMode: true));
+        => (await AuthCatalog.OpenAsync(TestNode!, Options, isClusterMode: true),
+            await AuthCatalog.OpenAsync(TestNode!, Options, isClusterMode: true));
 
     private static GrantScope DbScope(string databaseId) =>
         new() { Kind = GrantScopeKind.Database, DatabaseId = databaseId, DatabaseName = databaseId };
@@ -51,7 +51,7 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         // Warm B with a miss (loads B's cache at the current generation).
         Assert.IsNull(await b.TryGetUserAsync(user));
 
-        await a.CreateUserAsync(user, PasswordHasher.Hash("x", CamusDBConfig.Ambient.PasswordHashIterations), ifNotExists: false);
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x", Options.PasswordHashIterations), ifNotExists: false);
 
         UserRecord? seen = await b.TryGetUserAsync(user);
         Assert.IsNotNull(seen, "a user created on another node must become visible after revalidation");
@@ -76,7 +76,7 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         // A cold catalog must load the grant from KV — proves it was durably persisted, not just held
         // in a cache. (This is the check that first caught the grant key landing in the wrong routing
         // bucket because its leaf contained a '/'.)
-        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, CamusDBConfig.Ambient, isClusterMode: true);
+        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, Options, isClusterMode: true);
         Assert.AreEqual(1, (await c.ListGrantsAsync(user)).Count, "cold node must load the persisted grant from KV");
 
         IReadOnlyList<GrantRecord> grants = await b.ListGrantsAsync(user);
@@ -132,17 +132,17 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
 
         string user = "coh_" + Guid.NewGuid().ToString("n");
-        await a.CreateUserAsync(user, PasswordHasher.Hash("x", CamusDBConfig.Ambient.PasswordHashIterations), ifNotExists: false);
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x", Options.PasswordHashIterations), ifNotExists: false);
         Assert.IsNotNull(await b.TryGetUserAsync(user)); // warm B's cache with the user
 
         await a.DropUserAsync(user, ifExists: false);
 
         // B's cache still shows the user, but the locked read must see it dropped.
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await b.SetPasswordAsync(user, PasswordHasher.Hash("new", CamusDBConfig.Ambient.PasswordHashIterations)))!;
+            await b.SetPasswordAsync(user, PasswordHasher.Hash("new", Options.PasswordHashIterations)))!;
         Assert.AreEqual(CamusDBErrorCodes.UserDoesNotExist, ex.Code);
 
-        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, CamusDBConfig.Ambient, isClusterMode: true);
+        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, Options, isClusterMode: true);
         Assert.IsNull(await c.TryGetUserAsync(user), "the dropped user must stay gone");
     }
 
@@ -172,7 +172,7 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         (AuthCatalog a, _) = await TwoNodesAsync();
 
         string user = "coh_" + Guid.NewGuid().ToString("n");
-        await a.CreateUserAsync(user, PasswordHasher.Hash("x", CamusDBConfig.Ambient.PasswordHashIterations), ifNotExists: false);
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x", Options.PasswordHashIterations), ifNotExists: false);
 
         SessionRecord session = new()
         {
@@ -208,7 +208,7 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         // B's cache still shows no grant, but its locked read must see A's committed Select and union.
         await b.GrantAsync(user, DbScope("db1"), Privilege.Insert, revoke: false);
 
-        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, CamusDBConfig.Ambient, isClusterMode: true);
+        AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, Options, isClusterMode: true);
         Assert.AreEqual(Privilege.Select | Privilege.Insert, (await c.ListGrantsAsync(user)).Single().Privileges,
             "both nodes' grants must survive — no lost update");
     }

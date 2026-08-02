@@ -35,9 +35,16 @@ public class TestExplainExecutor : SharedNodeBaseTest
 {
     // ── Fixture helpers ───────────────────────────────────────────────────────
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupRobotsTable()
+    /// <summary>Engine with the query-result cache on — hinted queries report as eligible.</summary>
+    private CamusDBOptions CacheOn => Options with { QueryResultCacheEnabled = true };
+
+    /// <summary>Engine with the cache off — a hint must be reported as bypassed, not silently honoured.</summary>
+    private CamusDBOptions CacheOff => Options with { QueryResultCacheEnabled = false };
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupRobotsTable(
+        CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         KvTransaction txn = await database.Transactions.BeginAsync();
 
@@ -97,9 +104,10 @@ public class TestExplainExecutor : SharedNodeBaseTest
         return (dbname, database, executor);
     }
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTwoTables()
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTwoTables(
+        CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         KvTransaction txn = await database.Transactions.BeginAsync();
 
@@ -689,91 +697,55 @@ public class TestExplainExecutor : SharedNodeBaseTest
     [NonParallelizable]
     public async Task ExplainHintedQuery_CacheEnabled_ReportsEligible()
     {
-        bool orig = CamusDBConfig.QueryResultCacheEnabled;
-        CamusDBConfig.QueryResultCacheEnabled = true;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(CacheOn);
 
-            List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
-                "EXPLAIN SELECT * FROM robots {cache=robots_all}");
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT * FROM robots {cache=robots_all}");
 
-            string? detail = CacheDetail(rows);
-            Assert.IsNotNull(detail, "A hinted query must emit a 'cache' EXPLAIN row");
-            Assert.That(detail, Does.Contain("family=robots_all").And.Contain("eligible=true")
-                .And.Contain("ttl=default").And.Contain("strict=false"));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheEnabled = orig;
-        }
+        string? detail = CacheDetail(rows);
+        Assert.IsNotNull(detail, "A hinted query must emit a 'cache' EXPLAIN row");
+        Assert.That(detail, Does.Contain("family=robots_all").And.Contain("eligible=true")
+            .And.Contain("ttl=default").And.Contain("strict=false"));
     }
 
     [Test]
     [NonParallelizable]
     public async Task ExplainHintedQuery_WithTtlAndStrict_ReportsOptions()
     {
-        bool orig = CamusDBConfig.QueryResultCacheEnabled;
-        CamusDBConfig.QueryResultCacheEnabled = true;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(CacheOn);
 
-            List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
-                "EXPLAIN SELECT * FROM robots {cache=hot, ttl=30s, strict}");
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT * FROM robots {cache=hot, ttl=30s, strict}");
 
-            string? detail = CacheDetail(rows);
-            Assert.That(detail, Does.Contain("eligible=true").And.Contain("ttl=30000ms").And.Contain("strict=true"));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheEnabled = orig;
-        }
+        string? detail = CacheDetail(rows);
+        Assert.That(detail, Does.Contain("eligible=true").And.Contain("ttl=30000ms").And.Contain("strict=true"));
     }
 
     [Test]
     [NonParallelizable]
     public async Task ExplainHintedQuery_CacheDisabled_ReportsBypass()
     {
-        bool orig = CamusDBConfig.QueryResultCacheEnabled;
-        CamusDBConfig.QueryResultCacheEnabled = false;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(CacheOff);
 
-            List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
-                "EXPLAIN SELECT * FROM robots {cache=robots_all}");
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT * FROM robots {cache=robots_all}");
 
-            string? detail = CacheDetail(rows);
-            Assert.That(detail, Does.Contain("eligible=false").And.Contain("reason=cache-disabled"));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheEnabled = orig;
-        }
+        string? detail = CacheDetail(rows);
+        Assert.That(detail, Does.Contain("eligible=false").And.Contain("reason=cache-disabled"));
     }
 
     [Test]
     [NonParallelizable]
     public async Task ExplainJoinWithHint_ReportsBypassJoin()
     {
-        bool orig = CamusDBConfig.QueryResultCacheEnabled;
-        CamusDBConfig.QueryResultCacheEnabled = true;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables(CacheOn);
 
-            List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
-                "EXPLAIN SELECT u.email, p.title FROM app_users u {cache=joined} INNER JOIN posts p ON p.user_id = u.id");
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT u.email, p.title FROM app_users u {cache=joined} INNER JOIN posts p ON p.user_id = u.id");
 
-            string? detail = CacheDetail(rows);
-            Assert.IsNotNull(detail, "A hinted join must still emit a 'cache' row explaining the bypass");
-            Assert.That(detail, Does.Contain("family=joined").And.Contain("eligible=false").And.Contain("reason=join"));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheEnabled = orig;
-        }
+        string? detail = CacheDetail(rows);
+        Assert.IsNotNull(detail, "A hinted join must still emit a 'cache' row explaining the bypass");
+        Assert.That(detail, Does.Contain("family=joined").And.Contain("eligible=false").And.Contain("reason=join"));
     }
 
     [Test]

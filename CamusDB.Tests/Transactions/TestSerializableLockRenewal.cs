@@ -34,31 +34,22 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// finalize. That renewal (which operates on a ~60 s cadence, far too coarse to exercise with the
 /// sub-second TTLs used here) is verified at the Kahuna level, not in this fixture.</para>
 ///
-/// [NonParallelizable] because config knobs are process-global.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
 {
-    private int savedMaxLifetimeMs;
-
-    [SetUp]
-    public void DisableLifetimeCap()
-    {
-        savedMaxLifetimeMs = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = -1; // no cap during these tests
-    }
-
-    [TearDown]
-    public void RestoreConfig()
-    {
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = savedMaxLifetimeMs;
-    }
+    /// <summary>
+    /// These tests hold locks deliberately long to observe renewal, so the lifetime cap that would
+    /// otherwise abort them is disabled for every engine this fixture builds.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { MaxSerializableTransactionLifetimeMs = -1 };
 
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)>
-        SetupTableAsync()
+        SetupTableAsync(CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
@@ -196,18 +187,15 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 6. Raised lifetime cap: MaxSerializableTransactionLifetimeMs is now 1 hour,
-    //    not 25 s. A transaction open past the old 25 s threshold must not be
-    //    rejected by the lifetime gate. (Uses -1 = no cap in this test fixture
-    //    to avoid a 25+ s wait, but verifies the config value is non-trivial.)
+    // 6. The lifetime cap defaults to an hour, not 25 s, so a long-running transaction is not
+    //    rejected by the lifetime gate. The other tests here disable the cap entirely to avoid a
+    //    25+ s wait, so this one asserts the shipped default directly rather than through an engine.
     // -----------------------------------------------------------------------
 
     [Test]
     public void RaisedLifetimeCap_DefaultIsOneHour()
     {
-        // Restore the real default momentarily to inspect it.
-        int restored = 3_600_000;
-        Assert.AreEqual(restored, savedMaxLifetimeMs,
+        Assert.AreEqual(3_600_000, CamusDBOptions.Default.MaxSerializableTransactionLifetimeMs,
             "MaxSerializableTransactionLifetimeMs default must be 1 hour (3 600 000 ms), not 25 s");
     }
 

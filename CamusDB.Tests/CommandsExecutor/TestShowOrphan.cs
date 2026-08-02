@@ -99,7 +99,7 @@ internal sealed class TestShowOrphan : BaseTest
         DateTimeOffset droppedAt = DateTimeOffset.Parse(droppedAtStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
         DateTimeOffset expiresAt = DateTimeOffset.Parse(expiresAtStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
         Assert.IsTrue(droppedAtStr.EndsWith("Z", StringComparison.Ordinal), $"dropped_at must be ISO-8601 UTC, was '{droppedAtStr}'");
-        Assert.AreEqual(TimeSpan.FromMilliseconds(CamusDB.Core.CamusDBConfig.OrphanRetentionMs), expiresAt - droppedAt,
+        Assert.AreEqual(TimeSpan.FromMilliseconds(Options.OrphanRetentionMs), expiresAt - droppedAt,
             "expires_at must be exactly dropped_at + the retention window");
     }
 

@@ -38,29 +38,18 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestHttpAuth : BaseTest
 {
-    private bool savedEnabled;
-    private string savedKey = "", savedUser = "", savedPw = "";
-    private bool savedTls;
-
-    [SetUp]
-    public void Save()
+    /// <summary>
+    /// Auth on, with a known signing key and bootstrap superuser — the baseline every test here starts
+    /// from. A test that needs auth off, a different token lifetime, or a relaxed transport requirement
+    /// derives its own options from this and builds its own engine.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
-        savedEnabled = CamusConfig.AuthenticationEnabled;
-        savedKey = CamusConfig.AccessTokenServerKey;
-        savedUser = CamusConfig.BootstrapSuperuser;
-        savedPw = CamusConfig.BootstrapSuperuserPassword;
-        savedTls = CamusConfig.RequireTlsWhenAuthEnabled;
-    }
-
-    [TearDown]
-    public void Restore()
-    {
-        CamusConfig.AuthenticationEnabled = savedEnabled;
-        CamusConfig.AccessTokenServerKey = savedKey;
-        CamusConfig.BootstrapSuperuser = savedUser;
-        CamusConfig.BootstrapSuperuserPassword = savedPw;
-        CamusConfig.RequireTlsWhenAuthEnabled = savedTls;
-    }
+        AuthenticationEnabled = true,
+        AccessTokenServerKey = "test-key",
+        BootstrapSuperuser = "root",
+        BootstrapSuperuserPassword = "root-pw",
+    };
 
     private ILogger<ICamusDB> Logger => logger;
 
@@ -76,33 +65,39 @@ internal sealed class TestHttpAuth : BaseTest
         return new ControllerContext { HttpContext = http };
     }
 
-    private async Task<JsonResult> LoginRest(CommandExecutor ex, string user, string password, bool https = true)
+    private async Task<JsonResult> LoginRest(
+        CommandExecutor ex, string user, string password, bool https = true, CamusDBOptions? options = null)
     {
-        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger, CamusDBConfig.Ambient)
+        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger, options ?? Options)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { user, password }), bearer: null, https)
         };
         return await c.Login();
     }
 
-    private async Task<string> TokenFor(CommandExecutor ex, string user, string password)
+    private async Task<string> TokenFor(
+        CommandExecutor ex, string user, string password, CamusDBOptions? options = null)
     {
-        JsonResult r = await LoginRest(ex, user, password);
+        JsonResult r = await LoginRest(ex, user, password, options: options);
         return ((LoginResponse)r.Value!).Token!;
     }
 
-    private async Task<JsonResult> QueryRest(CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
+    private async Task<JsonResult> QueryRest(
+        CommandExecutor ex, string db, string sql, string? bearer, bool https = true, CamusDBOptions? options = null)
     {
-        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(CamusDBConfig.Ambient), Logger, CamusDBConfig.Ambient)
+        CamusDBOptions effective = options ?? Options;
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(effective), Logger, effective)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https)
         };
         return await c.ExecuteSQLQuery();
     }
 
-    private async Task<JsonResult> NonQueryRest(CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
+    private async Task<JsonResult> NonQueryRest(
+        CommandExecutor ex, string db, string sql, string? bearer, bool https = true, CamusDBOptions? options = null)
     {
-        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(CamusDBConfig.Ambient), Logger, CamusDBConfig.Ambient)
+        CamusDBOptions effective = options ?? Options;
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(effective), Logger, effective)
         {
             ControllerContext = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https)
         };
@@ -111,14 +106,9 @@ internal sealed class TestHttpAuth : BaseTest
 
     // Enable auth, create a db + table via the engine as the bootstrap superuser, plus a SELECT-only
     // reader. Returns (db, executor). The REST layer is what the tests exercise.
-    private async Task<(string db, CommandExecutor ex)> Setup()
+    private async Task<(string db, CommandExecutor ex)> Setup(CamusDBOptions? options = null)
     {
-        CamusConfig.AccessTokenServerKey = "test-key";
-        CamusConfig.BootstrapSuperuser = "root";
-        CamusConfig.BootstrapSuperuserPassword = "root-pw";
-        CamusConfig.AuthenticationEnabled = true;
-
-        CommandExecutor ex = CreateCommandExecutor();
+        CommandExecutor ex = CreateCommandExecutor(options ?? Options);
         string db = "authdb" + Guid.NewGuid().ToString("n");
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
         TrackDatabase(db, ex);
@@ -152,26 +142,19 @@ internal sealed class TestHttpAuth : BaseTest
     {
         // A client renews against these fields; without them it must guess a lifetime and guess wrong
         // whenever an operator shortens AccessTokenTtl.
-        TimeSpan savedTtl = CamusConfig.AccessTokenTtl;
-        try
-        {
-            CamusConfig.AccessTokenTtl = TimeSpan.FromMinutes(3);
-            (_, CommandExecutor ex) = await Setup();
+        CamusDBOptions shortTtl = Options with { AccessTokenTtl = TimeSpan.FromMinutes(3) };
 
-            LoginResponse resp = (LoginResponse)(await LoginRest(ex, "root", "root-pw")).Value!;
+        (_, CommandExecutor ex) = await Setup(shortTtl);
 
-            Assert.IsNotNull(resp.ExpiresInSeconds);
-            Assert.That(resp.ExpiresInSeconds!.Value, Is.InRange(150, 180),
-                "The reported TTL must follow the configured one, not a fixed default");
-            Assert.IsNotNull(resp.ExpiresAtUnixMs);
-            Assert.That(resp.ExpiresAtUnixMs!.Value,
-                Is.EqualTo(DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds()).Within(30_000),
-                "The absolute deadline and the TTL must describe the same instant");
-        }
-        finally
-        {
-            CamusConfig.AccessTokenTtl = savedTtl;
-        }
+        LoginResponse resp = (LoginResponse)(await LoginRest(ex, "root", "root-pw", options: shortTtl)).Value!;
+
+        Assert.IsNotNull(resp.ExpiresInSeconds);
+        Assert.That(resp.ExpiresInSeconds!.Value, Is.InRange(150, 180),
+            "The reported TTL must follow the configured one, not a fixed default");
+        Assert.IsNotNull(resp.ExpiresAtUnixMs);
+        Assert.That(resp.ExpiresAtUnixMs!.Value,
+            Is.EqualTo(DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds()).Within(30_000),
+            "The absolute deadline and the TTL must describe the same instant");
     }
 
     [Test]
@@ -180,7 +163,7 @@ internal sealed class TestHttpAuth : BaseTest
         (_, CommandExecutor ex) = await Setup();
         string token = await TokenFor(ex, "root", "root-pw");
 
-        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger, CamusDBConfig.Ambient)
+        AuthController c = new(ex, new HttpTransactionCoordinator(ex), Logger, Options)
         {
             ControllerContext = Context("", bearer: token, https: true)
         };
@@ -264,7 +247,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/insert", bearer: null);
-        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
+        await mw.Invoke(http, ex, Options);
 
         Assert.AreEqual(401, http.Response.StatusCode, "an unauthenticated legacy route must be rejected");
         Assert.IsFalse(nextCalled, "the request must not reach the controller");
@@ -286,7 +269,7 @@ internal sealed class TestHttpAuth : BaseTest
         });
 
         DefaultHttpContext http = MiddlewareContext("/insert", token);
-        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
+        await mw.Invoke(http, ex, Options);
 
         Assert.IsTrue(nextCalled);
         Assert.IsNotNull(captured.Principal, "the principal must be published for per-table enforcement");
@@ -302,7 +285,7 @@ internal sealed class TestHttpAuth : BaseTest
 
         // No node secret configured (Setup does not set one) → internal forwarding is refused.
         DefaultHttpContext http = MiddlewareContext("/internal/schema-ddl/create-table", bearer: null);
-        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
+        await mw.Invoke(http, ex, Options);
 
         Assert.AreEqual(401, http.Response.StatusCode);
         Assert.IsFalse(nextCalled);
@@ -320,7 +303,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/CamusAuth/Login", bearer: null);
-        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
+        await mw.Invoke(http, ex, Options);
 
         Assert.IsTrue(nextCalled, "gRPC login must not require the token it exists to issue");
         Assert.AreNotEqual(401, http.Response.StatusCode);
@@ -334,7 +317,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/CamusAuth/Logout", bearer: null);
-        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
+        await mw.Invoke(http, ex, Options);
 
         Assert.IsTrue(nextCalled);
         Assert.AreNotEqual(401, http.Response.StatusCode);
@@ -350,7 +333,7 @@ internal sealed class TestHttpAuth : BaseTest
         AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
 
         DefaultHttpContext http = MiddlewareContext("/CamusSql/ExecuteQuery", bearer: null);
-        await mw.Invoke(http, ex, CamusDBConfig.Ambient);
+        await mw.Invoke(http, ex, Options);
 
         Assert.AreEqual(401, http.Response.StatusCode);
         Assert.IsFalse(nextCalled);
@@ -359,9 +342,9 @@ internal sealed class TestHttpAuth : BaseTest
     [Test]
     public async Task Disabled_NoTokenWorks()
     {
-        CamusConfig.AuthenticationEnabled = false;
+        CamusDBOptions authOff = Options with { AuthenticationEnabled = false };
 
-        CommandExecutor ex = CreateCommandExecutor();
+        CommandExecutor ex = CreateCommandExecutor(authOff);
         string db = "authdb" + Guid.NewGuid().ToString("n");
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
         TrackDatabase(db, ex);
@@ -370,7 +353,7 @@ internal sealed class TestHttpAuth : BaseTest
         await ex.ExecuteDDLSQL(new ExecuteSQLTicket(tx, db, "CREATE TABLE items (id int64 PRIMARY KEY NOT NULL)", null));
         await d.Transactions.CommitAsync(tx);
 
-        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", bearer: null, https: false);
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", bearer: null, https: false, options: authOff);
         Assert.AreEqual(200, r.StatusCode ?? 200);
     }
 
@@ -380,11 +363,12 @@ internal sealed class TestHttpAuth : BaseTest
     [Test]
     public async Task PlaintextRequest_RefusedWhileTlsIsRequired()
     {
-        (string db, CommandExecutor ex) = await Setup();
-        CamusConfig.RequireTlsWhenAuthEnabled = true;
-        string token = await TokenFor(ex, "root", "root-pw");
+        CamusDBOptions tlsRequired = Options with { RequireTlsWhenAuthEnabled = true };
 
-        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", token, https: false);
+        (string db, CommandExecutor ex) = await Setup(tlsRequired);
+        string token = await TokenFor(ex, "root", "root-pw", tlsRequired);
+
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", token, https: false, options: tlsRequired);
 
         Assert.AreEqual(CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.InsecureTransport), r.StatusCode);
     }
@@ -394,11 +378,12 @@ internal sealed class TestHttpAuth : BaseTest
     {
         // The deployment shape this exists for: TLS terminates at an ingress/sidecar, so the node itself
         // only ever sees plaintext on the inside hop and would reject every forwarded request.
-        (string db, CommandExecutor ex) = await Setup();
-        CamusConfig.RequireTlsWhenAuthEnabled = false;
-        string token = await TokenFor(ex, "root", "root-pw");
+        CamusDBOptions tlsRelaxed = Options with { RequireTlsWhenAuthEnabled = false };
 
-        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", token, https: false);
+        (string db, CommandExecutor ex) = await Setup(tlsRelaxed);
+        string token = await TokenFor(ex, "root", "root-pw", tlsRelaxed);
+
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", token, https: false, options: tlsRelaxed);
 
         Assert.AreEqual(200, r.StatusCode ?? 200);
     }
@@ -407,10 +392,11 @@ internal sealed class TestHttpAuth : BaseTest
     public async Task TurningOffTlsDoesNotTurnOffAuthentication()
     {
         // Relaxing the transport requirement must not become a back door: credentials are still required.
-        (string db, CommandExecutor ex) = await Setup();
-        CamusConfig.RequireTlsWhenAuthEnabled = false;
+        CamusDBOptions tlsRelaxed = Options with { RequireTlsWhenAuthEnabled = false };
 
-        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", bearer: null, https: false);
+        (string db, CommandExecutor ex) = await Setup(tlsRelaxed);
+
+        JsonResult r = await QueryRest(ex, db, "SELECT id FROM items", bearer: null, https: false, options: tlsRelaxed);
 
         Assert.AreEqual(401, r.StatusCode);
     }

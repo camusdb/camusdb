@@ -231,7 +231,7 @@ public sealed class TestKvTableStoreRetry
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         FaultInjectingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, CamusDBConfig.Ambient, "testdb", tableId));
+        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "testdb", tableId));
     }
 
     // -----------------------------------------------------------------------
@@ -727,7 +727,7 @@ public sealed class TestKvTableStoreRetry
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         FaultInjectingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, CamusDBConfig.Ambient, "testdb", tableId, tableName, null, null, dbName));
+        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "testdb", tableId, tableName, null, null, dbName));
     }
 
     [Test]

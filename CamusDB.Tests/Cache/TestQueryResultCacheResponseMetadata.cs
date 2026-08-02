@@ -42,12 +42,17 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
 {
     private QueryResultCache? _cache;
 
-    protected override CommandExecutor CreateCommandExecutor()
+    /// <summary>
+    /// Every engine this fixture builds gets its own cache, and honours <paramref name="options"/>.
+    /// The options-taking overload is the one to override: the parameterless factory routes through it,
+    /// so a test that asks for particular cache limits still gets the injected cache.
+    /// </summary>
+    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        _cache = new QueryResultCache(options, sweepIntervalMs: -1);
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        return new(validator, catalogsManager, logger, options,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
                    cache: _cache);
     }
@@ -60,7 +65,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     /// re-execute under another needs two engines rather than a flag flipped between the two steps.
     /// </summary>
     private CommandExecutor ExecutorWith(CamusDBOptions options)
-        => new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, options,
+        => new(new CommandValidator(Options), new CatalogsManager(logger), logger, options,
                sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: _cache);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -252,7 +257,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         // database.Cache will be null, exercising the dispatch branch in Query() that
         // fires when a hint is present but no cache is wired up.
         CommandExecutor disabledExecutor = new(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: null);
 
@@ -281,26 +286,19 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     [Test]
     public async Task EvictedBeforePublish_RowCapExceeded_ReasonIsOversizedResult()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxEntryRows;
-        try
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryRows = 0;  // reject all
+        // A row cap of zero rejects every result, so any miss reports the oversized-result bypass.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(
+            Options with { QueryResultCacheMaxEntryRows = 0 });
 
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-            await CreateOrdersTable(dbname, database, executor);
-            await InsertOrder(dbname, database, executor, "row1", 10);
+        await CreateOrdersTable(dbname, database, executor);
+        await InsertOrder(dbname, database, executor, "row1", 10);
 
-            (_, CacheMetadataHolder meta) = await SelectAllWithMeta(dbname, executor, "cap_test");
+        (_, CacheMetadataHolder meta) = await SelectAllWithMeta(dbname, executor, "cap_test");
 
-            Assert.That(meta.Status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish));
-            Assert.That(meta.BypassReason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
-            Assert.That(meta.CacheName, Is.EqualTo("cap_test"));
-            Assert.That(CacheMetadataHolder.ToBypassReasonString(meta.BypassReason), Is.EqualTo("oversized-result"));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryRows = origMax;
-        }
+        Assert.That(meta.Status, Is.EqualTo(QueryCacheStatus.EvictedBeforePublish));
+        Assert.That(meta.BypassReason, Is.EqualTo(QueryCacheBypassReason.OversizedResult));
+        Assert.That(meta.CacheName, Is.EqualTo("cap_test"));
+        Assert.That(CacheMetadataHolder.ToBypassReasonString(meta.BypassReason), Is.EqualTo("oversized-result"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -313,7 +311,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     [Test]
     public async Task EvictedBeforePublish_GenerationFence_ReasonIsInFlightWrite()
     {
-        using var gate_cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
+        using var gate_cache = new QueryResultCache(Options, sweepIntervalMs: -1);
         string ks = "db1:tbl1:r";
         CacheGenerationToken staleToken = gate_cache.PublishGate.SnapshotGenerations([ks]);  // gen=0
         gate_cache.PublishGate.CommitWrite([ks]);  // gen→1 — stales the snapshot token
@@ -422,7 +420,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         // Re-execute through an engine whose row cap is 0, forcing EvictedBeforePublish on the publish
         // step while sharing the cache that holds the stale entry.
         CommandExecutor cappedExecutor = ExecutorWith(
-            CamusDBConfig.Ambient with { QueryResultCacheMaxEntryRows = 0 });
+            Options with { QueryResultCacheMaxEntryRows = 0 });
 
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await cappedExecutor.ExecuteSQLQuery(
             new ExecuteSQLTicket(snapshotTx, dbname,

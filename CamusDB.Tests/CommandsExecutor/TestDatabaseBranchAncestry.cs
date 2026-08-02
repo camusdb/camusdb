@@ -78,7 +78,7 @@ internal sealed class TestDatabaseBranchAncestry
     [Test]
     public async Task Root_HasEmptyAncestors()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
 
         string name = NewName();
         DatabaseRegistryEntry entry = await registry.RegisterAsync(name, NewId());
@@ -93,11 +93,11 @@ internal sealed class TestDatabaseBranchAncestry
         string name = NewName();
         string id = NewId();
 
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
         await first.RegisterAsync(name, id);
         await first.DisposeAsync();
 
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
         DatabaseRegistryEntry? loaded = second.GetById(id);
 
         Assert.IsNotNull(loaded, "entry must survive reopen");
@@ -112,7 +112,7 @@ internal sealed class TestDatabaseBranchAncestry
     [Test]
     public async Task Branch_AncestorsPersisted()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
 
         string parentId = NewId();
         HLCTimestamp forkT = MintTimestamp();
@@ -138,12 +138,12 @@ internal sealed class TestDatabaseBranchAncestry
         string branchName = NewName();
         string branchId = NewId();
 
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
         await first.RegisterAsync(branchName, branchId,
             [new DatabaseBranchAncestor { DatabaseId = parentId, ForkTimestamp = forkT }]);
         await first.DisposeAsync();
 
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
         DatabaseRegistryEntry? loaded = second.GetById(branchId);
 
         Assert.IsNotNull(loaded);
@@ -159,7 +159,7 @@ internal sealed class TestDatabaseBranchAncestry
     [Test]
     public async Task DeepChain_ThreeLevels_AncestryPreserved()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
 
         // Level A: root
         string aId = NewId();
@@ -200,7 +200,7 @@ internal sealed class TestDatabaseBranchAncestry
     [Test]
     public async Task Rename_PreservesAncestors()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
 
         string parentId = NewId();
         HLCTimestamp forkT = MintTimestamp();
@@ -231,13 +231,13 @@ internal sealed class TestDatabaseBranchAncestry
         string originalName = NewName();
         string newName = NewName();
 
-        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        DatabaseRegistry first = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
         await first.RegisterAsync(originalName, branchId,
             [new DatabaseBranchAncestor { DatabaseId = parentId, ForkTimestamp = forkT }]);
         await first.RenameAsync(originalName, newName);
         await first.DisposeAsync();
 
-        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry second = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
         DatabaseRegistryEntry? loaded = second.GetById(branchId);
 
         Assert.IsNotNull(loaded);
@@ -254,7 +254,7 @@ internal sealed class TestDatabaseBranchAncestry
     [Test]
     public async Task TryResolveEntryAsync_CacheHit_ReturnsEntry()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
 
         string parentId = NewId();
         HLCTimestamp forkT = MintTimestamp();
@@ -289,8 +289,8 @@ internal sealed class TestDatabaseBranchAncestry
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
 
-        await using DatabaseRegistry r1 = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
-        await using DatabaseRegistry r2 = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
+        await using DatabaseRegistry r1 = await DatabaseRegistry.OpenAsync(node, CamusDBOptions.Default);
+        await using DatabaseRegistry r2 = await DatabaseRegistry.OpenAsync(node, CamusDBOptions.Default);
 
         string parentId = NewId();
         HLCTimestamp forkT = node.Raft.HybridLogicalClock.SendOrLocalEvent(node.Raft.GetLocalNodeId());
@@ -320,7 +320,7 @@ internal sealed class TestDatabaseBranchAncestry
     [Test]
     public async Task TryResolveEntryAsync_UnknownName_ReturnsNull()
     {
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
 
         DatabaseRegistryEntry? result = await registry.TryResolveEntryAsync("nonexistent-db");
         Assert.IsNull(result);

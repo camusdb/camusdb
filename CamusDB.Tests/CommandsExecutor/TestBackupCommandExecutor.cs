@@ -53,16 +53,15 @@ public sealed class TestBackupCommandExecutor
         string Root, string BackupDir, string RestoreRoot);
 
     private readonly List<Ctx> created = new();
-    private bool authWasEnabled;
 
-    [SetUp]
-    public void SetUp() => authWasEnabled = CamusConfig.AuthenticationEnabled;
-
+    /// <summary>
+    /// Authentication on. An engine fixes this when it is constructed, so the tests that exercise the
+    /// backup authorization gate build their executor with it rather than turning it on afterwards.
+    /// </summary>
+    private static CamusDBOptions AuthOn => CamusDBOptions.Default with { AuthenticationEnabled = true };
     [TearDown]
     public async Task TearDown()
     {
-        CamusConfig.AuthenticationEnabled = authWasEnabled;
-
         foreach (Ctx c in created)
         {
             try { await c.Executor.DisposeAsync(); } catch { }
@@ -73,8 +72,10 @@ public sealed class TestBackupCommandExecutor
         created.Clear();
     }
 
-    private async Task<Ctx> NewExecutorAsync(bool backup = true, bool restore = true)
+    private async Task<Ctx> NewExecutorAsync(bool backup = true, bool restore = true, CamusDBOptions? options = null)
     {
+        CamusDBOptions effective = options ?? CamusDBOptions.Default;
+
         string root = Path.Combine(Path.GetTempPath(), "camus-t21-" + Guid.NewGuid().ToString("n"));
         string dataDir = Path.Combine(root, "data");
         string backupDir = Path.Combine(root, "backups");
@@ -99,9 +100,9 @@ public sealed class TestBackupCommandExecutor
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
         await node.FlushAsync();
 
-        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
+        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, effective);
         CommandExecutor executor = new(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(effective), new CatalogsManager(logger), logger, effective,
             sharedNode: node, registry: registry, isClusterMode: false);
 
         Ctx ctx = new(executor, node, registry, root, backupDir, restoreRoot);
@@ -175,10 +176,7 @@ public sealed class TestBackupCommandExecutor
     [Test]
     public async Task AuthEnabled_NullPrincipal_AuthenticationFailed()
     {
-        // An engine fixes its configuration when it is constructed, so authentication has to be on
-        // before the executor is built — flipping it afterwards leaves the executor unauthenticated.
-        CamusConfig.AuthenticationEnabled = true;
-        Ctx c = await NewExecutorAsync();
+        Ctx c = await NewExecutorAsync(options: AuthOn);
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await c.Executor.TakeBackup(new TakeBackupTicket(BackupKind.Full, null, principal: null)))!;
         Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ex.Code);
@@ -187,10 +185,7 @@ public sealed class TestBackupCommandExecutor
     [Test]
     public async Task AuthEnabled_NonSuperuser_InsufficientPrivilege()
     {
-        // An engine fixes its configuration when it is constructed, so authentication has to be on
-        // before the executor is built — flipping it afterwards leaves the executor unauthenticated.
-        CamusConfig.AuthenticationEnabled = true;
-        Ctx c = await NewExecutorAsync();
+        Ctx c = await NewExecutorAsync(options: AuthOn);
         Principal user = new("bob", isSuperuser: false, Array.Empty<GrantRecord>());
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
             async () => await c.Executor.TakeBackup(new TakeBackupTicket(BackupKind.Full, null, user)))!;
@@ -200,9 +195,8 @@ public sealed class TestBackupCommandExecutor
     [Test]
     public async Task AuthEnabled_Superuser_Passes()
     {
-        Ctx c = await NewExecutorAsync();
+        Ctx c = await NewExecutorAsync(options: AuthOn);
         await WriteKeyAsync(c.Node, "t21/k1", "v1");
-        CamusConfig.AuthenticationEnabled = true;
         Principal admin = new("root", isSuperuser: true, Array.Empty<GrantRecord>());
         BackupInfo full = await c.Executor.TakeBackup(new TakeBackupTicket(BackupKind.Full, null, admin));
         Assert.AreNotEqual(Guid.Empty, full.BackupId);

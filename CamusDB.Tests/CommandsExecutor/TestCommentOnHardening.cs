@@ -95,7 +95,7 @@ internal sealed class TestCommentOnHardening : BaseTest
     [Test]
     public void Validator_AcceptsCommentOnDatabaseWithoutAContextDatabase()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
 
         Assert.DoesNotThrow(() => validator.Validate(
             new ExecuteSQLTicket(txnState: null!, database: "", sql: "COMMENT ON DATABASE app IS 'x'", parameters: null)));
@@ -150,7 +150,7 @@ internal sealed class TestCommentOnHardening : BaseTest
         CommandExecutor executor, string? databaseName, string sql, bool ddlEndpoint)
     {
         HttpTransactionCoordinator txCoord = new(executor);
-        ExecuteSQLController controller = new(executor, txCoord, new PreparedStatementRegistry(CamusDBConfig.Ambient), Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ICamusDB>(SharedLoggerFactory), CamusDBConfig.Ambient);
+        ExecuteSQLController controller = new(executor, txCoord, new PreparedStatementRegistry(CamusDBOptions.Default), Microsoft.Extensions.Logging.LoggerFactoryExtensions.CreateLogger<ICamusDB>(SharedLoggerFactory), CamusDBOptions.Default);
 
         string body = JsonSerializer.Serialize(new { databaseName, sql }, JsonOpts);
         byte[] bodyBytes = Encoding.UTF8.GetBytes(body);

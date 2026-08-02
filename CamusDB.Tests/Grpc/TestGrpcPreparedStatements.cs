@@ -41,12 +41,12 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
     [SetUp]
     public void SetUpService()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        serviceExecutor = new(validator, catalogsManager, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
-        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
+        service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
     }
 
     [TearDown]
@@ -179,37 +179,28 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
         string db = await CreateDatabaseWithTableAsync(
             "CREATE TABLE robots (id oid PRIMARY KEY, year int64)");
 
-        int saved = CamusDBConfig.GrpcMaxPreparedStatementsPerStream;
-        CamusDBConfig.GrpcMaxPreparedStatementsPerStream = 2;
-
-        // The service captures its configuration when constructed, so rebuild it now that the
-        // per-stream cap under test is in place.
+        // A service of its own, capped at two prepared statements per stream — the cap is fixed when
+        // the service is constructed.
         service = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance,
-            new ForegroundRequestGauge(), CamusDBConfig.Ambient);
-        try
-        {
-            await StreamAsync(async (push, writer) =>
-            {
-                push(BPrepare(1, db, "SELECT id FROM robots WHERE year = @a"));
-                BatchExecuteResponse first = await WaitFor(writer, 1, BatchExecuteResponse.PayloadOneofCase.PrepareReply);
-                push(BPrepare(2, db, "SELECT id FROM robots WHERE year = @b"));
-                await WaitFor(writer, 2, BatchExecuteResponse.PayloadOneofCase.PrepareReply);
+            new ForegroundRequestGauge(), Options with { GrpcMaxPreparedStatementsPerStream = 2 });
 
-                push(BPrepare(3, db, "SELECT id FROM robots WHERE year = @c"));
-                BatchExecuteResponse third = await WaitTerminal(writer, 3);
-                Assert.That(third.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.Error));
-                Assert.That(third.Error.Code, Is.EqualTo(CamusDBErrorCodes.PreparedStatementLimitExceeded));
-
-                // The refusal must not have cost the caller a handle it already holds.
-                push(BExecute(4, BatchStatementKind.Query, first.PrepareReply.StatementId, Int(1)));
-                BatchExecuteResponse stillWorks = await WaitTerminal(writer, 4);
-                Assert.That(stillWorks.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.QueryComplete));
-            });
-        }
-        finally
+        await StreamAsync(async (push, writer) =>
         {
-            CamusDBConfig.GrpcMaxPreparedStatementsPerStream = saved;
-        }
+            push(BPrepare(1, db, "SELECT id FROM robots WHERE year = @a"));
+            BatchExecuteResponse first = await WaitFor(writer, 1, BatchExecuteResponse.PayloadOneofCase.PrepareReply);
+            push(BPrepare(2, db, "SELECT id FROM robots WHERE year = @b"));
+            await WaitFor(writer, 2, BatchExecuteResponse.PayloadOneofCase.PrepareReply);
+
+            push(BPrepare(3, db, "SELECT id FROM robots WHERE year = @c"));
+            BatchExecuteResponse third = await WaitTerminal(writer, 3);
+            Assert.That(third.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.Error));
+            Assert.That(third.Error.Code, Is.EqualTo(CamusDBErrorCodes.PreparedStatementLimitExceeded));
+
+            // The refusal must not have cost the caller a handle it already holds.
+            push(BExecute(4, BatchStatementKind.Query, first.PrepareReply.StatementId, Int(1)));
+            BatchExecuteResponse stillWorks = await WaitTerminal(writer, 4);
+            Assert.That(stillWorks.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.QueryComplete));
+        });
     }
 
     // ─── Prepared execution ───────────────────────────────────────────────────
@@ -358,47 +349,42 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
     [Test]
     public void TheStore_RefusesAStatementOverTheStreamsRetainedByteBudget()
     {
-        long savedBytes = CamusDBConfig.GrpcMaxPreparedStatementBytesPerStream;
-        int savedPerStatement = CamusDBConfig.MaxPreparedStatementBytes;
-        CamusDBConfig.GrpcMaxPreparedStatementBytesPerStream = 4096;
-        CamusDBConfig.MaxPreparedStatementBytes = 65_536;
-        try
+        // A per-statement ceiling well above any statement here, so the per-stream retained-byte
+        // budget is unambiguously what refuses the statement.
+        StreamPreparedStatements store = new(Options with
         {
-            StreamPreparedStatements store = new(CamusDBConfig.Ambient);
-            string padding = new('x', 900);
+            GrpcMaxPreparedStatementBytesPerStream = 4096,
+            MaxPreparedStatementBytes = 65_536,
+        });
 
-            int admitted = 0;
-            CamusDBException? refused = null;
-            for (int i = 0; i < 50 && refused is null; i++)
+        string padding = new('x', 900);
+
+        int admitted = 0;
+        CamusDBException? refused = null;
+        for (int i = 0; i < 50 && refused is null; i++)
+        {
+            try
             {
-                try
-                {
-                    store.Add(PreparedStatementBinder.Create("db", $"SELECT {i} -- {padding}"));
-                    admitted++;
-                }
-                catch (CamusDBException e) when (e.Code == CamusDBErrorCodes.PreparedStatementLimitExceeded)
-                {
-                    refused = e;
-                }
+                store.Add(PreparedStatementBinder.Create("db", $"SELECT {i} -- {padding}"));
+                admitted++;
             }
+            catch (CamusDBException e) when (e.Code == CamusDBErrorCodes.PreparedStatementLimitExceeded)
+            {
+                refused = e;
+            }
+        }
 
-            // The count cap (512) would have let all 50 in; the byte budget is what stops it.
-            Assert.That(refused, Is.Not.Null);
-            Assert.That(refused!.Message, Does.Contain("retained-byte"));
-            Assert.That(admitted, Is.GreaterThan(0).And.LessThan(50));
-            Assert.That(store.RetainedBytes, Is.LessThanOrEqualTo(4096));
-        }
-        finally
-        {
-            CamusDBConfig.GrpcMaxPreparedStatementBytesPerStream = savedBytes;
-            CamusDBConfig.MaxPreparedStatementBytes = savedPerStatement;
-        }
+        // The count cap (512) would have let all 50 in; the byte budget is what stops it.
+        Assert.That(refused, Is.Not.Null);
+        Assert.That(refused!.Message, Does.Contain("retained-byte"));
+        Assert.That(admitted, Is.GreaterThan(0).And.LessThan(50));
+        Assert.That(store.RetainedBytes, Is.LessThanOrEqualTo(4096));
     }
 
     [Test]
     public void TheStore_ReturnsQuotaWhenAStatementIsClosed()
     {
-        StreamPreparedStatements store = new(CamusDBConfig.Ambient);
+        StreamPreparedStatements store = new(Options);
 
         int id = store.Add(PreparedStatementBinder.Create("db", "SELECT 1"));
         Assert.That(store.RetainedBytes, Is.GreaterThan(0));
@@ -414,7 +400,7 @@ internal sealed class TestGrpcPreparedStatements : BaseTest
         // Ids are never reused, so the space is finite. Wrapping would produce negative ids — which
         // every resolve rejects — and eventually collide with a live id, handing a client someone
         // else's statement. The seam starts the counter just below the ceiling.
-        StreamPreparedStatements store = new(CamusDBConfig.Ambient, int.MaxValue - 1);
+        StreamPreparedStatements store = new(Options, int.MaxValue - 1);
 
         Assert.That(store.Add(PreparedStatementBinder.Create("db", "SELECT 1")), Is.EqualTo(int.MaxValue));
 

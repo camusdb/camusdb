@@ -41,44 +41,46 @@ public sealed class TestAutoAnalyze : BaseTest
 {
     // Config is process-global static; snapshot and restore around each test so tuning one test's
     // thresholds can't leak into others.
-    private bool savedEnabled;
-    private double savedFraction;
-    private long savedMinRows;
-    private int savedSampleRows;
-    private int savedCheckInterval;
-    private int savedLoadThreshold;
-    private int savedMaxRowsPerSecond;
 
     [SetUp]
     public void SnapshotConfig()
     {
-        savedEnabled          = CamusDBConfig.AutoAnalyzeEnabled;
-        savedFraction         = CamusDBConfig.AutoAnalyzeFractionStaleRows;
-        savedMinRows          = CamusDBConfig.AutoAnalyzeMinStaleRows;
-        savedSampleRows       = CamusDBConfig.AutoAnalyzeHistogramSampleRows;
-        savedCheckInterval    = CamusDBConfig.AutoAnalyzeCheckIntervalMs;
-        savedLoadThreshold    = CamusDBConfig.AutoAnalyzeLoadPauseThreshold;
-        savedMaxRowsPerSecond = CamusDBConfig.AutoAnalyzeMaxRowsPerSecond;
     }
 
     [TearDown]
     public void RestoreConfig()
     {
-        CamusDBConfig.AutoAnalyzeEnabled             = savedEnabled;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows   = savedFraction;
-        CamusDBConfig.AutoAnalyzeMinStaleRows        = savedMinRows;
-        CamusDBConfig.AutoAnalyzeHistogramSampleRows = savedSampleRows;
-        CamusDBConfig.AutoAnalyzeCheckIntervalMs     = savedCheckInterval;
-        CamusDBConfig.AutoAnalyzeLoadPauseThreshold  = savedLoadThreshold;
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond    = savedMaxRowsPerSecond;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Auto-analyze configuration for a case. The scheduler and analyzer fix these when the engine is
+    /// built, so a case states what it needs here rather than assigning process-wide values around it.
+    /// The returned value is also what the case asserts against, so the thresholds under test and the
+    /// thresholds being enforced cannot drift apart.
+    /// </summary>
+    private CamusDBOptions AutoAnalyze(
+        bool enabled = true,
+        double fractionStaleRows = 0.0,
+        long minStaleRows = 5,
+        int? loadPauseThreshold = null,
+        int? maxRowsPerSecond = null,
+        int? histogramSampleRows = null) =>
+        Options with
+        {
+            AutoAnalyzeEnabled = enabled,
+            AutoAnalyzeFractionStaleRows = fractionStaleRows,
+            AutoAnalyzeMinStaleRows = minStaleRows,
+            AutoAnalyzeLoadPauseThreshold = loadPauseThreshold ?? Options.AutoAnalyzeLoadPauseThreshold,
+            AutoAnalyzeMaxRowsPerSecond = maxRowsPerSecond ?? Options.AutoAnalyzeMaxRowsPerSecond,
+            AutoAnalyzeHistogramSampleRows = histogramSampleRows ?? Options.AutoAnalyzeHistogramSampleRows,
+        };
+
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
-        SetupRobotsTable()
+        SetupRobotsTable(CamusDBOptions options)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
 
         KvTransaction txn = await database.Transactions.BeginAsync();
         await executor.CreateTable(new CreateTableTicket(
@@ -151,11 +153,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task StaleTableIsBackgroundAnalyzedAndResetsStaleness()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0; // any churn past the floor is stale
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
+        // fractionStaleRows 0.0: any churn past the floor counts as stale.
+        CamusDBOptions options = AutoAnalyze(enabled: true, fractionStaleRows: 0.0, minStaleRows: 5);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
 
         // Establish a fresh baseline: manual ANALYZE loads stats and clears the mutation counter.
@@ -167,7 +168,7 @@ public sealed class TestAutoAnalyze : BaseTest
         // Now churn past the threshold.
         await InsertRobotsAsync(executor, database, dbname, 20, baseYear: 3000);
         Assert.IsTrue(
-            executor.Statistics.IsStale(database, table, CamusDBConfig.AutoAnalyzeFractionStaleRows, CamusDBConfig.AutoAnalyzeMinStaleRows),
+            executor.Statistics.IsStale(database, table, options.AutoAnalyzeFractionStaleRows, options.AutoAnalyzeMinStaleRows),
             "Table with 20 mutations over threshold must be stale");
 
         int analyzed = await executor.RunAutoAnalyzeForTestsAsync();
@@ -180,7 +181,7 @@ public sealed class TestAutoAnalyze : BaseTest
         Assert.AreEqual(0, executor.Statistics.GetMutationsSinceAnalyze(database, table),
             "Background ANALYZE must reset the mutation counter");
         Assert.IsFalse(
-            executor.Statistics.IsStale(database, table, CamusDBConfig.AutoAnalyzeFractionStaleRows, CamusDBConfig.AutoAnalyzeMinStaleRows),
+            executor.Statistics.IsStale(database, table, options.AutoAnalyzeFractionStaleRows, options.AutoAnalyzeMinStaleRows),
             "Table must no longer be stale after a background ANALYZE");
 
         // NDV was rebuilt for the indexed 'year' column.
@@ -192,11 +193,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task DisabledFlagSkipsSweep()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = false;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 1;
+        CamusDBOptions options = AutoAnalyze(enabled: false, fractionStaleRows: 0.0, minStaleRows: 1);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 10);
 
@@ -211,12 +211,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task LoadBackoffSkipsSweep()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
-        CamusDBConfig.AutoAnalyzeLoadPauseThreshold = 4;
+        CamusDBOptions options = AutoAnalyze(enabled: true, fractionStaleRows: 0.0, minStaleRows: 5, loadPauseThreshold: 4);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
 
         await InsertRobotsAsync(executor, database, dbname, 10);
@@ -230,7 +228,7 @@ public sealed class TestAutoAnalyze : BaseTest
 
         Assert.AreEqual(0, analyzed, "Sweep must back off entirely when foreground load exceeds the threshold");
         Assert.IsTrue(
-            executor.Statistics.IsStale(database, table, CamusDBConfig.AutoAnalyzeFractionStaleRows, CamusDBConfig.AutoAnalyzeMinStaleRows),
+            executor.Statistics.IsStale(database, table, options.AutoAnalyzeFractionStaleRows, options.AutoAnalyzeMinStaleRows),
             "Table stays stale after a load-skipped sweep (retried when quieter)");
     }
 
@@ -242,7 +240,9 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task PublishPreservesConcurrentCommittedDeltas()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        CamusDBOptions options = AutoAnalyze();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
 
         await InsertRobotsAsync(executor, database, dbname, 10);
@@ -281,11 +281,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task DiscoversStaleTableFromPersistedStateAfterEviction()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
+        CamusDBOptions options = AutoAnalyze(enabled: true, fractionStaleRows: 0.0, minStaleRows: 5);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
 
         await InsertRobotsAsync(executor, database, dbname, 10);
@@ -310,7 +309,9 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task BackgroundAnalyzeCancelsMidScanUnderLoad()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        CamusDBOptions options = AutoAnalyze();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
 
         // More than the analyzer's mid-scan check interval (1000 rows) so the pause callback is hit.
@@ -334,7 +335,9 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task PartialPublishFailureLeavesPersistedStatsUnchanged()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        CamusDBOptions options = AutoAnalyze();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 20);
 
@@ -369,7 +372,9 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task FenceHeldElsewhereAbortsPublishWithoutPersisting()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        CamusDBOptions options = AutoAnalyze();
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 10);
 
@@ -404,9 +409,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task BackgroundAnalyzeRespectsRowRateThrottle()
     {
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond = 500; // deliberately slow
+        // maxRowsPerSecond 500: deliberately slow, so the throttle is observable.
+        CamusDBOptions options = AutoAnalyze(enabled: true, fractionStaleRows: 0.0, minStaleRows: 5, maxRowsPerSecond: 500);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 600);
 
@@ -417,7 +423,7 @@ public sealed class TestAutoAnalyze : BaseTest
         // 600 rows at 500 rows/s ≈ 1.2s. Assert the throttle clearly engaged (well above instant),
         // with a generous lower bound so the test is not timing-flaky.
         Assert.Greater(sw.ElapsedMilliseconds, 700,
-            $"Throttle must pace the scan to ~{CamusDBConfig.AutoAnalyzeMaxRowsPerSecond} rows/s (took {sw.ElapsedMilliseconds} ms)");
+            $"Throttle must pace the scan to ~{options.AutoAnalyzeMaxRowsPerSecond} rows/s (took {sw.ElapsedMilliseconds} ms)");
     }
 
     /// <summary>
@@ -428,9 +434,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task ForegroundWriteProceedsAndIsPreservedDuringBackgroundAnalyze()
     {
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond = 2000; // slow enough the scan overlaps the write
+        // maxRowsPerSecond 2000: slow enough that the scan overlaps the write.
+        CamusDBOptions options = AutoAnalyze(enabled: true, fractionStaleRows: 0.0, minStaleRows: 5, maxRowsPerSecond: 2000);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
         await InsertRobotsAsync(executor, database, dbname, 3000);
 
@@ -453,12 +460,10 @@ public sealed class TestAutoAnalyze : BaseTest
     [Test]
     public async Task BackgroundAnalyzeSamplesLargeTable()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
-        CamusDBConfig.AutoAnalyzeHistogramSampleRows = 50; // tiny cap so sampling is observable
+        // histogramSampleRows 50: a tiny cap so sampling is observable.
+        CamusDBOptions options = AutoAnalyze(enabled: true, fractionStaleRows: 0.0, minStaleRows: 5, histogramSampleRows: 50);
 
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(options);
         TableDescriptor table = await OpenTableAsync(database, "robots");
 
         await InsertRobotsAsync(executor, database, dbname, 200);

@@ -435,8 +435,8 @@ await commandExecutor.EnsureBootstrapSuperuserAsync();
 
 // The bootstrap password was only needed to seed the first hash — drop it from process memory. Both
 // holders are cleared: the ambient value the seeding path read it from, and this scope's own copy.
-CamusDBConfig.BootstrapSuperuserPassword = "";
 camusOptions = camusOptions with { BootstrapSuperuserPassword = "" };
+CamusDBConfig.SetAmbient(camusOptions);
 
 // Give the background auto-analyze scheduler a foreground-load signal so it backs off under load:
 // explicit transactions plus in-flight autocommit data requests.

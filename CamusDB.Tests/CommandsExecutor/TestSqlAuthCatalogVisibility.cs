@@ -29,26 +29,20 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestSqlAuthCatalogVisibility : BaseTest
 {
-    private bool savedEnabled;
-    private string savedServerKey = "", savedUser = "", savedPassword = "";
 
-    [SetUp]
-    public void Save()
+    /// <summary>
+    /// Auth on, with a known signing key and bootstrap superuser — the baseline every test here starts
+    /// from. A test needing different auth settings derives its own options and builds its own engine.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
-        savedEnabled = CamusConfig.AuthenticationEnabled;
-        savedServerKey = CamusConfig.AccessTokenServerKey;
-        savedUser = CamusConfig.BootstrapSuperuser;
-        savedPassword = CamusConfig.BootstrapSuperuserPassword;
-    }
+        AuthenticationEnabled = true,
+        AccessTokenServerKey = "test-key",
+        BootstrapSuperuser = "root",
+        BootstrapSuperuserPassword = "root-pw",
+    };
 
-    [TearDown]
-    public void Restore()
-    {
-        CamusConfig.AuthenticationEnabled = savedEnabled;
-        CamusConfig.AccessTokenServerKey = savedServerKey;
-        CamusConfig.BootstrapSuperuser = savedUser;
-        CamusConfig.BootstrapSuperuserPassword = savedPassword;
-    }
+
 
     private static async Task<Principal> Login(CommandExecutor ex, string u, string p)
         => await ex.ResolvePrincipalAsync((await ex.LoginAsync(u, p)).Token);
@@ -100,11 +94,6 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
     // Enables auth, creates a database with tables t1/t2/t3 as the superuser.
     private async Task<(string db, CommandExecutor ex, Principal root)> Setup()
     {
-        CamusConfig.AccessTokenServerKey = "test-key";
-        CamusConfig.BootstrapSuperuser = "root";
-        CamusConfig.BootstrapSuperuserPassword = "root-pw";
-        CamusConfig.AuthenticationEnabled = true;
-
         CommandExecutor ex = CreateCommandExecutor();
         string db = "visdb" + Guid.NewGuid().ToString("n");
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
@@ -385,7 +374,6 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
 
         // An engine fixes its configuration when it is constructed, so the unauthenticated listing is
         // exercised through a second executor built with authentication off.
-        CamusConfig.AuthenticationEnabled = false;
         CommandExecutor unauthenticated = CreateCommandExecutor();
 
         CollectionAssert.AreEquivalent(
@@ -415,7 +403,6 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         // they did before visibility filtering existed. An engine fixes its configuration when it is
         // constructed, so the unauthenticated behaviour is exercised through a second executor built
         // with authentication off, not by flipping a flag under the one that created the tables.
-        CamusConfig.AuthenticationEnabled = false;
         CommandExecutor unauthenticated = CreateCommandExecutor();
 
         CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTables(unauthenticated, db, null));

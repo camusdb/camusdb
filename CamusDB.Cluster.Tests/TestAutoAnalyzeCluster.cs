@@ -34,34 +34,22 @@ namespace CamusDB.Tests.Cluster;
 [NonParallelizable]
 public sealed class TestAutoAnalyzeCluster
 {
-    private bool savedEnabled;
-    private double savedFraction;
-    private long savedMinRows;
-    private int savedMaxRowsPerSecond;
-    private int savedCheckRows;
 
     // The fixed key whose partition leadership gates auto-analyze ownership.
     private const string RegistryBucket = "_system/dbregistry";
 
-    [SetUp]
-    public void SnapshotConfig()
+    /// <summary>
+    /// Auto-analyze triggered by staleness alone: no fraction threshold, and only a few stale rows
+    /// needed, so a sweep over a small table decides to analyze it.
+    /// </summary>
+    private static CamusDBOptions EagerAutoAnalyze => CamusDBOptions.Default with
     {
-        savedEnabled          = CamusDBConfig.AutoAnalyzeEnabled;
-        savedFraction         = CamusDBConfig.AutoAnalyzeFractionStaleRows;
-        savedMinRows          = CamusDBConfig.AutoAnalyzeMinStaleRows;
-        savedMaxRowsPerSecond = CamusDBConfig.AutoAnalyzeMaxRowsPerSecond;
-        savedCheckRows        = CamusDBConfig.AutoAnalyzeOwnershipCheckRows;
-    }
+        AutoAnalyzeEnabled = true,
+        AutoAnalyzeFractionStaleRows = 0.0,
+        AutoAnalyzeMinStaleRows = 5,
+    };
 
-    [TearDown]
-    public void RestoreConfig()
-    {
-        CamusDBConfig.AutoAnalyzeEnabled            = savedEnabled;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows  = savedFraction;
-        CamusDBConfig.AutoAnalyzeMinStaleRows       = savedMinRows;
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond   = savedMaxRowsPerSecond;
-        CamusDBConfig.AutoAnalyzeOwnershipCheckRows = savedCheckRows;
-    }
+
 
     private static async Task<InProcessSchemaCluster.Node?> FindRegistryOwnerAsync(InProcessSchemaCluster cluster)
     {
@@ -114,12 +102,9 @@ public sealed class TestAutoAnalyzeCluster
     [Test]
     public async Task Cluster_StaleTableDiscoveredAndAnalyzedByRegistryLeader()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
-
-        await using InProcessSchemaCluster cluster =
-            await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 1);
+        // Auto-analyze triggered by staleness alone, so a handful of stale rows is enough.
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
+            nodeCount: 3, partitions: 1, options: EagerAutoAnalyze);
 
         string db = cluster.NextSchemaLogDatabaseName();
         await cluster.OpenDatabaseOnAllNodesAsync(db);
@@ -191,12 +176,16 @@ public sealed class TestAutoAnalyzeCluster
     [Test]
     public async Task Cluster_LeadershipLostMidScanAbortsWithoutPublishing()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeMaxRowsPerSecond = 50;    // slow scan so it spans the step-down
-        CamusDBConfig.AutoAnalyzeOwnershipCheckRows = 25;  // re-check ownership frequently
+        // Slow scan that spans the step-down, re-checking ownership often enough to notice it.
+        CamusDBOptions slowScan = CamusDBOptions.Default with
+        {
+            AutoAnalyzeEnabled = true,
+            AutoAnalyzeMaxRowsPerSecond = 50,
+            AutoAnalyzeOwnershipCheckRows = 25,
+        };
 
-        await using InProcessSchemaCluster cluster =
-            await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 1);
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
+            nodeCount: 3, partitions: 1, options: slowScan);
 
         string db = cluster.NextSchemaLogDatabaseName();
         await cluster.OpenDatabaseOnAllNodesAsync(db);
@@ -239,12 +228,9 @@ public sealed class TestAutoAnalyzeCluster
     [Test]
     public async Task Cluster_DisabledTableIsNotAutoAnalyzed()
     {
-        CamusDBConfig.AutoAnalyzeEnabled = true;
-        CamusDBConfig.AutoAnalyzeFractionStaleRows = 0.0;
-        CamusDBConfig.AutoAnalyzeMinStaleRows = 5;
-
-        await using InProcessSchemaCluster cluster =
-            await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 1);
+        // Auto-analyze triggered by staleness alone, so a handful of stale rows is enough.
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
+            nodeCount: 3, partitions: 1, options: EagerAutoAnalyze);
 
         string db = cluster.NextSchemaLogDatabaseName();
         await cluster.OpenDatabaseOnAllNodesAsync(db);

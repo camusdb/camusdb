@@ -60,9 +60,9 @@ public sealed class TestDatabaseOpener : BaseTest
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
 
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogsManager = new(logger);
-        CommandExecutor executor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient, sharedNode: clusterNode, isClusterMode: true);
+        CommandExecutor executor = new(validator, catalogsManager, logger, Options, sharedNode: clusterNode, isClusterMode: true);
 
         string db1 = System.Guid.NewGuid().ToString("n");
         string db2 = System.Guid.NewGuid().ToString("n");

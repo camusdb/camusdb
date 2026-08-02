@@ -1856,87 +1856,79 @@ public sealed class TestInProcessSchemaCluster
     {
         const int rowCount = 25;
 
-        bool previousFlag = CamusDBConfig.KeyRangeShardingEnabled;
-        CamusDBConfig.KeyRangeShardingEnabled = true;
-        try
+        // InitialPartitions = 3 keeps key-range routing genuinely multi-partition; the harness
+        // uses long, well-spread election timeouts (see CreateClusterNode) so the schema-log
+        // partition leader stays stable under in-process load — otherwise a spurious re-election
+        // misroutes a follower's schema-applied ack and CreateTable's convergence wait flakes.
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
+        nodeCount: 3, partitions: 3, wireLeaderForwarder: true,
+        options: CamusDBOptions.Default with { KeyRangeShardingEnabled = true });
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        // Wait for the schema partition leader to be stable before issuing any DDL. Without
+        // this, CreateTable can race a still-churning schema partition and time out.
+        await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        // Choose a writer that does NOT lead the meta partition, so opening the table on it
+        // forwards the range-descriptor seed to the meta leader (the K1 path under test).
+        InProcessSchemaCluster.Node writer = await NonMetaLeaderNodeAsync(cluster);
+
+        // CREATE TABLE from the writer — forwarded to the schema leader, converges on all nodes.
+        CreateTableResult created = await writer.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(60));
+
+        Assert.IsTrue(created.Success, "CREATE TABLE on the writer must forward to the leader and apply");
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        // INSERT a spread of rows from the writer. The first INSERT opens the table on the writer
+        // (non-meta-leader) node → RegisterKeyRangeAsync → K1 seed forwarding to the meta leader.
+        // A "No range descriptor covers key" here is the exact failure C2 pins; with 0.3.3 it must
+        // not surface (the call would throw a CamusDBException and fail the test).
+        for (int i = 0; i < rowCount; i++)
         {
-            // InitialPartitions = 3 keeps key-range routing genuinely multi-partition; the harness
-            // uses long, well-spread election timeouts (see CreateClusterNode) so the schema-log
-            // partition leader stays stable under in-process load — otherwise a spurious re-election
-            // misroutes a follower's schema-applied ack and CreateTable's convergence wait flakes.
-            await using InProcessSchemaCluster cluster =
-                await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 3, wireLeaderForwarder: true);
-            string db = cluster.NextSchemaLogDatabaseName();
-            await cluster.OpenDatabaseOnAllNodesAsync(db);
-
-            // Wait for the schema partition leader to be stable before issuing any DDL. Without
-            // this, CreateTable can race a still-churning schema partition and time out.
-            await cluster.WaitForSchemaLeaderNodeAsync(db);
-
-            // Choose a writer that does NOT lead the meta partition, so opening the table on it
-            // forwards the range-descriptor seed to the meta leader (the K1 path under test).
-            InProcessSchemaCluster.Node writer = await NonMetaLeaderNodeAsync(cluster);
-
-            // CREATE TABLE from the writer — forwarded to the schema leader, converges on all nodes.
-            CreateTableResult created = await writer.Executor.CreateTable(new CreateTableTicket(
-                databaseName: db,
-                tableName: "robots",
-                columns: [new ColumnInfo("id", ColumnType.Id), new ColumnInfo("name", ColumnType.String)],
-                constraints:
-                [
-                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
-                        [new ColumnIndexInfo("id", OrderType.Ascending)])
-                ],
-                ifNotExists: false
-            )).WaitAsync(TimeSpan.FromSeconds(60));
-
-            Assert.IsTrue(created.Success, "CREATE TABLE on the writer must forward to the leader and apply");
-            await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
-
-            // INSERT a spread of rows from the writer. The first INSERT opens the table on the writer
-            // (non-meta-leader) node → RegisterKeyRangeAsync → K1 seed forwarding to the meta leader.
-            // A "No range descriptor covers key" here is the exact failure C2 pins; with 0.3.3 it must
-            // not surface (the call would throw a CamusDBException and fail the test).
-            for (int i = 0; i < rowCount; i++)
-            {
-                KvTransaction tx = await writer.Database!.Transactions.BeginAsync();
-                await writer.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
-                    txnState: tx,
-                    database: db,
-                    sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'robot {i:D3}')",
-                    parameters: null
-                ));
-                await writer.Database.Transactions.CommitAsync(tx);
-            }
-
-            // Read back from a DIFFERENT node than the writer (its first SELECT opens + registers the
-            // row space locally too — idempotent, served from the replicated descriptor).
-            InProcessSchemaCluster.Node reader = cluster.Nodes.First(n => n.Index != writer.Index);
-
-            KvTransaction readTx = await reader.Database!.Transactions.BeginAsync();
-            (_, IAsyncEnumerable<QueryResultRow> readCursor) = await reader.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
-                txnState: readTx,
+            KvTransaction tx = await writer.Database!.Transactions.BeginAsync();
+            await writer.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx,
                 database: db,
-                sql: "SELECT id FROM robots",
+                sql: $"INSERT INTO robots (id, name) VALUES (gen_id(), 'robot {i:D3}')",
                 parameters: null
             ));
-            List<string> readIds = (await readCursor.ToListAsync()).Select(r => r.Row["id"].StrValue!).ToList();
-            await reader.Database.Transactions.CommitAsync(readTx);
-
-            // All rows visible on the reader node, regardless of which node wrote them.
-            Assert.AreEqual(rowCount, readIds.Count,
-                $"reader node {reader.Index} must see all {rowCount} rows inserted by writer node {writer.Index}");
-
-            // Ordered-scan property: a full PK scan over the key-range row space returns rows in
-            // ascending key order (ObjectId hex is order-preserving under ordinal comparison).
-            List<string> ascending = readIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
-            CollectionAssert.AreEqual(ascending, readIds,
-                "key-range PK scan must return rows ordered ascending by row id");
+            await writer.Database.Transactions.CommitAsync(tx);
         }
-        finally
-        {
-            CamusDBConfig.KeyRangeShardingEnabled = previousFlag;
-        }
+
+        // Read back from a DIFFERENT node than the writer (its first SELECT opens + registers the
+        // row space locally too — idempotent, served from the replicated descriptor).
+        InProcessSchemaCluster.Node reader = cluster.Nodes.First(n => n.Index != writer.Index);
+
+        KvTransaction readTx = await reader.Database!.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> readCursor) = await reader.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+            txnState: readTx,
+            database: db,
+            sql: "SELECT id FROM robots",
+            parameters: null
+        ));
+        List<string> readIds = (await readCursor.ToListAsync()).Select(r => r.Row["id"].StrValue!).ToList();
+        await reader.Database.Transactions.CommitAsync(readTx);
+
+        // All rows visible on the reader node, regardless of which node wrote them.
+        Assert.AreEqual(rowCount, readIds.Count,
+            $"reader node {reader.Index} must see all {rowCount} rows inserted by writer node {writer.Index}");
+
+        // Ordered-scan property: a full PK scan over the key-range row space returns rows in
+        // ascending key order (ObjectId hex is order-preserving under ordinal comparison).
+        List<string> ascending = readIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
+        CollectionAssert.AreEqual(ascending, readIds,
+        "key-range PK scan must return rows ordered ascending by row id");
     }
 
     // Returns a cluster node that is NOT the current leader of the meta partition (P0). Opening a

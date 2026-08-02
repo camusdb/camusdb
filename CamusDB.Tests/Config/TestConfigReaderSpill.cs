@@ -15,7 +15,7 @@ namespace CamusDB.Tests.Config;
 
 /// <summary>
 /// Verifies that the spill-to-disk YAML knobs are parsed, validated, and applied to
-/// <see cref="CamusDBConfig"/> correctly, and that an unknown or misspelled spill key
+/// <see cref="CamusDBOptions"/> correctly, and that an unknown or misspelled spill key
 /// is rejected at startup rather than silently dropped.
 ///
 /// <para>Non-parallelizable: applying a config rewrites <b>every</b> process-wide knob from that one
@@ -128,72 +128,40 @@ public sealed class TestConfigReaderSpill
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
     }
 
-    // ── Resolver: values flow to CamusDBConfig ───────────────────────────────
+    // ── Resolver: values reach the resolved options ──────────────────────────
 
     /// <summary>
-    /// <c>ApplyToCamusDBConfig</c> must copy all three spill fields onto the matching
-    /// <see cref="CamusDBConfig"/> statics so the engine uses the YAML-configured values.
+    /// The resolver must carry all three spill fields onto the options it produces — those options are
+    /// what an engine is built from, so a field the resolver drops is a YAML key that silently does
+    /// nothing.
     /// </summary>
     [Test]
-    public void Resolver_AppliesSpillKnobsToCamusDBConfig()
+    public void Resolver_CarriesSpillKnobsOntoTheResolvedOptions()
     {
-        bool savedEnabled   = CamusDBConfig.SpillEnabled;
-        int  savedThreshold = CamusDBConfig.SpillThresholdRows;
-        int  savedFanIn     = CamusDBConfig.SpillMergeFanIn;
+        const string yml = """
+            spill_enabled: true
+            spill_threshold_rows: 25000
+            spill_merge_fan_in: 32
+            """;
 
-        try
-        {
-            const string yml = """
-                spill_enabled: true
-                spill_threshold_rows: 25000
-                spill_merge_fan_in: 32
-                """;
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read(yml));
 
-            ConfigDefinition config = new ConfigReader().Read(yml);
-            ConfigResolver.ApplyToCamusDBConfig(config);
-
-            Assert.That(CamusDBConfig.SpillEnabled,       Is.True,            "resolver must set SpillEnabled");
-            Assert.That(CamusDBConfig.SpillThresholdRows, Is.EqualTo(25_000), "resolver must set SpillThresholdRows");
-            Assert.That(CamusDBConfig.SpillMergeFanIn,    Is.EqualTo(32),     "resolver must set SpillMergeFanIn");
-        }
-        finally
-        {
-            CamusDBConfig.SpillEnabled       = savedEnabled;
-            CamusDBConfig.SpillThresholdRows = savedThreshold;
-            CamusDBConfig.SpillMergeFanIn    = savedFanIn;
-        }
+        Assert.That(resolved.SpillEnabled,       Is.True,            "resolver must carry SpillEnabled");
+        Assert.That(resolved.SpillThresholdRows, Is.EqualTo(25_000), "resolver must carry SpillThresholdRows");
+        Assert.That(resolved.SpillMergeFanIn,    Is.EqualTo(32),     "resolver must carry SpillMergeFanIn");
     }
 
     /// <summary>
-    /// When the spill keys are absent from config.yml, applying the config must leave the
-    /// built-in defaults intact.
+    /// When the spill keys are absent from config.yml, the resolved options must hold the built-in
+    /// defaults rather than anything left over from another configuration.
     /// </summary>
     [Test]
     public void Resolver_OmittedSpillKeys_PreservesDefaults()
     {
-        bool savedEnabled   = CamusDBConfig.SpillEnabled;
-        int  savedThreshold = CamusDBConfig.SpillThresholdRows;
-        int  savedFanIn     = CamusDBConfig.SpillMergeFanIn;
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read("mode: standalone"));
 
-        try
-        {
-            // Corrupt the statics first so the test can catch a missing apply.
-            CamusDBConfig.SpillEnabled       = true;
-            CamusDBConfig.SpillThresholdRows = 1;
-            CamusDBConfig.SpillMergeFanIn    = 1;
-
-            ConfigDefinition config = new ConfigReader().Read("mode: standalone");
-            ConfigResolver.ApplyToCamusDBConfig(config);
-
-            Assert.That(CamusDBConfig.SpillEnabled,       Is.False,              "omitted spill_enabled must default to false");
-            Assert.That(CamusDBConfig.SpillThresholdRows, Is.EqualTo(500_000),   "omitted spill_threshold_rows must default to 500000");
-            Assert.That(CamusDBConfig.SpillMergeFanIn,    Is.EqualTo(16),        "omitted spill_merge_fan_in must default to 16");
-        }
-        finally
-        {
-            CamusDBConfig.SpillEnabled       = savedEnabled;
-            CamusDBConfig.SpillThresholdRows = savedThreshold;
-            CamusDBConfig.SpillMergeFanIn    = savedFanIn;
-        }
+        Assert.That(resolved.SpillEnabled,       Is.False,            "omitted spill_enabled must default to false");
+        Assert.That(resolved.SpillThresholdRows, Is.EqualTo(500_000), "omitted spill_threshold_rows must default to 500000");
+        Assert.That(resolved.SpillMergeFanIn,    Is.EqualTo(16),      "omitted spill_merge_fan_in must default to 16");
     }
 }

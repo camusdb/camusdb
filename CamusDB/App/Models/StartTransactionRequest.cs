@@ -15,7 +15,7 @@ public sealed class StartTransactionRequest
     /// <summary>
     /// Optional isolation level for this transaction.
     /// Accepted values: <c>"ReadCommitted"</c> (default), <c>"Serializable"</c>.
-    /// When absent, the server applies <see cref="CamusDB.Core.CamusDBConfig.DefaultIsolationLevel"/>.
+    /// When absent, the server applies <see cref="CamusDB.Core.CamusDBOptions.DefaultIsolationLevel"/>.
     /// </summary>
     public string? IsolationLevel { get; set; }
 
@@ -28,7 +28,7 @@ public sealed class StartTransactionRequest
     /// <summary>
     /// Optional locking mode for this transaction.
     /// Accepted values: <c>"Pessimistic"</c> (default), <c>"Optimistic"</c>.
-    /// When absent, the server applies <see cref="CamusDB.Core.CamusDBConfig.DefaultTransactionLocking"/>.
+    /// When absent, the server applies <see cref="CamusDB.Core.CamusDBOptions.DefaultTransactionLocking"/>.
     /// </summary>
     public string? Locking { get; set; }
 }

@@ -132,9 +132,9 @@ public sealed class TestSerializableAnomaliesCluster
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
 
-        CommandValidator validator  = new(CamusDBConfig.Ambient);
+        CommandValidator validator  = new(CamusDBOptions.Default);
         CatalogsManager  catalogs   = new(logger);
-        CommandExecutor  executor   = new(validator, catalogs, logger, CamusDBConfig.Ambient,
+        CommandExecutor  executor   = new(validator, catalogs, logger, CamusDBOptions.Default,
             sharedNode: node, isClusterMode: true);
 
         string dbname = Guid.NewGuid().ToString("n");

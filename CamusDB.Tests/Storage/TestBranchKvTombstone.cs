@@ -69,7 +69,7 @@ public sealed class TestBranchKvTombstone
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
-        return (node, new KvTableStore(node.Kahuna, CamusDBConfig.Ambient, "testdb", tableId));
+        return (node, new KvTableStore(node.Kahuna, CamusDBOptions.Default, "testdb", tableId));
     }
 
     [Test]

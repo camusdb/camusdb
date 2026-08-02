@@ -110,15 +110,12 @@ public abstract class BaseTest
     /// <see cref="ConfigureOptions"/>; nothing here mutates shared state, so two fixtures wanting
     /// different settings do not conflict.
     ///
-    /// <para>It is evaluated where it is used rather than captured in set-up, and it starts from the
-    /// ambient value rather than from the defaults. Both are deliberate while the migration is in
-    /// progress: fixtures that still configure by assigning statics — including in their own set-up,
-    /// which NUnit runs *after* this class's — would otherwise silently lose those settings. Once a
-    /// fixture is migrated to <see cref="ConfigureOptions"/> the ambient contributes nothing, and the
-    /// base can become <see cref="CamusDBOptions.Default"/>.</para>
+    /// <para>It starts from the shipped defaults, not from any process-wide value, so a test's
+    /// configuration cannot be influenced by whatever ran before it. The only thing layered on top is
+    /// this test's own isolated data directory.</para>
     /// </summary>
     protected CamusDBOptions Options =>
-        ConfigureOptions(CamusDBConfig.Ambient with { DataDirectory = CamusConfig.DataDirectory });
+        ConfigureOptions(CamusDBOptions.Default with { DataDirectory = tempDir });
 
     /// <summary>
     /// Hook for a fixture to state the configuration it needs, applied once per test before anything is

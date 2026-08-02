@@ -55,13 +55,13 @@ internal sealed class TestPreparedStatementParseElimination : BaseTest
     [SetUp]
     public void SetUpService()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogs = new(logger);
-        executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
+        executor = new(validator, catalogs, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(executor);
-        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
-        registry = new(CamusDBConfig.Ambient);
+        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
+        registry = new(Options);
     }
 
     [TearDown]
@@ -81,7 +81,7 @@ internal sealed class TestPreparedStatementParseElimination : BaseTest
     }
 
     private ExecuteSQLController Sql(object body) =>
-        new(executor, coordinator, registry, logger, CamusDBConfig.Ambient) { ControllerContext = Context(body) };
+        new(executor, coordinator, registry, logger, Options) { ControllerContext = Context(body) };
 
     private async Task<string> CreateDatabaseWithRowAsync()
     {
@@ -131,7 +131,7 @@ internal sealed class TestPreparedStatementParseElimination : BaseTest
         long inlineParses = await CountParsesAsync(async () => await Sql(inlineBody()).ExecuteSQLQuery());
 
         PrepareStatementResponse prepared = (PrepareStatementResponse)
-            (await new PreparedStatementsController(executor, coordinator, registry, logger, CamusDBConfig.Ambient)
+            (await new PreparedStatementsController(executor, coordinator, registry, logger, Options)
             {
                 ControllerContext = Context(new { databaseName = db, sql }),
             }.PrepareSQLStatement()).Value!;

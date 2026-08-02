@@ -45,13 +45,13 @@ public class TestGrpcRowsService : BaseTest
     [SetUp]
     public void SetUpGrpcService()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        serviceExecutor = new(validator, catalogsManager, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         coordinator = new(serviceExecutor);
-        rowsService = new(serviceExecutor, coordinator, logger, CamusDBConfig.Ambient);
-        sqlService   = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), CamusDBConfig.Ambient);
+        rowsService = new(serviceExecutor, coordinator, logger, Options);
+        sqlService   = new(serviceExecutor, coordinator, logger, TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(), Options);
     }
 
     [TearDown]

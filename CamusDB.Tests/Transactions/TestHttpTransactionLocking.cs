@@ -85,7 +85,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             locking: null, cancellationToken: CancellationToken.None);
 
-        Assert.That(tx.Locking, Is.EqualTo(CamusDBConfig.DefaultTransactionLocking));
+        Assert.That(tx.Locking, Is.EqualTo(CamusDBOptions.Default.DefaultTransactionLocking));
 
         await coord.RollbackAsync(tx, CancellationToken.None);
     }
@@ -246,7 +246,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
         KvTransaction tx = await coord.StartAsync(
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             locking: null, deferStart: true);
-        Assert.That(tx.Locking, Is.EqualTo(CamusDBConfig.DefaultTransactionLocking));
+        Assert.That(tx.Locking, Is.EqualTo(CamusDBOptions.Default.DefaultTransactionLocking));
 
         // SET TRANSACTION LOCKING runs before any data statement and before the session opens.
         (_, IAsyncEnumerable<QueryResultRow> c) =
@@ -271,7 +271,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
         KvTransaction tx = await coord.StartAsync(
             dbname, CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             locking: null, deferStart: true);
-        Assert.That(tx.Locking, Is.EqualTo(CamusDBConfig.DefaultTransactionLocking));
+        Assert.That(tx.Locking, Is.EqualTo(CamusDBOptions.Default.DefaultTransactionLocking));
 
         // SET ISOLATION then SET LOCKING, both through the non-query endpoint, both before any data
         // statement — must not throw and must reconfigure the in-flight transaction.
@@ -396,7 +396,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
     /// </summary>
     private sealed class LockingParseProbe : CommandsController
     {
-        private LockingParseProbe() : base(null!, null!, null!, CamusDBConfig.Ambient) { }
+        private LockingParseProbe() : base(null!, null!, null!, CamusDBOptions.Default) { }
 
         public static (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) Parse(ExecuteSQLRequest request)
             => ParseRequestLevelMode(request);

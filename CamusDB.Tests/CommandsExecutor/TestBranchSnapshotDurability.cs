@@ -81,9 +81,9 @@ public sealed class TestBranchSnapshotDurability
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
         await node.FlushAsync();
 
-        registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
+        registry = await DatabaseRegistry.OpenAsync(node, CamusDBOptions.Default);
         catalogs = new CatalogsManager(logger);
-        executor = new CommandExecutor(new CommandValidator(CamusDBConfig.Ambient), catalogs, logger, CamusDBConfig.Ambient,
+        executor = new CommandExecutor(new CommandValidator(CamusDBOptions.Default), catalogs, logger, CamusDBOptions.Default,
                                        sharedNode: node, registry: registry, isClusterMode: false);
     }
 

@@ -11,9 +11,9 @@ using NUnit.Framework;
 using System;
 using System.Threading.Tasks;
 
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Controllers;
 
-using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -26,22 +26,13 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestFenceLease : BaseTest
 {
-    private int savedLease;
-    private int savedRenew;
-
-    [SetUp]
-    public void SaveFenceConfig()
-    {
-        savedLease = CamusConfig.FenceLeaseMs;
-        savedRenew = CamusConfig.FenceLeaseRenewIntervalMs;
-    }
-
-    [TearDown]
-    public void RestoreFenceConfig()
-    {
-        CamusConfig.FenceLeaseMs = savedLease;
-        CamusConfig.FenceLeaseRenewIntervalMs = savedRenew;
-    }
+    /// <summary>
+    /// A registry whose fence lease lasts <paramref name="leaseMs"/> and renews every
+    /// <paramref name="renewMs"/>. Both are fixed when the registry is opened, so each test opens its
+    /// registries with the timings it needs rather than changing them afterwards.
+    /// </summary>
+    private CamusDBOptions Fence(int leaseMs, int renewMs) =>
+        Options with { FenceLeaseMs = leaseMs, FenceLeaseRenewIntervalMs = renewMs };
 
     /// <summary>
     /// A holder that crashes (its registry is disposed without releasing the fence — the renewer stops
@@ -54,15 +45,14 @@ internal sealed class TestFenceLease : BaseTest
     {
         // Short lease, and a renew interval LONGER than the lease so a disposed holder cannot keep it
         // alive — after the lease elapses the fence is genuinely free.
-        CamusConfig.FenceLeaseMs = 500;
-        CamusConfig.FenceLeaseRenewIntervalMs = 10_000;
+        CamusDBOptions fence = Fence(500, 10_000);
 
         string id = "f" + Guid.NewGuid().ToString("n");
 
-        DatabaseRegistry dead = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
+        DatabaseRegistry dead = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         Assert.IsTrue(await dead.AcquireDropIntentAsync(id), "sanity: fence acquired by the first owner");
 
-        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
+        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
             // While the first owner's lease is live, the fence is genuinely held.
@@ -91,19 +81,18 @@ internal sealed class TestFenceLease : BaseTest
     public async Task LiveHolderRenewsLease_KeepsFenceAcrossLeasePeriods()
     {
         // Renew comfortably inside the lease so the background renewer keeps refreshing it.
-        CamusConfig.FenceLeaseMs = 800;
-        CamusConfig.FenceLeaseRenewIntervalMs = 200;
+        CamusDBOptions fence = Fence(800, 200);
 
         string id = "f" + Guid.NewGuid().ToString("n");
 
-        DatabaseRegistry holder = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
-        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
+        DatabaseRegistry holder = await DatabaseRegistry.OpenAsync(TestNode!, fence);
+        DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
             Assert.IsTrue(await holder.AcquireDropIntentAsync(id), "sanity: fence acquired");
 
             // Wait well past two lease periods; the renewer must have kept the lease alive throughout.
-            await Task.Delay(CamusConfig.FenceLeaseMs * 3);
+            await Task.Delay(fence.FenceLeaseMs * 3);
 
             Assert.IsFalse(await other.AcquireDropIntentAsync(id),
                 "a renewed lease must still block another acquirer after multiple lease periods");
@@ -125,13 +114,13 @@ internal sealed class TestFenceLease : BaseTest
     [NonParallelizable]
     public async Task Release_FreesFenceImmediately_AndStopsRenewer()
     {
-        CamusConfig.FenceLeaseMs = 30_000; // long lease: only an explicit release can free it this fast
-        CamusConfig.FenceLeaseRenewIntervalMs = 1_000;
+        // Long lease: only an explicit release can free the fence this fast.
+        CamusDBOptions fence = Fence(leaseMs: 30_000, renewMs: 1_000);
 
         string id = "f" + Guid.NewGuid().ToString("n");
 
-        DatabaseRegistry a = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
-        DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, CamusConfig.Ambient);
+        DatabaseRegistry a = await DatabaseRegistry.OpenAsync(TestNode!, fence);
+        DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
             Assert.IsTrue(await a.AcquireDropIntentAsync(id));

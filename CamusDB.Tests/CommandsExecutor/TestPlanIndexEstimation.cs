@@ -257,7 +257,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
             toBound:      new CompositeColumnValue([new(ColumnType.Integer64, 6L)]),
             toInclusive:  false);
 
-        long rows = CostEstimator.EstimateRangeScanRows(node, 1_000, CamusDBConfig.Ambient, executor.Statistics, database, table);
+        long rows = CostEstimator.EstimateRangeScanRows(node, 1_000, Options, executor.Statistics, database, table);
 
         // Prefix sel = 1/10 = 10%; range sel = (2000-1000)/(2000-0) = 50%.
         // Expected ≈ 1000 * 0.10 * 0.50 = 50 rows.
@@ -324,8 +324,8 @@ public sealed class TestPlanIndexEstimation : BaseTest
             toBound:       new CompositeColumnValue([new(ColumnType.Integer64, 6L)]),
             toInclusive:   false);
 
-        long upperOpenRows = CostEstimator.EstimateRangeScanRows(upperOpen, 1_000, CamusDBConfig.Ambient, executor.Statistics, database, table);
-        long lowerOpenRows = CostEstimator.EstimateRangeScanRows(lowerOpen, 1_000, CamusDBConfig.Ambient, executor.Statistics, database, table);
+        long upperOpenRows = CostEstimator.EstimateRangeScanRows(upperOpen, 1_000, Options, executor.Statistics, database, table);
+        long lowerOpenRows = CostEstimator.EstimateRangeScanRows(lowerOpen, 1_000, Options, executor.Statistics, database, table);
 
         // Both should be ≈ 1000 * 1/10 * 50% = 50 rows.
         Assert.Greater(upperOpenRows, 20L,
@@ -384,7 +384,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
             toBound:       new CompositeColumnValue([new(ColumnType.String, "electronics")]),
             toInclusive:   true);
 
-        long rows = CostEstimator.EstimateRangeScanRows(node, 1_000, CamusDBConfig.Ambient, executor.Statistics, database, table);
+        long rows = CostEstimator.EstimateRangeScanRows(node, 1_000, Options, executor.Statistics, database, table);
 
         // Should be 1000/10 = 100, not ~1 (the degenerate range estimate).
         Assert.GreaterOrEqual(rows, 80L,
@@ -432,7 +432,7 @@ public sealed class TestPlanIndexEstimation : BaseTest
             toBound:       new CompositeColumnValue([new(ColumnType.String, "electronics")]),
             toInclusive:   true);
 
-        long rows = CostEstimator.EstimateRangeScanRows(node, 1_000, CamusDBConfig.Ambient, executor.Statistics, database, table);
+        long rows = CostEstimator.EstimateRangeScanRows(node, 1_000, Options, executor.Statistics, database, table);
 
         // Without NDV, falls through to BothBoundsSelectivity = 10% → 100 rows.
         // The important thing is it does NOT return ~1 (the broken degenerate result).

@@ -48,8 +48,8 @@ public sealed class TestSnapshotRead
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tag}/warmup", CancellationToken.None);
-        KvTransactionsManager mgr = new(node.Kahuna, CamusDBConfig.Ambient);
-        KvTableStore store = new(node.Kahuna, CamusDBConfig.Ambient, "testdb", tag);
+        KvTransactionsManager mgr = new(node.Kahuna, CamusDBOptions.Default);
+        KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, "testdb", tag);
         return (node, mgr, store);
     }
 

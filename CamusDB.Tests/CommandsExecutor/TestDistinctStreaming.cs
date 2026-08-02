@@ -538,46 +538,38 @@ public sealed class TestDistinctStreaming : BaseTest
     [Test]
     public async Task HashDistinct_MixedLayoutQueryRows_deduplicatesCorrectly()
     {
-        bool savedSpill = CamusDBConfig.SpillEnabled;
-        CamusDBConfig.SpillEnabled = true; // routes DistinctResultset → sort-based DistinctRowComparer
+        // SpillEnabled routes DistinctResultset through the sort-based DistinctRowComparer; it is
+        // passed to the distincter below in its execution context.
+        // Layout A: [name=0, score=1]; Layout B: [score=0, name=1] — reversed ordinal order.
+        RowLayout layoutA = RowLayout.ForColumns(["name", "score"]);
+        RowLayout layoutB = RowLayout.ForColumns(["score", "name"]);
 
-        try
-        {
-            // Layout A: [name=0, score=1]; Layout B: [score=0, name=1] — reversed ordinal order.
-            RowLayout layoutA = RowLayout.ForColumns(["name", "score"]);
-            RowLayout layoutB = RowLayout.ForColumns(["score", "name"]);
+        QueryResultRow MakeA(string name, long score) =>
+            new(default, new QueryRow(default, layoutA,
+                [new(ColumnType.String, name), new(ColumnType.Integer64, score)]));
+        QueryResultRow MakeB(string name, long score) =>
+            new(default, new QueryRow(default, layoutB,
+                [new(ColumnType.Integer64, score), new(ColumnType.String, name)]));
 
-            QueryResultRow MakeA(string name, long score) =>
-                new(default, new QueryRow(default, layoutA,
-                    [new(ColumnType.String, name), new(ColumnType.Integer64, score)]));
-            QueryResultRow MakeB(string name, long score) =>
-                new(default, new QueryRow(default, layoutB,
-                    [new(ColumnType.Integer64, score), new(ColumnType.String, name)]));
+        // Unsorted input; the sort-based dedup orders internally. "robot-a" (name+score equal)
+        // appears once from each layout and must collapse to a single output row.
+        List<QueryResultRow> input =
+        [
+            MakeA("robot-a", 1L),
+            MakeB("robot-a", 1L),
+            MakeA("robot-b", 2L),
+        ];
 
-            // Unsorted input; the sort-based dedup orders internally. "robot-a" (name+score equal)
-            // appears once from each layout and must collapse to a single output row.
-            List<QueryResultRow> input =
-            [
-                MakeA("robot-a", 1L),
-                MakeB("robot-a", 1L),
-                MakeA("robot-b", 2L),
-            ];
+        QueryDistincter distincter = new();
+        // DistinctResultset ignores the ticket (both branches take only the cursor).
+        List<QueryResultRow> output = await distincter
+            .DistinctResultset(null!, ToAsync(input), new QueryExecutionContext(CamusDBOptions.Default with { SpillEnabled = true }))
+            .ToListAsync();
 
-            QueryDistincter distincter = new();
-            // DistinctResultset ignores the ticket (both branches take only the cursor).
-            List<QueryResultRow> output = await distincter
-                .DistinctResultset(null!, ToAsync(input), new QueryExecutionContext(CamusDBOptions.Default with { SpillEnabled = true }))
-                .ToListAsync();
-
-            Assert.AreEqual(2, output.Count, "duplicate robot-a across layouts must collapse to one");
-            List<string> names = output.Select(static r => r.Row["name"].StrValue!).OrderBy(static n => n).ToList();
-            Assert.AreEqual("robot-a", names[0]);
-            Assert.AreEqual("robot-b", names[1]);
-        }
-        finally
-        {
-            CamusDBConfig.SpillEnabled = savedSpill;
-        }
+        Assert.AreEqual(2, output.Count, "duplicate robot-a across layouts must collapse to one");
+        List<string> names = output.Select(static r => r.Row["name"].StrValue!).OrderBy(static n => n).ToList();
+        Assert.AreEqual("robot-a", names[0]);
+        Assert.AreEqual("robot-b", names[1]);
     }
 
     private static async IAsyncEnumerable<QueryResultRow> ToAsync(IEnumerable<QueryResultRow> rows)

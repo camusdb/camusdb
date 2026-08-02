@@ -23,7 +23,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Proves the slot-backed decode path (<see cref="CamusDBConfig.SlotBackedDecode"/> == true) produces
+/// Proves the slot-backed decode path (<see cref="CamusDBOptions.SlotBackedDecode"/> == true) produces
 /// results identical to the eager path across representative query shapes. The flag ships off by default
 /// (a selectivity-dependent perf trade), so without this test the slot path would never be exercised;
 /// here every shape is run under both flag states and compared cell-for-cell.
@@ -31,14 +31,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestSlotBackedDecodeParity : SharedNodeBaseTest
 {
-    private bool _original;
-
-    [SetUp]
-    public void SaveFlag() => _original = CamusDBConfig.SlotBackedDecode;
-
-    [TearDown]
-    public void RestoreFlag() => CamusDBConfig.SlotBackedDecode = _original;
-
     private static async Task<List<object?[]>> RunAsync(
         CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
     {
@@ -60,13 +52,18 @@ public sealed class TestSlotBackedDecodeParity : SharedNodeBaseTest
             CollectionAssert.AreEqual(eager[r], slot[r], $"row {r}");
     }
 
-    private async Task AssertParity(CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
+    /// <summary>
+    /// Runs <paramref name="sql"/> through two engines that differ only in whether slot-backed decode is
+    /// enabled, and requires identical rows. Two engines rather than one: a decode path is fixed when the
+    /// engine is built, so a single engine could only ever exercise one of the two arms.
+    /// </summary>
+    private static async Task AssertParity(
+        CommandExecutor eagerEngine, DatabaseDescriptor eagerDb,
+        CommandExecutor slotEngine, DatabaseDescriptor slotDb,
+        string dbname, string sql)
     {
-        CamusDBConfig.SlotBackedDecode = false;
-        List<object?[]> eager = await RunAsync(executor, database, dbname, sql);
-
-        CamusDBConfig.SlotBackedDecode = true;
-        List<object?[]> slot = await RunAsync(executor, database, dbname, sql);
+        List<object?[]> eager = await RunAsync(eagerEngine, eagerDb, dbname, sql);
+        List<object?[]> slot  = await RunAsync(slotEngine,  slotDb,  dbname, sql);
 
         AssertRowsEqual(eager, slot);
     }
@@ -74,7 +71,8 @@ public sealed class TestSlotBackedDecodeParity : SharedNodeBaseTest
     [Test]
     public async Task SlotPath_MatchesEager_AcrossQueryShapes()
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await CreateDatabase(Options with { SlotBackedDecode = false });
 
         KvTransaction ddl = await database.Transactions.BeginAsync();
         await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddl, dbname,
@@ -96,13 +94,19 @@ public sealed class TestSlotBackedDecodeParity : SharedNodeBaseTest
                 $"INSERT INTO u (id, tid, note) VALUES ({i}, {i}, \"n{i}\")", null));
         await database.Transactions.CommitAsync(ins);
 
+        // A second engine over the same data, differing only in the decode path under test.
+        CommandExecutor slotEngine = CreateCommandExecutor(Options with { SlotBackedDecode = true });
+        DatabaseDescriptor slotDb = await slotEngine.OpenDatabase(dbname);
+
+        Task Parity(string sql) => AssertParity(executor, database, slotEngine, slotDb, dbname, sql);
+
         // Scan + projection, SELECT *, selective filter, ORDER BY, GROUP BY, DISTINCT, and a join.
-        await AssertParity(executor, database, dbname, "SELECT id, cat, val FROM t");
-        await AssertParity(executor, database, dbname, "SELECT * FROM t");
-        await AssertParity(executor, database, dbname, "SELECT id, val FROM t WHERE val < 30");
-        await AssertParity(executor, database, dbname, "SELECT id, val FROM t ORDER BY val DESC");
-        await AssertParity(executor, database, dbname, "SELECT cat, COUNT(*), SUM(val) FROM t GROUP BY cat");
-        await AssertParity(executor, database, dbname, "SELECT DISTINCT cat FROM t");
-        await AssertParity(executor, database, dbname, "SELECT t.id, t.cat, u.note FROM t JOIN u ON t.id = u.tid");
+        await Parity("SELECT id, cat, val FROM t");
+        await Parity("SELECT * FROM t");
+        await Parity("SELECT id, val FROM t WHERE val < 30");
+        await Parity("SELECT id, val FROM t ORDER BY val DESC");
+        await Parity("SELECT cat, COUNT(*), SUM(val) FROM t GROUP BY cat");
+        await Parity("SELECT DISTINCT cat FROM t");
+        await Parity("SELECT t.id, t.cat, u.note FROM t JOIN u ON t.id = u.tid");
     }
 }

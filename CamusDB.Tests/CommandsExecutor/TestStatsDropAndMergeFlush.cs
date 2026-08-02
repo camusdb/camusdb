@@ -14,6 +14,7 @@ using System.Collections.Generic;
 using NUnit.Framework;
 using Nito.AsyncEx;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
@@ -41,23 +42,17 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestStatsDropAndMergeFlush : SharedNodeBaseTest
 {
-    private int savedFlushInterval;
 
     // Disable background flush scheduling so only the explicit FlushAsync calls in these tests
     // touch the persisted blob — a delayed scheduled flush racing the external blob writes or
     // the drop would make the assertions timing-dependent.
-    [SetUp]
-    public void DisableScheduledFlushes()
-    {
-        savedFlushInterval = CamusDB.Core.CamusDBConfig.StatsFlushIntervalMs;
-        CamusDB.Core.CamusDBConfig.StatsFlushIntervalMs = -1;
-    }
-
-    [TearDown]
-    public void RestoreScheduledFlushes()
-    {
-        CamusDB.Core.CamusDBConfig.StatsFlushIntervalMs = savedFlushInterval;
-    }
+    /// <summary>
+    /// These tests assert on flushes they trigger themselves, so the background flush timer is disabled
+    /// for every engine this fixture builds — a scheduled flush landing mid-test would race the
+    /// assertions.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { StatsFlushIntervalMs = -1 };
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, TableDescriptor table)>
         SetupRobotsWithRows(int rows)

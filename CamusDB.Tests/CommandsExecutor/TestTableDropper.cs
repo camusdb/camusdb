@@ -185,102 +185,93 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
     [NonParallelizable]
     public async Task TestDropAndRecreateTableUnderKeyRangeSharding_DescriptorIsEvictedAndNewDataVisible()
     {
-        bool prevFlag = CamusConfig.KeyRangeShardingEnabled;
-        CamusConfig.KeyRangeShardingEnabled = true;
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await CreateDatabase(Options with { KeyRangeShardingEnabled = true });
 
-        try
+        // ── Phase 1: create "vehicles" and insert 5 rows ──────────────────────
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "vehicles",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("value", ColumnType.Integer64)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
+
+        for (int i = 0; i < 5; i++)
         {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-
-            // ── Phase 1: create "vehicles" and insert 5 rows ──────────────────────
-            await executor.CreateTable(new CreateTableTicket(
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.Insert(new InsertTicket(
+                txnState: tx,
                 databaseName: dbname,
                 tableName: "vehicles",
-                columns:
+                values:
                 [
-                    new ColumnInfo("id", ColumnType.Id),
-                    new ColumnInfo("value", ColumnType.Integer64)
-                ],
-                constraints:
-                [
-                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
-                        [new ColumnIndexInfo("id", OrderType.Ascending)])
-                ],
-                ifNotExists: false
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "value", new(ColumnType.Integer64, i) }
+                    }
+                ]
             ));
+            await database.Transactions.CommitAsync(tx);
+        }
 
-            for (int i = 0; i < 5; i++)
-            {
-                KvTransaction tx = await database.Transactions.BeginAsync();
-                await executor.Insert(new InsertTicket(
-                    txnState: tx,
-                    databaseName: dbname,
-                    tableName: "vehicles",
-                    values:
-                    [
-                        new()
-                        {
-                            { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                            { "value", new(ColumnType.Integer64, i) }
-                        }
-                    ]
-                ));
-                await database.Transactions.CommitAsync(tx);
-            }
+        // Confirm 5 rows visible before drop.
+        Assert.AreEqual(5, await CountRows(dbname, database, executor, "vehicles"));
 
-            // Confirm 5 rows visible before drop.
-            Assert.AreEqual(5, await CountRows(dbname, database, executor, "vehicles"));
+        // ── Phase 2: drop and recreate with a different schema ─────────────────
+        await executor.DropTable(new DropTableTicket(databaseName: dbname, tableName: "vehicles", ifExists: false));
 
-            // ── Phase 2: drop and recreate with a different schema ─────────────────
-            await executor.DropTable(new DropTableTicket(databaseName: dbname, tableName: "vehicles", ifExists: false));
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "vehicles",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("model", ColumnType.String, notNull: true)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        ));
 
-            await executor.CreateTable(new CreateTableTicket(
+        for (int i = 0; i < 3; i++)
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.Insert(new InsertTicket(
+                txnState: tx,
                 databaseName: dbname,
                 tableName: "vehicles",
-                columns:
+                values:
                 [
-                    new ColumnInfo("id", ColumnType.Id),
-                    new ColumnInfo("model", ColumnType.String, notNull: true)
-                ],
-                constraints:
-                [
-                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
-                        [new ColumnIndexInfo("id", OrderType.Ascending)])
-                ],
-                ifNotExists: false
+                    new()
+                    {
+                        { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "model", new(ColumnType.String, "Model " + i) }
+                    }
+                ]
             ));
-
-            for (int i = 0; i < 3; i++)
-            {
-                KvTransaction tx = await database.Transactions.BeginAsync();
-                await executor.Insert(new InsertTicket(
-                    txnState: tx,
-                    databaseName: dbname,
-                    tableName: "vehicles",
-                    values:
-                    [
-                        new()
-                        {
-                            { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                            { "model", new(ColumnType.String, "Model " + i) }
-                        }
-                    ]
-                ));
-                await database.Transactions.CommitAsync(tx);
-            }
-
-            // ── Phase 3: assert only 3 new rows are visible; schema is the new one ─
-            Assert.AreEqual(3, await CountRows(dbname, database, executor, "vehicles"),
-                "recreated table must see only the 3 new rows, not the 5 rows from the dropped table");
-
-            TableSchema schema = new CatalogsManager(logger).GetTableSchema(database, "vehicles");
-            Assert.AreEqual(2, schema.Columns!.Count, "new schema has 2 columns");
-            Assert.AreEqual("model", schema.Columns![1].Name, "second column is 'model', not 'value'");
+            await database.Transactions.CommitAsync(tx);
         }
-        finally
-        {
-            CamusConfig.KeyRangeShardingEnabled = prevFlag;
-        }
+
+        // ── Phase 3: assert only 3 new rows are visible; schema is the new one ─
+        Assert.AreEqual(3, await CountRows(dbname, database, executor, "vehicles"),
+            "recreated table must see only the 3 new rows, not the 5 rows from the dropped table");
+
+        TableSchema schema = new CatalogsManager(logger).GetTableSchema(database, "vehicles");
+        Assert.AreEqual(2, schema.Columns!.Count, "new schema has 2 columns");
+        Assert.AreEqual("model", schema.Columns![1].Name, "second column is 'model', not 'value'");
     }
 
     // C1 regression test: concurrent SELECTs must not conflict in key-range-sharding mode.
@@ -292,73 +283,68 @@ internal sealed class TestTableDropper : SharedNodeBaseTest
     [NonParallelizable]
     public async Task C1_ConcurrentSelectsWithReadOnlyTransactionsDoNotConflictInKeyRangeMode()
     {
-        bool prevFlag = CamusConfig.KeyRangeShardingEnabled;
-        CamusConfig.KeyRangeShardingEnabled = true;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await CreateDatabase(Options with { KeyRangeShardingEnabled = true });
 
-            await executor.CreateTable(new CreateTableTicket(
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "books",
+            columns:
+            [
+                new ColumnInfo("id",    ColumnType.Id),
+                new ColumnInfo("title", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false));
+
+        // Seed 5 rows.
+        for (int i = 0; i < 5; i++)
+        {
+            KvTransaction ins = await database.Transactions.BeginAsync();
+            await executor.Insert(new InsertTicket(
+                txnState: ins,
                 databaseName: dbname,
                 tableName: "books",
-                columns:
-                [
-                    new ColumnInfo("id",    ColumnType.Id),
-                    new ColumnInfo("title", ColumnType.String, notNull: true),
-                ],
-                constraints:
-                [
-                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
-                        [new ColumnIndexInfo("id", OrderType.Ascending)])
-                ],
-                ifNotExists: false));
-
-            // Seed 5 rows.
-            for (int i = 0; i < 5; i++)
-            {
-                KvTransaction ins = await database.Transactions.BeginAsync();
-                await executor.Insert(new InsertTicket(
-                    txnState: ins,
-                    databaseName: dbname,
-                    tableName: "books",
-                    values: new()
-                    {
-                        new()
-                        {
-                            { "id",    new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
-                            { "title", new(ColumnType.String, $"Book {i}") },
-                        },
-                    }));
-                await database.Transactions.CommitAsync(ins);
-            }
-
-            // Run 4 concurrent SELECTs using read-only transactions. Each must succeed and
-            // see 5 rows. No TransactionConflict should be thrown.
-            int concurrency = 4;
-            using SemaphoreSlim gate = new(0, concurrency);
-            List<Task<int>> tasks = [];
-
-            for (int i = 0; i < concurrency; i++)
-            {
-                tasks.Add(Task.Run(async () =>
+                values: new()
                 {
-                    // Simulate the fixed HTTP layer: read-only transaction for a pure SELECT.
-                    KvTransaction ro = database.Transactions.CreateReadOnlyTransaction();
-                    (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
-                        await executor.ExecuteSQLQuery(new(ro, dbname, "SELECT id FROM books", null));
-
-                    gate.Release(); // all tasks lined up; start scanning together
-                    await gate.WaitAsync(concurrency - 1); // wait until everyone released
-
-                    return (await cursor.ToListAsync()).Count;
+                    new()
+                    {
+                        { "id",    new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "title", new(ColumnType.String, $"Book {i}") },
+                    },
                 }));
-            }
-
-            int[] results = await Task.WhenAll(tasks);
-            Assert.That(results, Is.All.EqualTo(5),
-                "each concurrent read-only SELECT must return all 5 rows without conflicting");
+            await database.Transactions.CommitAsync(ins);
         }
-        finally { CamusConfig.KeyRangeShardingEnabled = prevFlag; }
+
+        // Run 4 concurrent SELECTs using read-only transactions. Each must succeed and
+        // see 5 rows. No TransactionConflict should be thrown.
+        int concurrency = 4;
+        using SemaphoreSlim gate = new(0, concurrency);
+        List<Task<int>> tasks = [];
+
+        for (int i = 0; i < concurrency; i++)
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                // Simulate the fixed HTTP layer: read-only transaction for a pure SELECT.
+                KvTransaction ro = database.Transactions.CreateReadOnlyTransaction();
+                (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+                    await executor.ExecuteSQLQuery(new(ro, dbname, "SELECT id FROM books", null));
+
+                gate.Release(); // all tasks lined up; start scanning together
+                await gate.WaitAsync(concurrency - 1); // wait until everyone released
+
+                return (await cursor.ToListAsync()).Count;
+            }));
+        }
+
+        int[] results = await Task.WhenAll(tasks);
+        Assert.That(results, Is.All.EqualTo(5),
+        "each concurrent read-only SELECT must return all 5 rows without conflicting");
     }
 
     private static async Task<int> CountRows(string dbname, DatabaseDescriptor database, CommandExecutor executor, string tableName)

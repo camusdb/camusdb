@@ -71,9 +71,9 @@ public sealed class TestSchemaDdlForwardController
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
 
         executor = new CommandExecutor(
-            new CommandValidator(CamusDBConfig.Ambient),
+            new CommandValidator(CamusDBOptions.Default),
             new CatalogsManager(NullLogger<ICamusDB>.Instance),
-            NullLogger<ICamusDB>.Instance, CamusDBConfig.Ambient,
+            NullLogger<ICamusDB>.Instance, CamusDBOptions.Default,
             sharedNode: node,
             isClusterMode: true
         );
@@ -106,7 +106,7 @@ public sealed class TestSchemaDdlForwardController
             executor!,
             txCoord,
             NullLogger<ICamusDB>.Instance
-        , CamusDBConfig.Ambient);
+        , CamusDBOptions.Default);
 
         byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonBody);
         DefaultHttpContext httpContext = new()

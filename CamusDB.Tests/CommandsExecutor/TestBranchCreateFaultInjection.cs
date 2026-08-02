@@ -133,7 +133,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     }
 
     private CommandExecutor BuildExecutorWith(DatabaseRegistry registry)
-        => new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+        => new(new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
                sharedNode: TestNode!, registry: registry, isClusterMode: false);
 
     private static async Task<int> CountMetaKeysAsync(DatabaseDescriptor readVia, string dbId)
@@ -172,7 +172,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         string branchName = "b_" + Guid.NewGuid().ToString("n");
 
         AbortThenUnregisterFailsKahuna fault = new(TestNode!.Kahuna, branchName);
-        await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, CamusDBConfig.Ambient);
+        await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
         CommandExecutor executor = BuildExecutorWith(faultRegistry);
 
         // Root created through the fault registry (only drop-intent reads / branch-name deletes are faulted).
@@ -223,7 +223,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     {
         ScriptedDropIntentKahuna fault = new(TestNode!.Kahuna,
             [KeyValueResponseType.MustRetry, KeyValueResponseType.WaitingForReplication, KeyValueResponseType.Get]);
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
         bool present = await registry.HasDropIntentAsync("some-source-id");
 
@@ -237,7 +237,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     public async Task HasDropIntent_DoesNotExist_ReportsAbsent()
     {
         ScriptedDropIntentKahuna fault = new(TestNode!.Kahuna, [KeyValueResponseType.DoesNotExist]);
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
         Assert.That(await registry.HasDropIntentAsync("some-source-id"), Is.False,
             "only an authoritative DoesNotExist may report no drop");
@@ -252,7 +252,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     public async Task HasDropIntent_ReadFailure_Throws_NotFalse()
     {
         ScriptedDropIntentKahuna fault = new(TestNode!.Kahuna, statuses: null, throwInstead: true);
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await registry.HasDropIntentAsync("some-source-id"));
@@ -270,7 +270,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     public async Task StandaloneDrop_Proceeds_WhenFenceAcquireThrows()
     {
         FenceAcquireThrowsKahuna fault = new(TestNode!.Kahuna);
-        await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, CamusDBConfig.Ambient, isClusterMode: false);
+        await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options, isClusterMode: false);
         CommandExecutor executor = BuildExecutorWith(faultRegistry);
 
         string name = "s_" + Guid.NewGuid().ToString("n");
@@ -290,7 +290,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         // Always MustRetry: the bounded retry loop exhausts and the result stays indeterminate.
         ScriptedDropIntentKahuna fault = new(TestNode!.Kahuna,
             Enumerable.Repeat(KeyValueResponseType.MustRetry, 50));
-        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, CamusDBConfig.Ambient);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await registry.HasDropIntentAsync("some-source-id"));

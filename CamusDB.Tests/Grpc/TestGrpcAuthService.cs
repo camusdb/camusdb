@@ -36,40 +36,45 @@ namespace CamusDB.Tests.Grpc;
 [NonParallelizable]
 internal sealed class TestGrpcAuthService : BaseTest
 {
+
+    /// <summary>
+    /// Auth on, with a known signing key and bootstrap superuser — the baseline every test here starts
+    /// from. A test needing different auth settings derives its own options and builds its own engine.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
+    {
+        AuthenticationEnabled = true,
+        AccessTokenServerKey = "test-grpc-auth-key",
+        BootstrapSuperuser = "root",
+        BootstrapSuperuserPassword = "root-password",
+    };
     private CamusAuthService auth = null!;
     private CamusSqlService sql = null!;
     private CommandExecutor serviceExecutor = null!;
 
-    private bool savedEnabled;
-    private string savedServerKey = "", savedBootstrapUser = "", savedBootstrapPassword = "";
-    private TimeSpan savedTtl;
 
     [SetUp]
-    public void SetUpGrpcAuthService()
-    {
-        serviceExecutor = new CommandExecutor(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
-            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
-        auth = new CamusAuthService(serviceExecutor, logger, CamusConfig.Ambient);
-        sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusConfig.Ambient);
-
-        savedEnabled           = CamusConfig.AuthenticationEnabled;
-        savedServerKey         = CamusConfig.AccessTokenServerKey;
-        savedBootstrapUser     = CamusConfig.BootstrapSuperuser;
-        savedBootstrapPassword = CamusConfig.BootstrapSuperuserPassword;
-        savedTtl               = CamusConfig.AccessTokenTtl;
-    }
+    public void SetUpGrpcAuthService() => BuildServices(Options);
 
     [TearDown]
     public async Task TearDownGrpcAuthService()
     {
-        CamusConfig.AuthenticationEnabled       = savedEnabled;
-        CamusConfig.AccessTokenServerKey        = savedServerKey;
-        CamusConfig.BootstrapSuperuser          = savedBootstrapUser;
-        CamusConfig.BootstrapSuperuserPassword  = savedBootstrapPassword;
-        CamusConfig.AccessTokenTtl              = savedTtl;
         try { await serviceExecutor.DisposeAsync(); } catch { }
+    }
+
+    /// <summary>
+    /// Builds the executor and the two services in front of it under <paramref name="options"/>. They
+    /// all fix their configuration when constructed, so a test that needs different auth settings
+    /// rebuilds the whole stack rather than changing anything after the fact.
+    /// </summary>
+    private void BuildServices(CamusDBOptions options)
+    {
+        serviceExecutor = new CommandExecutor(
+            new CommandValidator(options), new CatalogsManager(logger), logger, options,
+            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
+        auth = new CamusAuthService(serviceExecutor, logger, options);
+        sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), options);
     }
 
     private static TestServerCallContext Ctx(string? bearer = null)
@@ -80,22 +85,9 @@ internal sealed class TestGrpcAuthService : BaseTest
         return ctx;
     }
 
-    private async Task EnableAuthAsync()
+    private async Task EnableAuthAsync(CamusDBOptions? options = null)
     {
-        CamusConfig.AccessTokenServerKey       = "test-grpc-auth-key";
-        CamusConfig.BootstrapSuperuser         = "root";
-        CamusConfig.BootstrapSuperuserPassword = "root-password";
-        CamusConfig.AuthenticationEnabled      = true;
-
-        // An engine fixes its configuration when it is constructed, so the executor and the services
-        // in front of it are rebuilt here — after the authentication policy and signing key are in
-        // place — rather than in set-up, where they would have captured auth-disabled settings.
-        serviceExecutor = new CommandExecutor(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusConfig.Ambient,
-            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
-        auth = new CamusAuthService(serviceExecutor, logger, CamusConfig.Ambient);
-        sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusConfig.Ambient);
+        BuildServices(options ?? Options);
 
         await serviceExecutor.EnsureBootstrapSuperuserAsync();
     }
@@ -123,8 +115,7 @@ internal sealed class TestGrpcAuthService : BaseTest
     {
         // The whole point of reporting expiry is that a client stops guessing, so the figure has to
         // follow the server's TTL rather than any fixed assumption.
-        CamusConfig.AccessTokenTtl = TimeSpan.FromMinutes(3);
-        await EnableAuthAsync();
+        await EnableAuthAsync(Options with { AccessTokenTtl = TimeSpan.FromMinutes(3) });
 
         LoginReply reply = await LoginAsync("root", "root-password");
 

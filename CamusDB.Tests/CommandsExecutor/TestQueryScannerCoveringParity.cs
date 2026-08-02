@@ -102,9 +102,9 @@ public class TestQueryScannerCoveringParity : BaseTest
     }
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)>
-        SetupWithYearIndex(int rowCount = 100, bool includeNullRows = false)
+        SetupWithYearIndex(int rowCount = 100, bool includeNullRows = false, CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? Options);
 
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
@@ -721,34 +721,25 @@ public class TestQueryScannerCoveringParity : BaseTest
         // as 2+2+2+2+1. Predicate: WHERE year > 91 on 100 rows (~9% selectivity) — index forced.
         // 'enabled' is not in year_idx, so IndexOnly=false and the batch-fetch non-covering path runs.
         // rows_read > 0 confirms primary rows were fetched (not the covering path).
-        int prev = CamusDBConfig.IndexScanFetchBatchSize;
-        CamusDBConfig.IndexScanFetchBatchSize = 2;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
-                await SetupWithYearIndex(rowCount: 100);
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await SetupWithYearIndex(rowCount: 100, options: Options with { IndexScanFetchBatchSize = 2 });
 
-            List<QueryResultRow> baseline = await RunSql(executor, database, dbname,
-                "SELECT * FROM robots WHERE year > 91");
-            List<QueryResultRow> batchFetched = await RunSql(executor, database, dbname,
-                "SELECT enabled FROM robots WHERE year > 91");
+        List<QueryResultRow> baseline = await RunSql(executor, database, dbname,
+            "SELECT * FROM robots WHERE year > 91");
+        List<QueryResultRow> batchFetched = await RunSql(executor, database, dbname,
+            "SELECT enabled FROM robots WHERE year > 91");
 
-            Assert.AreEqual(9, baseline.Count, "years 92..100 → 9 rows");
-            Assert.AreEqual(baseline.Count, batchFetched.Count,
-                "batch-fetched non-covered result must have the same row count as SELECT *");
-            Assert.IsTrue(batchFetched.All(r => r.Row.ContainsKey("enabled")),
-                "every batch-fetched row must contain the projected 'enabled' column");
+        Assert.AreEqual(9, baseline.Count, "years 92..100 → 9 rows");
+        Assert.AreEqual(baseline.Count, batchFetched.Count,
+            "batch-fetched non-covered result must have the same row count as SELECT *");
+        Assert.IsTrue(batchFetched.All(r => r.Row.ContainsKey("enabled")),
+            "every batch-fetched row must contain the projected 'enabled' column");
 
-            long? rowsRead = await ExplainAnalyzeScanRowsRead(executor, database, dbname,
-                "SELECT enabled FROM robots WHERE year > 91");
-            Assert.IsNotNull(rowsRead, "cost model must have chosen an index scan (not a table scan)");
-            Assert.Greater(rowsRead!.Value, 0L,
-                "non-covered batch scan must fetch primary rows (rows_read > 0)");
-        }
-        finally
-        {
-            CamusDBConfig.IndexScanFetchBatchSize = prev;
-        }
+        long? rowsRead = await ExplainAnalyzeScanRowsRead(executor, database, dbname,
+            "SELECT enabled FROM robots WHERE year > 91");
+        Assert.IsNotNull(rowsRead, "cost model must have chosen an index scan (not a table scan)");
+        Assert.Greater(rowsRead!.Value, 0L,
+            "non-covered batch scan must fetch primary rows (rows_read > 0)");
     }
 
     [Test]
@@ -763,33 +754,25 @@ public class TestQueryScannerCoveringParity : BaseTest
         // (row 100 has NULL year and does not satisfy year > 95). That is 4 rows (~4%).
         // The cost model picks the index; 4 rows with batch size 2 → 2 full pages.
         // 'enabled' is not in year_idx → non-covering batch-fetch path.
-        int prev = CamusDBConfig.IndexScanFetchBatchSize;
-        CamusDBConfig.IndexScanFetchBatchSize = 2;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
-                await SetupWithYearIndex(rowCount: 100, includeNullRows: true);
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await SetupWithYearIndex(rowCount: 100, includeNullRows: true,
+                                     options: Options with { IndexScanFetchBatchSize = 2 });
 
-            List<QueryResultRow> baseline = await RunSql(executor, database, dbname,
-                "SELECT * FROM robots WHERE year > 95");
-            List<QueryResultRow> batchFetched = await RunSql(executor, database, dbname,
-                "SELECT enabled FROM robots WHERE year > 95");
+        List<QueryResultRow> baseline = await RunSql(executor, database, dbname,
+            "SELECT * FROM robots WHERE year > 95");
+        List<QueryResultRow> batchFetched = await RunSql(executor, database, dbname,
+            "SELECT enabled FROM robots WHERE year > 95");
 
-            // Rows 96–99 are non-null; row 100 has NULL year and is excluded.
-            Assert.AreEqual(4, baseline.Count,
-                "baseline must return only the 4 non-null rows with year > 95");
-            Assert.AreEqual(baseline.Count, batchFetched.Count,
-                "batch-fetched path must exclude null-year rows identically to SELECT *");
+        // Rows 96–99 are non-null; row 100 has NULL year and is excluded.
+        Assert.AreEqual(4, baseline.Count,
+            "baseline must return only the 4 non-null rows with year > 95");
+        Assert.AreEqual(baseline.Count, batchFetched.Count,
+            "batch-fetched path must exclude null-year rows identically to SELECT *");
 
-            long? rowsRead = await ExplainAnalyzeScanRowsRead(executor, database, dbname,
-                "SELECT enabled FROM robots WHERE year > 95");
-            Assert.IsNotNull(rowsRead, "cost model must have chosen an index scan (not a table scan)");
-            Assert.Greater(rowsRead!.Value, 0L,
-                "non-covered batch scan must fetch primary rows (rows_read > 0)");
-        }
-        finally
-        {
-            CamusDBConfig.IndexScanFetchBatchSize = prev;
-        }
+        long? rowsRead = await ExplainAnalyzeScanRowsRead(executor, database, dbname,
+            "SELECT enabled FROM robots WHERE year > 95");
+        Assert.IsNotNull(rowsRead, "cost model must have chosen an index scan (not a table scan)");
+        Assert.Greater(rowsRead!.Value, 0L,
+            "non-covered batch scan must fetch primary rows (rows_read > 0)");
     }
 }

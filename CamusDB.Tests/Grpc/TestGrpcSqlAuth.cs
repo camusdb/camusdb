@@ -34,37 +34,37 @@ namespace CamusDB.Tests.Grpc;
 [NonParallelizable]
 internal sealed class TestGrpcSqlAuth : BaseTest
 {
+
+    /// <summary>
+    /// Auth on, with a known signing key and bootstrap superuser — the baseline every test here starts
+    /// from. A test needing different auth settings derives its own options and builds its own engine.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
+    {
+        AuthenticationEnabled = true,
+        AccessTokenServerKey = "test-grpc-key",
+        BootstrapSuperuser = "root",
+        BootstrapSuperuserPassword = "root-password",
+    };
     private CamusSqlService service = null!;
     private CommandExecutor serviceExecutor = null!;
 
-    private bool savedEnabled;
-    private string savedServerKey = "";
-    private string savedBootstrapUser = "";
-    private string savedBootstrapPassword = "";
 
     [SetUp]
     public void SetUpGrpcAuth()
     {
-        CommandValidator validator = new(CamusDBConfig.Ambient);
+        CommandValidator validator = new(Options);
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
+        serviceExecutor = new(validator, catalogsManager, logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
 
-        savedEnabled = CamusConfig.AuthenticationEnabled;
-        savedServerKey = CamusConfig.AccessTokenServerKey;
-        savedBootstrapUser = CamusConfig.BootstrapSuperuser;
-        savedBootstrapPassword = CamusConfig.BootstrapSuperuserPassword;
     }
 
     [TearDown]
     public async Task TearDownGrpcAuth()
     {
-        CamusConfig.AuthenticationEnabled = savedEnabled;
-        CamusConfig.AccessTokenServerKey = savedServerKey;
-        CamusConfig.BootstrapSuperuser = savedBootstrapUser;
-        CamusConfig.BootstrapSuperuserPassword = savedBootstrapPassword;
         try { await serviceExecutor.DisposeAsync(); } catch { }
     }
 
@@ -82,19 +82,14 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     // table already created through the gRPC surface as the superuser.
     private async Task<(string db, string rootToken)> SetupAuthenticated()
     {
-        CamusConfig.AccessTokenServerKey = "test-grpc-key";
-        CamusConfig.BootstrapSuperuser = "root";
-        CamusConfig.BootstrapSuperuserPassword = "root-password";
-        CamusConfig.AuthenticationEnabled = true;
-
         // An engine fixes its configuration when it is constructed, so the executor and the service in
         // front of it are rebuilt here — after the authentication policy and signing key are in place —
         // rather than in set-up, where they would have captured auth-disabled settings.
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
 
         await serviceExecutor.EnsureBootstrapSuperuserAsync();
         string rootToken = (await serviceExecutor.LoginAsync("root", "root-password")).Token;
@@ -109,8 +104,6 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     [Test]
     public async Task AuthDisabled_NoTokenWorks()
     {
-        CamusConfig.AuthenticationEnabled = false;
-
         string db = "grpcauthdb" + Guid.NewGuid().ToString("n");
         await service.ExecuteDdl(Req("", $"CREATE DATABASE {db}"), Ctx());
         TrackDatabase(db, serviceExecutor);

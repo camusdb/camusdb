@@ -93,8 +93,8 @@ public sealed class HttpTransactionCoordinator
     /// <summary>
     /// Starts a new transaction with the requested isolation level, mode, and locking strategy.
     /// When any argument is <see langword="null"/> the server default applies:
-    /// <see cref="CamusDBConfig.DefaultIsolationLevel"/>, <see cref="CamusTransactionMode.ReadWrite"/>,
-    /// and <see cref="CamusDBConfig.DefaultTransactionLocking"/> respectively.
+    /// <see cref="CamusDBOptions.DefaultIsolationLevel"/>, <see cref="CamusTransactionMode.ReadWrite"/>,
+    /// and <see cref="CamusDBOptions.DefaultTransactionLocking"/> respectively.
     ///
     /// <para><paramref name="deferStart"/> requests deferred Kahuna-session start: the transaction is
     /// begun without opening a coordinator session so a following <c>SET TRANSACTION LOCKING</c> can

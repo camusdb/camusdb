@@ -29,7 +29,7 @@ public sealed class TestBackupValidators
     [Test]
     public void TakeBackup_IncrementalRequiresParent()
     {
-        TakeBackupValidator validator = new(CamusDBConfig.Ambient);
+        TakeBackupValidator validator = new(CamusDBOptions.Default);
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
             () => validator.Validate(new TakeBackupTicket(BackupKind.Incremental, parentBackupId: null)))!;
@@ -42,7 +42,7 @@ public sealed class TestBackupValidators
     [Test]
     public void TakeBackup_FullMustNotCarryParent()
     {
-        TakeBackupValidator validator = new(CamusDBConfig.Ambient);
+        TakeBackupValidator validator = new(CamusDBOptions.Default);
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
             () => validator.Validate(new TakeBackupTicket(BackupKind.Full, Guid.NewGuid())))!;
@@ -55,7 +55,7 @@ public sealed class TestBackupValidators
     [Test]
     public void Restore_RejectsRelativeOrEmptyTargetDir()
     {
-        RestoreBackupValidator validator = new(CamusDBConfig.Ambient);
+        RestoreBackupValidator validator = new(CamusDBOptions.Default);
 
         Assert.Throws<CamusDBException>(
             () => validator.Validate(new RestoreBackupTicket(Guid.NewGuid(), "", 0)));
@@ -87,7 +87,7 @@ public sealed class TestBackupValidators
     [Test]
     public void Restore_RejectsNegativeTargetTime_ButDelegatesCoverageToKahuna()
     {
-        RestoreBackupValidator validator = new(CamusDBConfig.Ambient);
+        RestoreBackupValidator validator = new(CamusDBOptions.Default);
 
         string dir = Path.Combine(Path.GetTempPath(), "camusdb-restore-window", Guid.NewGuid().ToString("N"));
 

@@ -79,12 +79,22 @@ public sealed class TestKvTableStore
 
     // ---- node factory -----------------------------------------------------
 
-    private static async Task<(EmbeddedKahuna node, KvTableStore store)> CreateStoreAsync(string tableId)
+    /// <summary>Baseline configuration for a store under test — no engine is involved here.</summary>
+    private static CamusDBOptions StoreOptions => CamusDBOptions.Default;
+
+    /// <summary>
+    /// Key-range sharding on. Range locks exist only in this mode; with a single partition
+    /// <c>AcquireRowRangeLockAsync</c> is a no-op, so every predicate-lock assertion below needs it.
+    /// </summary>
+    private static CamusDBOptions ShardedOptions => StoreOptions with { KeyRangeShardingEnabled = true };
+
+    private static async Task<(EmbeddedKahuna node, KvTableStore store)> CreateStoreAsync(
+        string tableId, CamusDBOptions? options = null)
     {
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
-        return (node, new KvTableStore(node.Kahuna, CamusDBConfig.Ambient, "testdb", tableId));
+        return (node, new KvTableStore(node.Kahuna, options ?? StoreOptions, "testdb", tableId));
     }
 
     // ---- tests ------------------------------------------------------------
@@ -347,32 +357,26 @@ public sealed class TestKvTableStore
     [NonParallelizable]
     public async Task AcquireRowRangeLock_SharedScansCoexist_AndReleasedOnCommit()
     {
-        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
-        CamusDBConfig.KeyRangeShardingEnabled = true;
-        try
-        {
-            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("trangelock");
-            await using EmbeddedKahuna __ = node;
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("trangelock", ShardedOptions);
+        await using EmbeddedKahuna __ = node;
 
-            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
+        KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
 
-            KvTransaction tx1 = await transactions.BeginAsync();
-            await store.AcquireRowRangeLockAsync(tx1);
-            Assert.AreEqual(1, tx1.GetAcquiredRangeLocks().Count, "tx1 must track its range lock");
+        KvTransaction tx1 = await transactions.BeginAsync();
+        await store.AcquireRowRangeLockAsync(tx1);
+        Assert.AreEqual(1, tx1.GetAcquiredRangeLocks().Count, "tx1 must track its range lock");
 
-            // A second concurrent scan over the same row range must COEXIST with tx1's shared lock.
-            KvTransaction tx2 = await transactions.BeginAsync();
-            Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
-                "two shared scan locks over the same row range must coexist");
-            Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count, "tx2 must track its own shared range lock");
+        // A second concurrent scan over the same row range must COEXIST with tx1's shared lock.
+        KvTransaction tx2 = await transactions.BeginAsync();
+        Assert.DoesNotThrowAsync(async () => await store.AcquireRowRangeLockAsync(tx2),
+            "two shared scan locks over the same row range must coexist");
+        Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count, "tx2 must track its own shared range lock");
 
-            // Committing tx1 releases its range lock; tx2's is unaffected.
-            await transactions.CommitAsync(tx1);
-            Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
+        // Committing tx1 releases its range lock; tx2's is unaffected.
+        await transactions.CommitAsync(tx1);
+        Assert.AreEqual(1, tx2.GetAcquiredRangeLocks().Count);
 
-            await transactions.CommitAsync(tx2);
-        }
-        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+        await transactions.CommitAsync(tx2);
     }
 
     /// <summary>
@@ -409,38 +413,32 @@ public sealed class TestKvTableStore
     [NonParallelizable]
     public async Task RangeLock_FinalizedByCoordinator_NoClientSideRelease()
     {
-        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
-        CamusDBConfig.KeyRangeShardingEnabled = true;
-        try
-        {
-            EmbeddedKahuna node = new();
-            await node.StartAsync(CancellationToken.None);
-            await node.WaitForLeaderAsync("norelease/warmup", CancellationToken.None);
-            await using EmbeddedKahuna __ = node;
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await node.WaitForLeaderAsync("norelease/warmup", CancellationToken.None);
+        await using EmbeddedKahuna __ = node;
 
-            ReleaseCountingKahuna counting = new(node.Kahuna);
-            KvTableStore store = new(counting, CamusDBConfig.Ambient, "testdb", "norelease");
-            KvTransactionsManager transactions = new(counting, CamusDBConfig.Ambient);
+        ReleaseCountingKahuna counting = new(node.Kahuna);
+        KvTableStore store = new(counting, ShardedOptions, "testdb", "norelease");
+        KvTransactionsManager transactions = new(counting, ShardedOptions);
 
-            // Commit path.
-            KvTransaction committed = await transactions.BeginAsync(
-                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-            await store.AcquireRowRangeLockAsync(committed, exclusive: true);
-            Assert.AreEqual(1, committed.GetAcquiredRangeLocks().Count, "the range lock must be tracked for coverage");
-            await transactions.CommitAsync(committed);
+        // Commit path.
+        KvTransaction committed = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        await store.AcquireRowRangeLockAsync(committed, exclusive: true);
+        Assert.AreEqual(1, committed.GetAcquiredRangeLocks().Count, "the range lock must be tracked for coverage");
+        await transactions.CommitAsync(committed);
 
-            // Rollback path.
-            KvTransaction rolledBack = await transactions.BeginAsync(
-                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
-            await store.AcquireRowRangeLockAsync(rolledBack, exclusive: true);
-            await transactions.RollbackAsync(rolledBack);
+        // Rollback path.
+        KvTransaction rolledBack = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        await store.AcquireRowRangeLockAsync(rolledBack, exclusive: true);
+        await transactions.RollbackAsync(rolledBack);
 
-            Assert.AreEqual(0, counting.RangeReleaseCalls,
-                "the client must not issue any range-lock release; the coordinator releases the folded lock at finalize");
-            Assert.AreEqual(0, counting.PrefixReleaseCalls,
-                "the client must not issue any prefix-lock release");
-        }
-        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+        Assert.AreEqual(0, counting.RangeReleaseCalls,
+            "the client must not issue any range-lock release; the coordinator releases the folded lock at finalize");
+        Assert.AreEqual(0, counting.PrefixReleaseCalls,
+            "the client must not issue any prefix-lock release");
     }
 
     // "Optimistic" only skips the exclusive WRITE lock. Under Serializable, reads still take shared
@@ -452,41 +450,35 @@ public sealed class TestKvTableStore
     [NonParallelizable]
     public async Task SerializableOptimistic_StillTakesReadPredicateLock_Hybrid()
     {
-        bool prev = CamusDBConfig.KeyRangeShardingEnabled;
-        CamusDBConfig.KeyRangeShardingEnabled = true;
-        try
-        {
-            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("hybridopt");
-            await using EmbeddedKahuna __ = node;
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("hybridopt", ShardedOptions);
+        await using EmbeddedKahuna __ = node;
 
-            KvTransactionsManager transactions = new(node.Kahuna, CamusDBConfig.Ambient);
+        KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
 
-            ObjectIdValue rowId = new(9, 9, 9);
-            KvTransaction seed = await transactions.BeginAsync();
-            await store.InsertRow(seed, rowId, [1]);
-            await transactions.CommitAsync(seed);
+        ObjectIdValue rowId = new(9, 9, 9);
+        KvTransaction seed = await transactions.BeginAsync();
+        await store.InsertRow(seed, rowId, [1]);
+        await transactions.CommitAsync(seed);
 
-            // Serializable + Optimistic: the write lock is skipped, but the READ still takes a shared
-            // predicate lock — the hybrid.
-            KvTransaction hybrid = await transactions.BeginAsync(
-                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite,
-                locking: KeyValueTransactionLocking.Optimistic);
-            Assert.That(hybrid.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic), "the tx must be optimistic");
-            await store.GetRow(hybrid, rowId);
-            Assert.Greater(hybrid.GetAcquiredRangeLocks().Count, 0,
-                "Serializable+Optimistic must still take a shared read predicate lock (hybrid, not lock-free)");
-            await transactions.RollbackAsync(hybrid);
+        // Serializable + Optimistic: the write lock is skipped, but the READ still takes a shared
+        // predicate lock — the hybrid.
+        KvTransaction hybrid = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite,
+            locking: KeyValueTransactionLocking.Optimistic);
+        Assert.That(hybrid.Locking, Is.EqualTo(KeyValueTransactionLocking.Optimistic), "the tx must be optimistic");
+        await store.GetRow(hybrid, rowId);
+        Assert.Greater(hybrid.GetAcquiredRangeLocks().Count, 0,
+            "Serializable+Optimistic must still take a shared read predicate lock (hybrid, not lock-free)");
+        await transactions.RollbackAsync(hybrid);
 
-            // Read Committed + Optimistic: fully lock-free — no predicate lock on the read.
-            KvTransaction lockFree = await transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-                locking: KeyValueTransactionLocking.Optimistic);
-            await store.GetRow(lockFree, rowId);
-            Assert.AreEqual(0, lockFree.GetAcquiredRangeLocks().Count,
-                "ReadCommitted+Optimistic must take no read predicate lock (fully lock-free)");
-            await transactions.RollbackAsync(lockFree);
-        }
-        finally { CamusDBConfig.KeyRangeShardingEnabled = prev; }
+        // Read Committed + Optimistic: fully lock-free — no predicate lock on the read.
+        KvTransaction lockFree = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            locking: KeyValueTransactionLocking.Optimistic);
+        await store.GetRow(lockFree, rowId);
+        Assert.AreEqual(0, lockFree.GetAcquiredRangeLocks().Count,
+            "ReadCommitted+Optimistic must take no read predicate lock (fully lock-free)");
+        await transactions.RollbackAsync(lockFree);
     }
 
     // ---- GetRowsBatch tests -----------------------------------------------

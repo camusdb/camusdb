@@ -78,7 +78,7 @@ public sealed class TestOptimisticLockAudit
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         CountingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, CamusDBConfig.Ambient, "lockaudit", tableId));
+        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "lockaudit", tableId));
     }
 
     private static async Task<KvTransaction> BeginAsync(IKahuna kahuna, KeyValueTransactionLocking locking, CamusIsolationLevel level)

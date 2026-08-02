@@ -40,18 +40,12 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestPlanCostBasedAccessPath : BaseTest
 {
-    [SetUp]
-    public void EnableCostBasedAccessPath()
-    {
-        // Gate the cost-based branch via its feature flag; this class tests that flag's behaviour.
-        CamusDBConfig.CostBasedAccessPathEnabled = true;
-    }
-
-    [TearDown]
-    public void RestoreCostBasedAccessPath()
-    {
-        CamusDBConfig.CostBasedAccessPathEnabled = false;
-    }
+    /// <summary>
+    /// This fixture exists to test the cost-based access-path branch, so every engine it builds has that
+    /// branch enabled — it is off by default.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { CostBasedAccessPathEnabled = true };
 
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers

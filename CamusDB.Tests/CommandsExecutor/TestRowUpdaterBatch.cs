@@ -36,17 +36,24 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
 {
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupDatabase()
-        => await CreateDatabase();
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupDatabase(
+        CamusDBOptions? options = null)
+        => await CreateDatabase(options ?? Options);
+
+    /// <summary>
+    /// Forces the batched write path to chunk after <paramref name="rows"/> rows, so a modest number of
+    /// rows spans several chunks and the chunk boundary itself is what the test exercises.
+    /// </summary>
+    private CamusDBOptions ChunkEvery(int rows) => Options with { ForceSpillThresholdRows = rows };
 
     // -----------------------------------------------------------------------
     // Table helpers
     // -----------------------------------------------------------------------
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids)>
-        SetupSimpleTable(int rowCount = 10)
+        SetupSimpleTable(int rowCount = 10, CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase(options);
 
         KvTransaction tx = await database.Transactions.BeginAsync();
 
@@ -90,9 +97,9 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
     }
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids)>
-        SetupTableWithUniqueIndex(int rowCount = 10)
+        SetupTableWithUniqueIndex(int rowCount = 10, CamusDBOptions? options = null)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase(options);
 
         KvTransaction tx = await database.Transactions.BeginAsync();
 
@@ -241,39 +248,30 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
         // Drive the chunk boundary by forcing a small spill threshold so 20 rows span
         // multiple chunks. Verifies that chunking produces correct results with no
         // missed or double-applied mutations.
-        int savedThreshold = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 5;
-        try
-        {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids) =
-                await SetupSimpleTable(rowCount: 20);
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids) =
+            await SetupSimpleTable(rowCount: 20, options: ChunkEvery(5));
 
-            KvTransaction tx = await database.Transactions.BeginAsync();
+        KvTransaction tx = await database.Transactions.BeginAsync();
 
-            UpdateTicket ticket = new(
-                txnState: tx,
-                databaseName: dbname,
-                tableName: "items",
-                plainValues: new() { { "score", new(ColumnType.Integer64, 999) } },
-                exprValues: null,
-                where: null,
-                filters: null,
-                parameters: null);
+        UpdateTicket ticket = new(
+            txnState: tx,
+            databaseName: dbname,
+            tableName: "items",
+            plainValues: new() { { "score", new(ColumnType.Integer64, 999) } },
+            exprValues: null,
+            where: null,
+            filters: null,
+            parameters: null);
 
-            UpdateResult result = await executor.Update(ticket);
-            await database.Transactions.CommitAsync(tx);
+        UpdateResult result = await executor.Update(ticket);
+        await database.Transactions.CommitAsync(tx);
 
-            Assert.AreEqual(20, result.UpdatedRows);
+        Assert.AreEqual(20, result.UpdatedRows);
 
-            List<QueryResultRow> rows = await QueryAllAsync(executor, database, dbname, "items");
-            Assert.AreEqual(20, rows.Count);
-            Assert.IsTrue(rows.All(r => r.Row["score"].LongValue == 999L),
-                "Every row should have score=999 after chunked update");
-        }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = savedThreshold == 0 ? null : savedThreshold;
-        }
+        List<QueryResultRow> rows = await QueryAllAsync(executor, database, dbname, "items");
+        Assert.AreEqual(20, rows.Count);
+        Assert.IsTrue(rows.All(r => r.Row["score"].LongValue == 999L),
+            "Every row should have score=999 after chunked update");
     }
 
     [Test]
@@ -430,44 +428,35 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
         // chunk — every statement matches exactly one row — but guards that repeated single-row
         // unique-index retargeting leaves a consistent index. Genuine multi-row-per-chunk unique
         // coverage lives in BatchUpdate_MultiRowChunk_IntUniqueIndex_DistinctExprValues below.
-        int savedThreshold = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        try
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids) =
+            await SetupTableWithUniqueIndex(rowCount: 12, options: ChunkEvery(3));
+
+        // Update each row to a new unique code prefix "NEW-{i}" — all distinct, no collisions.
+        for (int i = 0; i < ids.Count; i++)
         {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor, List<string> ids) =
-                await SetupTableWithUniqueIndex(rowCount: 12);
+            KvTransaction tx = await database.Transactions.BeginAsync();
 
-            // Update each row to a new unique code prefix "NEW-{i}" — all distinct, no collisions.
-            for (int i = 0; i < ids.Count; i++)
-            {
-                KvTransaction tx = await database.Transactions.BeginAsync();
+            UpdateTicket ticket = new(
+                txnState: tx,
+                databaseName: dbname,
+                tableName: "items",
+                plainValues: new() { { "code", new(ColumnType.String, "NEW-" + i) } },
+                exprValues: null,
+                where: null,
+                filters: new() { new("id", "=", new(ColumnType.Id, ids[i])) },
+                parameters: null);
 
-                UpdateTicket ticket = new(
-                    txnState: tx,
-                    databaseName: dbname,
-                    tableName: "items",
-                    plainValues: new() { { "code", new(ColumnType.String, "NEW-" + i) } },
-                    exprValues: null,
-                    where: null,
-                    filters: new() { new("id", "=", new(ColumnType.Id, ids[i])) },
-                    parameters: null);
-
-                await executor.Update(ticket);
-                await database.Transactions.CommitAsync(tx);
-            }
-
-            // Verify all original codes are gone and all new codes are present.
-            List<QueryResultRow> rows = await QueryAllAsync(executor, database, dbname, "items");
-            Assert.AreEqual(12, rows.Count);
-
-            HashSet<string?> codes = rows.Select(r => r.Row["code"].StrValue).ToHashSet();
-            for (int i = 0; i < 12; i++)
-                Assert.IsTrue(codes.Contains("NEW-" + i), $"Expected 'NEW-{i}' to be present");
+            await executor.Update(ticket);
+            await database.Transactions.CommitAsync(tx);
         }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = savedThreshold == 0 ? null : savedThreshold;
-        }
+
+        // Verify all original codes are gone and all new codes are present.
+        List<QueryResultRow> rows = await QueryAllAsync(executor, database, dbname, "items");
+        Assert.AreEqual(12, rows.Count);
+
+        HashSet<string?> codes = rows.Select(r => r.Row["code"].StrValue).ToHashSet();
+        for (int i = 0; i < 12; i++)
+            Assert.IsTrue(codes.Contains("NEW-" + i), $"Expected 'NEW-{i}' to be present");
     }
 
     // -----------------------------------------------------------------------
@@ -512,31 +501,22 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
         // 12 rows through a unique index in ONE statement, forced into 4 chunks of 3. Each row gets
         // a distinct new value (val + 1000) that does not overlap any existing value, so every chunk
         // performs multiple unique delete-old/set-new mutations concurrently.
-        int savedThreshold = CamusDBConfig.ForceSpillThresholdRows ?? 0;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        try
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(ChunkEvery(3));
+        await CreateIntUniqueTableAsync(executor, database, dbname, rowCount: 12);
+
+        KvTransaction upTx = await database.Transactions.BeginAsync();
+        ExecuteNonSQLResult res = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            upTx, dbname, "UPDATE items SET val = val + 1000 WHERE val >= 0", null));
+        await database.Transactions.CommitAsync(upTx);
+
+        Assert.AreEqual(12, res.ModifiedRows);
+
+        for (int i = 0; i < 12; i++)
         {
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-            await CreateIntUniqueTableAsync(executor, database, dbname, rowCount: 12);
-
-            KvTransaction upTx = await database.Transactions.BeginAsync();
-            ExecuteNonSQLResult res = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
-                upTx, dbname, "UPDATE items SET val = val + 1000 WHERE val >= 0", null));
-            await database.Transactions.CommitAsync(upTx);
-
-            Assert.AreEqual(12, res.ModifiedRows);
-
-            for (int i = 0; i < 12; i++)
-            {
-                Assert.AreEqual(1, (await SelectByValAsync(executor, database, dbname, 1000 + i)).Count,
-                    $"new unique value {1000 + i} must be findable via the index exactly once");
-                Assert.AreEqual(0, (await SelectByValAsync(executor, database, dbname, i)).Count,
-                    $"old unique value {i} must be gone from the index");
-            }
-        }
-        finally
-        {
-            CamusDBConfig.ForceSpillThresholdRows = savedThreshold == 0 ? null : savedThreshold;
+            Assert.AreEqual(1, (await SelectByValAsync(executor, database, dbname, 1000 + i)).Count,
+                $"new unique value {1000 + i} must be findable via the index exactly once");
+            Assert.AreEqual(0, (await SelectByValAsync(executor, database, dbname, i)).Count,
+                $"old unique value {i} must be gone from the index");
         }
     }
 
@@ -574,48 +554,38 @@ public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
         // no secondary index, so each row is exactly one mutation — 25 rows against a limit of 10 must
         // trip the guard. ReserveMutations is checked before the writes in the chunk, so the limit is
         // enforced rather than silently exceeded.
-        int savedLimit = CamusDBConfig.MaxMutationsPerTransaction;
-        try
+        // The setup inserts below are one row per transaction, so they stay well under the limit;
+        // only the batched UPDATE reserves enough to trip the guard.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor)
+            = await CreateDatabase(Options with { MaxMutationsPerTransaction = 10 });
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, dbname,
+            "CREATE TABLE items (id OBJECT_ID PRIMARY KEY, val INT64)", null));
+
+        // One row per insert transaction, so seeding stays far below the lowered limit and only the
+        // batched UPDATE below can trip it.
+        for (int i = 0; i < 25; i++)
         {
-            // The limit is fixed when the engine is built, so it is lowered before the database is
-            // created rather than afterwards. The setup inserts below are one row per transaction, so
-            // they stay well under it; only the batched UPDATE reserves enough to trip the guard.
-            CamusDBConfig.MaxMutationsPerTransaction = 10;
-
-            (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, dbname,
-                "CREATE TABLE items (id OBJECT_ID PRIMARY KEY, val INT64)", null));
-
-            // Seed under the default (generous) limit — one row per insert transaction so the seed
-            // itself never trips the limit we are about to lower.
-            for (int i = 0; i < 25; i++)
-            {
-                KvTransaction insTx = await database.Transactions.BeginAsync();
-                await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(insTx, dbname,
-                    $"INSERT INTO items (id, val) VALUES (gen_id(), {i})", null));
-                await database.Transactions.CommitAsync(insTx);
-            }
-
-            KvTransaction upTx = await database.Transactions.BeginAsync();
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
-                    upTx, dbname, "UPDATE items SET val = val + 1000 WHERE val >= 0", null)));
-            await database.Transactions.RollbackIfNotCompletedAsync(upTx);
-
-            Assert.AreEqual(CamusDBErrorCodes.TransactionMutationLimitExceeded, ex?.Code,
-                "Exceeding MaxMutationsPerTransaction must throw TransactionMutationLimitExceeded");
-
-            // After rollback the original values must be intact — the failed update left no partial state.
-            for (int i = 0; i < 25; i++)
-                Assert.AreEqual(1, (await SelectByValAsync(executor, database, dbname, i)).Count,
-                    $"original value {i} must survive the rolled-back over-limit update");
-            for (int i = 0; i < 25; i++)
-                Assert.AreEqual(0, (await SelectByValAsync(executor, database, dbname, 1000 + i)).Count,
-                    $"no row should carry the would-be updated value {1000 + i}");
+            KvTransaction insTx = await database.Transactions.BeginAsync();
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(insTx, dbname,
+                $"INSERT INTO items (id, val) VALUES (gen_id(), {i})", null));
+            await database.Transactions.CommitAsync(insTx);
         }
-        finally
-        {
-            CamusDBConfig.MaxMutationsPerTransaction = savedLimit;
-        }
+
+        KvTransaction upTx = await database.Transactions.BeginAsync();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                upTx, dbname, "UPDATE items SET val = val + 1000 WHERE val >= 0", null)));
+        await database.Transactions.RollbackIfNotCompletedAsync(upTx);
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMutationLimitExceeded, ex?.Code,
+            "Exceeding MaxMutationsPerTransaction must throw TransactionMutationLimitExceeded");
+
+        // After rollback the original values must be intact — the failed update left no partial state.
+        for (int i = 0; i < 25; i++)
+            Assert.AreEqual(1, (await SelectByValAsync(executor, database, dbname, i)).Count,
+                $"original value {i} must survive the rolled-back over-limit update");
+        for (int i = 0; i < 25; i++)
+            Assert.AreEqual(0, (await SelectByValAsync(executor, database, dbname, 1000 + i)).Count,
+                $"no row should carry the would-be updated value {1000 + i}");
     }
 }

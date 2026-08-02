@@ -134,7 +134,7 @@ public class AllocationPrimitivesBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_wideSchema, TxId, RowId, _wideRows[i],
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 _narrowProjection, decodeState: cache).ConfigureAwait(false);
         return last!;
     }
@@ -146,7 +146,7 @@ public class AllocationPrimitivesBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_nullBoolSchema, TxId, RowId, _nullBoolRows[i],
-            CamusDBConfig.Ambient,
+            CamusDBOptions.Default,
                 decodeState: cache).ConfigureAwait(false);
         return last!;
     }

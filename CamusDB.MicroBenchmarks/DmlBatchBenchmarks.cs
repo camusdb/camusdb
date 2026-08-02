@@ -51,9 +51,9 @@ internal static class DmlBenchHarness
         await node.WaitForLeaderAsync("dml-bench-warmup", CancellationToken.None);
         await node.FlushAsync();
 
-        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
+        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, CamusDBOptions.Default);
 
-        CommandExecutor executor = new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(Logger), Logger, CamusDBConfig.Ambient,
+        CommandExecutor executor = new(new CommandValidator(CamusDBOptions.Default), new CatalogsManager(Logger), Logger, CamusDBOptions.Default,
             sharedNode: node, registry: registry, isClusterMode: true);
 
         string dbName = Guid.NewGuid().ToString("N");

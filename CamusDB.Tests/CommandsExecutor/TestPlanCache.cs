@@ -37,19 +37,14 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// CommandExecutor.PlanCache (internal, visible to tests via InternalsVisibleTo).
 /// </summary>
 [TestFixture]
-// Toggles the process-wide static CamusDBConfig.PlanCacheEnabled in SetUp/TearDown. Under the
-// assembly's ParallelScope.Fixtures this would race any concurrent fixture that plans a query and
-// reads that flag; NonParallelizable isolates the toggle.
-[NonParallelizable]
 public sealed class TestPlanCache : BaseTest
 {
-    // Enable the cache for every test in this fixture; restore the default (false) on teardown
-    // so that parallel or sequentially-run fixtures are not affected by the flag.
-    [SetUp]
-    public void EnableCache() => CamusDBConfig.PlanCacheEnabled = true;
-
-    [TearDown]
-    public void DisableCache() => CamusDBConfig.PlanCacheEnabled = false;
+    /// <summary>
+    /// The plan cache is off by default, so every engine this fixture builds turns it on. Nothing outside
+    /// the fixture sees the change, so no teardown is needed.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { PlanCacheEnabled = true };
 
     // ─── Schema helpers ───────────────────────────────────────────────────────
 
@@ -216,44 +211,35 @@ public sealed class TestPlanCache : BaseTest
         // The first shape should be evicted, and Evictions must equal 1.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
 
-        // Overwrite the shared cache with a tiny one.
         executor.PlanCache.Clear();
-        int originalMax = CamusDBConfig.PlanCacheMaxEntries;
-        CamusDBConfig.PlanCacheMaxEntries = 2;
 
-        // Create a fresh executor whose cache was constructed with max=2.
-        CommandExecutor executor2 = CreateCommandExecutor();
+        // A second engine whose plan cache holds two entries — the capacity is fixed when the cache is
+        // constructed, so the small cache has to come from a separate engine.
+        CommandExecutor executor2 = CreateCommandExecutor(Options with { PlanCacheMaxEntries = 2 });
         TrackDatabase(dbname, executor2);
 
         long evictionsBefore = executor2.PlanCache.Evictions;
 
-        try
-        {
-            // Each query column access path is a distinct shape (different projection/filter).
-            string[] sqls =
-            [
-                "SELECT id    FROM products WHERE category = \"electronics\"",
-                "SELECT price FROM products WHERE category = \"books\"",
-                "SELECT id, price FROM products WHERE category = \"electronics\"",
-            ];
+        // Each query is a distinct shape (different projection/filter).
+        string[] sqls =
+        [
+            "SELECT id    FROM products WHERE category = \"electronics\"",
+            "SELECT price FROM products WHERE category = \"books\"",
+            "SELECT id, price FROM products WHERE category = \"electronics\"",
+        ];
 
-            foreach (string sql in sqls)
-            {
-                DatabaseDescriptor db = await executor2.OpenDatabase(dbname);
-                KvTransaction txn = await db.Transactions.BeginAsync();
-                ExecuteSQLTicket ticket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
-                (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor2.ExecuteSQLQuery(ticket);
-                await foreach (QueryResultRow _ in cursor) { }
-                await db.Transactions.CommitAsync(txn);
-            }
-
-            Assert.GreaterOrEqual(executor2.PlanCache.Evictions, evictionsBefore + 1,
-                "At least one eviction expected when three distinct shapes fill a capacity-2 cache.");
-        }
-        finally
+        foreach (string sql in sqls)
         {
-            CamusDBConfig.PlanCacheMaxEntries = originalMax;
+            DatabaseDescriptor db = await executor2.OpenDatabase(dbname);
+            KvTransaction txn = await db.Transactions.BeginAsync();
+            ExecuteSQLTicket ticket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor2.ExecuteSQLQuery(ticket);
+            await foreach (QueryResultRow _ in cursor) { }
+            await db.Transactions.CommitAsync(txn);
         }
+
+        Assert.GreaterOrEqual(executor2.PlanCache.Evictions, evictionsBefore + 1,
+            "At least one eviction expected when three distinct shapes fill a capacity-2 cache.");
     }
 
     [Test]

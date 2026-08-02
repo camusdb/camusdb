@@ -171,11 +171,12 @@ public sealed class TestIndependentlyConfiguredEngines : BaseTest
 
         CommandExecutor engine = EngineWith(o => o with { MaxIdentifierLength = 8 });
 
-        // Mutating the process-wide value must not reach an engine that already exists.
-        int saved = CamusDBConfig.MaxIdentifierLength;
+        // Replacing the process-wide value — the one a freshly started host would install — must not
+        // reach an engine that already exists.
+        CamusDBOptions saved = CamusDBConfig.Ambient;
         try
         {
-            CamusDBConfig.MaxIdentifierLength = 512;
+            CamusDBConfig.SetAmbient(saved with { MaxIdentifierLength = 512 });
 
             CamusDBException stillRejected = Assert.ThrowsAsync<CamusDBException>(
                 async () => await engine.CreateTable(TableTicket(dbname, "still_too_long_for_this_engine")))!;
@@ -184,7 +185,7 @@ public sealed class TestIndependentlyConfiguredEngines : BaseTest
         }
         finally
         {
-            CamusDBConfig.MaxIdentifierLength = saved;
+            CamusDBConfig.SetAmbient(saved);
         }
     }
 }

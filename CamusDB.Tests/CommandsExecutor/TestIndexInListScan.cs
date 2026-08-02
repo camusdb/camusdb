@@ -39,7 +39,7 @@ public class TestIndexInListScan : BaseTest
     // ── Planner-only test harness ─────────────────────────────────────────────
 
     private static QueryPlannerTestContext? ctx;
-    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
+    private readonly QueryPlanner queryPlanner = new(CamusDBOptions.Default);
 
     [OneTimeSetUp]
     public void OneTimeSetUp() => ctx = QueryPlannerTestContext.Create();
@@ -769,7 +769,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: 2);
 
-        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
+        QueryPlanner planner = new(Options, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -795,7 +795,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: null);
 
-        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
+        QueryPlanner planner = new(Options, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -820,7 +820,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: 5_000);
 
-        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
+        QueryPlanner planner = new(Options, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -847,7 +847,7 @@ public class TestIndexInListScan : BaseTest
         (DatabaseDescriptor database, TableDescriptor table, CommandExecutor executor, string dbname)
             = await CreateStatusTable(trc: 10_000, ndv: 5);
 
-        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
+        QueryPlanner planner = new(Options, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
@@ -862,7 +862,7 @@ public class TestIndexInListScan : BaseTest
         Assert.IsInstanceOf<IndexInListScanNode>(ScanRoot(plan),
             "NDV=5, n=2: estimatedRows=4000, gate passes (2*4000 < 10000).");
 
-        CostEstimator.AnnotatePlan(plan.Root, database, table, executor.Statistics, CamusDBConfig.Ambient);
+        CostEstimator.AnnotatePlan(plan.Root, database, table, executor.Statistics, Options);
 
         long? card = ScanRoot(plan).EstimatedCardinality;
         Assert.IsNotNull(card, "EstimatedCardinality must be populated by AnnotatePlan.");
@@ -885,7 +885,7 @@ public class TestIndexInListScan : BaseTest
         executor.Statistics.SeedRowCountForTesting(database,
             await database.TableDescriptors["robots"], 10_000);
 
-        QueryPlanner planner = new(CamusDBConfig.Ambient, executor.Statistics);
+        QueryPlanner planner = new(Options, executor.Statistics);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         string id0 = ids[0], id1 = ids[1], id2 = ids[2];
@@ -900,7 +900,7 @@ public class TestIndexInListScan : BaseTest
         QueryPlan plan = planner.GetPlan(database, table, ticket);
 
         Assert.IsInstanceOf<IndexInListScanNode>(ScanRoot(plan));
-        CostEstimator.AnnotatePlan(plan.Root, database, table, executor.Statistics, CamusDBConfig.Ambient);
+        CostEstimator.AnnotatePlan(plan.Root, database, table, executor.Statistics, Options);
 
         long? card = ScanRoot(plan).EstimatedCardinality;
         Assert.IsNotNull(card, "EstimatedCardinality must be set for unique IN-list scan.");

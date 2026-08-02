@@ -24,19 +24,14 @@ namespace CamusDB.Tests.Transactions;
 
 /// <summary>
 /// Verifies that a Serializable+RW transaction that outlives
-/// <see cref="CamusDBConfig.MaxSerializableTransactionLifetimeMs"/> is invalidated by CamusDB
+/// <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/> is invalidated by CamusDB
 /// before its range locks can expire at Kahuna, preventing the silent isolation break that
 /// would result from Kahuna expiring a lock while the transaction is still considered live.
 ///
-/// Each test overrides MaxSerializableTransactionLifetimeMs to a small value (100 ms) so
-/// the suite completes quickly. The original config value is restored in TearDown.
-///
-/// [NonParallelizable]: tests mutate the global CamusDBConfig.MaxSerializableTransactionLifetimeMs.
-/// A concurrent fixture that begins a Serializable+RW transaction could see the 100 ms value
-/// and spuriously hit TransactionLifetimeExceeded.
+/// Each test builds its node with a small deadline (100 ms) so the suite completes quickly. The
+/// deadline belongs to that node's own transaction manager and store, so no other fixture can see it.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestSerializableTransactionDeadline
 {
 
