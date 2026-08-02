@@ -45,7 +45,7 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     [SetUp]
     public void SetUpGrpcAuth()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
@@ -91,7 +91,7 @@ internal sealed class TestGrpcSqlAuth : BaseTest
         // front of it are rebuilt here — after the authentication policy and signing key are in place —
         // rather than in set-up, where they would have captured auth-disabled settings.
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
             TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), CamusDBConfig.Ambient);

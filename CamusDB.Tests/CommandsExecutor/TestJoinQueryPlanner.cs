@@ -744,7 +744,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
 
         // database/stats are unused on this arm; a StackOverflow here (the old bug) would crash the
         // process rather than fail the assert, so reaching the assert at all proves no recursion.
-        long rows = JoinQueryPlanner.EstimatePhysicalNodeRows(node, database: null!, stats: null);
+        long rows = new JoinQueryPlanner(CamusDBConfig.Ambient).EstimatePhysicalNodeRows(node, database: null!, stats: null);
 
         Assert.AreEqual(CostEstimator.DefaultTableRowCount, rows);
     }
@@ -755,7 +755,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         TableIndexSchema index = new("idx", ["col"], IndexType.Unique);
         IndexLookupNode node = new(index, new ColumnValue(ColumnType.Integer64, 1L));
 
-        long rows = JoinQueryPlanner.EstimatePhysicalNodeRows(node, database: null!, stats: null);
+        long rows = new JoinQueryPlanner(CamusDBConfig.Ambient).EstimatePhysicalNodeRows(node, database: null!, stats: null);
         Assert.AreEqual(1, rows);
     }
 
@@ -790,7 +790,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
         // Manually build an equivalent NestedLoopJoinNode plan and annotate it.
         // We reuse the same left input and right source so the stats context is identical.
         NestedLoopJoinNode nljNode = new(hashJoin.Input!, hashJoin.BuildSource, hashJoin.OnPredicate!);
-        CostEstimator.AnnotatePlan(nljNode, database, table: null, executor.Statistics);
+        CostEstimator.AnnotatePlan(nljNode, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
 
         Assert.IsNotNull(hashJoin.Cost, "hash join cost must be annotated");
         Assert.IsNotNull(nljNode.Cost,  "NLJ cost must be annotated");

@@ -1058,11 +1058,11 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             Assert.IsNotNull(rangeLeaf, "Expected an IndexRangeScanNode for the orders leaf with CostBasedAccessPathEnabled=true");
 
             // AnnotatePlan fills EstimatedCardinality.
-            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics);
+            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
             long annotated = rangeLeaf!.EstimatedCardinality ?? 0L;
 
             // EstimatePhysicalNodeRows is the reference — it passes the table correctly.
-            long reference = JoinQueryPlanner.EstimatePhysicalNodeRows(rangeLeaf, database, executor.Statistics);
+            long reference = new JoinQueryPlanner(CamusDBConfig.Ambient).EstimatePhysicalNodeRows(rangeLeaf, database, executor.Statistics);
 
             Assert.AreEqual(reference, annotated,
                 "AnnotatePlan leaf cardinality must equal EstimatePhysicalNodeRows for an IndexRangeScanNode join leaf.");
@@ -1092,7 +1092,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             IndexRangeScanNode? rangeLeaf = FindIndexRangeLeaf(plan.Root, "o");
             Assert.IsNotNull(rangeLeaf);
 
-            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics);
+            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
 
             Assert.AreNotEqual(1_000L, rangeLeaf!.EstimatedCardinality,
                 "Annotated leaf cardinality must not equal the 10% heuristic fallback when NDV stats are seeded.");
@@ -1210,7 +1210,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
             Assert.IsNotNull(FindIndexRangeLeaf(plan.Root, "o"),
                 "Precondition: orders left leaf must be an IndexRangeScanNode (CostBasedAccessPathEnabled + selective status index).");
 
-            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics);
+            CostEstimator.AnnotatePlan(plan.Root, database, table: null, executor.Statistics, CamusDBConfig.Ambient);
 
             // The left key (o.id) is unique → unique-left-key formula → join cardinality = rightRows.
             long joinCard = plan.Root.EstimatedCardinality ?? 0L;

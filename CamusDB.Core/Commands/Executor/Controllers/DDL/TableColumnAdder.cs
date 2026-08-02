@@ -30,7 +30,7 @@ public sealed class TableColumnAdder
         this.logger = logger;
     }
 
-    private static void Validate(TableDescriptor table, AlterColumnTicket ticket)
+    private static void Validate(TableDescriptor table, AlterColumnTicket ticket, CamusDBOptions options)
     {
         bool hasColumn = false;
 
@@ -46,7 +46,7 @@ public sealed class TableColumnAdder
         if (hasColumn)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{ticket.Column.Name}'");
 
-        int maxCols = CamusDBConfig.MaxColumnsPerTable;
+        int maxCols = options.MaxColumnsPerTable;
         if (maxCols > 0)
         {
             int currentCount = table.Schema.Columns!.Count;
@@ -66,7 +66,7 @@ public sealed class TableColumnAdder
         AlterColumnTicket ticket
     )
     {
-        Validate(table, ticket);
+        Validate(table, ticket, database.Options);
 
         AlterColumnFluxState state = new(
             catalogs: catalogs,

@@ -13,6 +13,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class AlterIndexValidator : ValidatorBase
 {
+    public AlterIndexValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(AlterIndexTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

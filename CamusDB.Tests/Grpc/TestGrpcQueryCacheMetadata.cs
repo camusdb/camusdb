@@ -51,7 +51,7 @@ public sealed class TestGrpcQueryCacheMetadata : BaseTest
         // sweepIntervalMs: -1 keeps the background sweeper off so an entry cannot expire mid-test.
         cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: cache);
         service = new CamusSqlService(

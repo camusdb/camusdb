@@ -304,7 +304,7 @@ public sealed class TestSpillFileManager
         string missingPath = Path.Combine(_dataDir, "does_not_exist.spill");
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
-            async () => await SpillRunReader.OpenAsync(missingPath))!;
+            async () => await SpillRunReader.OpenAsync(missingPath, CamusDBOptions.Default.SpillMaxFrameBytes))!;
 
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.SpillStorageUnavailable),
             "A missing spill file must surface as CADB0507, not a raw IOException.");

@@ -39,7 +39,9 @@ public sealed class AuthService
 
     // A fixed verifier used to spend comparable work on an unknown/passwordless user so a failed login
     // takes about as long whether or not the account exists (reduces enumeration by timing).
-    private static readonly Lazy<Credential> DummyCredential = new(() => PasswordHasher.Hash("camusdb-dummy-password"));
+    // Per-instance because its cost must match this engine's configured iteration count — a dummy
+    // that hashes with different work would reintroduce the timing signal it exists to remove.
+    private readonly Lazy<Credential> DummyCredential;
 
     private static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(1);
 
@@ -55,6 +57,7 @@ public sealed class AuthService
 
         // Sized from the injected configuration rather than a field initializer, which cannot see it.
         kdfConcurrency = new SemaphoreSlim(options.LoginKdfMaxConcurrency, options.LoginKdfMaxConcurrency);
+        DummyCredential = new Lazy<Credential>(() => PasswordHasher.Hash("camusdb-dummy-password", options.PasswordHashIterations));
     }
 
     private static string Normalize(string name) => name.ToLowerInvariant();

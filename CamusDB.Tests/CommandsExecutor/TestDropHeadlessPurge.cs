@@ -19,6 +19,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -90,7 +91,7 @@ public sealed class TestDropHeadlessPurge : BaseTest
         Assert.That(await CountKeysUnderAsync(db, rowBucket, rowPrefix), Is.EqualTo(3), "sanity: rows were written");
 
         // A dropper whose descriptor cache does not contain the id → the absent path.
-        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger);
+        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, CamusDBConfig.Ambient);
         bool purged = await dropper.Drop(dbId, purge: true, headlessKahuna: TestNode!.Kahuna);
 
         Assert.That(purged, Is.True, "the headless purge must verifiably complete");
@@ -114,7 +115,7 @@ public sealed class TestDropHeadlessPurge : BaseTest
         descriptors.Descriptors[dbId] = new AsyncLazy<DatabaseDescriptor>(() =>
             throw new InvalidOperationException("injected load failure"));
 
-        DatabaseDropper dropper = new(descriptors, logger);
+        DatabaseDropper dropper = new(descriptors, logger, CamusDBConfig.Ambient);
         bool purged = await dropper.Drop(dbId, purge: true, headlessKahuna: TestNode!.Kahuna);
 
         Assert.That(purged, Is.True, "the headless purge must verifiably complete for a faulted descriptor");
@@ -144,7 +145,7 @@ public sealed class TestDropHeadlessPurge : BaseTest
             // Route the drop through a dropper that holds this live descriptor so it takes the drain path.
             DatabaseDescriptors descriptors = new();
             descriptors.Descriptors[dbId] = new AsyncLazy<DatabaseDescriptor>(() => Task.FromResult(db));
-            DatabaseDropper dropper = new(descriptors, logger);
+            DatabaseDropper dropper = new(descriptors, logger, CamusDBConfig.Ambient);
 
             bool purged = await dropper.Drop(
                 dbId, purge: true, headlessKahuna: TestNode!.Kahuna, drainTimeout: TimeSpan.FromMilliseconds(300));
@@ -160,7 +161,7 @@ public sealed class TestDropHeadlessPurge : BaseTest
         }
 
         // With the writer drained, a resume (fresh dropper, headless) can now finish the purge.
-        DatabaseDropper resumeDropper = new(new DatabaseDescriptors(), logger);
+        DatabaseDropper resumeDropper = new(new DatabaseDescriptors(), logger, CamusDBConfig.Ambient);
         bool resumed = await resumeDropper.Drop(dbId, purge: true, headlessKahuna: TestNode!.Kahuna);
         Assert.That(resumed, Is.True, "once the writer drains, the purge can complete");
         Assert.That(await CountKeysUnderAsync(db, rowBucket, rowPrefix), Is.EqualTo(0), "resume must reclaim the keyspace");
@@ -173,7 +174,7 @@ public sealed class TestDropHeadlessPurge : BaseTest
     {
         (string dbId, _, _) = await CreateDbWithRows();
 
-        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger);
+        DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, CamusDBConfig.Ambient);
         bool purged = await dropper.Drop(dbId, purge: true, headlessKahuna: null);
 
         Assert.That(purged, Is.False,

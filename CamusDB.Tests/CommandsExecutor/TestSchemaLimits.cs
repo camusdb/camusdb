@@ -12,6 +12,8 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 
 using CamusDB.Core;
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -34,6 +36,17 @@ namespace CamusDB.Tests.CommandsExecutor;
 [TestFixture]
 public sealed class TestSchemaLimits : BaseTest
 {
+
+    /// <summary>
+    /// A second engine over the same node whose identifier ceiling is <paramref name="maxIdentifierLength"/>.
+    /// Validators fix their limits when the engine is built, so a case that must create a database under
+    /// the default ceiling and then exercise a tighter one needs two engines rather than a flag flipped
+    /// between the two steps.
+    /// </summary>
+    private CommandExecutor ExecutorWithIdentifierLimit(int maxIdentifierLength)
+        => new(new CommandValidator(Options with { MaxIdentifierLength = maxIdentifierLength }),
+               new CatalogsManager(logger), logger, Options with { MaxIdentifierLength = maxIdentifierLength },
+               sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
     // ── helpers ────────────────────────────────────────────────────────────────
 
     private static CreateTableTicket BasicTable(string dbname, string tableName, int extraColumns = 0)
@@ -69,92 +82,76 @@ public sealed class TestSchemaLimits : BaseTest
     [NonParallelizable]
     public async Task CreateTable_NameTooLong_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxIdentifierLength;
-        try
-        {
-            // Create the database under the default limit (its auto-generated name is 32 chars),
-            // then tighten the limit so it only bites the table name under test.
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            CamusDBConfig.MaxIdentifierLength = 8;
+        // The database is created under the default limit — its auto-generated name is 32 chars — and
+        // the table is created through an engine whose ceiling is 8, so the limit bites only the table
+        // name under test.
+        (string dbname, _, _) = await CreateDatabase();
 
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-                async () => await executor.CreateTable(BasicTable(dbname, "toolongname")));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-            Assert.That(ex.Message, Does.Contain("toolongname"));
-        }
-        finally { CamusDBConfig.MaxIdentifierLength = saved; }
+        CommandExecutor tightExecutor = ExecutorWithIdentifierLimit(8);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await tightExecutor.CreateTable(BasicTable(dbname, "toolongname")));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
+        Assert.That(ex.Message, Does.Contain("toolongname"));
     }
 
     [Test]
     [NonParallelizable]
     public async Task CreateTable_NameAtLimit_Succeeds()
     {
-        int saved = CamusDBConfig.MaxIdentifierLength;
-        try
-        {
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            CamusDBConfig.MaxIdentifierLength = 8;
-            bool ok = (await executor.CreateTable(BasicTable(dbname, "exactly8"))).Success;
-            Assert.IsTrue(ok);
-        }
-        finally { CamusDBConfig.MaxIdentifierLength = saved; }
+        (string dbname, _, _) = await CreateDatabase();
+
+        bool ok = (await ExecutorWithIdentifierLimit(8).CreateTable(BasicTable(dbname, "exactly8"))).Success;
+        Assert.IsTrue(ok);
     }
 
     [Test]
     [NonParallelizable]
     public async Task CreateDatabase_NameTooLong_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxIdentifierLength;
-        CamusDBConfig.MaxIdentifierLength = 6;
-        try
-        {
-            CommandExecutor executor = CreateCommandExecutor();
+        CommandExecutor executor = ExecutorWithIdentifierLimit(6);
 
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-                async () => await executor.CreateDatabase(new CreateDatabaseTicket("toolong_db", ifNotExists: false)));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-        }
-        finally { CamusDBConfig.MaxIdentifierLength = saved; }
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await executor.CreateDatabase(new CreateDatabaseTicket("toolong_db", ifNotExists: false)));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
     }
 
     [Test]
     [NonParallelizable]
     public async Task AlterTable_ColumnNameTooLong_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxIdentifierLength;
-        try
+        // The table is created under the default ceiling; the ALTER runs through an engine whose
+        // ceiling is 10, so the limit bites only the column name under test.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await executor.CreateTable(BasicTable(dbname, "mytable"));
+
         {
-            (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "mytable"));
-            CamusDBConfig.MaxIdentifierLength = 10;
+            CommandExecutor tightExecutor = ExecutorWithIdentifierLimit(10);
 
             CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.AlterTable(new AlterTableTicket(
+                await tightExecutor.AlterTable(new AlterTableTicket(
                     databaseName: dbname,
                     tableName: "mytable",
                     column: new ColumnInfo("col_toolong_name", ColumnType.String),
                     operation: AlterTableOperation.AddColumn)));
             Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
         }
-        finally { CamusDBConfig.MaxIdentifierLength = saved; }
     }
 
     [Test]
     [NonParallelizable]
     public async Task AlterIndex_IndexNameTooLong_ThrowsSchemaLimitExceeded()
     {
-        int saved = CamusDBConfig.MaxIdentifierLength;
-        try
-        {
-            (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-            await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 1));
-            CamusDBConfig.MaxIdentifierLength = 8;
+        // The table is created under the default ceiling; the index is added through an engine whose
+        // ceiling is 8, so the limit bites only the index name under test.
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await executor.CreateTable(BasicTable(dbname, "t", extraColumns: 1));
 
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-                await executor.AlterIndex(AddIndexTicket(dbname, "t", "col_0", "toolong_idx")));
-            Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
-        }
-        finally { CamusDBConfig.MaxIdentifierLength = saved; }
+        CommandExecutor tightExecutor = ExecutorWithIdentifierLimit(8);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await tightExecutor.AlterIndex(AddIndexTicket(dbname, "t", "col_0", "toolong_idx")));
+        Assert.AreEqual(CamusDBErrorCodes.SchemaLimitExceeded, ex!.Code);
     }
 
     [Test]
@@ -169,7 +166,7 @@ public sealed class TestSchemaLimits : BaseTest
             Assert.DoesNotThrow(() =>
             {
                 // Invoke via CreateDatabaseValidator directly — avoids spinning up a DB.
-                var validator = new CamusDB.Core.CommandsValidator.CommandValidator();
+                var validator = new CamusDB.Core.CommandsValidator.CommandValidator(CamusDBConfig.Ambient);
                 // A 300-char name — would have failed under the old 255 limit.
                 string longName = new('a', 300);
                 validator.Validate(new CreateDatabaseTicket(longName, ifNotExists: false));

@@ -68,7 +68,7 @@ public sealed class TestAdaptiveSlotDecode
     private static async Task<QueryRow> Decode(TableSchema schema, ReadOnlyMemory<byte> payload, bool? slotOverride)
     {
         RowEncoder.RowDecodeState state = new() { SlotBackedDecode = slotOverride };
-        return await RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, decodeState: state);
+        return await RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, CamusDBConfig.Ambient, decodeState: state);
     }
 
     [Test]

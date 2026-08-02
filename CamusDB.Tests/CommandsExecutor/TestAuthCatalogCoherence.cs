@@ -51,7 +51,7 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         // Warm B with a miss (loads B's cache at the current generation).
         Assert.IsNull(await b.TryGetUserAsync(user));
 
-        await a.CreateUserAsync(user, PasswordHasher.Hash("x"), ifNotExists: false);
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x", CamusDBConfig.Ambient.PasswordHashIterations), ifNotExists: false);
 
         UserRecord? seen = await b.TryGetUserAsync(user);
         Assert.IsNotNull(seen, "a user created on another node must become visible after revalidation");
@@ -132,14 +132,14 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
 
         string user = "coh_" + Guid.NewGuid().ToString("n");
-        await a.CreateUserAsync(user, PasswordHasher.Hash("x"), ifNotExists: false);
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x", CamusDBConfig.Ambient.PasswordHashIterations), ifNotExists: false);
         Assert.IsNotNull(await b.TryGetUserAsync(user)); // warm B's cache with the user
 
         await a.DropUserAsync(user, ifExists: false);
 
         // B's cache still shows the user, but the locked read must see it dropped.
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await b.SetPasswordAsync(user, PasswordHasher.Hash("new")))!;
+            await b.SetPasswordAsync(user, PasswordHasher.Hash("new", CamusDBConfig.Ambient.PasswordHashIterations)))!;
         Assert.AreEqual(CamusDBErrorCodes.UserDoesNotExist, ex.Code);
 
         AuthCatalog c = await AuthCatalog.OpenAsync(TestNode!, CamusDBConfig.Ambient, isClusterMode: true);
@@ -172,7 +172,7 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
         (AuthCatalog a, _) = await TwoNodesAsync();
 
         string user = "coh_" + Guid.NewGuid().ToString("n");
-        await a.CreateUserAsync(user, PasswordHasher.Hash("x"), ifNotExists: false);
+        await a.CreateUserAsync(user, PasswordHasher.Hash("x", CamusDBConfig.Ambient.PasswordHashIterations), ifNotExists: false);
 
         SessionRecord session = new()
         {

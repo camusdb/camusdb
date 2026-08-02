@@ -1724,7 +1724,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // "Remote node": independent registry + executor over the same Kahuna node.
         await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
         await using CommandExecutor remote = new(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: remoteRegistry, isClusterMode: false);
 
         string target = "t_" + Guid.NewGuid().ToString("n");
@@ -1753,7 +1753,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     {
         await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, CamusDBConfig.Ambient);
         await using CommandExecutor remote = new(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: remoteRegistry, isClusterMode: false);
 
         string source = "src_" + Guid.NewGuid().ToString("n");

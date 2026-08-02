@@ -429,6 +429,7 @@ public static class RowEncoder
         HLCTimestamp txId,
         ObjectIdValue rowId,
         ReadOnlyMemory<byte> data,
+        CamusDBOptions options,
         IReadOnlySet<string>? requiredColumns = null,
         long? visibilitySchemaVersion = null,
         RowDecodeState? decodeState = null)
@@ -459,7 +460,7 @@ public static class RowEncoder
         // The per-scan override wins; without one, only the global ForceBorrowed policy turns borrowed on
         // at this level (the scanner sets the override for Adaptive-borrowed scans — this facade has no
         // plan/filter context of its own, so Adaptive/ForceEager both mean eager here).
-        bool borrowed = decodeState?.BorrowedDecode ?? (CamusDBConfig.BorrowedDecode == BorrowedDecodePolicy.ForceBorrowed);
+        bool borrowed = decodeState?.BorrowedDecode ?? (options.BorrowedDecode == BorrowedDecodePolicy.ForceBorrowed);
         if (borrowed)
         {
             plan.Codec.ValidateFrame(data.Span);
@@ -469,7 +470,7 @@ public static class RowEncoder
 
         // Slot-backed decode is chosen per scan: the caller's RowDecodeState may opt in/out based on
         // its shape (see RowDecodeState.SlotBackedDecode); absent an override, the global default applies.
-        bool useSlots = decodeState?.SlotBackedDecode ?? CamusDBConfig.SlotBackedDecode;
+        bool useSlots = decodeState?.SlotBackedDecode ?? options.SlotBackedDecode;
         return ExecuteDecodePlan(plan, data.Span, rowId, useSlots);
     }
 

@@ -7,6 +7,7 @@
  */
 
 using BenchmarkDotNet.Attributes;
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -183,6 +184,7 @@ public class EnvelopeRoundTripBenchmarks
             byte[] storageValue = RowEncoder.EncodeStorageValue(_schema, _rows[i], RowId);
             BranchKvValue decoded = BranchKvCodec.Decode(storageValue);
             last = await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, decoded.Payload,
+            CamusDBConfig.Ambient,
                 decodeState: cache).ConfigureAwait(false);
         }
         return last!;

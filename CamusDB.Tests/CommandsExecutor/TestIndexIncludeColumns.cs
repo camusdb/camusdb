@@ -617,13 +617,15 @@ internal sealed class TestIndexIncludeColumns : BaseTest
     [NonParallelizable]
     public async Task PayloadByteLimit_RejectsInsert_WithOversizedIncludeTuple()
     {
+        // The encoder fixes its ceiling when the engine is built, so it is lowered first.
+        int saved = CamusDBConfig.MaxIndexIncludeTupleBytes;
+        CamusDBConfig.MaxIndexIncludeTupleBytes = 8; // a short string encodes to > 8 bytes
+
         (string dbname, _, CommandExecutor executor) = await CreateOrdersTable();
         // Index created on the empty table, so backfill writes nothing — this isolates the INSERT path.
         await ExecDDL(executor, dbname,
             $"CREATE INDEX idx_customer ON {TableName} (customer_id) INCLUDE (status)");
 
-        int saved = CamusDBConfig.MaxIndexIncludeTupleBytes;
-        CamusDBConfig.MaxIndexIncludeTupleBytes = 8; // a short string encodes to > 8 bytes
         try
         {
             CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
@@ -649,15 +651,16 @@ internal sealed class TestIndexIncludeColumns : BaseTest
     [NonParallelizable]
     public async Task Insert_NullUniqueKey_DoesNotSerializeOrCheckIncludePayload()
     {
+        // The encoder fixes its ceiling when the engine is built, so it is lowered first.
+        int saved = CamusDBConfig.MaxIndexIncludeTupleBytes;
+        CamusDBConfig.MaxIndexIncludeTupleBytes = 8; // any real 'big' string encodes larger than this
+
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
         await ExecDDL(executor, dbname,
             $"CREATE TABLE {TableName} (id oid primary key, code int64, big string(200))");
         // Unique index on a nullable key column with an INCLUDE payload.
         await ExecDDL(executor, dbname,
             $"CREATE UNIQUE INDEX ux_code ON {TableName} (code) INCLUDE (big)");
-
-        int saved = CamusDBConfig.MaxIndexIncludeTupleBytes;
-        CamusDBConfig.MaxIndexIncludeTupleBytes = 8; // any real 'big' string encodes larger than this
         try
         {
             // NULL unique key → NULLs are distinct → no index entry is written. With lazy

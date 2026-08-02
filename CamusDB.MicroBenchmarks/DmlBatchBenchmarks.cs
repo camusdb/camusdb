@@ -53,7 +53,7 @@ internal static class DmlBenchHarness
 
         DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
 
-        CommandExecutor executor = new(new CommandValidator(), new CatalogsManager(Logger), Logger, CamusDBConfig.Ambient,
+        CommandExecutor executor = new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(Logger), Logger, CamusDBConfig.Ambient,
             sharedNode: node, registry: registry, isClusterMode: true);
 
         string dbName = Guid.NewGuid().ToString("N");

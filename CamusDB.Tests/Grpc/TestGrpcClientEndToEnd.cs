@@ -41,7 +41,7 @@ public class TestGrpcClientEndToEnd : BaseTest
     [SetUp]
     public void SetUpService()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogs = new(logger);
         executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);

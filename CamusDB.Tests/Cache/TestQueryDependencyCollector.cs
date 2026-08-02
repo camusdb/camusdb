@@ -39,7 +39,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void EmptyCollector_BuildsEmptySet()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         Assert.That(col.CapExceeded, Is.False);
 
         QueryDependencySet deps = col.Build();
@@ -51,7 +51,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void RecordRange_AppearsInBuild()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         col.RecordRange("db1:tbl1:r");
         col.RecordRange("db1:tbl1:i:idx-abc");
 
@@ -63,7 +63,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void RecordRange_DedupesIdentical()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         col.RecordRange("db1:tbl1:r");
         col.RecordRange("db1:tbl1:r");
 
@@ -74,7 +74,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void RecordPoint_AppearsInBuild()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         col.RecordRange("db1:tbl1:r");
         col.RecordPoint("db1:tbl1:r/000000000000000000000001");
         col.RecordPoint("db1:tbl1:r/000000000000000000000002");
@@ -87,7 +87,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void RecordSchema_AppearsInBuild()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         col.RecordSchema("tbl-id-1", 3);
 
         QueryDependencySet deps = col.Build();
@@ -99,7 +99,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void RecordSchema_DedupesForSameTableId()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         col.RecordSchema("tbl-id-1", 3);
         col.RecordSchema("tbl-id-1", 3);  // duplicate
         col.RecordSchema("tbl-id-2", 1);
@@ -115,11 +115,10 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void TotalDepCap_SetsCapExceeded()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxDeps;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxDeps = 3 });
         {
-            CamusDBConfig.QueryResultCacheMaxDeps = 3;
-            var col = new QueryDependencyCollector();
             col.RecordRange("r1");
             col.RecordRange("r2");
             col.RecordRange("r3");
@@ -127,20 +126,15 @@ public sealed class TestQueryDependencyCollector
 
             Assert.That(col.CapExceeded, Is.True);
         }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxDeps = origMax;
-        }
     }
 
     [Test]
     public void WhenCapExceeded_BuildReturnsEmpty()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxDeps;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxDeps = 1 });
         {
-            CamusDBConfig.QueryResultCacheMaxDeps = 1;
-            var col = new QueryDependencyCollector();
             col.RecordRange("r1");
             col.RecordRange("r2");
 
@@ -150,30 +144,21 @@ public sealed class TestQueryDependencyCollector
             Assert.That(deps.RangeDeps.Count, Is.EqualTo(0),
                 "Build() must return QueryDependencySet.Empty when total cap is exceeded");
         }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxDeps = origMax;
-        }
     }
 
     [Test]
     public void AfterCapExceeded_FurtherRecordCallsAreNoOps()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxDeps;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxDeps = 1 });
         {
-            CamusDBConfig.QueryResultCacheMaxDeps = 1;
-            var col = new QueryDependencyCollector();
             col.RecordRange("r1");
             col.RecordRange("r2");  // triggers cap
 
             Assert.DoesNotThrow(() => col.RecordRange("r3"));
             Assert.DoesNotThrow(() => col.RecordPoint("p1"));
             Assert.DoesNotThrow(() => col.RecordSchema("t1", 1));
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxDeps = origMax;
         }
     }
 
@@ -184,11 +169,10 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void PointDepCap_SilentlyDropsExcess_RangeDepStillPresent()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxPointDeps;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxPointDeps = 2 });
         {
-            CamusDBConfig.QueryResultCacheMaxPointDeps = 2;
-            var col = new QueryDependencyCollector();
             col.RecordRange("db:tbl:r");
             col.RecordPoint("db:tbl:r/aaaa");
             col.RecordPoint("db:tbl:r/bbbb");
@@ -203,10 +187,6 @@ public sealed class TestQueryDependencyCollector
             Assert.That(deps.RangeDeps, Contains.Item("db:tbl:r"),
                 "Range dep must survive point-dep cap overflow");
         }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxPointDeps = origMax;
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -216,11 +196,10 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void RangeDepCap_SetsCapExceeded()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxRanges;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxRanges = 2 });
         {
-            CamusDBConfig.QueryResultCacheMaxRanges = 2;
-            var col = new QueryDependencyCollector();
             col.RecordRange("db:tbl1:r");
             col.RecordRange("db:tbl2:r");
             col.RecordRange("db:tbl3:r");  // exceeds cap
@@ -228,20 +207,15 @@ public sealed class TestQueryDependencyCollector
             Assert.That(col.CapExceeded, Is.True,
                 "Exceeding the range-dep cap must set CapExceeded — a truncated range set is not safe to publish");
         }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxRanges = origMax;
-        }
     }
 
     [Test]
     public void RangeDepCap_BuildReturnsEmpty()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxRanges;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxRanges = 1 });
         {
-            CamusDBConfig.QueryResultCacheMaxRanges = 1;
-            var col = new QueryDependencyCollector();
             col.RecordRange("db:tbl1:r");
             col.RecordRange("db:tbl2:r");  // triggers cap
 
@@ -249,20 +223,15 @@ public sealed class TestQueryDependencyCollector
             Assert.That(deps.RangeDeps.Count, Is.EqualTo(0),
                 "Build() must return QueryDependencySet.Empty when the range cap is exceeded");
         }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxRanges = origMax;
-        }
     }
 
     [Test]
     public void RangeDepCap_DuplicatesDoNotCountTowardCap()
     {
-        int origMax = CamusDBConfig.QueryResultCacheMaxRanges;
-        try
+        // The collector fixes its caps when constructed, so the cap under test is stated as options
+        // rather than assigned to a global and restored afterwards.
+        var col = new QueryDependencyCollector(CamusDBOptions.Default with { QueryResultCacheMaxRanges = 1 });
         {
-            CamusDBConfig.QueryResultCacheMaxRanges = 1;
-            var col = new QueryDependencyCollector();
             col.RecordRange("db:tbl1:r");
             col.RecordRange("db:tbl1:r");  // duplicate — must not count
             col.RecordRange("db:tbl1:r");  // duplicate — must not count
@@ -274,10 +243,6 @@ public sealed class TestQueryDependencyCollector
             QueryDependencySet deps = col.Build();
             Assert.That(deps.RangeDeps.Count, Is.EqualTo(1));
         }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxRanges = origMax;
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -287,7 +252,7 @@ public sealed class TestQueryDependencyCollector
     [Test]
     public void Build_RoundTrip_AllThreeKinds()
     {
-        var col = new QueryDependencyCollector();
+        var col = new QueryDependencyCollector(CamusDBOptions.Default);
         col.RecordRange("db:tbl:r");
         col.RecordRange("db:tbl:i:idx1");
         col.RecordPoint("db:tbl:r/000000000000000000000001");

@@ -30,7 +30,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///
 /// <para>
 /// Derived-table (FROM subquery) materializations use <see cref="SpillableRowList"/>, which
-/// buffers rows in memory until <see cref="CamusDBConfig.SpillEffectiveThreshold"/> and then
+/// buffers rows in memory until <see cref="CamusDBOptions.SpillEffectiveThreshold"/> and then
 /// overflows to a spill file. Enumeration is re-entrant so the derived table can be scanned
 /// by multiple join arms. Spill files are deleted when the join cursor is fully consumed.
 /// </para>
@@ -47,10 +47,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
 
     [SetUp]
     public void SetUpSpill()
@@ -58,12 +54,6 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_sq_spill_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
 
-        _savedSpillEnabled   = CamusDBConfig.SpillEnabled;
-        _savedThreshold      = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn          = CamusDBConfig.SpillMergeFanIn;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -71,12 +61,6 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     public void TearDownSpill()
     {
         SpillFileManager.ReleaseInstanceLock();
-
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn         = _savedFanIn;
-        CamusDBConfig.DataDirectory           = null!;
 
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
@@ -92,9 +76,25 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     /// Creates a <c>products</c> table (id, name, price) with <paramref name="count"/> rows
     /// and a <c>categories</c> table (id, product_id, label) with one row per product.
     /// </summary>
-    private async Task<Fixture> SetupProductsAndCategories(int count = 10)
+    /// <summary>Spill disabled — the in-memory materialization path.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows so materialization overflows on inputs
+    /// small enough for a unit test. Independent of any other configuration in play.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows, int fanIn = 4) =>
+        Options with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            SpillMergeFanIn = fanIn,
+            DataDirectory = _dataDir,
+        };
+
+    private async Task<Fixture> SetupProductsAndCategories(CamusDBOptions options, int count = 10)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -172,14 +172,10 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     {
         const string sql = "SELECT d.name FROM (SELECT id, name FROM products) d";
 
-        CamusDBConfig.SpillEnabled = false;
-        Fixture fRef = await SetupProductsAndCategories(10);
+        Fixture fRef = await SetupProductsAndCategories(SpillOff, 10);
         List<QueryResultRow> reference = await Run(fRef, sql);
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        Fixture fSpill = await SetupProductsAndCategories(10);
+        Fixture fSpill = await SetupProductsAndCategories(SpillOn(3, 4), 10);
         List<QueryResultRow> spillResult = await Run(fSpill, sql);
 
         Assert.AreEqual(reference.Count, spillResult.Count,
@@ -195,11 +191,7 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     [Test]
     public async Task DerivedTableSpill_NoSpillFilesRemainAfterCompletion()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        Fixture f = await SetupProductsAndCategories(10);
+        Fixture f = await SetupProductsAndCategories(SpillOn(3, 4), 10);
         List<QueryResultRow> rows = await Run(f, "SELECT d.name FROM (SELECT id, name FROM products) d");
 
         Assert.That(rows.Count, Is.GreaterThan(0));
@@ -220,9 +212,7 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     [Test]
     public async Task DerivedTableSpill_FlagOff_NoSpillFiles()
     {
-        CamusDBConfig.SpillEnabled = false;
-
-        Fixture f = await SetupProductsAndCategories(10);
+        Fixture f = await SetupProductsAndCategories(SpillOff, 10);
         List<QueryResultRow> rows = await Run(f, "SELECT d.name FROM (SELECT id, name FROM products) d");
 
         Assert.That(rows.Count, Is.EqualTo(10));
@@ -244,14 +234,10 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     {
         const string sql = "SELECT d.name FROM (SELECT id, name, price FROM products) d WHERE d.price > 50";
 
-        CamusDBConfig.SpillEnabled = false;
-        Fixture fOff = await SetupProductsAndCategories(15);
+        Fixture fOff = await SetupProductsAndCategories(SpillOff, 15);
         List<QueryResultRow> offRows = await Run(fOff, sql);
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 4;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        Fixture fOn = await SetupProductsAndCategories(15);
+        Fixture fOn = await SetupProductsAndCategories(SpillOn(4, 4), 15);
         List<QueryResultRow> onRows = await Run(fOn, sql);
 
         CollectionAssert.AreEqual(SortedNames(offRows), SortedNames(onRows),
@@ -268,10 +254,9 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     [Test]
     public async Task SpillableRowList_ReEnumeratesAfterOverflow()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-
-        await using SpillableRowList list = new(new QueryExecutionContext(CamusDBConfig.Ambient));
+        // Spilling after 3 rows is the path under test; the list takes it as context, so nothing here
+        // is process-wide.
+        await using SpillableRowList list = new(new QueryExecutionContext(SpillOn(3)));
 
         for (int i = 0; i < 10; i++)
         {
@@ -309,7 +294,7 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     [Test]
     public async Task InSubqueryStreaming_CorrectResults()
     {
-        Fixture f = await SetupProductsAndCategories(10);
+        Fixture f = await SetupProductsAndCategories(SpillOff, 10);
 
         // Insert extra products that have no category row — these must not appear in the result.
         KvTransaction txn = await f.Database.Transactions.BeginAsync();
@@ -320,16 +305,16 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
         ]));
         await f.Database.Transactions.CommitAsync(txn);
 
-        // Flag-off baseline
-        CamusDBConfig.SpillEnabled = false;
-        List<QueryResultRow> offRows = await Run(f,
-            "SELECT name FROM products WHERE id IN (SELECT product_id FROM categories) ORDER BY name");
+        const string sql =
+            "SELECT name FROM products WHERE id IN (SELECT product_id FROM categories) ORDER BY name";
 
-        // Flag-on (streaming path is the same regardless; flag just gates DerivedTable spill)
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        List<QueryResultRow> onRows = await Run(f,
-            "SELECT name FROM products WHERE id IN (SELECT product_id FROM categories) ORDER BY name");
+        // Flag-off baseline — f's engine already has spill disabled.
+        List<QueryResultRow> offRows = await Run(f, sql);
+
+        // Flag-on (the streaming path is the same regardless; the flag only gates DerivedTable spill).
+        // The same data goes through a second engine, since one engine cannot answer for both.
+        Fixture spilling = f with { Executor = CreateCommandExecutor(SpillOn(3)) };
+        List<QueryResultRow> onRows = await Run(spilling, sql);
 
         Assert.AreEqual(offRows.Count, onRows.Count,
             "IN subquery must return the same row count on both flag-on and flag-off paths.");
@@ -347,7 +332,7 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     [Test]
     public async Task NotInSubqueryStreaming_CorrectResults()
     {
-        Fixture f = await SetupProductsAndCategories(8);
+        Fixture f = await SetupProductsAndCategories(SpillOff, 8);
 
         // Add a product that is explicitly in the categories table — it must be excluded.
         KvTransaction txn = await f.Database.Transactions.BeginAsync();
@@ -377,7 +362,7 @@ public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
     [Test]
     public async Task ScalarSubqueryStreaming_ReturnsCorrectValue()
     {
-        Fixture f = await SetupProductsAndCategories(5);
+        Fixture f = await SetupProductsAndCategories(SpillOff, 5);
 
         // prices: 10, 20, 30, 40, 50 → max = 50, which is Product4
         List<QueryResultRow> rows = await Run(f,

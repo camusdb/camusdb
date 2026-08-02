@@ -37,7 +37,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 public class TestPlanDistributedProperties
 {
     private static QueryPlannerTestContext? ctx;
-    private readonly QueryPlanner queryPlanner = new(CamusDBConfig.Ambient);
 
     [OneTimeSetUp]
     public void OneTimeSetUp() => ctx = QueryPlannerTestContext.Create();
@@ -62,8 +61,13 @@ public class TestPlanDistributedProperties
         return QueryTicketAdapter.ToQueryTicket(query, exec);
     }
 
+    /// <summary>
+    /// Plans <paramref name="sql"/> with a planner built from the configuration in force at the call.
+    /// A planner fixes its configuration when constructed, so a fixture-level instance would plan every
+    /// case under whatever settings happened to hold when the fixture was created.
+    /// </summary>
     private QueryPlan Plan(string sql, Dictionary<string, ColumnValue>? parameters = null) =>
-        queryPlanner.GetPlan(ctx!.Database, ctx!.Table, Ticket(sql, parameters));
+        new QueryPlanner(CamusDBConfig.Ambient).GetPlan(ctx!.Database, ctx!.Table, Ticket(sql, parameters));
 
     /// <summary>Walk the plan tree in DFS order and collect all nodes.</summary>
     private static List<PhysicalPlanNode> AllNodes(QueryPlan plan)

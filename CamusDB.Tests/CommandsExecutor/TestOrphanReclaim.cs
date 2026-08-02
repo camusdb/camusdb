@@ -88,12 +88,14 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     [NonParallelizable]
     public async Task Gc_ReclaimsExpiredDatabaseOrphan()
     {
+        // The reclaimer fixes its retention when the engine is built, so it is set before setup.
+        CamusConfig.OrphanRetentionMs = 1;
+
         (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(5);
         await executor.DropDatabase(new DropDatabaseTicket(dbName));
 
         Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present after deferred drop");
 
-        CamusConfig.OrphanRetentionMs = 1;
         await Task.Delay(50);
 
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
@@ -168,10 +170,12 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
     [NonParallelizable]
     public async Task Gc_ReclaimsExpiredTableOrphan()
     {
+        // The reclaimer fixes its retention when the engine is built, so it is set before setup.
+        CamusConfig.OrphanRetentionMs = 1;
+
         (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(6);
         await executor.DropTable(new DropTableTicket(dbName, "robots", ifExists: false));
 
-        CamusConfig.OrphanRetentionMs = 1;
         await Task.Delay(50);
 
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();

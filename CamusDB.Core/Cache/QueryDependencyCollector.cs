@@ -53,6 +53,11 @@ namespace CamusDB.Core.Cache;
 /// </summary>
 internal sealed class QueryDependencyCollector
 {
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public QueryDependencyCollector(CamusDBOptions options) => this.options = options;
+
     private readonly HashSet<string> _rangeDeps  = new(StringComparer.Ordinal);
     private readonly HashSet<string> _pointDeps  = new(StringComparer.Ordinal);
     private readonly List<(string TableId, int SchemaVersion)> _schemaDeps = new();
@@ -103,7 +108,7 @@ internal sealed class QueryDependencyCollector
         if (_rangeDeps.Contains(keyspaceBucket))
             return;
 
-        if (_rangeDeps.Count >= CamusDBConfig.QueryResultCacheMaxRanges)
+        if (_rangeDeps.Count >= options.QueryResultCacheMaxRanges)
         {
             _capExceeded = true;
             return;
@@ -126,7 +131,7 @@ internal sealed class QueryDependencyCollector
         // Drop point deps beyond the cap. For non-strict entries the range dep provides coverage;
         // for strict entries this truncation is unsafe (deletes are invisible without the point dep)
         // and PointDepsTruncated is set so FinalizeAsync can bypass publish for strict entries.
-        if (_pointDeps.Count >= CamusDBConfig.QueryResultCacheMaxPointDeps)
+        if (_pointDeps.Count >= options.QueryResultCacheMaxPointDeps)
         {
             _pointDepsTruncated = true;
             return;
@@ -174,7 +179,7 @@ internal sealed class QueryDependencyCollector
     private void CheckTotalCap()
     {
         int total = _rangeDeps.Count + _pointDeps.Count + _schemaDeps.Count;
-        if (total > CamusDBConfig.QueryResultCacheMaxDeps)
+        if (total > options.QueryResultCacheMaxDeps)
             _capExceeded = true;
     }
 }

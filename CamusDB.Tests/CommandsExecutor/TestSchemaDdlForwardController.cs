@@ -71,7 +71,7 @@ public sealed class TestSchemaDdlForwardController
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
 
         executor = new CommandExecutor(
-            new CommandValidator(),
+            new CommandValidator(CamusDBConfig.Ambient),
             new CatalogsManager(NullLogger<ICamusDB>.Instance),
             NullLogger<ICamusDB>.Instance, CamusDBConfig.Ambient,
             sharedNode: node,

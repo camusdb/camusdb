@@ -80,7 +80,7 @@ public class IndexScanBenchmarks
 
         _registry = await DatabaseRegistry.OpenAsync(_node, CamusDBConfig.Ambient);
 
-        CommandValidator validator    = new();
+        CommandValidator validator    = new(CamusDBConfig.Ambient);
         CatalogsManager  catalogsMgr = new(Logger);
         _executor = new CommandExecutor(validator, catalogsMgr, Logger, CamusDBConfig.Ambient,
             sharedNode: _node, registry: _registry, isClusterMode: true);

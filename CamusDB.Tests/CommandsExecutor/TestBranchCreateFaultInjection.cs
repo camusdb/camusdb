@@ -133,7 +133,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     }
 
     private CommandExecutor BuildExecutorWith(DatabaseRegistry registry)
-        => new(new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+        => new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
                sharedNode: TestNode!, registry: registry, isClusterMode: false);
 
     private static async Task<int> CountMetaKeysAsync(DatabaseDescriptor readVia, string dbId)

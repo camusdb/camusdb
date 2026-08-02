@@ -45,7 +45,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     protected override CommandExecutor CreateCommandExecutor()
     {
         _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
@@ -53,6 +53,15 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     }
 
     private QueryResultCache Cache => _cache!;
+
+    /// <summary>
+    /// A second engine over the same node and the <b>same cache</b>, configured differently. An engine
+    /// fixes its cache limits when it is constructed, so a case that must populate under one limit and
+    /// re-execute under another needs two engines rather than a flag flipped between the two steps.
+    /// </summary>
+    private CommandExecutor ExecutorWith(CamusDBOptions options)
+        => new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, options,
+               sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: _cache);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
@@ -243,7 +252,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         // database.Cache will be null, exercising the dispatch branch in Query() that
         // fires when a hint is present but no cache is wired up.
         CommandExecutor disabledExecutor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
             cache: null);
 
@@ -410,21 +419,16 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
             new HLCTimestamp(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0));
         var meta = new CacheMetadataHolder();
 
-        int origMax = CamusDBConfig.QueryResultCacheMaxEntryRows;
-        try
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryRows = 0;  // force EvictedBeforePublish on re-execution
+        // Re-execute through an engine whose row cap is 0, forcing EvictedBeforePublish on the publish
+        // step while sharing the cache that holds the stale entry.
+        CommandExecutor cappedExecutor = ExecutorWith(
+            CamusDBConfig.Ambient with { QueryResultCacheMaxEntryRows = 0 });
 
-            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
-                new ExecuteSQLTicket(snapshotTx, dbname,
-                    $"SELECT * FROM orders{{cache={cacheName}, strict}}",
-                    null), meta);
-            await foreach (QueryResultRow _ in cursor) { }
-        }
-        finally
-        {
-            CamusDBConfig.QueryResultCacheMaxEntryRows = origMax;
-        }
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await cappedExecutor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(snapshotTx, dbname,
+                $"SELECT * FROM orders{{cache={cacheName}, strict}}",
+                null), meta);
+        await foreach (QueryResultRow _ in cursor) { }
 
         Assert.That(meta.Status, Is.EqualTo(QueryCacheStatus.StaleRevalidated),
             "StaleRevalidated must survive EvictedBeforePublish on the re-execution publish step");

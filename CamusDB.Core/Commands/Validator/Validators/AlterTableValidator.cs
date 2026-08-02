@@ -13,6 +13,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class AlterTableValidator : ValidatorBase
 {
+    public AlterTableValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(AlterTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

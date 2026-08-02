@@ -14,39 +14,70 @@ namespace CamusDB.Core.CommandsValidator;
 
 public sealed class CommandValidator
 {
-    private readonly CreateDatabaseValidator createDatabaseValidator = new();
+    private readonly CreateDatabaseValidator createDatabaseValidator;
 
-    private readonly DropDatabaseValidator dropDatabaseValidator = new();
+    private readonly DropDatabaseValidator dropDatabaseValidator;
 
-    private readonly CreateTableValidator createTableValidator = new();
+    private readonly CreateTableValidator createTableValidator;
 
-    private readonly InsertValidator insertValidator = new();
+    private readonly InsertValidator insertValidator;
 
-    private readonly AlterTableValidator alterTableValidator = new();
+    private readonly AlterTableValidator alterTableValidator;
 
-    private readonly AlterIndexValidator alterIndexValidator = new();
+    private readonly AlterIndexValidator alterIndexValidator;
 
-    private readonly AlterConstraintValidator alterConstraintValidator = new();
+    private readonly AlterConstraintValidator alterConstraintValidator;
 
-    private readonly CommentValidator commentValidator = new();
+    private readonly CommentValidator commentValidator;
 
-    private readonly CreateUserValidator createUserValidator = new();
+    private readonly CreateUserValidator createUserValidator;
 
-    private readonly AlterUserValidator alterUserValidator = new();
+    private readonly AlterUserValidator alterUserValidator;
 
-    private readonly DropUserValidator dropUserValidator = new();
+    private readonly DropUserValidator dropUserValidator;
 
-    private readonly GrantValidator grantValidator = new();
+    private readonly GrantValidator grantValidator;
 
-    private readonly CloseDatabaseValidator closeDatabaseValidator = new();
+    private readonly CloseDatabaseValidator closeDatabaseValidator;
 
-    private readonly RelinkDatabaseValidator relinkDatabaseValidator = new();
+    private readonly RelinkDatabaseValidator relinkDatabaseValidator;
 
-    private readonly RelinkTableValidator relinkTableValidator = new();
+    private readonly RelinkTableValidator relinkTableValidator;
 
-    private readonly TakeBackupValidator takeBackupValidator = new();
+    private readonly TakeBackupValidator takeBackupValidator;
 
-    private readonly RestoreBackupValidator restoreBackupValidator = new();
+    private readonly RestoreBackupValidator restoreBackupValidator;
+
+    /// <summary>
+    /// Builds the validator set for one engine. Limits such as identifier length and the per-table
+    /// column ceiling are operator-settable, so each validator is given this engine's configuration
+    /// rather than reading a process-wide value.
+    /// </summary>
+    /// <summary>Configuration of the engine whose commands this validates.</summary>
+    private readonly CamusDBOptions options;
+
+    public CommandValidator(CamusDBOptions options)
+    {
+        this.options = options;
+
+        createDatabaseValidator = new(options);
+        dropDatabaseValidator = new(options);
+        createTableValidator = new(options);
+        insertValidator = new(options);
+        alterTableValidator = new(options);
+        alterIndexValidator = new(options);
+        alterConstraintValidator = new(options);
+        commentValidator = new(options);
+        createUserValidator = new(options);
+        alterUserValidator = new(options);
+        dropUserValidator = new(options);
+        grantValidator = new(options);
+        closeDatabaseValidator = new(options);
+        relinkDatabaseValidator = new(options);
+        relinkTableValidator = new(options);
+        takeBackupValidator = new(options);
+        restoreBackupValidator = new(options);
+    }
 
     public void Validate(TakeBackupTicket ticket)
     {
@@ -138,7 +169,7 @@ public sealed class CommandValidator
             Kind = SchemaRenameKind.Table,
             TableName = ticket.TableName,
             NewName = ticket.NewName,
-        });
+        }, options);
     }
 
     public void Validate(CloseDatabaseTicket ticket)
@@ -148,7 +179,7 @@ public sealed class CommandValidator
 
     public void Validate(DropTableTicket ticket)
     {
-        DropTableValidator validator = new();
+        DropTableValidator validator = new(options);
         validator.Validate(ticket);
     }
 
@@ -159,31 +190,31 @@ public sealed class CommandValidator
 
     public void Validate(UpdateTicket ticket)
     {
-        UpdateValidator validator = new();
+        UpdateValidator validator = new(options);
         validator.Validate(ticket);
     }
 
     public void Validate(DeleteTicket ticket)
     {
-        DeleteValidator validator = new();
+        DeleteValidator validator = new(options);
         validator.Validate(ticket);
     }
 
     public void Validate(QueryTicket ticket)
     {
-        QueryValidator validator = new();
+        QueryValidator validator = new(options);
         validator.Validate(ticket);
     }
 
     public void Validate(QueryByIdTicket ticket)
     {
-        QueryByIdValidator validator = new();
+        QueryByIdValidator validator = new(options);
         validator.Validate(ticket);
     }
 
     public void Validate(ExecuteSQLTicket ticket)
     {
-        ExecuteSQLValidator validator = new();
+        ExecuteSQLValidator validator = new(options);
         validator.Validate(ticket);
     }
 }

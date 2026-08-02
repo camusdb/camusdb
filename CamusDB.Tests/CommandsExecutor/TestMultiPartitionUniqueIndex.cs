@@ -79,7 +79,7 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
 
     protected override CommandExecutor CreateCommandExecutor()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger, CamusDBConfig.Ambient, sharedNode: node!, isClusterMode: true);
     }

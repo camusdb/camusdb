@@ -57,7 +57,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
     [SetUp]
     public void SetUpRest()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogs = new(logger);
         executor = new(validator, catalogs, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
@@ -724,7 +724,7 @@ internal sealed class TestHttpPreparedStatements : BaseTest
         // A real cache, or the executor reports "cache-disabled" and a broken hit path would pass.
         QueryResultCache cache = new(CamusDBConfig.Ambient, sweepIntervalMs: -1);
         CommandExecutor cachedExecutor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false, cache: cache);
         HttpTransactionCoordinator cachedCoordinator = new(cachedExecutor);
 

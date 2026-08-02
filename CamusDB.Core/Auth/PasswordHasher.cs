@@ -35,7 +35,7 @@ public static class PasswordHasher
     /// denial-of-service lever (the ticket validator enforces the same bound earlier; this is the
     /// last-line guard).
     /// </summary>
-    public static Credential Hash(string password)
+    public static Credential Hash(string password, int iterations)
     {
         ArgumentNullException.ThrowIfNull(password);
 
@@ -45,7 +45,6 @@ public static class PasswordHasher
                 CamusDBErrorCodes.InvalidInput,
                 $"Password exceeds the maximum of {CamusDBConstants.MaxPasswordBytes} bytes");
 
-        int iterations = CamusDBConfig.PasswordHashIterations;
         byte[] salt = RandomNumberGenerator.GetBytes(SaltBytes);
         byte[] hash = Rfc2898DeriveBytes.Pbkdf2(passwordBytes, salt, iterations, HashAlgorithmName.SHA256, HashBytes);
 

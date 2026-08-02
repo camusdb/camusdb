@@ -123,7 +123,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
             yield break;
         }
 
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(_spillPath!, ct: ct).ConfigureAwait(false);
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(_spillPath!, _context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
         if (reader is null)
             yield break;
 

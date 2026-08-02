@@ -12,6 +12,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class QueryByIdValidator : ValidatorBase
 {
+    public QueryByIdValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(QueryByIdTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

@@ -65,7 +65,7 @@ internal sealed class TestSqlAuthentication : BaseTest
     [Test]
     public void PasswordHasherRoundTrips()
     {
-        Credential credential = PasswordHasher.Hash("app-password");
+        Credential credential = PasswordHasher.Hash("app-password", CamusDBConfig.Ambient.PasswordHashIterations);
 
         Assert.AreEqual(AuthAlgorithm.Pbkdf2Sha256, credential.Algorithm);
         Assert.IsTrue(credential.Salt.Length > 0);
@@ -75,7 +75,7 @@ internal sealed class TestSqlAuthentication : BaseTest
         Assert.IsFalse(PasswordHasher.Verify("app-password", null));
 
         // A second hash of the same password draws a fresh salt, so the stored hash differs.
-        Credential second = PasswordHasher.Hash("app-password");
+        Credential second = PasswordHasher.Hash("app-password", CamusDBConfig.Ambient.PasswordHashIterations);
         Assert.AreNotEqual(Convert.ToBase64String(credential.Hash), Convert.ToBase64String(second.Hash));
     }
 

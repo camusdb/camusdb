@@ -215,7 +215,7 @@ else
     {
         string dataPath = camusOptions.DataDirectory;
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
-        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, camusOptions.Kahuna);
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, camusOptions.Kahuna, camusOptions);
         options.InitialPartitions = config.InitialPartitions;
         return new EmbeddedKahuna(options, loggerFactory);
     });
@@ -304,7 +304,7 @@ if (config.IsClusterMode)
 {
     builder.Services.AddSingleton<EmbeddedKahuna>(services =>
     {
-        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildCluster(config);
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildCluster(config, camusOptions);
 
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
         EmbeddedKahuna kahuna = EmbeddedKahuna.CreateCluster(options, config.Peers, loggerFactory);

@@ -16,6 +16,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 /// </summary>
 internal sealed class TakeBackupValidator : ValidatorBase
 {
+    public TakeBackupValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(TakeBackupTicket ticket)
     {
         if (ticket.Kind == BackupKind.Incremental)

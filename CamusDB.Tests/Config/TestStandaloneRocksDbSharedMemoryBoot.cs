@@ -53,7 +53,7 @@ public sealed class TestStandaloneRocksDbSharedMemoryBoot
         Directory.CreateDirectory(dataPath);
 
         // Default standalone RocksDB options: both storage and WAL are rocksdb, so shared memory is on.
-        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, new KahunaOptionsConfig());
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, new KahunaOptionsConfig(), CamusDBOptions.Default);
         Assert.That(options.RocksDbSharedMemoryEnabled, Is.True, "shared memory must be on by default for the standalone RocksDB baseline");
         Assert.That(options.Storage, Is.EqualTo("rocksdb"));
         Assert.That(options.WalStorage, Is.EqualTo("rocksdb"));
@@ -73,7 +73,7 @@ public sealed class TestStandaloneRocksDbSharedMemoryBoot
 
             ILogger<ICamusDB> logger = LoggerFactory.CreateLogger<ICamusDB>();
             executor = new CommandExecutor(
-                new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+                new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
                 sharedNode: node, registry: registry, isClusterMode: false);
 
             string dbname = Guid.NewGuid().ToString("n");

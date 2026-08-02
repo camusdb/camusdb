@@ -37,7 +37,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <para>
 /// Every test verifies one of: (a) result equivalence between the spill and in-memory paths,
 /// (b) spill-file cleanup after the operation completes or errors, or (c) flag-off baseline
-/// correctness (no spill files created when <see cref="CamusDBConfig.SpillEnabled"/> is
+/// correctness (no spill files created when <see cref="CamusDBOptions.SpillEnabled"/> is
 /// <c>false</c>).
 /// </para>
 /// </summary>
@@ -46,10 +46,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
 
     [SetUp]
     public void SetUpSpill()
@@ -57,12 +53,6 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_du_spill_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
 
-        _savedSpillEnabled   = CamusDBConfig.SpillEnabled;
-        _savedThreshold      = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn          = CamusDBConfig.SpillMergeFanIn;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -70,12 +60,6 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     public void TearDownSpill()
     {
         SpillFileManager.ReleaseInstanceLock();
-
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn         = _savedFanIn;
-        CamusDBConfig.DataDirectory           = null!;
 
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
@@ -89,11 +73,22 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
         List<string> Ids);
 
     /// <summary>
+    /// <summary>Spill disabled — the in-memory buffering path.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows, so the chunked mutation path runs on
+    /// inputs small enough for a unit test. Independent of any other configuration in play.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows) =>
+        Options with { SpillEnabled = true, ForceSpillThresholdRows = thresholdRows, DataDirectory = _dataDir };
+
+    /// <summary>
     /// Creates a <c>things</c> table (id, name, value) with <paramref name="count"/> rows.
     /// </summary>
-    private async Task<Fixture> SetupThingsTable(int count = 20)
+    private async Task<Fixture> SetupThingsTable(CamusDBOptions options, int count = 20)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -164,14 +159,11 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task DeleteSpill_MatchesInMemoryPath()
     {
-        CamusDBConfig.SpillEnabled = false;
-        Fixture fRef = await SetupThingsTable(20);
+        Fixture fRef = await SetupThingsTable(SpillOff, 20);
         await RunNonQuery(fRef, "DELETE FROM things WHERE value >= 5 AND value < 15");
         List<QueryResultRow> refRemaining = await RunQuery(fRef, "SELECT name FROM things ORDER BY name");
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        Fixture fSpill = await SetupThingsTable(20);
+        Fixture fSpill = await SetupThingsTable(SpillOn(3), 20);
         await RunNonQuery(fSpill, "DELETE FROM things WHERE value >= 5 AND value < 15");
         List<QueryResultRow> spillRemaining = await RunQuery(fSpill, "SELECT name FROM things ORDER BY name");
 
@@ -191,10 +183,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task DeleteSpill_DeleteAll_LeavesTableEmpty()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 4;
-
-        Fixture f = await SetupThingsTable(15);
+        Fixture f = await SetupThingsTable(SpillOn(4), 15);
         await RunNonQuery(f, "DELETE FROM things WHERE value >= 0");
         List<QueryResultRow> remaining = await RunQuery(f, "SELECT name FROM things");
 
@@ -209,10 +198,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task DeleteSpill_NoSpillFilesRemainAfterCompletion()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-
-        Fixture f = await SetupThingsTable(20);
+        Fixture f = await SetupThingsTable(SpillOn(3), 20);
         await RunNonQuery(f, "DELETE FROM things WHERE value < 10");
 
         Assert.IsEmpty(SpillFiles(_dataDir),
@@ -226,9 +212,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task DeleteSpill_FlagOff_NoSpillFiles()
     {
-        CamusDBConfig.SpillEnabled = false;
-
-        Fixture f = await SetupThingsTable(20);
+        Fixture f = await SetupThingsTable(SpillOff, 20);
         await RunNonQuery(f, "DELETE FROM things WHERE value >= 10");
         List<QueryResultRow> remaining = await RunQuery(f, "SELECT name FROM things");
 
@@ -244,7 +228,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     /// Verifies that the DELETE mutation phase applies <see cref="KvTableStore.DeleteRowsBatch"/>
     /// in bounded chunks rather than one O(matched) batch. The discriminator is
     /// <c>StatisticsManager.DeleteBatchMaxChunkSeen</c>: its value must never exceed the
-    /// configured chunk size (which equals <see cref="CamusDBConfig.SpillEffectiveThreshold"/>).
+    /// configured chunk size (which equals <see cref="CamusDBOptions.SpillEffectiveThreshold"/>).
     ///
     /// <para>Negative proof: reverting to the single-batch code path sets
     /// <c>DeleteBatchMaxChunkSeen = 20</c> (all matched rows), which exceeds the forced
@@ -256,10 +240,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
         const int rowCount  = 20;
         const int chunkSize = 3;   // ForceSpillThresholdRows drives both the row-buffer and the chunk size
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = chunkSize;
-
-        Fixture f = await SetupThingsTable(rowCount);
+        Fixture f = await SetupThingsTable(SpillOn(chunkSize), rowCount);
         f.Executor.Statistics.DeleteBatchMaxChunkSeen = 0;
 
         // Delete all rows so the chunking path is exercised across multiple batches.
@@ -286,14 +267,11 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task UpdateSpill_MatchesInMemoryPath()
     {
-        CamusDBConfig.SpillEnabled = false;
-        Fixture fRef = await SetupThingsTable(20);
+        Fixture fRef = await SetupThingsTable(SpillOff, 20);
         await RunNonQuery(fRef, "UPDATE things SET name = 'updated' WHERE value < 10");
         List<QueryResultRow> refRows = await RunQuery(fRef, "SELECT name FROM things WHERE name = 'updated' ORDER BY name");
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        Fixture fSpill = await SetupThingsTable(20);
+        Fixture fSpill = await SetupThingsTable(SpillOn(3), 20);
         await RunNonQuery(fSpill, "UPDATE things SET name = 'updated' WHERE value < 10");
         List<QueryResultRow> spillRows = await RunQuery(fSpill, "SELECT name FROM things WHERE name = 'updated' ORDER BY name");
 
@@ -308,10 +286,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task UpdateSpill_UpdateAll_ChangesEveryRow()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 4;
-
-        Fixture f = await SetupThingsTable(15);
+        Fixture f = await SetupThingsTable(SpillOn(4), 15);
         await RunNonQuery(f, "UPDATE things SET name = 'bulk' WHERE value >= 0");
         List<QueryResultRow> rows = await RunQuery(f, "SELECT name FROM things WHERE name = 'bulk'");
 
@@ -326,10 +301,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task UpdateSpill_NoSpillFilesRemainAfterCompletion()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-
-        Fixture f = await SetupThingsTable(20);
+        Fixture f = await SetupThingsTable(SpillOn(3), 20);
         await RunNonQuery(f, "UPDATE things SET value = 999 WHERE value < 10");
 
         Assert.IsEmpty(SpillFiles(_dataDir),
@@ -343,9 +315,7 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     [Test]
     public async Task UpdateSpill_FlagOff_NoSpillFiles()
     {
-        CamusDBConfig.SpillEnabled = false;
-
-        Fixture f = await SetupThingsTable(20);
+        Fixture f = await SetupThingsTable(SpillOff, 20);
         await RunNonQuery(f, "UPDATE things SET name = 'patched' WHERE value >= 10");
         List<QueryResultRow> patched = await RunQuery(f, "SELECT name FROM things WHERE name = 'patched'");
 
@@ -366,14 +336,11 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
         const string update = "UPDATE things SET value = value + 100 WHERE value >= 5 AND value < 15";
         const string query  = "SELECT name, value FROM things ORDER BY name";
 
-        CamusDBConfig.SpillEnabled = false;
-        Fixture fOff = await SetupThingsTable(20);
+        Fixture fOff = await SetupThingsTable(SpillOff, 20);
         await RunNonQuery(fOff, update);
         List<QueryResultRow> offRows = await RunQuery(fOff, query);
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        Fixture fOn = await SetupThingsTable(20);
+        Fixture fOn = await SetupThingsTable(SpillOn(3), 20);
         await RunNonQuery(fOn, update);
         List<QueryResultRow> onRows = await RunQuery(fOn, query);
 

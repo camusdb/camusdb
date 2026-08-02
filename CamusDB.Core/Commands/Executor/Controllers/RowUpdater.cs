@@ -197,9 +197,9 @@ public sealed class RowUpdater
     /// whose entry is skipped (key and included values unchanged) never serializes or byte-checks a
     /// payload it would discard.
     /// </summary>
-    private static byte[]? BuildIncludeTuple(TableIndexSchema index, Dictionary<string, ColumnValue> newRow)
+    private static byte[]? BuildIncludeTuple(TableIndexSchema index, Dictionary<string, ColumnValue> newRow, CamusDBOptions options)
         => index.HasIncludeColumns
-            ? IndexIncludeValueCodec.EncodeTupleChecked(index.IncludeColumns, newRow, index.Name)
+            ? IndexIncludeValueCodec.EncodeTupleChecked(index.IncludeColumns, newRow, index.Name, options)
             : null;
 
     private async Task<FluxAction> LocateTuplesToUpdate(UpdateFluxState state)
@@ -365,7 +365,7 @@ public sealed class RowUpdater
 
         // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
         // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
-        int chunkSize = CamusDBConfig.SpillEffectiveThreshold;
+        int chunkSize = state.Database.Options.SpillEffectiveThreshold;
         List<QueryResultRow> chunkRows = new(Math.Min(chunkSize, 64));
 
         await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
@@ -431,7 +431,7 @@ public sealed class RowUpdater
 
             (IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries,
              IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
-                CollectIndexUpdates(table, rowId, oldRow, newRow);
+                CollectIndexUpdates(table, rowId, oldRow, newRow, state.Database.Options);
 
             batch.Add(new KvTableStore.RowUpdate
             {
@@ -461,7 +461,8 @@ public sealed class RowUpdater
             TableDescriptor table,
             ObjectIdValue rowId,
             Dictionary<string, ColumnValue> oldRow,
-            Dictionary<string, ColumnValue> newRow)
+            Dictionary<string, ColumnValue> newRow,
+            CamusDBOptions options)
     {
         List<KvTableStore.IndexDelete>? oldEntries = null;
         List<KvTableStore.IndexWrite>? newEntries = null;
@@ -505,7 +506,7 @@ public sealed class RowUpdater
                     // existing entry value in place (same key, this row's rowId) — no delete, and Set
                     // rather than SetIfNotExists (which would no-op on the already-present key).
                     if (includeChanged)
-                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow), Overwrite: true));
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
                     continue;
                 }
 
@@ -513,7 +514,7 @@ public sealed class RowUpdater
                     (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey!, rowId, Unique: true));
 
                 if (newHasKey)
-                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow)));
+                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
             }
             else if (index.Type == IndexType.Multi)
             {
@@ -528,12 +529,12 @@ public sealed class RowUpdater
                     // Key (incl. rowId tie-breaker) identical: overwrite the entry value in place to
                     // refresh the covered payload; no delete needed.
                     if (includeChanged)
-                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow), Overwrite: true));
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
                     continue;
                 }
 
                 (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey, rowId, Unique: false));
-                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow)));
+                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
             }
         }
 

@@ -110,7 +110,7 @@ internal sealed class JoinQueryPlanner
         else
         {
             orderedSource = _options.CostBasedJoinOrderEnabled && _stats is not null
-                ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats)
+                ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options)
                 : JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
         }
 
@@ -129,7 +129,7 @@ internal sealed class JoinQueryPlanner
         ProjectionPushdownPlanner.Apply(plan);
 
         // Annotate the join plan tree with cardinality and cost estimates.
-        CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats);
+        CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats, _options);
 
         // Record the plan's query-shape ID and schema-version dependencies.
         plan.QueryShapeId = shapeId;
@@ -223,7 +223,7 @@ internal sealed class JoinQueryPlanner
                 {
                     BoundSource = boundSource,
                     ExecutionFilter = scanFilter,
-                    Distribution = PlacementReader.Instance.GetPrimaryRowScanDistribution(boundSource.Table),
+                    Distribution = PlacementReader.Instance.GetPrimaryRowScanDistribution(boundSource.Table, _options),
                 };
             }
 
@@ -349,7 +349,7 @@ internal sealed class JoinQueryPlanner
     /// Also sets <see cref="PhysicalPlanNode.OutputOrdering"/> to ascending on the left key
     /// columns so a downstream ORDER BY on those columns can be elided by the planner.
     /// </summary>
-    private static MergeJoinNode BuildMergeJoinNode(
+    private MergeJoinNode BuildMergeJoinNode(
         PhysicalPlanNode left,
         BoundJoinRightSource right,
         NodeAst onPredicate,
@@ -387,7 +387,7 @@ internal sealed class JoinQueryPlanner
                 BoundSource = ls,
                 ExecutionFilter = left is TableScanNode lsn ? lsn.ExecutionFilter : null,
                 OutputOrdering = leftKeyOrdering,
-                Distribution = PlacementReader.Instance.GetIndexScanDistribution(leftIndex),
+                Distribution = PlacementReader.Instance.GetIndexScanDistribution(leftIndex, _options),
             };
         }
         else
@@ -410,7 +410,7 @@ internal sealed class JoinQueryPlanner
                     BoundSource = rightBound,
                     ExecutionFilter = rightFilter,
                     OutputOrdering = rightKeyOrdering,
-                    Distribution = PlacementReader.Instance.GetIndexScanDistribution(rightIndex),
+                    Distribution = PlacementReader.Instance.GetIndexScanDistribution(rightIndex, _options),
                 };
                 rightIsOrdered = true;
             }
@@ -421,7 +421,7 @@ internal sealed class JoinQueryPlanner
                 {
                     BoundSource = rightBound,
                     ExecutionFilter = rightFilter,
-                    Distribution = PlacementReader.Instance.GetPrimaryRowScanDistribution(rightBound.Table),
+                    Distribution = PlacementReader.Instance.GetPrimaryRowScanDistribution(rightBound.Table, _options),
                 };
                 rightPhysicalNode = new SortNode(rightScan)
                 {
@@ -540,7 +540,7 @@ internal sealed class JoinQueryPlanner
     /// Constructs a <see cref="HashJoinNode"/> from pre-extracted equi-keys, choosing the
     /// optimal build side. Shared by the indexed and unindexed hash-join selection paths.
     /// </summary>
-    private static HashJoinNode BuildHashJoinNode(
+    private HashJoinNode BuildHashJoinNode(
         PhysicalPlanNode left,
         BoundJoinRightSource right,
         NodeAst? onPredicate,
@@ -607,7 +607,7 @@ internal sealed class JoinQueryPlanner
     /// — roughly when leftRows &gt; 1.1 × rightRows. For equal-sized inputs INLJ wins by a
     /// small margin, matching the "prefer INLJ for equal/unknown cardinality" guidance in the spec.
     /// </summary>
-    private static bool ShouldPreferHashOverIndexNestedLoop(
+    private bool ShouldPreferHashOverIndexNestedLoop(
         PhysicalPlanNode leftNode,
         BoundJoinRightSource rightSource,
         DatabaseDescriptor database,
@@ -638,7 +638,7 @@ internal sealed class JoinQueryPlanner
     /// row count, choose left as the build side (smaller hash table, smaller memory
     /// footprint). Otherwise choose right.
     /// </summary>
-    private static HashJoinBuildSide ChooseBuildSide(
+    private HashJoinBuildSide ChooseBuildSide(
         PhysicalPlanNode leftNode,
         BoundJoinRightSource rightSource,
         DatabaseDescriptor database,
@@ -697,7 +697,7 @@ internal sealed class JoinQueryPlanner
     // Internal for unit testing. With CostBasedAccessPathEnabled=true, BuildJoinTree emits
     // IndexRangeScanNode join leaves when a selective index is available; the IndexRangeScanNode
     // arm is therefore reachable through GetPlan in that mode.
-    internal static long EstimatePhysicalNodeRows(
+    internal long EstimatePhysicalNodeRows(
         PhysicalPlanNode node,
         DatabaseDescriptor database,
         StatisticsManager? stats)
@@ -732,7 +732,7 @@ internal sealed class JoinQueryPlanner
                                  ?? CostEstimator.DefaultTableRowCount;
 
                 // Estimate index range selectivity via the cost model.
-                long rangeRows = CostEstimator.EstimateRangeScanRows(rsn, tableRows, stats, database, rangeBound.Table);
+                long rangeRows = CostEstimator.EstimateRangeScanRows(rsn, tableRows, _options, stats, database, rangeBound.Table);
 
                 // Add residual filter on top if present.
                 if (rsn.ExecutionFilter is not null && stats is not null)
@@ -797,7 +797,7 @@ internal sealed class JoinQueryPlanner
     /// (returns null) when no usable index is found, the chosen step is a full scan,
     /// or the range-scan cost exceeds the full-scan breakeven threshold.
     /// </summary>
-    private static PhysicalPlanNode? TryBuildIndexLeaf(
+    private PhysicalPlanNode? TryBuildIndexLeaf(
         NodeAst scanFilter,
         BoundTableSource boundSource,
         DatabaseDescriptor database,
@@ -823,7 +823,7 @@ internal sealed class JoinQueryPlanner
                 bool breakeven = tableRows is { } trc && trc > 0
                     && CostEstimator.ShouldPreferFullScan(
                         (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value),
-                        trc, stats, database, boundSource.Table);
+                        trc, _options, stats, database, boundSource.Table);
 
                 if (!breakeven)
                 {
@@ -838,7 +838,7 @@ internal sealed class JoinQueryPlanner
                         {
                             BoundSource = boundSource,
                             ExecutionFilter = residual,
-                            Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index)
+                            Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index, _options)
                         };
                         return indexNode;
                     }

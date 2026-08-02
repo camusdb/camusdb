@@ -29,7 +29,7 @@ public sealed class TestBackupValidators
     [Test]
     public void TakeBackup_IncrementalRequiresParent()
     {
-        TakeBackupValidator validator = new();
+        TakeBackupValidator validator = new(CamusDBConfig.Ambient);
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
             () => validator.Validate(new TakeBackupTicket(BackupKind.Incremental, parentBackupId: null)))!;
@@ -42,7 +42,7 @@ public sealed class TestBackupValidators
     [Test]
     public void TakeBackup_FullMustNotCarryParent()
     {
-        TakeBackupValidator validator = new();
+        TakeBackupValidator validator = new(CamusDBConfig.Ambient);
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
             () => validator.Validate(new TakeBackupTicket(BackupKind.Full, Guid.NewGuid())))!;
@@ -55,7 +55,7 @@ public sealed class TestBackupValidators
     [Test]
     public void Restore_RejectsRelativeOrEmptyTargetDir()
     {
-        RestoreBackupValidator validator = new();
+        RestoreBackupValidator validator = new(CamusDBConfig.Ambient);
 
         Assert.Throws<CamusDBException>(
             () => validator.Validate(new RestoreBackupTicket(Guid.NewGuid(), "", 0)));
@@ -66,35 +66,28 @@ public sealed class TestBackupValidators
     [Test]
     public void Restore_RejectsLiveDataDirectory()
     {
-        RestoreBackupValidator validator = new();
-
         string dataDir = Path.Combine(Path.GetTempPath(), "camusdb-restore-guard", Guid.NewGuid().ToString("N"));
-        string previous = CamusDBConfig.DataDirectory;
-        try
-        {
-            CamusDBConfig.DataDirectory = dataDir;
 
-            foreach (string bad in new[] { dataDir, Path.Combine(dataDir, "kv"), Path.Combine(dataDir, "wal") })
-            {
-                CamusDBException ex = Assert.Throws<CamusDBException>(
-                    () => validator.Validate(new RestoreBackupTicket(Guid.NewGuid(), bad, 0)))!;
-                Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code, $"target '{bad}' must be rejected");
-            }
+        // The validator fixes the data directory it protects when it is constructed, so the directory
+        // under test is stated as options rather than assigned to a global and restored afterwards.
+        RestoreBackupValidator validator = new(CamusDBOptions.Default with { DataDirectory = dataDir });
 
-            // A sibling directory is fine.
-            Assert.DoesNotThrow(
-                () => validator.Validate(new RestoreBackupTicket(Guid.NewGuid(), Path.Combine(dataDir, "..", "restored"), 0)));
-        }
-        finally
+        foreach (string bad in new[] { dataDir, Path.Combine(dataDir, "kv"), Path.Combine(dataDir, "wal") })
         {
-            CamusDBConfig.DataDirectory = previous;
+            CamusDBException ex = Assert.Throws<CamusDBException>(
+                () => validator.Validate(new RestoreBackupTicket(Guid.NewGuid(), bad, 0)))!;
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code, $"target '{bad}' must be rejected");
         }
+
+        // A sibling directory is fine.
+        Assert.DoesNotThrow(
+            () => validator.Validate(new RestoreBackupTicket(Guid.NewGuid(), Path.Combine(dataDir, "..", "restored"), 0)));
     }
 
     [Test]
     public void Restore_RejectsNegativeTargetTime_ButDelegatesCoverageToKahuna()
     {
-        RestoreBackupValidator validator = new();
+        RestoreBackupValidator validator = new(CamusDBConfig.Ambient);
 
         string dir = Path.Combine(Path.GetTempPath(), "camusdb-restore-window", Guid.NewGuid().ToString("N"));
 

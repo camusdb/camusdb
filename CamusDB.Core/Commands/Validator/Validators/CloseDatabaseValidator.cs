@@ -12,6 +12,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class CloseDatabaseValidator : ValidatorBase
 {
+    public CloseDatabaseValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(CloseDatabaseTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

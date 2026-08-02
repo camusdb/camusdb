@@ -162,9 +162,9 @@ internal sealed class RowInserter
     /// for a plain index. Called only from the branch that actually emits the index entry, so a row
     /// that carries no entry (e.g. a NULL unique key) never pays the encode + byte-check cost.
     /// </summary>
-    private static byte[]? BuildIncludeTuple(TableIndexSchema index, Dictionary<string, ColumnValue> values)
+    private static byte[]? BuildIncludeTuple(TableIndexSchema index, Dictionary<string, ColumnValue> values, CamusDBOptions options)
         => index.HasIncludeColumns
-            ? IndexIncludeValueCodec.EncodeTupleChecked(index.IncludeColumns, values, index.Name)
+            ? IndexIncludeValueCodec.EncodeTupleChecked(index.IncludeColumns, values, index.Name, options)
             : null;
 
     public async Task<int> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
@@ -226,12 +226,12 @@ internal sealed class RowInserter
                     CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
                     // Serialize the INCLUDE payload only now that the entry is known to be written —
                     // a NULL-key row above returns without paying the encode + byte-check cost.
-                    (indexEntries ??= new()).Add(new(index.KvId, uniqueKeyValue, Unique: true, IncludeTuple: BuildIncludeTuple(index, values)));
+                    (indexEntries ??= new()).Add(new(index.KvId, uniqueKeyValue, Unique: true, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
                 else if (index.Type == IndexType.Multi)
                 {
                     CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                    (indexEntries ??= new()).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values)));
+                    (indexEntries ??= new()).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
             }
 

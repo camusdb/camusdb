@@ -42,25 +42,12 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestHashJoinSpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
-    private int _savedMaxBuildRows;
 
     [SetUp]
     public void SetUpSpill()
     {
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_hj_spill_" + System.Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
-
-        _savedSpillEnabled    = CamusDBConfig.SpillEnabled;
-        _savedThreshold       = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold  = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn           = CamusDBConfig.SpillMergeFanIn;
-        _savedMaxBuildRows    = CamusDBConfig.HashJoinMaxBuildRows;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -68,13 +55,6 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     public void TearDownSpill()
     {
         SpillFileManager.ReleaseInstanceLock();
-
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn         = _savedFanIn;
-        CamusDBConfig.HashJoinMaxBuildRows    = _savedMaxBuildRows;
-        CamusDBConfig.DataDirectory           = null!;
 
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
@@ -86,9 +66,27 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         DatabaseDescriptor Database,
         CommandExecutor Executor);
 
-    private async Task<HJSFixture> SetupOrdersItems(bool includeNullKey = false)
+    /// <summary>Spill disabled — the in-memory hash-join build path.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows so the Grace/hybrid path runs on inputs
+    /// small enough for a unit test. <paramref name="maxBuildRows"/> covers the cases that exercise the
+    /// non-spill build cap. Independent of any other configuration in play.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows, int fanIn = 4, int? maxBuildRows = null) =>
+        Options with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            SpillMergeFanIn = fanIn,
+            HashJoinMaxBuildRows = maxBuildRows ?? Options.HashJoinMaxBuildRows,
+            DataDirectory = _dataDir,
+        };
+
+    private async Task<HJSFixture> SetupOrdersItems(CamusDBOptions options, bool includeNullKey = false)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -174,16 +172,11 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
 
         // In-memory reference (spill off, build cap large enough to fit everything).
-        CamusDBConfig.SpillEnabled         = false;
-        CamusDBConfig.HashJoinMaxBuildRows = 1_000_000;
-        HJSFixture fRef = await SetupOrdersItems();
+        HJSFixture fRef = await SetupOrdersItems(SpillOff);
         List<QueryResultRow> reference = await Run(fRef, sql);
 
         // Grace hash join path: cap at 1 so any 2-row build triggers overflow.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        HJSFixture fSpill = await SetupOrdersItems();
+        HJSFixture fSpill = await SetupOrdersItems(SpillOn(2, maxBuildRows: 1));
         List<QueryResultRow> spillResult = await Run(fSpill, sql);
 
         Assert.AreEqual(reference.Count, spillResult.Count,
@@ -195,10 +188,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     [Test]
     public async Task HashJoinSpill_NoSpillFilesRemainAfterCompletion()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        HJSFixture f = await SetupOrdersItems();
+        HJSFixture f = await SetupOrdersItems(SpillOn(2, maxBuildRows: 1));
 
         string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
         List<QueryResultRow> rows = await Run(f, sql);
@@ -215,9 +205,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     [Test]
     public async Task HashJoinSpill_FlagOff_UsesInMemoryPath()
     {
-        CamusDBConfig.SpillEnabled         = false;
-        CamusDBConfig.HashJoinMaxBuildRows = 1_000_000;
-        HJSFixture f = await SetupOrdersItems();
+        HJSFixture f = await SetupOrdersItems(SpillOff);
 
         string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
         List<QueryResultRow> rows = await Run(f, sql);
@@ -229,10 +217,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     [Test]
     public async Task HashJoinSpill_NullJoinKey_RowExcluded()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        HJSFixture f = await SetupOrdersItems(includeNullKey: true);
+        HJSFixture f = await SetupOrdersItems(SpillOn(2, maxBuildRows: 1), includeNullKey: true);
 
         string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
         List<QueryResultRow> rows = await Run(f, sql);
@@ -251,11 +236,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         // fixed row shape by ordinal and asserts the full slot count is filled; a row that carried a
         // NULL as an absent key (rather than an explicit ColumnValue.Null) would leave a slot unfilled
         // and throw. This guards that null non-key columns are materialized as real slots end to end.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(SpillOn(2, maxBuildRows: 1));
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -308,16 +289,9 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     {
         string sql = "SELECT o.name, li.product, li.qty " +
                      "FROM orders o JOIN line_items li ON li.order_id = o.id";
-
-        CamusDBConfig.SpillEnabled         = false;
-        CamusDBConfig.HashJoinMaxBuildRows = 1_000_000;
-        HJSFixture fOff = await SetupOrdersItems();
+        HJSFixture fOff = await SetupOrdersItems(SpillOff);
         List<QueryResultRow> offRows = await Run(fOff, sql);
-
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        HJSFixture fOn = await SetupOrdersItems();
+        HJSFixture fOn = await SetupOrdersItems(SpillOn(2, maxBuildRows: 1));
         List<QueryResultRow> onRows = await Run(fOn, sql);
 
         Assert.AreEqual(offRows.Count, onRows.Count,
@@ -330,7 +304,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         // All line items share the same order_id — extreme skew that triggers the MaxGraceHashDepth
         // fallback where all rows end up in the same sub-partition and the hash table is loaded
         // unconditionally.
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(SpillOn(1, 4, maxBuildRows: 1)); // threshold 1: every partition overflows → recursive repartition
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -361,11 +335,6 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         await database.Transactions.CommitAsync(txn);
         executor.Statistics.ForceHashJoinForTesting = true;
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 1; // Every partition immediately overflows → recursive repartition
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
         KvTransaction runTxn = await database.Transactions.BeginAsync();
         ExecuteSQLTicket ticket = new(txnState: runTxn, database: dbname,
             sql: "SELECT o.label, i.val FROM orders o JOIN items i ON i.order_id = o.id",
@@ -388,7 +357,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         // backstop returns the correct multiset whether or not the recursion actually splits.
         // The true discriminator for the murmur-finalizer fix is the PartitionIndex level-
         // independence unit test below (PartitionIndex_RedistributesCollidingKeysAcrossLevels).
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(SpillOn(3, 2, maxBuildRows: 1));
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -428,11 +397,6 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         // Per-partition threshold=3 so every level-0 bucket overflows and triggers recursion.
         // With a proper finalizer the recursive splits distribute the 20 keys per bucket
         // into new sub-buckets and the join completes correctly.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        CamusDBConfig.SpillMergeFanIn         = 2;
-
         KvTransaction runTxn = await database.Transactions.BeginAsync();
         ExecuteSQLTicket ticket = new(txnState: runTxn, database: dbname,
             sql: "SELECT o.name, i.val FROM orders o JOIN items i ON i.order_id = o.id",
@@ -461,17 +425,12 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
 
         // Reference: spill off, large cap — in-memory path.
-        CamusDBConfig.SpillEnabled         = false;
-        CamusDBConfig.HashJoinMaxBuildRows = 1_000_000;
-        HJSFixture fRef = await SetupOrdersItems();
+        HJSFixture fRef = await SetupOrdersItems(SpillOff);
         List<QueryResultRow> reference = await Run(fRef, sql);
 
-        // Grace path triggered by ForceSpillThresholdRows (not by HashJoinMaxBuildRows = 1).
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000; // deliberately large — must NOT be the trigger
-        CamusDBConfig.ForceSpillThresholdRows = 3;         // 4-row build > 3 → overflow → Grace
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        HJSFixture fSpill = await SetupOrdersItems();
+        // Grace path triggered by ForceSpillThresholdRows; the build cap is deliberately large, so it
+        // cannot be what triggers it.
+        HJSFixture fSpill = await SetupOrdersItems(SpillOn(3, 4, maxBuildRows: 1_000_000));
         fSpill.Executor.Statistics.HashJoinGracePathCount = 0;
         List<QueryResultRow> spillResult = await Run(fSpill, sql);
 
@@ -510,11 +469,7 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
     {
         // SetupOrdersItems builds a 4-row right side (orders). Set threshold to 4 so the
         // build fits exactly within the cap and no overflow fires.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000;
-        CamusDBConfig.ForceSpillThresholdRows = 4; // build has exactly 4 rows → must NOT overflow
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        HJSFixture f = await SetupOrdersItems();
+        HJSFixture f = await SetupOrdersItems(SpillOn(4, 4, maxBuildRows: 1_000_000));
 
         string sql = "SELECT o.name, li.product FROM orders o JOIN line_items li ON li.order_id = o.id";
         List<QueryResultRow> rows = await Run(f, sql);
@@ -550,14 +505,10 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
         // threshold=2: the 4-row single-key build overflows at every recursion level. At
         // MaxGraceHashDepth the NLJ backstop fires instead of load-all. The engine fixes its
         // configuration when it is built, so this is set before the database is created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.HashJoinMaxBuildRows    = 1_000_000;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
         // items (right/build side, 4 rows) all share one order_id — extreme skew.
         // orders (left/probe side, 6 rows) is larger so ChooseBuildSide picks items as build.
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await CreateDatabase(SpillOn(2, 4, maxBuildRows: 1_000_000));
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(

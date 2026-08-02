@@ -34,16 +34,20 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// dedup. Correctness is asserted by comparing sorted results against the flag-off hash-set
 /// path.
 /// </para>
+///
+/// <para>
+/// Each case states the configuration it needs as options passed to the engine it runs against, so
+/// nothing here mutates process-wide state. [NonParallelizable] nonetheless stays, for a different
+/// reason: <see cref="SpillFileManager.AcquireInstanceLock"/> holds a single process-wide
+/// <c>FileStream</c>, so two fixtures acquiring it concurrently would clobber one another. That lock,
+/// not configuration, is what keeps this fixture serialized.
+/// </para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
 
     [SetUp]
     public void SetUpSpill()
@@ -51,12 +55,6 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_dist_spill_" + System.Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
 
-        _savedSpillEnabled   = CamusDBConfig.SpillEnabled;
-        _savedThreshold      = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn          = CamusDBConfig.SpillMergeFanIn;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -65,14 +63,25 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     {
         SpillFileManager.ReleaseInstanceLock();
 
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn         = _savedFanIn;
-        CamusDBConfig.DataDirectory           = null!;
-
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
+
+    /// <summary>Spill disabled — the in-memory hash-set path.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows, so the external path runs on inputs
+    /// small enough for a unit test. Each call is an independent configuration — nothing here is
+    /// process-wide, so two of these can be in play at once.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows, int fanIn = 4) =>
+        Options with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            SpillMergeFanIn = fanIn,
+            DataDirectory = _dataDir,
+        };
 
     // ── Fixture helpers ───────────────────────────────────────────────────────
 
@@ -87,9 +96,9 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     /// <paramref name="dupsPerCity"/> times, with varying scores so row content is not
     /// entirely identical (only <c>city</c> is duplicated by value).
     /// </summary>
-    private async Task<DistFixture> SetupPeople(int cities = 5, int dupsPerCity = 4)
+    private async Task<DistFixture> SetupPeople(CamusDBOptions options, int cities = 5, int dupsPerCity = 4)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -144,14 +153,10 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     {
         const string sql = "SELECT DISTINCT city FROM people";
 
-        CamusDBConfig.SpillEnabled = false;
-        DistFixture fRef = await SetupPeople();
+        DistFixture fRef = await SetupPeople(SpillOff);
         List<QueryResultRow> reference = await Run(fRef, sql);
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 5;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        DistFixture fSpill = await SetupPeople();
+        DistFixture fSpill = await SetupPeople(SpillOn(5, 4));
         List<QueryResultRow> spillResult = await Run(fSpill, sql);
 
         Assert.AreEqual(reference.Count, spillResult.Count,
@@ -165,14 +170,10 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     {
         const string sql = "SELECT DISTINCT city FROM people";
 
-        CamusDBConfig.SpillEnabled = false;
-        DistFixture fOff = await SetupPeople(cities: 8, dupsPerCity: 5);
+        DistFixture fOff = await SetupPeople(SpillOff, cities: 8, dupsPerCity: 5);
         List<QueryResultRow> offRows = await Run(fOff, sql);
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 6;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        DistFixture fOn = await SetupPeople(cities: 8, dupsPerCity: 5);
+        DistFixture fOn = await SetupPeople(SpillOn(6, 4), cities: 8, dupsPerCity: 5);
         List<QueryResultRow> onRows = await Run(fOn, sql);
 
         CollectionAssert.AreEqual(SortedCities(offRows), SortedCities(onRows),
@@ -182,11 +183,7 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     [Test]
     public async Task DistinctSpill_NoSpillFilesRemainAfterCompletion()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        DistFixture f = await SetupPeople(cities: 4, dupsPerCity: 3);
+        DistFixture f = await SetupPeople(SpillOn(3, 4), cities: 4, dupsPerCity: 3);
         List<QueryResultRow> rows = await Run(f, "SELECT DISTINCT city FROM people");
 
         Assert.That(rows.Count, Is.GreaterThan(0));
@@ -205,9 +202,7 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     {
         // When SpillEnabled=false, the hash-set path returns the correct result and must not
         // create any *.spill partition files.
-        CamusDBConfig.SpillEnabled = false;
-
-        DistFixture f = await SetupPeople(cities: 3, dupsPerCity: 4);
+        DistFixture f = await SetupPeople(SpillOff, cities: 3, dupsPerCity: 4);
         List<QueryResultRow> rows = await Run(f, "SELECT DISTINCT city FROM people");
 
         Assert.That(rows.Count, Is.EqualTo(3));
@@ -223,8 +218,9 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
     [Test]
     public async Task DistinctSpill_NullValues_TreatedAsEqual()
     {
-        // Two rows with a NULL city must deduplicate to one output row.
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        // Two rows with a NULL city must deduplicate to one output row. The engine spills after 2 rows,
+        // which is the path under test.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(SpillOn(2));
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -249,10 +245,6 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
 
         await database.Transactions.CommitAsync(txn);
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2; // spill after 2 rows
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
         KvTransaction runTxn = await database.Transactions.BeginAsync();
         ExecuteSQLTicket ticket = new(txnState: runTxn, database: dbname,
             sql: "SELECT DISTINCT city FROM locs", parameters: null);
@@ -270,7 +262,7 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
         // Multi-column DISTINCT: rows sharing the first column but differing in the second
         // must NOT be deduplicated. A comparer/streaming-dedup that only looked at the first
         // column would collapse (London,1) and (London,2) into one row — this test catches that.
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(SpillOff);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -304,18 +296,18 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
 
         const string sql = "SELECT DISTINCT city, score FROM visits";
 
-        CamusDBConfig.SpillEnabled = false;
         KvTransaction offTxn = await database.Transactions.BeginAsync();
         (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> offCursor) =
             await executor.ExecuteSQLQuery(new ExecuteSQLTicket(offTxn, dbname, sql, null));
         List<QueryResultRow> offRows = await offCursor.ToListAsync();
 
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2; // force the external sort to spill
-        CamusDBConfig.SpillMergeFanIn         = 4;
+        // The same data through a second engine that spills after 2 rows — one engine cannot answer
+        // for both configurations, since it fixes them when it is built.
+        CommandExecutor spillingExecutor = CreateCommandExecutor(SpillOn(2));
+
         KvTransaction onTxn = await database.Transactions.BeginAsync();
         (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> onCursor) =
-            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(onTxn, dbname, sql, null));
+            await spillingExecutor.ExecuteSQLQuery(new ExecuteSQLTicket(onTxn, dbname, sql, null));
         List<QueryResultRow> onRows = await onCursor.ToListAsync();
 
         Assert.That(offRows.Count, Is.EqualTo(4), "flag-off: 4 distinct (city,score) tuples expected");

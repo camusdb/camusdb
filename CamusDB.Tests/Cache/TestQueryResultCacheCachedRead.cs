@@ -44,7 +44,7 @@ public sealed class TestQueryResultCacheCachedRead : CommandsExecutor.BaseTest
     protected override CommandExecutor CreateCommandExecutor()
     {
         _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,
@@ -292,17 +292,19 @@ public sealed class TestQueryResultCacheCachedRead : CommandsExecutor.BaseTest
     [Test]
     public async Task RowCapBreach_AllRowsDelivered_CacheNotPopulated()
     {
+        // Lower the cap below the number of rows in the table so DrainAsync breaches it. The engine
+        // fixes its cache limits when it is built, so this is set before the database is created.
+        int savedRowCap = CamusDBConfig.QueryResultCacheMaxEntryRows;
+        CamusDBConfig.QueryResultCacheMaxEntryRows = 2;
+
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await CreateOrdersTable(dbname, database, executor);
         await InsertOrder(dbname, database, executor, "c1", 1);
         await InsertOrder(dbname, database, executor, "c2", 2);
         await InsertOrder(dbname, database, executor, "c3", 3);
 
-        int savedRowCap = CamusDBConfig.QueryResultCacheMaxEntryRows;
         try
         {
-            // Lower the cap below the number of rows in the table so DrainAsync breaches it.
-            CamusDBConfig.QueryResultCacheMaxEntryRows = 2;
 
             List<QueryResultRow> rows = await SelectAll(dbname, executor, "orders_cap");
 

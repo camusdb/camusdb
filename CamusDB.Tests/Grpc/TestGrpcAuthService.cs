@@ -48,7 +48,7 @@ internal sealed class TestGrpcAuthService : BaseTest
     public void SetUpGrpcAuthService()
     {
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         auth = new CamusAuthService(serviceExecutor, logger, CamusConfig.Ambient);
         sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
@@ -91,7 +91,7 @@ internal sealed class TestGrpcAuthService : BaseTest
         // in front of it are rebuilt here — after the authentication policy and signing key are in
         // place — rather than in set-up, where they would have captured auth-disabled settings.
         serviceExecutor = new CommandExecutor(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         auth = new CamusAuthService(serviceExecutor, logger, CamusConfig.Ambient);
         sql  = new CamusSqlService(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,

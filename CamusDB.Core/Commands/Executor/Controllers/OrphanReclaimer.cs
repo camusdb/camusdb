@@ -45,6 +45,9 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
     private readonly DatabaseRegistry registry;
     private readonly DatabaseDropper databaseDropper;
     private readonly ILogger<ICamusDB> logger;
+
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly int intervalMs;
     private readonly CancellationTokenSource cts = new();
     private Task? loop;
@@ -54,8 +57,10 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         DatabaseRegistry registry,
         DatabaseDropper databaseDropper,
         ILogger<ICamusDB> logger,
-        int intervalMs)
+        int intervalMs,
+        CamusDBOptions options)
     {
+        this.options = options;
         this.sharedNode = sharedNode;
         this.registry = registry;
         this.databaseDropper = databaseDropper;
@@ -103,7 +108,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
     /// </summary>
     private bool IsExpired(HLCTimestamp droppedAt, HLCTimestamp now)
     {
-        long retentionMs = CamusDBConfig.OrphanRetentionMs;
+        long retentionMs = options.OrphanRetentionMs;
         if (retentionMs <= 0)
             return false;
         return droppedAt + TimeSpan.FromMilliseconds(retentionMs) <= now;
@@ -119,7 +124,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
             return 0;
 
         // Retention disabled → nothing is ever eligible; skip the scans entirely.
-        if (CamusDBConfig.OrphanRetentionMs <= 0)
+        if (options.OrphanRetentionMs <= 0)
             return 0;
 
         HLCTimestamp now = Now();

@@ -14,6 +14,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class CreateDatabaseValidator : ValidatorBase
 {
+    public CreateDatabaseValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(CreateDatabaseTicket ticket)
     {
         ValidateIdentifier(ticket.DatabaseName, "Database");

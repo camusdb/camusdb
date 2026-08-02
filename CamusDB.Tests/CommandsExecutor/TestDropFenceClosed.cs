@@ -65,7 +65,7 @@ public sealed class TestDropFenceClosed : SharedNodeBaseTest
         // Build a second cluster-mode executor whose registry cannot acquire the drop fence.
         FenceAcquireThrowsKahuna fault = new(SharedKahuna);
         await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(SharedNode, fault, CamusDBConfig.Ambient, isClusterMode: true);
-        CommandExecutor faultExecutor = new(new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+        CommandExecutor faultExecutor = new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: SharedNode, registry: faultRegistry, isClusterMode: true);
 
         // The drop must fail closed with a retryable error.

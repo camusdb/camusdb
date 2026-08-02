@@ -135,6 +135,7 @@ internal sealed class QueryScanner
                     txId,
                     rowId,
                     data,
+            plan.Database.Options,
                     plan.ScanRequiredColumns,
                     visibilityVersion,
                     decodeState).ConfigureAwait(false);
@@ -262,7 +263,7 @@ internal sealed class QueryScanner
                 SlotBackedDecode = plan.Database.Options.SlotBackedDecode || plan.ExecutionFilter is not null,
                 BorrowedDecode = ShouldUseBorrowedDecode(plan),
             };
-        int batchSize = CamusDBConfig.IndexScanFetchBatchSize;
+        int batchSize = plan.Database.Options.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
 
         // Fetch and decode one buffered page; yields rows in the order they appear in the page.
@@ -283,6 +284,7 @@ internal sealed class QueryScanner
                 if (scanStats is not null) scanStats.RowsRead++;
                 QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,
+            plan.Database.Options,
                     plan.ScanRequiredColumns, visibilityVersion, decodeState).ConfigureAwait(false);
                 if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                     yield return new QueryResultRow(batchRowId, queryRow);

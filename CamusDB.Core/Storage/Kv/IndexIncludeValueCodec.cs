@@ -61,11 +61,11 @@ public static class IndexIncludeValueCodec
     /// and the enclosing transaction batch. Every write path (INSERT/UPDATE/backfill) that materializes
     /// a covering-index tuple goes through this. Limit disabled when the config value is <c>&lt;= 0</c>.
     /// </summary>
-    public static byte[] EncodeTupleChecked(string[] includeColumns, IReadOnlyDictionary<string, ColumnValue> row, string indexName)
+    public static byte[] EncodeTupleChecked(string[] includeColumns, IReadOnlyDictionary<string, ColumnValue> row, string indexName, CamusDBOptions options)
     {
         byte[] tuple = EncodeTuple(includeColumns, row);
 
-        int max = CamusDBConfig.MaxIndexIncludeTupleBytes;
+        int max = options.MaxIndexIncludeTupleBytes;
         if (max > 0 && tuple.Length > max)
             throw new CamusDBException(
                 CamusDBErrorCodes.SchemaLimitExceeded,

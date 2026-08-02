@@ -16,11 +16,15 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 /// </summary>
 internal sealed class RenameValidator : ValidatorBase
 {
-    private static readonly RenameValidator Instance = new();
+    public RenameValidator(CamusDBOptions options) : base(options) { }
 
-    public static void Validate(SchemaRenamePayload payload)
+    /// <summary>
+    /// Validates a rename against <paramref name="options"/>. A shared singleton is no longer possible:
+    /// the identifier limit it enforces is per-engine configuration.
+    /// </summary>
+    public static void Validate(SchemaRenamePayload payload, CamusDBOptions options)
     {
-        Instance.ValidateInternal(payload);
+        new RenameValidator(options).ValidateInternal(payload);
     }
 
     private void ValidateInternal(SchemaRenamePayload payload)

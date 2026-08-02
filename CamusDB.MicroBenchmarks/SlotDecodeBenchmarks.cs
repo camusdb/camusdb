@@ -112,7 +112,7 @@ public class SlotDecodeBenchmarks
     private async Task<QueryRow> DecodeAsync(int i, RowEncoder.RowDecodeState cache)
     {
         BranchKvValue env = BranchKvCodec.Decode(_payloads[i]);
-        return await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, env.Payload, decodeState: cache)
+        return await RowEncoder.DecodeToQueryRowAsync(_schema, TxId, RowId, env.Payload, CamusDBConfig.Ambient, decodeState: cache)
             .ConfigureAwait(false);
     }
 

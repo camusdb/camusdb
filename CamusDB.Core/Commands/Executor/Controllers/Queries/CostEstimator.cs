@@ -106,14 +106,15 @@ internal static class CostEstimator
         PhysicalPlanNode root,
         DatabaseDescriptor database,
         TableDescriptor? table,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        CamusDBOptions options)
     {
         // Pre-resolve the single-table row count; null for join plans (resolved per-node below).
         long? singleTableRowCount = table is not null
             ? stats?.GetRowCountEstimate(database, table)
             : null;
 
-        AnnotateNode(root, database, stats, singleTableRowCount, table);
+        AnnotateNode(root, database, stats, singleTableRowCount, options, table);
     }
 
     /// <summary>
@@ -129,7 +130,8 @@ internal static class CostEstimator
         long tableRowCount,
         StatisticsManager? stats,
         DatabaseDescriptor database,
-        TableDescriptor table)
+        TableDescriptor table,
+        CamusDBOptions options)
     {
         (_, PlanCost cost) = EstimateNodeCost(
             scanNode,
@@ -137,6 +139,7 @@ internal static class CostEstimator
             tableRowCount: tableRowCount,
             database: database,
             stats: stats,
+            options: options,
             primaryTable: table,
             resolvedTable: table);
         return cost.Total;
@@ -157,11 +160,12 @@ internal static class CostEstimator
     public static bool ShouldPreferFullScan(
         IndexRangeScanNode indexNode,
         long tableRowCount,
+        CamusDBOptions options,
         StatisticsManager? stats = null,
         DatabaseDescriptor? database = null,
         TableDescriptor? table = null)
     {
-        long estimatedEntries = EstimateRangeScanRows(indexNode, tableRowCount, stats, database, table);
+        long estimatedEntries = EstimateRangeScanRows(indexNode, tableRowCount, options, stats, database, table);
         // Use ceiling so tiny tables don't mis-trigger on rounding (e.g. ceil(3 × 0.50) = 2,
         // so 1 estimated entry < 2 breakeven → index wins).
         long breakeven = (long)Math.Ceiling(tableRowCount * BreakevenFraction);
@@ -177,6 +181,7 @@ internal static class CostEstimator
         DatabaseDescriptor database,
         StatisticsManager? stats,
         long? rowCountHint,
+        CamusDBOptions options,
         TableDescriptor? primaryTable = null)
     {
         // Resolve the effective table row count for this specific node.
@@ -184,11 +189,11 @@ internal static class CostEstimator
         long? effectiveRowCount = ResolveNodeRowCount(node, database, stats, rowCountHint);
 
         long inputCardinality = node.Input is not null
-            ? AnnotateNode(node.Input, database, stats, rowCountHint, primaryTable)
+            ? AnnotateNode(node.Input, database, stats, rowCountHint, options, primaryTable)
             : effectiveRowCount ?? DefaultTableRowCount;
 
         TableDescriptor? resolvedTable = ResolveNodeTable(node, primaryTable);
-        (long cardinality, PlanCost cost) = EstimateNodeCost(node, inputCardinality, effectiveRowCount, database, stats, primaryTable, resolvedTable);
+        (long cardinality, PlanCost cost) = EstimateNodeCost(node, inputCardinality, effectiveRowCount, database, stats, options, primaryTable, resolvedTable);
 
         node.EstimatedCardinality = cardinality;
         node.Cost = cost;
@@ -267,7 +272,7 @@ internal static class CostEstimator
         if (node.Distribution is not { Kind: DataDistributionKind.Partitioned })
             return 0.0;
 
-        double remoteFraction = PlacementReader.GetRemoteFraction();
+        double remoteFraction = PlacementReader.GetRemoteFraction(options);
         if (remoteFraction <= 0.0 || options.NetWeight <= 0.0)
             return 0.0;
 
@@ -281,6 +286,7 @@ internal static class CostEstimator
         long? tableRowCount,
         DatabaseDescriptor database,
         StatisticsManager? stats,
+        CamusDBOptions options,
         TableDescriptor? primaryTable = null,
         TableDescriptor? resolvedTable = null)
     {
@@ -296,7 +302,7 @@ internal static class CostEstimator
                     EstimatedRows        = rows,
                     KvPointLookups       = 1,
                     RowFetchesAfterIndex = 1,
-                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, options),
                 });
             }
 
@@ -314,7 +320,7 @@ internal static class CostEstimator
                     KvPointLookups       = isUnique ? n : 0,
                     KvRangeScanEntries   = isUnique ? 0 : rows,  // non-unique: entries scanned ≈ matched rows
                     RowFetchesAfterIndex = rows,
-                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, options),
                 });
             }
 
@@ -324,13 +330,13 @@ internal static class CostEstimator
                 // (resolved from BoundSource by ResolveNodeTable). Pass the non-null one so
                 // EstimateRangeScanRows can use histogram/min-max/NDV stats rather than the
                 // fixed 10%/40% fallback.
-                long rows = EstimateRangeScanRows(rangeNode, trc, stats, database, resolvedTable ?? primaryTable);
+                long rows = EstimateRangeScanRows(rangeNode, trc, options, stats, database, resolvedTable ?? primaryTable);
                 return (rows, new PlanCost
                 {
                     EstimatedRows        = rows,
                     KvRangeScanEntries   = rows,
                     RowFetchesAfterIndex = rows,
-                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, options),
                 });
             }
 
@@ -353,7 +359,7 @@ internal static class CostEstimator
                 {
                     EstimatedRows      = outputCard,
                     KvRangeScanEntries = rows,
-                    NetworkFactor      = ComputeNetworkFactor(node, rows, resolvedTable, database.Options),
+                    NetworkFactor      = ComputeNetworkFactor(node, rows, resolvedTable, options),
                 });
             }
 
@@ -637,6 +643,7 @@ internal static class CostEstimator
     internal static long EstimateRangeScanRows(
         IndexRangeScanNode node,
         long tableRowCount,
+        CamusDBOptions options,
         StatisticsManager? stats = null,
         DatabaseDescriptor? database = null,
         TableDescriptor? table = null)

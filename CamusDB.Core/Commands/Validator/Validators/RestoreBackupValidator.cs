@@ -26,6 +26,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 /// </summary>
 internal sealed class RestoreBackupValidator : ValidatorBase
 {
+    public RestoreBackupValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(RestoreBackupTicket ticket)
     {
         if (ticket.LeafBackupId == Guid.Empty)
@@ -46,10 +48,10 @@ internal sealed class RestoreBackupValidator : ValidatorBase
         // Restore is non-destructive to the live node: writing into the serving node's storage tree is
         // unsupported and would corrupt it. Reject the live data directory and its kv/wal children.
         string target = NormalizeDir(ticket.TargetDir);
-        string dataDir = NormalizeDir(CamusDBConfig.DataDirectory);
+        string dataDir = NormalizeDir(Options.DataDirectory);
         if (target == dataDir
-            || target == NormalizeDir(Path.Combine(CamusDBConfig.DataDirectory, "kv"))
-            || target == NormalizeDir(Path.Combine(CamusDBConfig.DataDirectory, "wal")))
+            || target == NormalizeDir(Path.Combine(Options.DataDirectory, "kv"))
+            || target == NormalizeDir(Path.Combine(Options.DataDirectory, "wal")))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,

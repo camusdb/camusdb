@@ -17,6 +17,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 /// </summary>
 internal sealed class CommentValidator : ValidatorBase
 {
+    public CommentValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(CommentTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

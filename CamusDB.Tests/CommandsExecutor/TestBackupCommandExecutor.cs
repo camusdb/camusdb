@@ -101,7 +101,7 @@ public sealed class TestBackupCommandExecutor
 
         DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(node, CamusDBConfig.Ambient);
         CommandExecutor executor = new(
-            new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
+            new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient,
             sharedNode: node, registry: registry, isClusterMode: false);
 
         Ctx ctx = new(executor, node, registry, root, backupDir, restoreRoot);

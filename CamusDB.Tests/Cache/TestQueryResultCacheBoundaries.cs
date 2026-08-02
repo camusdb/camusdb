@@ -7,6 +7,7 @@
  */
 
 using System;
+using CamusDB.Core;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -111,7 +112,7 @@ public class TestQueryResultCacheBoundaries
         var token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
         var result = MakePendingResult();
 
-        var runner = new CachedQueryRunner(cache, result, token, cts.Token);
+        var runner = new CachedQueryRunner(cache, result, token, CamusDBConfig.Ambient, cts.Token);
 
         // Cancel before the drain begins — the enumerable will throw OperationCanceledException
         cts.Cancel();
@@ -138,7 +139,7 @@ public class TestQueryResultCacheBoundaries
         var token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
         var result = MakePendingResult("fp2");
 
-        var runner = new CachedQueryRunner(cache, result, token);
+        var runner = new CachedQueryRunner(cache, result, token, CamusDBConfig.Ambient);
 
         // Only consume the first row from a 5-row source — drain is incomplete.
         await foreach (var row in runner.DrainAsync(RowSource(5, cancelAfterFirst: true)))
@@ -164,7 +165,7 @@ public class TestQueryResultCacheBoundaries
         var token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
         var result = MakePendingResult("fp3");
 
-        var runner = new CachedQueryRunner(cache, result, token);
+        var runner = new CachedQueryRunner(cache, result, token, CamusDBConfig.Ambient);
 
         await foreach (var _ in runner.DrainAsync(RowSource(3))) { }
 
@@ -186,7 +187,7 @@ public class TestQueryResultCacheBoundaries
         var token = cache.PublishGate.SnapshotGenerations(ks); // gen=0
         var result = MakePendingResult("fp4");
 
-        var runner = new CachedQueryRunner(cache, result, token);
+        var runner = new CachedQueryRunner(cache, result, token, CamusDBConfig.Ambient);
 
         await foreach (var _ in runner.DrainAsync(RowSource(3))) { }
 

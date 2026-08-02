@@ -42,6 +42,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 public sealed class DatabaseRegistry : IAsyncDisposable
 {
     private readonly IKahuna kahuna;
+
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
     private readonly KvTransactionsManager transactions;
     private readonly string keyPrefix;
 
@@ -111,14 +114,22 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private string NameKey(string name) => $"{keyPrefix}dbregistry/db:{name}";
     private string SequenceKey => $"{keyPrefix}dbregistry/seq";
 
+    /// <summary>
+    /// Test-only seam: the id counter's key, so a test can delete it and reproduce the counter reset
+    /// that <see cref="AllocateIdAsync"/> recovers from. Production code never needs this.
+    /// </summary>
+    internal string IdSequenceKeyForTests => SequenceKey;
+
     private DatabaseRegistry(
         IKahuna kahuna,
+        CamusDBOptions options,
         KvTransactionsManager transactions,
         string keyPrefix,
         int localNodeId,
         bool isClusterMode)
     {
         this.kahuna = kahuna;
+        this.options = options;
         this.transactions = transactions;
         this.keyPrefix = keyPrefix;
         this.localNodeId = localNodeId;
@@ -138,7 +149,27 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// a DROP, so a recycled name gets a strictly higher id than the dropped database.
     /// The id is returned as a short base-62 string.
     /// </summary>
-    public Task<string> AllocateIdAsync() => AllocateFromSequenceAsync(SequenceKey, "database");
+    public async Task<string> AllocateIdAsync()
+    {
+        // Normally one allocation suffices: the counter is persistent and monotonic, so it never
+        // returns an id that is already live. It can, though, be re-created rather than resumed —
+        // LocateAndCreateSequence reports Success (it created it) instead of AlreadyExists — and a
+        // counter that restarts at 0 re-issues ids that registered databases still hold. Skipping ids
+        // already present makes allocation self-healing in that case instead of failing the CREATE with
+        // "id 'X' is already registered under name '…'".
+        for (int attempt = 0; attempt < MaxRetries; attempt++)
+        {
+            string candidate = await AllocateFromSequenceAsync(SequenceKey, "database").ConfigureAwait(false);
+
+            if (!byId.ContainsKey(candidate))
+                return candidate;
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SystemSpaceCorrupt,
+            "Database id allocation kept returning ids that are already registered; the id counter " +
+            "appears to have been reset behind the registry.");
+    }
 
     /// <summary>
     /// Allocates the next table id from the persistent per-store monotonic sequence
@@ -361,7 +392,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         };
 
         KvTransactionsManager txManager = new(sharedNode.Kahuna, options, mintLocalT);
-        DatabaseRegistry registry = new(sharedNode.Kahuna, txManager, "_system/", sharedNode.Raft.GetLocalNodeId(), isClusterMode);
+        DatabaseRegistry registry = new(sharedNode.Kahuna, options, txManager, "_system/", sharedNode.Raft.GetLocalNodeId(), isClusterMode);
 
         // OpenAsync is kicked off eagerly during CommandExecutor construction, which a hosted service
         // can trigger before Program.cs calls StartAsync. Wait until the shared node has elected
@@ -394,7 +425,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         };
 
         KvTransactionsManager txManager = new(kvOverride, options, mintLocalT);
-        DatabaseRegistry registry = new(kvOverride, txManager, "_system/", node.Raft.GetLocalNodeId(), isClusterMode);
+        DatabaseRegistry registry = new(kvOverride, options, txManager, "_system/", node.Raft.GetLocalNodeId(), isClusterMode);
 
         await node.WaitUntilStartedAsync().ConfigureAwait(false);
         await registry.LoadAsync().ConfigureAwait(false);
@@ -1052,7 +1083,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         {
             (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, null, -1,
-                KeyValueFlags.SetIfNotExists, CamusDBConfig.FenceLeaseMs, KeyValueDurability.Persistent, CancellationToken.None
+                KeyValueFlags.SetIfNotExists, options.FenceLeaseMs, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
 
             if (type == KeyValueResponseType.Set)
@@ -1104,14 +1135,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                await Task.Delay(CamusDBConfig.FenceLeaseRenewIntervalMs, ct).ConfigureAwait(false);
+                await Task.Delay(options.FenceLeaseRenewIntervalMs, ct).ConfigureAwait(false);
 
                 // SetIfEqualToValue: renew (refresh the expiry) only if the stored value is still THIS
                 // node's owner value. If the lease lapsed and another node re-acquired, the compare fails
                 // (NotSet) and we stop renewing — we no longer own the fence and must not overwrite it.
                 (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
                     HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, LocalOwnerValue, -1,
-                    KeyValueFlags.SetIfEqualToValue, CamusDBConfig.FenceLeaseMs, KeyValueDurability.Persistent, ct
+                    KeyValueFlags.SetIfEqualToValue, options.FenceLeaseMs, KeyValueDurability.Persistent, ct
                 ).ConfigureAwait(false);
 
                 if (type is KeyValueResponseType.Set

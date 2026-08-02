@@ -147,7 +147,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
                 {
-                    CommandValidator validator = new();
+                    CommandValidator validator = new(CamusDBConfig.Ambient);
                     CatalogsManager catalogs = new(logger);
                     CommandExecutor executor = new(
                         validator,

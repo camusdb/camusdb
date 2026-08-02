@@ -14,6 +14,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class InsertValidator : ValidatorBase
 {
+    public InsertValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(InsertTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

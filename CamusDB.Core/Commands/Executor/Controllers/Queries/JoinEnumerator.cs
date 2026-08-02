@@ -70,7 +70,8 @@ internal static class JoinEnumerator
         BoundSelectQuery bound,
         JoinPredicatePushdown.Result pushdown,
         DatabaseDescriptor database,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        CamusDBOptions options)
     {
         List<LeafEntry> leaves = [];
         List<NodeAst> predicatePool = [];
@@ -90,7 +91,7 @@ internal static class JoinEnumerator
         long[] scanCard = new long[n];
 
         for (int i = 0; i < n; i++)
-            EstimateLeaf(i, leaves, pushdown, bound, database, stats, out scanCost[i], out scanCard[i]);
+            EstimateLeaf(i, leaves, pushdown, bound, database, stats, out scanCost[i], out scanCard[i], options);
 
         // Precompute one alias bitmask per pool predicate: the DP evaluates connectivity
         // ~n·2^(n−1) times, and re-walking each ON AST (allocating a HashSet per probe) at every
@@ -161,7 +162,8 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         out double cost,
-        out long card)
+        out long card,
+        CamusDBOptions options)
     {
         string alias = leaves[idx].Alias;
         TableDescriptor? table = FindTableDescriptor(alias, bound);
@@ -181,7 +183,7 @@ internal static class JoinEnumerator
 
         // When CBO access-path selection is enabled, BuildJoinTree may emit an IndexRangeScanNode
         // instead of a TableScanNode. Mirror that decision here so the DP costs what is actually built.
-        if (CamusDBConfig.CostBasedAccessPathEnabled)
+        if (options.CostBasedAccessPathEnabled)
         {
             PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, null);
             PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, alias);
@@ -197,9 +199,9 @@ internal static class JoinEnumerator
                     // Breakeven veto through the SAME decision the builder (TryBuildIndexLeaf)
                     // uses — a hand-rolled copy of the comparison can drift and make the DP cost
                     // a plan shape the builder then refuses to build.
-                    if (!CostEstimator.ShouldPreferFullScan(candidate, tableRows, stats, database, table))
+                    if (!CostEstimator.ShouldPreferFullScan(candidate, tableRows, options, stats, database, table))
                     {
-                        long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, stats, database, table);
+                        long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, options, stats, database, table);
                         cost = rangeRows * 2.0; // index entry + row fetch
                         card = rangeRows;
                         return;

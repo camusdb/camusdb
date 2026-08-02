@@ -13,6 +13,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class AlterConstraintValidator : ValidatorBase
 {
+    public AlterConstraintValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(AlterConstraintTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

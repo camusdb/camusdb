@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -681,7 +682,7 @@ public sealed class TestRowEncoder
         Dictionary<string, ColumnValue> dictRow = RowEncoder.Decode(schema, rowId, bytes);
 
         // Async QueryRow decode — the new path under test.
-        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(schema, default(HLCTimestamp), rowId, bytes);
+        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(schema, default(HLCTimestamp), rowId, bytes, CamusDBConfig.Ambient);
 
         // The adapter must expose the same column set with identical values.
         Assert.AreEqual(dictRow.Count, qr.Count, "Column count must match");
@@ -716,7 +717,8 @@ public sealed class TestRowEncoder
 
         HashSet<string> required = ["a", "c"];
         QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(
-            schema, default(HLCTimestamp), rowId, bytes, required);
+            schema, default(HLCTimestamp), rowId, bytes,
+            CamusDBConfig.Ambient, required);
 
         Assert.AreEqual(2, qr.Count, "Only requested columns should be present");
         Assert.AreEqual(10L, qr["a"].LongValue);
@@ -746,7 +748,7 @@ public sealed class TestRowEncoder
         // Synchronous reference.
         Dictionary<string, ColumnValue> dictRow = RowEncoder.Decode(schema, rowId, bytes);
 
-        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(schema, default(HLCTimestamp), rowId, bytes);
+        QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(schema, default(HLCTimestamp), rowId, bytes, CamusDBConfig.Ambient);
 
         // "notes" must be present and typed Null in both paths.
         Assert.IsTrue(qr.ContainsKey("notes"), "Null column must appear in QueryRow");
@@ -789,6 +791,7 @@ public sealed class TestRowEncoder
         // Decode using the v1 schema with visibilitySchemaVersion = 1 so injection fires.
         QueryRow qr = await RowEncoder.DecodeToQueryRowAsync(
             schema, default(HLCTimestamp), rowId, bytes,
+            CamusDBConfig.Ambient,
             requiredColumns: null, visibilitySchemaVersion: 1);
 
         Assert.IsTrue(qr.ContainsKey("score"), "Injected column must appear in QueryRow");

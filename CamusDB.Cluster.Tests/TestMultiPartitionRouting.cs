@@ -119,7 +119,7 @@ public sealed class TestMultiPartitionRouting
 
     private CommandExecutor CreateExecutorForDb()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         CommandExecutor executor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: sharedNode!, isClusterMode: true);

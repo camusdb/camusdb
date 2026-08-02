@@ -316,7 +316,7 @@ internal sealed class TableIndexAdder
             // columns, included columns may be NULL (they are payload, not part of the key).
             // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
             byte[]? includeTuple = ticket.IncludeColumns.Length > 0
-                ? IndexIncludeValueCodec.EncodeTupleChecked(ticket.IncludeColumns, row, ticket.IndexName)
+                ? IndexIncludeValueCodec.EncodeTupleChecked(ticket.IncludeColumns, row, ticket.IndexName, state.Database.Options)
                 : null;
 
             await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique, includeTuple: includeTuple).ConfigureAwait(false);

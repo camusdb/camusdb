@@ -13,6 +13,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class ExecuteSQLValidator : ValidatorBase
 {
+    public ExecuteSQLValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(ExecuteSQLTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.Sql))

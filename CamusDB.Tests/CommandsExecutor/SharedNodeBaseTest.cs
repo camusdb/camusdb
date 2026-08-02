@@ -68,11 +68,11 @@ public abstract class SharedNodeBaseTest : BaseTest
     protected override Task<DatabaseRegistry> CreateRegistryAsync()
         => DatabaseRegistry.OpenAsync(sharedNode!, Options);
 
-    protected override CommandExecutor CreateCommandExecutor()
+    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, Options,
+        return new(validator, catalogsManager, logger, options,
             sharedNode: sharedNode!,
             registry: sharedRegistry!, isClusterMode: true);
     }

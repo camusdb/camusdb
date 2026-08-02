@@ -46,7 +46,7 @@ public class TestGrpcSqlService : BaseTest
     [SetUp]
     public void SetUpGrpcService()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         serviceExecutor = new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);

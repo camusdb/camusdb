@@ -208,7 +208,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         databaseDescriptors = new();
         databaseOpener = new(this, databaseDescriptors, catalogs, logger, options, sharedNode, registryTask, isClusterMode, cache);
         databaseCloser = new(databaseDescriptors, logger);
-        databaseDroper = new(databaseDescriptors, logger);
+        databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
         tableOpener = new(catalogs, logger);
         tableCreator = new(catalogs, logger, options);
@@ -274,7 +274,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Physically reclaim deferred-dropped databases/tables past their retention window, on the
         // elected node. Kick one immediate sweep so orphans already expired during downtime are cleaned
         // promptly rather than waiting a full interval.
-        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options.OrphanReclaimIntervalMs);
+        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options.OrphanReclaimIntervalMs, options);
         reclaimer.Start();
         orphanReclaimer = reclaimer;
         _ = ReclaimExpiredOrphansOnStartupAsync(reclaimer);
@@ -1547,7 +1547,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                         // Materialize stored/payload (INCLUDE) values (NULL-tolerant) for a covering index.
                         // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
                         byte[]? includeTuple = indexInfo.IncludeColumnNames is { Length: > 0 } includeNames
-                            ? Storage.Kv.IndexIncludeValueCodec.EncodeTupleChecked(includeNames, row, indexInfo.IndexName)
+                            ? Storage.Kv.IndexIncludeValueCodec.EncodeTupleChecked(includeNames, row, indexInfo.IndexName, options)
                             : null;
 
                         await table.Store.PutIndexEntry(tx, indexInfo.IndexId, compositeKey, rowId, unique, backfillMode: true, includeTuple: includeTuple).ConfigureAwait(false);
@@ -2757,7 +2757,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         bool created = await catalog.TryBootstrapSuperuserAsync(
             options.BootstrapSuperuser,
-            PasswordHasher.Hash(options.BootstrapSuperuserPassword)).ConfigureAwait(false);
+            PasswordHasher.Hash(options.BootstrapSuperuserPassword, options.PasswordHashIterations)).ConfigureAwait(false);
 
         if (created && logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Bootstrap superuser '{User}' created", options.BootstrapSuperuser);
@@ -2773,7 +2773,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
-        Credential? credential = ticket.Password is null ? null : PasswordHasher.Hash(ticket.Password);
+        Credential? credential = ticket.Password is null ? null : PasswordHasher.Hash(ticket.Password, options.PasswordHashIterations);
         await auth.CreateUserAsync(ticket.UserName, credential, ticket.IfNotExists).ConfigureAwait(false);
 
         return new ExecuteDDLSQLResult(null!, true);
@@ -2785,7 +2785,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         validator.Validate(ticket);
 
         AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
-        await auth.SetPasswordAsync(ticket.UserName, PasswordHasher.Hash(ticket.Password)).ConfigureAwait(false);
+        await auth.SetPasswordAsync(ticket.UserName, PasswordHasher.Hash(ticket.Password, options.PasswordHashIterations)).ConfigureAwait(false);
 
         return new ExecuteDDLSQLResult(null!, true);
     }

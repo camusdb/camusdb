@@ -43,6 +43,9 @@ namespace CamusDB.Core.Cache;
 public sealed class CachedQueryRunner
 {
     private readonly IQueryResultCache _cache;
+
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions _options;
     private readonly CachedQueryResult _pendingResult;
     private readonly CacheGenerationToken _token;
     private readonly CancellationToken _ct;
@@ -63,6 +66,7 @@ public sealed class CachedQueryRunner
         IQueryResultCache cache,
         CachedQueryResult pendingResult,
         CacheGenerationToken token,
+        CamusDBOptions options,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(cache);
@@ -70,6 +74,7 @@ public sealed class CachedQueryRunner
         ArgumentNullException.ThrowIfNull(token);
 
         _cache         = cache;
+        _options       = options;
         _pendingResult = pendingResult;
         _token         = token;
         _ct            = ct;
@@ -97,8 +102,8 @@ public sealed class CachedQueryRunner
                 _accumulatedRows.Add(row);
                 _accumulatedBytes += QueryResultCache.EstimateRowBytes(row);
 
-                if (_accumulatedRows.Count > CamusDBConfig.QueryResultCacheMaxEntryRows ||
-                    _accumulatedBytes > CamusDBConfig.QueryResultCacheMaxEntryBytes)
+                if (_accumulatedRows.Count > _options.QueryResultCacheMaxEntryRows ||
+                    _accumulatedBytes > _options.QueryResultCacheMaxEntryBytes)
                 {
                     // Release memory immediately and stop buffering for the rest of the stream.
                     _accumulatedRows.Clear();

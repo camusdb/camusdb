@@ -43,15 +43,15 @@ public sealed class QueryPlanner
     }
 
     // Tag a scan leaf with its DataDistribution and return it (fluent helper).
-    private static PhysicalPlanNode WithDistribution(PhysicalPlanNode node, TableDescriptor table)
+    private PhysicalPlanNode WithDistribution(PhysicalPlanNode node, TableDescriptor table)
     {
         node.Distribution = node switch
         {
             IndexLookupNode                                                   => PlacementReader.GetLookupDistribution(),
             IndexInListScanNode                                               => PlacementReader.GetLookupDistribution(),
-            IndexRangeScanNode rangeScan                                      => PlacementReader.Instance.GetIndexScanDistribution(rangeScan.Index),
-            TableScanNode { Source: TableScanSource.ForcedIndex, Index: { } forcedIdx } => PlacementReader.Instance.GetIndexScanDistribution(forcedIdx),
-            TableScanNode                                                     => PlacementReader.Instance.GetPrimaryRowScanDistribution(table),
+            IndexRangeScanNode rangeScan                                      => PlacementReader.Instance.GetIndexScanDistribution(rangeScan.Index, _options),
+            TableScanNode { Source: TableScanSource.ForcedIndex, Index: { } forcedIdx } => PlacementReader.Instance.GetIndexScanDistribution(forcedIdx, _options),
+            TableScanNode                                                     => PlacementReader.Instance.GetPrimaryRowScanDistribution(table, _options),
             _                                                                 => DataDistribution.Gathered,
         };
         return node;
@@ -347,7 +347,7 @@ public sealed class QueryPlanner
         TryMarkIndexOnly(plan, table);
 
         // Annotate every node with EstimatedCardinality and PlanCost.
-        CostEstimator.AnnotatePlan(plan.Root, database, table, _stats);
+        CostEstimator.AnnotatePlan(plan.Root, database, table, _stats, _options);
 
         // On a cache miss, store the access-path decision so the next identical-shape query
         // can skip the expensive cost enumeration.  In-list scans are excluded: they have no
@@ -443,14 +443,14 @@ public sealed class QueryPlanner
         long tableRowCount)
     {
         PhysicalPlanNode fullScanNode = WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table);
-        double bestCost = CostEstimator.EstimateScanLeafCost(fullScanNode, tableRowCount, _stats, database, table);
+        double bestCost = CostEstimator.EstimateScanLeafCost(fullScanNode, tableRowCount, _stats, database, table, _options);
         PhysicalPlanNode bestNode = fullScanNode;
         QueryPlanStep? bestStep = null;
 
         foreach (QueryPlanStep step in IndexScanSelector.EnumerateViableSteps(table, analysis))
         {
             PhysicalPlanNode candidateNode = WithDistribution(ToScanNode(step), table);
-            double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table);
+            double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table, _options);
 
             // Deterministic tie-break by index name: candidates arrive in Dictionary iteration
             // order, which can differ across descriptor rebuilds (and therefore across nodes) —
@@ -620,7 +620,7 @@ public sealed class QueryPlanner
             if (tableRowCount is { } trc && trc > 0)
             {
                 var tempRangeNode = (IndexRangeScanNode)ToScanNode(scanStep.Value);
-                if (CostEstimator.ShouldPreferFullScan(tempRangeNode, trc, _stats, database, table))
+                if (CostEstimator.ShouldPreferFullScan(tempRangeNode, trc, _options, _stats, database, table))
                     scanStep = null; // fall through to full table scan
             }
         }
@@ -839,7 +839,7 @@ public sealed class QueryPlanner
                 if (tableRowCount is { } trc && trc > 0)
                 {
                     var tempRangeNode = (IndexRangeScanNode)ToScanNode(rangeScanStep);
-                    long rangeRows = CostEstimator.EstimateRangeScanRows(tempRangeNode, trc, _stats, database, table);
+                    long rangeRows = CostEstimator.EstimateRangeScanRows(tempRangeNode, trc, _options, _stats, database, table);
                     long inListRows = CardinalityEstimator.EstimateInListRows(
                         inList.ColumnName, inList.Values, bestIsUnique, trc, database, table, _stats);
                     if (2L * inListRows >= 2L * rangeRows)

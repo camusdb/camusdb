@@ -15,16 +15,25 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 internal abstract class ValidatorBase
 {
     /// <summary>
+    /// Configuration of the engine whose commands this validates. Limits such as the identifier
+    /// length and per-table column ceiling are operator-settable, so a validator must enforce the
+    /// limits of the engine it belongs to rather than a process-wide value.
+    /// </summary>
+    protected readonly CamusDBOptions Options;
+
+    protected ValidatorBase(CamusDBOptions options) => Options = options;
+
+    /// <summary>
     /// Validates a user-facing identifier (database, table, column, or index name):
     /// must be non-empty, within <see cref="CamusDB.Core.CamusDBOptions.MaxIdentifierLength"/>,
     /// and composed only of alphanumeric characters and underscores.
     /// </summary>
-    protected static void ValidateIdentifier(string name, string kind)
+    protected void ValidateIdentifier(string name, string kind)
     {
         if (string.IsNullOrWhiteSpace(name))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"{kind} name is required");
 
-        int maxLen = CamusDB.Core.CamusDBConfig.MaxIdentifierLength;
+        int maxLen = Options.MaxIdentifierLength;
         if (maxLen > 0 && name.Length > maxLen)
             throw new CamusDBException(
                 CamusDBErrorCodes.SchemaLimitExceeded,

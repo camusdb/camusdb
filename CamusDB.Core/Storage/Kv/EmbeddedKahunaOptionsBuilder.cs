@@ -24,11 +24,11 @@ public static class EmbeddedKahunaOptionsBuilder
     /// (2000/4000 ms). A <c>kahuna: { storage: sqlite, wal_storage: sqlite }</c> override restores the
     /// former sqlite behavior for callers that need it.
     /// </summary>
-    public static EmbeddedKahunaOptions ClusterBaseline(ConfigDefinition config)
+    public static EmbeddedKahunaOptions ClusterBaseline(ConfigDefinition config, CamusDBOptions options)
     {
         string dataDir = !string.IsNullOrEmpty(config.DataDir)
             ? config.DataDir
-            : CamusDBConfig.DataDirectory;
+            : options.DataDirectory;
 
         return new EmbeddedKahunaOptions
         {
@@ -98,23 +98,24 @@ public static class EmbeddedKahunaOptionsBuilder
     }
 
     /// <summary>Cluster baseline plus <c>kahuna:</c> overrides.</summary>
-    public static EmbeddedKahunaOptions BuildCluster(ConfigDefinition config)
-        => ApplyOverrides(ClusterBaseline(config), config.Kahuna);
+    public static EmbeddedKahunaOptions BuildCluster(ConfigDefinition config, CamusDBOptions options)
+        => ApplyOverrides(ClusterBaseline(config, options), config.Kahuna, options);
 
     /// <summary>Standalone baseline plus <c>kahuna:</c> overrides.</summary>
-    public static EmbeddedKahunaOptions BuildStandalone(string dataPath, KahunaOptionsConfig kahuna)
-        => ApplyOverrides(StandaloneBaseline(dataPath), kahuna);
+    public static EmbeddedKahunaOptions BuildStandalone(string dataPath, KahunaOptionsConfig kahuna, CamusDBOptions options)
+        => ApplyOverrides(StandaloneBaseline(dataPath), kahuna, options);
 
     /// <summary>Standalone RocksDB baseline plus <c>kahuna:</c> overrides.</summary>
-    public static EmbeddedKahunaOptions BuildStandaloneRocksDb(string dataPath, KahunaOptionsConfig kahuna)
-        => ApplyOverrides(StandaloneRocksDbBaseline(dataPath), kahuna);
+    public static EmbeddedKahunaOptions BuildStandaloneRocksDb(string dataPath, KahunaOptionsConfig kahuna, CamusDBOptions options)
+        => ApplyOverrides(StandaloneRocksDbBaseline(dataPath), kahuna, options);
 
     /// <summary>
     /// Applies nullable Kahuna overrides. Unset fields keep the baseline value unchanged.
     /// </summary>
     public static EmbeddedKahunaOptions ApplyOverrides(
         EmbeddedKahunaOptions baseline,
-        KahunaOptionsConfig kahuna)
+        KahunaOptionsConfig kahuna,
+        CamusDBOptions options)
     {
         if (kahuna.Storage is not null)
             baseline.Storage = kahuna.Storage;
@@ -267,7 +268,7 @@ public static class EmbeddedKahunaOptionsBuilder
         // it never lowers an explicit one (max(...) guards the case where an explicit cap already
         // exceeds the lifetime). A non-positive lifetime disables the engine cap, leaving the node
         // default untouched.
-        int lifetimeMs = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
+        int lifetimeMs = options.MaxSerializableTransactionLifetimeMs;
         if (lifetimeMs > 0 && baseline.MaxTransactionTimeout < lifetimeMs)
             baseline.MaxTransactionTimeout = lifetimeMs;
 

@@ -626,7 +626,7 @@ public sealed class TestSchemaDdlForwarding
 
         public CommandExecutor CreateExecutor(EmbeddedKahuna node, ISchemaDdlForwarder? forwarder = null)
         {
-            CommandValidator validator = new();
+            CommandValidator validator = new(CamusDBConfig.Ambient);
             CatalogsManager catalogs = new(Logger);
             return new(validator, catalogs, Logger, CamusDBConfig.Ambient,
                 sharedNode: node,

@@ -284,7 +284,7 @@ internal sealed class QuerySorter
         }
 
         // Final pass: stream the merged output directly to the caller.
-        await foreach (QueryResultRow row in MergeRunsLazilyAsync(runs, comparer, ct).ConfigureAwait(false))
+        await foreach (QueryResultRow row in MergeRunsLazilyAsync(runs, comparer, context, ct).ConfigureAwait(false))
             yield return row;
     }
 
@@ -317,7 +317,7 @@ internal sealed class QuerySorter
         string outPath = scope.OpenWriter(out FileStream writer);
         try
         {
-            await foreach (QueryResultRow row in MergeRunsLazilyAsync(runs, comparer, ct).ConfigureAwait(false))
+            await foreach (QueryResultRow row in MergeRunsLazilyAsync(runs, comparer, context, ct).ConfigureAwait(false))
             {
                 if (sharedLayout is not null && row.Row is QueryRow qr)
                     SpillRowCodec.EncodeValueOnlyToStream(writer, qr);
@@ -341,6 +341,7 @@ internal sealed class QuerySorter
     private static async IAsyncEnumerable<QueryResultRow> MergeRunsLazilyAsync(
         IReadOnlyList<SpillRun> runs,
         IComparer<QueryResultRow> comparer,
+        QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken ct)
     {
         List<SpillRunReader> openReaders = new(runs.Count);
@@ -348,7 +349,7 @@ internal sealed class QuerySorter
         {
             foreach (SpillRun run in runs)
             {
-                SpillRunReader? reader = await SpillRunReader.OpenAsync(run.Path, run.Layout, ct).ConfigureAwait(false);
+                SpillRunReader? reader = await SpillRunReader.OpenAsync(run.Path, context.Options.SpillMaxFrameBytes, run.Layout, ct).ConfigureAwait(false);
                 if (reader is not null)
                     openReaders.Add(reader);
             }

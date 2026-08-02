@@ -95,7 +95,7 @@ internal sealed class TestCommentOnHardening : BaseTest
     [Test]
     public void Validator_AcceptsCommentOnDatabaseWithoutAContextDatabase()
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
 
         Assert.DoesNotThrow(() => validator.Validate(
             new ExecuteSQLTicket(txnState: null!, database: "", sql: "COMMENT ON DATABASE app IS 'x'", parameters: null)));

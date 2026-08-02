@@ -14,6 +14,7 @@ using BenchmarkDotNet.Exporters;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Loggers;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -202,6 +203,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _fullRows[i],
+            CamusDBConfig.Ambient,
                 decodeState: cache).ConfigureAwait(false);
         return last!;
     }
@@ -213,6 +215,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _fullRows[i],
+            CamusDBConfig.Ambient,
                 decodeState: null).ConfigureAwait(false);
         return last!;
     }
@@ -235,6 +238,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaFull, TxId, RowId, _projRows[i],
+            CamusDBConfig.Ambient,
                 _projected, decodeState: cache).ConfigureAwait(false);
         return last!;
     }
@@ -259,6 +263,7 @@ public class RowDecodeBenchmarks
         QueryRow? last = null;
         for (int i = 0; i < RowCount; i++)
             last = await RowEncoder.DecodeToQueryRowAsync(_schemaHistory, TxId, RowId, _historyRows[i],
+            CamusDBConfig.Ambient,
                 visibilitySchemaVersion: 1, decodeState: cache).ConfigureAwait(false);
         return last!;
     }

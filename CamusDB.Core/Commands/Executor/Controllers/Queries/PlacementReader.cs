@@ -38,9 +38,9 @@ internal sealed class PlacementReader
     /// Distribution for a full primary-row table scan (TableScanNode with PrimaryRows source).
     /// Gathered when sharding is off; Partitioned by PK key columns when sharding is on.
     /// </summary>
-    public DataDistribution GetPrimaryRowScanDistribution(TableDescriptor table)
+    public DataDistribution GetPrimaryRowScanDistribution(TableDescriptor table, CamusDBOptions options)
     {
-        if (!CamusDBConfig.KeyRangeShardingEnabled)
+        if (!options.KeyRangeShardingEnabled)
             return DataDistribution.Gathered;
 
         string[] pkCols = GetPkColumns(table);
@@ -53,9 +53,9 @@ internal sealed class PlacementReader
     /// Distribution for an index range scan or forced-index full scan.
     /// Gathered when sharding is off; Partitioned by the index key columns when sharding is on.
     /// </summary>
-    public DataDistribution GetIndexScanDistribution(TableIndexSchema index)
+    public DataDistribution GetIndexScanDistribution(TableIndexSchema index, CamusDBOptions options)
     {
-        if (!CamusDBConfig.KeyRangeShardingEnabled)
+        if (!options.KeyRangeShardingEnabled)
             return DataDistribution.Gathered;
 
         return index.Columns is { Length: > 0 }
@@ -85,12 +85,12 @@ internal sealed class PlacementReader
     ///
     /// Staleness contract: reflects the startup partition count, not live Raft state.
     /// </summary>
-    public static double GetRemoteFraction()
+    public static double GetRemoteFraction(CamusDBOptions options)
     {
-        if (!CamusDBConfig.KeyRangeShardingEnabled)
+        if (!options.KeyRangeShardingEnabled)
             return 0.0;
 
-        int n = CamusDBConfig.ClusterPartitionCount;
+        int n = options.ClusterPartitionCount;
         return n <= 1 ? 0.0 : (n - 1.0) / n;
     }
 

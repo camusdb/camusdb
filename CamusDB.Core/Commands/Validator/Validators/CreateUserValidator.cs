@@ -17,6 +17,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 /// </summary>
 internal sealed class CreateUserValidator : ValidatorBase
 {
+    public CreateUserValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(CreateUserTicket ticket)
     {
         ValidateIdentifier(ticket.UserName, "User");

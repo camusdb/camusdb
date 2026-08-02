@@ -12,6 +12,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class DropTableValidator : ValidatorBase
 {
+    public DropTableValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(DropTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

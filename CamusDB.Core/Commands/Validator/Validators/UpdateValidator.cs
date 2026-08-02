@@ -15,6 +15,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class UpdateValidator : ValidatorBase
 {
+    public UpdateValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(UpdateTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

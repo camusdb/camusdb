@@ -459,6 +459,7 @@ internal sealed class QueryJoinExecutor
             plan.Ticket.TxnState.TransactionId,
             rowId,
             data,
+            _options,
             GetRequiredColumnsForAlias(plan, source.Alias),
             GetTableSchemaVersionForAlias(plan, source.Alias),
             decodeState?.DecodeState).ConfigureAwait(false);
@@ -570,6 +571,7 @@ internal sealed class QueryJoinExecutor
                 txId,
                 rowId,
                 data,
+            _options,
                 required,
                 GetTableSchemaVersionForAlias(plan, source.Alias),
                 rowDecodeState).ConfigureAwait(false);
@@ -632,6 +634,7 @@ internal sealed class QueryJoinExecutor
                 txId,
                 rowId,
                 data,
+            _options,
                 required,
                 GetTableSchemaVersionForAlias(plan, source.Alias),
                 rowDecodeState).ConfigureAwait(false);
@@ -699,6 +702,7 @@ internal sealed class QueryJoinExecutor
                 txId,
                 rowId,
                 data,
+            _options,
                 required,
                 GetTableSchemaVersionForAlias(plan, source.Alias),
                 rowDecodeState).ConfigureAwait(false);
@@ -762,6 +766,7 @@ internal sealed class QueryJoinExecutor
 
                 QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, rowId.Value, data.Value,
+            _options,
                     required,
                     GetTableSchemaVersionForAlias(plan, source.Alias),
                     rowDecodeState).ConfigureAwait(false);
@@ -802,6 +807,7 @@ internal sealed class QueryJoinExecutor
 
                     QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                         table.Schema, txId, rowId, data.Value,
+            _options,
                         required,
                         GetTableSchemaVersionForAlias(plan, source.Alias),
                         rowDecodeState).ConfigureAwait(false);
@@ -1423,9 +1429,10 @@ internal sealed class QueryJoinExecutor
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> ReadSpillFileAsync(
         string path,
+        int maxFrameBytes,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, maxFrameBytes, ct: ct).ConfigureAwait(false);
         if (reader is null) yield break;
         await using (reader)
         {
@@ -1619,7 +1626,7 @@ internal sealed class QueryJoinExecutor
         bool overflow = false;
 
         await using IAsyncEnumerator<QueryResultRow> buildEnum =
-            ReadSpillFileAsync(buildFile, ct).GetAsyncEnumerator(ct);
+            ReadSpillFileAsync(buildFile, _options.SpillMaxFrameBytes, ct).GetAsyncEnumerator(ct);
 
         while (await buildEnum.MoveNextAsync().ConfigureAwait(false))
         {
@@ -1647,9 +1654,9 @@ internal sealed class QueryJoinExecutor
                 // Re-read both files with a new hash seed to distribute rows across K sub-partitions.
                 int newSeed = seed + 1;
                 string[] subBuildFiles = await PartitionStreamToFilesAsync(
-                    scope, K, newSeed, ReadSpillFileAsync(buildFile, ct), buildKeyColumns, ct).ConfigureAwait(false);
+                    scope, K, newSeed, ReadSpillFileAsync(buildFile, _options.SpillMaxFrameBytes, ct), buildKeyColumns, ct).ConfigureAwait(false);
                 string[] subProbeFiles = await PartitionStreamToFilesAsync(
-                    scope, K, newSeed, ReadSpillFileAsync(probeFile, ct), probeKeyColumns, ct).ConfigureAwait(false);
+                    scope, K, newSeed, ReadSpillFileAsync(probeFile, _options.SpillMaxFrameBytes, ct), probeKeyColumns, ct).ConfigureAwait(false);
 
                 for (int p = 0; p < K; p++)
                 {
@@ -1680,7 +1687,7 @@ internal sealed class QueryJoinExecutor
         // Probe phase: stream probe partition against the loaded hash table.
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
-        await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, ct).ConfigureAwait(false))
+        await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, _options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
             ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
             if (probeKeyVals is null) continue;
@@ -1726,12 +1733,12 @@ internal sealed class QueryJoinExecutor
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
 
-        await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, ct).ConfigureAwait(false))
+        await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, _options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
             ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
             if (probeKeyVals is null) continue;
 
-            await foreach (QueryResultRow buildRow in ReadSpillFileAsync(buildFile, ct).ConfigureAwait(false))
+            await foreach (QueryResultRow buildRow in ReadSpillFileAsync(buildFile, _options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
             {
                 ColumnValue[]? buildKeyVals = ExtractMergeKey(buildRow.Row, buildKeyColumns);
                 if (buildKeyVals is null) continue;

@@ -30,9 +30,25 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// </summary>
 internal static class RegexMatcher
 {
-    // Cache keyed by (pattern, RegexOptions) so functions using the full options set
-    // share the same compiled Regex as the operators that used the old bool-ci key.
-    private static readonly ConcurrentDictionary<(string pattern, RegexOptions opts), Regex> Cache = new();
+    // The two knobs below are engine configuration, but every caller sits inside the static expression
+    // evaluator (EvalExpr and the scalar-function table), which carries no per-engine context. They are
+    // read here — in one place — rather than diffused across ~25 call sites, and become parameters once
+    // the evaluator gains an execution context. The cross-engine hazard they used to carry is already
+    // gone: the compiled-Regex cache is keyed by timeout, so two engines with different limits no
+    // longer share an instance compiled under the other's timeout.
+    private static int TimeoutMs => CamusDBConfig.Ambient.RegexMatchTimeoutMs;
+
+    private static int CacheMaxEntries => CamusDBConfig.Ambient.RegexCacheMaxEntries;
+
+    // Cache keyed by (pattern, RegexOptions, timeoutMs) so functions using the full options set share
+    // the same compiled Regex as the operators that used the old bool-ci key.
+    //
+    // The timeout is part of the key because it is baked into the compiled Regex and is per-engine
+    // configuration: without it, two engines configured with different match timeouts would share
+    // whichever instance happened to be compiled first, and one of them would silently enforce the
+    // other's limit. The cache stays static — a compiled Regex is expensive and engine-independent
+    // once the timeout is part of its identity.
+    private static readonly ConcurrentDictionary<(string pattern, RegexOptions opts, int timeoutMs), Regex> Cache = new();
 
     /// <summary>
     /// Evaluates whether <paramref name="subject"/> contains a match for <paramref name="pattern"/>.
@@ -43,7 +59,7 @@ internal static class RegexMatcher
     {
         RegexOptions opts = RegexOptions.CultureInvariant;
         if (ignoreCase) opts |= RegexOptions.IgnoreCase;
-        Regex re = GetOrCompile(pattern, opts);
+        Regex re = GetOrCompile(pattern, opts, TimeoutMs, CacheMaxEntries);
         try
         {
             return re.IsMatch(subject);
@@ -52,7 +68,7 @@ internal static class RegexMatcher
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Regular expression match exceeded the {CamusDBConfig.RegexMatchTimeoutMs}ms time limit");
+                $"Regular expression match exceeded the {TimeoutMs}ms time limit");
         }
     }
 
@@ -63,7 +79,7 @@ internal static class RegexMatcher
     /// <c>.Replace</c>, and <c>.Split</c> directly while sharing the same cache and timeout.
     /// </summary>
     public static Regex GetRegex(string pattern, RegexOptions opts) =>
-        GetOrCompile(pattern, opts | RegexOptions.CultureInvariant);
+        GetOrCompile(pattern, opts | RegexOptions.CultureInvariant, TimeoutMs, CacheMaxEntries);
 
     /// <summary>
     /// Parses a PostgreSQL-style flags string into <see cref="RegexOptions"/> and a global flag.
@@ -117,7 +133,7 @@ internal static class RegexMatcher
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Regular expression match exceeded the {CamusDBConfig.RegexMatchTimeoutMs}ms time limit");
+                $"Regular expression match exceeded the {TimeoutMs}ms time limit");
         }
     }
 
@@ -131,21 +147,21 @@ internal static class RegexMatcher
     {
         RegexOptions opts = RegexOptions.CultureInvariant;
         if (ignoreCase) opts |= RegexOptions.IgnoreCase;
-        GetOrCompile(pattern, opts);
+        GetOrCompile(pattern, opts, TimeoutMs, CacheMaxEntries);
     }
 
-    private static Regex GetOrCompile(string pattern, RegexOptions opts)
+    private static Regex GetOrCompile(string pattern, RegexOptions opts, int timeoutMs, int cacheMaxEntries)
     {
         // CultureInvariant is always forced; callers may or may not include it already.
         opts |= RegexOptions.CultureInvariant;
 
-        if (Cache.TryGetValue((pattern, opts), out Regex? cached))
+        if (Cache.TryGetValue((pattern, opts, timeoutMs), out Regex? cached))
             return cached;
 
         Regex re;
         try
         {
-            re = new Regex(pattern, opts, TimeSpan.FromMilliseconds(CamusDBConfig.RegexMatchTimeoutMs));
+            re = new Regex(pattern, opts, TimeSpan.FromMilliseconds(timeoutMs));
         }
         catch (ArgumentException ex)
         {
@@ -154,8 +170,8 @@ internal static class RegexMatcher
                 $"Invalid regular expression: {ex.Message}");
         }
 
-        if (Cache.Count < CamusDBConfig.RegexCacheMaxEntries)
-            Cache.TryAdd((pattern, opts), re);
+        if (Cache.Count < cacheMaxEntries)
+            Cache.TryAdd((pattern, opts, timeoutMs), re);
 
         return re;
     }

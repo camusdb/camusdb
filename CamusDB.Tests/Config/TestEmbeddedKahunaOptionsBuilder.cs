@@ -33,8 +33,8 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             InitialPartitions = 3,
         };
 
-        EmbeddedKahunaOptions expected = EmbeddedKahunaOptionsBuilder.ClusterBaseline(config);
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config);
+        EmbeddedKahunaOptions expected = EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
 
         Assert.That(built.NodeName, Is.EqualTo(expected.NodeName));
         Assert.That(built.NodeId, Is.EqualTo(expected.NodeId));
@@ -56,7 +56,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     {
         string dataPath = "/tmp/db-one";
         EmbeddedKahunaOptions expected = EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath);
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone(dataPath, new KahunaOptionsConfig());
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone(dataPath, new KahunaOptionsConfig(), CamusDBOptions.Default);
 
         Assert.That(built.Storage, Is.EqualTo(expected.Storage));
         Assert.That(built.StorageRevision, Is.EqualTo(expected.StorageRevision));
@@ -71,7 +71,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // The single-fsync commit fast path is the recommended standalone default; Kahuna's own embedded
         // default is off, so CamusDB opts standalone in via the baseline. Group-commit linger stays opt-in.
         EmbeddedKahunaOptions built =
-            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/fsync-db", new KahunaOptionsConfig());
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/fsync-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
 
         Assert.That(built.RaftWalSingleFsyncCommit, Is.True);
         Assert.That(built.RaftWalGroupCommitLingerMs, Is.EqualTo(0));
@@ -86,7 +86,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             WalSingleFsyncCommit = false,
         };
 
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/gc-db", kahuna);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/gc-db", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RaftWalGroupCommitLingerMs, Is.EqualTo(2));
         // An explicit config value wins over the baseline default (which enables single-fsync).
@@ -98,7 +98,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     {
         KahunaOptionsConfig kahuna = new() { Storage = "rocksdb" };
 
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/rocksdb-db", kahuna);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/rocksdb-db", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.Storage, Is.EqualTo("rocksdb"));
         Assert.That(built.StoragePath, Is.EqualTo(Path.Combine("/tmp/rocksdb-db", "kv")));
@@ -117,7 +117,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             },
         };
 
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
 
         Assert.That(built.StartElectionTimeout, Is.EqualTo(1500));
         Assert.That(built.EndElectionTimeout, Is.EqualTo(3500));
@@ -138,7 +138,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             MaxEntriesPerCompaction = 2_000,
         };
 
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/evict-db", kahuna);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/evict-db", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.MaxEntriesPerActor, Is.EqualTo(20_000));
         Assert.That(built.MaxBytesPerActor, Is.EqualTo(128L * 1024 * 1024));
@@ -156,7 +156,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // An empty kahuna section must not touch the eviction/compaction knobs; they inherit
         // Kahuna's own EmbeddedKahunaOptions defaults untouched.
         EmbeddedKahunaOptions defaults = new();
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/defaults-db", new KahunaOptionsConfig());
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/defaults-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
 
         Assert.That(built.CacheEntryTtl, Is.EqualTo(defaults.CacheEntryTtl));
         Assert.That(built.CacheEntriesToRemove, Is.EqualTo(defaults.CacheEntriesToRemove));
@@ -184,7 +184,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
 
         EmbeddedKahunaOptions standalone = EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath);
         EmbeddedKahunaOptions standaloneRocksDb = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath);
-        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.ClusterBaseline(config);
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default);
 
         foreach (EmbeddedKahunaOptions opts in new[] { standalone, standaloneRocksDb, cluster })
         {
@@ -198,7 +198,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void SharedMemoryOff_Override_DisablesFlag()
     {
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemory = false };
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-off", kahuna);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-off", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryEnabled, Is.False);
     }
@@ -212,7 +212,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             RocksdbSharedMemoryBudgetMb = 512,
             RocksdbSharedMemtableBudgetMb = 200,
         };
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-budget", kahuna);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-budget", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryEnabled, Is.True);
         Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(512));
@@ -223,7 +223,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void UnsetSharedMemoryFields_KeepBaselineDefaults()
     {
         KahunaOptionsConfig kahuna = new();
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna);
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryEnabled, Is.True);
         Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(320));
@@ -279,7 +279,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemoryBudgetMb = 100 };
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
-            () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-total", kahuna))!;
+            () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-total", kahuna, CamusDBOptions.Default))!;
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
         Assert.That(ex.Message, Does.Contain("rocksdb_shared_memtable_budget_mb"));
         Assert.That(ex.Message, Does.Contain("rocksdb_shared_memory_budget_mb"));
@@ -293,7 +293,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemtableBudgetMb = 500 };
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
-            () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-memtable", kahuna))!;
+            () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-memtable", kahuna, CamusDBOptions.Default))!;
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
     }
 
@@ -306,7 +306,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // rejecting it would be over-strict for a config Kahuna never acts on.
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemoryBudgetMb = 100 };
 
-        Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/sm-merge-sqlite", kahuna));
+        Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/sm-merge-sqlite", kahuna, CamusDBOptions.Default));
     }
 
     [Test]
@@ -316,7 +316,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // and must not be rejected even on the RocksDB baseline.
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemory = false, RocksdbSharedMemoryBudgetMb = 100 };
 
-        Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-off", kahuna));
+        Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-off", kahuna, CamusDBOptions.Default));
     }
 
     // ── Transaction-timeout composition (session Timeout vs node MaxTransactionTimeout) ──────────
@@ -327,19 +327,13 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     /// MaxTransactionTimeout from this static, so these tests must set it deterministically rather than
     /// inherit whatever a prior test left behind.
     /// </summary>
-    private static void WithSerializableLifetime(int lifetimeMs, Action body)
-    {
-        int saved = CamusDBConfig.MaxSerializableTransactionLifetimeMs;
-        CamusDBConfig.MaxSerializableTransactionLifetimeMs = lifetimeMs;
-        try
-        {
-            body();
-        }
-        finally
-        {
-            CamusDBConfig.MaxSerializableTransactionLifetimeMs = saved;
-        }
-    }
+    /// <summary>
+    /// Options whose serializable-transaction lifetime is <paramref name="lifetimeMs"/>. The builder
+    /// derives the node's MaxTransactionTimeout from it and takes it as an argument, so a case states
+    /// the lifetime it wants instead of assigning a global and restoring it afterwards.
+    /// </summary>
+    private static CamusDBOptions WithSerializableLifetime(int lifetimeMs)
+        => CamusDBOptions.Default with { MaxSerializableTransactionLifetimeMs = lifetimeMs };
 
     [Test]
     public void MaxTransactionTimeout_DerivedFromSerializableLifetime_WhenUnset()
@@ -347,11 +341,10 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // The engine passes MaxSerializableTransactionLifetimeMs as each session's Timeout; the node cap
         // must be lifted to admit it, or Kahuna clamps the session to its 300 s default and reaps a long
         // transaction early. With no explicit override the builder derives the cap from the lifetime.
-        WithSerializableLifetime(1_800_000, () =>
-        {
-            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-derive", new KahunaOptionsConfig());
-            Assert.That(built.MaxTransactionTimeout, Is.EqualTo(1_800_000));
-        });
+        CamusDBOptions lifetimeOptions = WithSerializableLifetime(1_800_000);
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-derive", new KahunaOptionsConfig(), lifetimeOptions);
+        Assert.That(built.MaxTransactionTimeout, Is.EqualTo(1_800_000));
     }
 
     [Test]
@@ -359,25 +352,22 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     {
         // An operator who pins a cap larger than the lifetime keeps it; the derive step only ever raises
         // an unset/too-small cap, never lowers an explicit one.
-        WithSerializableLifetime(600_000, () =>
-        {
-            KahunaOptionsConfig kahuna = new() { MaxTransactionTimeoutMs = 900_000 };
-            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-explicit", kahuna);
-            Assert.That(built.MaxTransactionTimeout, Is.EqualTo(900_000));
-        });
-    }
+        CamusDBOptions lifetimeOptions = WithSerializableLifetime(600_000);
+
+        KahunaOptionsConfig kahuna = new() { MaxTransactionTimeoutMs = 900_000 };
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-explicit", kahuna, lifetimeOptions);
+        Assert.That(built.MaxTransactionTimeout, Is.EqualTo(900_000));    }
 
     [Test]
     public void NonPositiveLifetime_LeavesNodeMaxTimeoutAtDefault()
     {
         // A disabled lifetime cap (<= 0) means "no engine-imposed maximum", so the node keeps Kahuna's
         // own default MaxTransactionTimeout untouched.
-        WithSerializableLifetime(0, () =>
-        {
-            EmbeddedKahunaOptions defaults = new();
-            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-disabled", new KahunaOptionsConfig());
-            Assert.That(built.MaxTransactionTimeout, Is.EqualTo(defaults.MaxTransactionTimeout));
-        });
+        CamusDBOptions lifetimeOptions = WithSerializableLifetime(0);
+
+        EmbeddedKahunaOptions defaults = new();
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/txto-disabled", new KahunaOptionsConfig(), lifetimeOptions);
+        Assert.That(built.MaxTransactionTimeout, Is.EqualTo(defaults.MaxTransactionTimeout));
     }
 
     [Test]

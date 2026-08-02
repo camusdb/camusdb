@@ -45,23 +45,12 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
 
     [SetUp]
     public void SetUpSpill()
     {
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_agg_spill_" + System.Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
-
-        _savedSpillEnabled   = CamusDBConfig.SpillEnabled;
-        _savedThreshold      = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn          = CamusDBConfig.SpillMergeFanIn;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -69,12 +58,6 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     public void TearDownSpill()
     {
         SpillFileManager.ReleaseInstanceLock();
-
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn         = _savedFanIn;
-        CamusDBConfig.DataDirectory           = null!;
 
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
@@ -91,9 +74,25 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     /// Inserts <paramref name="categories"/> × <paramref name="rowsPerCategory"/> rows so that
     /// each category has an equal number of rows with sequential amounts starting at 1.
     /// </summary>
-    private async Task<AggFixture> SetupSales(int categories = 5, int rowsPerCategory = 4)
+    /// <summary>Spill disabled — the in-memory grouping path.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows so the partitioned aggregate path runs
+    /// on inputs small enough for a unit test. Independent of any other configuration in play.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows, int fanIn = 4) =>
+        Options with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            SpillMergeFanIn = fanIn,
+            DataDirectory = _dataDir,
+        };
+
+    private async Task<AggFixture> SetupSales(CamusDBOptions options, int categories = 5, int rowsPerCategory = 4)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -159,15 +158,10 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     public async Task GroupBySpill_Sum_MatchesInMemoryPath()
     {
         const string sql = "SELECT category, SUM(amount) AS total FROM sales GROUP BY category";
-
-        CamusDBConfig.SpillEnabled = false;
-        AggFixture fRef = await SetupSales();
+        AggFixture fRef = await SetupSales(SpillOff);
         List<QueryResultRow> reference = await Run(fRef, sql);
-
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 5; // 5 categories × 4 rows; overflow after 5 rows
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        AggFixture fSpill = await SetupSales();
+        // 5 categories × 4 rows; overflow after 5 rows
+        AggFixture fSpill = await SetupSales(SpillOn(5, 4));
         List<QueryResultRow> spillResult = await Run(fSpill, sql);
 
         Assert.AreEqual(reference.Count, spillResult.Count,
@@ -180,15 +174,10 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     public async Task GroupBySpill_Count_MatchesInMemoryPath()
     {
         const string sql = "SELECT category, COUNT(*) AS cnt FROM sales GROUP BY category";
-
-        CamusDBConfig.SpillEnabled = false;
-        AggFixture fRef = await SetupSales(categories: 6, rowsPerCategory: 3);
+        AggFixture fRef = await SetupSales(SpillOff, categories: 6, rowsPerCategory: 3);
         List<QueryResultRow> reference = await Run(fRef, sql);
-
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 4; // overflows during partition phase
-        CamusDBConfig.SpillMergeFanIn         = 3;
-        AggFixture fSpill = await SetupSales(categories: 6, rowsPerCategory: 3);
+        // overflows during partition phase
+        AggFixture fSpill = await SetupSales(SpillOn(4, 3), categories: 6, rowsPerCategory: 3);
         List<QueryResultRow> spillResult = await Run(fSpill, sql);
 
         Assert.AreEqual(reference.Count, spillResult.Count);
@@ -199,11 +188,8 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     [Test]
     public async Task GroupBySpill_NoSpillFilesRemainAfterCompletion()
     {
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        CamusDBConfig.SpillMergeFanIn         = 4;
 
-        AggFixture f = await SetupSales();
+        AggFixture f = await SetupSales(SpillOn(3, 4));
         List<QueryResultRow> rows = await Run(f,
             "SELECT category, SUM(amount) AS total FROM sales GROUP BY category");
 
@@ -221,9 +207,8 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     [Test]
     public async Task GroupBySpill_FlagOff_UsesInMemoryPath()
     {
-        CamusDBConfig.SpillEnabled = false;
 
-        AggFixture f = await SetupSales(categories: 3, rowsPerCategory: 2);
+        AggFixture f = await SetupSales(SpillOff, categories: 3, rowsPerCategory: 2);
         List<QueryResultRow> rows = await Run(f,
             "SELECT category, SUM(amount) AS total FROM sales GROUP BY category");
 
@@ -236,15 +221,9 @@ public sealed class TestQueryAggregatorSpill : SharedNodeBaseTest
     public async Task GroupBySpill_FlagOnVsOff_IdenticalResults()
     {
         const string sql = "SELECT category, SUM(amount) AS total FROM sales GROUP BY category";
-
-        CamusDBConfig.SpillEnabled = false;
-        AggFixture fOff = await SetupSales(categories: 8, rowsPerCategory: 5);
+        AggFixture fOff = await SetupSales(SpillOff, categories: 8, rowsPerCategory: 5);
         List<QueryResultRow> offRows = await Run(fOff, sql);
-
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 6;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-        AggFixture fOn = await SetupSales(categories: 8, rowsPerCategory: 5);
+        AggFixture fOn = await SetupSales(SpillOn(6, 4), categories: 8, rowsPerCategory: 5);
         List<QueryResultRow> onRows = await Run(fOn, sql);
 
         CollectionAssert.AreEqual(SortedSums(offRows), SortedSums(onRows),

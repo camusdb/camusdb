@@ -29,23 +29,12 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestQuerySorterSpill
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
 
     [SetUp]
     public void SetUp()
     {
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_sort_spill_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
-
-        _savedSpillEnabled = CamusDBConfig.SpillEnabled;
-        _savedThreshold = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn = CamusDBConfig.SpillMergeFanIn;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -53,12 +42,6 @@ public sealed class TestQuerySorterSpill
     public void TearDown()
     {
         SpillFileManager.ReleaseInstanceLock();
-
-        CamusDBConfig.SpillEnabled = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn = _savedFanIn;
-        CamusDBConfig.DataDirectory = null!;
 
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
@@ -71,8 +54,23 @@ public sealed class TestQuerySorterSpill
     /// A context for these operator-level tests. Spill files go to the fixture's own directory, so a
     /// forced spill never writes outside the test's scratch space.
     /// </summary>
-    private static QueryExecutionContext NewContext(CamusDBOptions options)
-        => new(options, spillDirectory: CamusDBConfig.DataDirectory);
+    private QueryExecutionContext NewContext(CamusDBOptions options)
+        => new(options, spillDirectory: _dataDir);
+
+    /// <summary>Spill disabled — the fully in-memory sort.</summary>
+    private QueryExecutionContext SpillOff => NewContext(CamusDBOptions.Default with { SpillEnabled = false });
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows so the external merge sort runs on
+    /// inputs small enough for a unit test. Independent of any other configuration in play.
+    /// </summary>
+    private QueryExecutionContext SpillOn(int thresholdRows, int fanIn = 4) =>
+        NewContext(CamusDBOptions.Default with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            SpillMergeFanIn = fanIn,
+        });
 
     [Test]
     public async Task ExternalSort_ForcedSpill_ProducesSameOrderAsInMemory()
@@ -113,13 +111,8 @@ public sealed class TestQuerySorterSpill
         QueryTicket ticket = MakeTicket(
             new QueryOrderBy("group", OrderType.Ascending),
             new QueryOrderBy("name", OrderType.Descending));
-
-        CamusDBConfig.SpillEnabled = false;
-        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
-
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 1;
-        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(1)).ToListAsync();
 
         Assert.That(spilled.Count, Is.EqualTo(reference.Count));
         for (int i = 0; i < reference.Count; i++)
@@ -135,14 +128,8 @@ public sealed class TestQuerySorterSpill
         // 12 rows, threshold=3 → 4 runs, fanIn=2 → two intermediate passes before final merge.
         List<QueryResultRow> input = NumericRows(12);
         QueryTicket ticket = NumericAscTicket();
-
-        CamusDBConfig.SpillEnabled = false;
-        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
-
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 3;
-        CamusDBConfig.SpillMergeFanIn = 2;
-        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(3, 2)).ToListAsync();
 
         Assert.That(spilled.Count, Is.EqualTo(reference.Count));
         for (int i = 0; i < reference.Count; i++)
@@ -154,13 +141,8 @@ public sealed class TestQuerySorterSpill
     {
         List<QueryResultRow> input = NumericRows(15);
         IReadOnlyList<QueryOrderBy> orderBy = new[] { new QueryOrderBy("n", OrderType.Ascending) };
-
-        CamusDBConfig.SpillEnabled = false;
-        List<QueryResultRow> reference = await new QuerySorter().SortByKeys(ToAsync(input), orderBy, NewContext(CamusDBConfig.Ambient)).ToListAsync();
-
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        List<QueryResultRow> spilled = await new QuerySorter().SortByKeys(ToAsync(input), orderBy, NewContext(CamusDBConfig.Ambient)).ToListAsync();
+        List<QueryResultRow> reference = await new QuerySorter().SortByKeys(ToAsync(input), orderBy, SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortByKeys(ToAsync(input), orderBy, SpillOn(2)).ToListAsync();
 
         Assert.That(spilled.Count, Is.EqualTo(reference.Count));
         for (int i = 0; i < reference.Count; i++)
@@ -174,11 +156,10 @@ public sealed class TestQuerySorterSpill
     [Test]
     public async Task ExternalSort_SpillDisabled_NoSpillFilesCreated()
     {
-        CamusDBConfig.SpillEnabled = false;
 
         List<QueryResultRow> input = NumericRows(10);
         List<QueryResultRow> result = await new QuerySorter()
-            .SortResultset(NumericAscTicket(), ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+            .SortResultset(NumericAscTicket(), ToAsync(input), SpillOff).ToListAsync();
 
         Assert.That(result.Count, Is.EqualTo(10));
         Assert.That(SpillFileCount(), Is.EqualTo(0), "no spill files when flag is off");
@@ -187,12 +168,10 @@ public sealed class TestQuerySorterSpill
     [Test]
     public async Task ExternalSort_InputUnderThreshold_NoSpillFiles()
     {
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 1000; // threshold larger than input
 
         List<QueryResultRow> input = NumericRows(5);
         List<QueryResultRow> result = await new QuerySorter()
-            .SortResultset(NumericAscTicket(), ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+            .SortResultset(NumericAscTicket(), ToAsync(input), SpillOn(1000)).ToListAsync();
 
         Assert.That(result.Count, Is.EqualTo(5));
         Assert.That(SpillFileCount(), Is.EqualTo(0), "input under threshold → in-memory path only");
@@ -205,11 +184,9 @@ public sealed class TestQuerySorterSpill
     [Test]
     public async Task ExternalSort_NormalCompletion_NoSpillFilesRemain()
     {
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 1;
 
         List<QueryResultRow> input = NumericRows(10);
-        await new QuerySorter().SortResultset(NumericAscTicket(), ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+        await new QuerySorter().SortResultset(NumericAscTicket(), ToAsync(input), SpillOn(1)).ToListAsync();
 
         Assert.That(SpillFileCount(), Is.EqualTo(0), "all spill files deleted on normal completion");
     }
@@ -217,8 +194,6 @@ public sealed class TestQuerySorterSpill
     [Test]
     public async Task ExternalSort_Cancellation_NoSpillFilesRemain()
     {
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 1;
 
         List<QueryResultRow> input = NumericRows(20);
         CancellationTokenSource cts = new();
@@ -227,7 +202,7 @@ public sealed class TestQuerySorterSpill
         try
         {
             await foreach (QueryResultRow _ in new QuerySorter()
-                .SortResultset(NumericAscTicket(), ToAsync(input), NewContext(CamusDBConfig.Ambient))
+                .SortResultset(NumericAscTicket(), ToAsync(input), SpillOn(1))
                 .WithCancellation(cts.Token))
             {
                 if (++yielded == 3)
@@ -242,14 +217,12 @@ public sealed class TestQuerySorterSpill
     [Test]
     public async Task ExternalSort_ExceptionInDataCursor_NoSpillFilesRemain()
     {
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
 
         // Cursor yields 5 rows then throws; 2 runs will be spilled before the throw.
         try
         {
             await new QuerySorter()
-                .SortResultset(NumericAscTicket(), ThrowingCursor(NumericRows(10), throwAfter: 5), NewContext(CamusDBConfig.Ambient))
+                .SortResultset(NumericAscTicket(), ThrowingCursor(NumericRows(10), throwAfter: 5), SpillOn(2))
                 .ToListAsync();
             Assert.Fail("Expected exception was not thrown");
         }
@@ -283,10 +256,7 @@ public sealed class TestQuerySorterSpill
         ];
 
         QueryTicket ticket = MakeTicket(new QueryOrderBy("k", OrderType.Ascending));
-
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 1;
-        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(1)).ToListAsync();
 
         // (a) Multiset equality — every tag appears exactly once.
         Assert.That(spilled.Count, Is.EqualTo(input.Count));
@@ -310,13 +280,8 @@ public sealed class TestQuerySorterSpill
         // Both paths must return rows in identical order — the test fails if either path is broken.
         List<QueryResultRow> input = NumericRows(8);
         QueryTicket ticket = NumericDescTicket();
-
-        CamusDBConfig.SpillEnabled = false;
-        List<QueryResultRow> inMem = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
-
-        CamusDBConfig.SpillEnabled = true;
-        CamusDBConfig.ForceSpillThresholdRows = 1;
-        List<QueryResultRow> ext = await new QuerySorter().SortResultset(ticket, ToAsync(input), NewContext(CamusDBConfig.Ambient)).ToListAsync();
+        List<QueryResultRow> inMem = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> ext = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(1)).ToListAsync();
 
         Assert.That(ext.Select(r => r.Row["n"].LongValue),
             Is.EqualTo(inMem.Select(r => r.Row["n"].LongValue)).AsCollection,

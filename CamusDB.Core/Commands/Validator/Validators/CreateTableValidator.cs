@@ -14,6 +14,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class CreateTableValidator : ValidatorBase
 {
+    public CreateTableValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(CreateTableTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))
@@ -26,7 +28,7 @@ internal sealed class CreateTableValidator : ValidatorBase
         if (ticket.Columns.Length == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table requires at least one column");
 
-        int maxCols = CamusDB.Core.CamusDBConfig.MaxColumnsPerTable;
+        int maxCols = Options.MaxColumnsPerTable;
         if (maxCols > 0 && ticket.Columns.Length > maxCols)
             throw new CamusDBException(
                 CamusDBErrorCodes.SchemaLimitExceeded,

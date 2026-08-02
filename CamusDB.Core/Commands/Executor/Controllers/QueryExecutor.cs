@@ -358,7 +358,7 @@ internal sealed class QueryExecutor
             yield break;
         }
 
-        var depCollector = new QueryDependencyCollector();
+        var depCollector = new QueryDependencyCollector(options);
         plan.DepCollector = depCollector;
 
         CachedQueryResult pending = new(
@@ -371,7 +371,7 @@ internal sealed class QueryExecutor
             HintTtlMs: hint.TtlMs,
             HintIsStrict: hint.IsStrict);
 
-        CachedQueryRunner runner = new(cache, pending, token, ct);
+        CachedQueryRunner runner = new(cache, pending, token, options, ct);
         runner.DepCollector = depCollector;
 
         try

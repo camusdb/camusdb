@@ -102,7 +102,7 @@ public sealed class TestSerializableRWMultiPartitionCluster
                 await node.WaitForLeaderAsync(key, CancellationToken.None);
         }
 
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogs = new(logger);
         CommandExecutor executor = new(validator, catalogs, logger, CamusDBConfig.Ambient, sharedNode: node, isClusterMode: true);
 

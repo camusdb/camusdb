@@ -46,7 +46,7 @@ public sealed class TestQueryResultCacheSingleFlight : CommandsExecutor.BaseTest
     protected override CommandExecutor CreateCommandExecutor()
     {
         _cache = new QueryResultCache(CamusDBConfig.Ambient, sweepIntervalMs: -1);
-        CommandValidator validator = new();
+        CommandValidator validator = new(CamusDBConfig.Ambient);
         CatalogsManager catalogsManager = new(logger);
         return new(validator, catalogsManager, logger, CamusDBConfig.Ambient,
                    sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false,

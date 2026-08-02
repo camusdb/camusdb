@@ -13,6 +13,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class DeleteValidator : ValidatorBase
 {
+    public DeleteValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(DeleteTicket ticket)
     {
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))

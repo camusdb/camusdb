@@ -7,6 +7,7 @@
  */
 
 using Kahuna;
+using CamusDB.Core.Config.Models;
 using Kahuna.Shared.Communication.Rest;
 using Kommander;
 using Kommander.Communication;
@@ -232,15 +233,15 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// Constructs the embedded engine backed by SQLite at <paramref name="dataPath"/>.
     /// Suitable for single-process embedded use and tests that require persistence across close/reopen.
     /// </summary>
-    public static EmbeddedKahuna CreateSqlite(string dataPath, ILoggerFactory? loggerFactory = null)
-        => new(EmbeddedKahunaOptionsBuilder.BuildStandalone(dataPath, CamusDBConfig.Kahuna), loggerFactory);
+    public static EmbeddedKahuna CreateSqlite(string dataPath, CamusDBOptions options, ILoggerFactory? loggerFactory = null)
+        => new(EmbeddedKahunaOptionsBuilder.BuildStandalone(dataPath, options.Kahuna, options), loggerFactory);
 
     /// <summary>
     /// Constructs the embedded engine backed by RocksDB for both KV and WAL at <paramref name="dataPath"/>.
     /// Suitable for production standalone deployments that need higher write throughput than SQLite.
     /// </summary>
-    public static EmbeddedKahuna CreateRocksDb(string dataPath, ILoggerFactory? loggerFactory = null)
-        => new(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, CamusDBConfig.Kahuna), loggerFactory);
+    public static EmbeddedKahuna CreateRocksDb(string dataPath, CamusDBOptions options, ILoggerFactory? loggerFactory = null)
+        => new(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(dataPath, options.Kahuna, options), loggerFactory);
 
     /// <summary>
     /// Starts the Raft cluster and waits for every partition (system + all data partitions) to elect

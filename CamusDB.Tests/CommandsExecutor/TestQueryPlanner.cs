@@ -1348,9 +1348,9 @@ public class TestQueryPlanner
             toBound: null,
             toInclusive: true);
 
-        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 5),
+        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 5, CamusDBConfig.Ambient),
             "odd row count: half-open range without stats must flip to full scan");
-        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 10),
+        Assert.IsTrue(CostEstimator.ShouldPreferFullScan(halfOpen, tableRowCount: 10, CamusDBConfig.Ambient),
             "even row count: half-open range without stats must flip to full scan");
 
         IndexRangeScanNode bothBounds = new(
@@ -1360,7 +1360,7 @@ public class TestQueryPlanner
             toBound: new CompositeColumnValue(new[] { new ColumnValue(ColumnType.Integer64, 2005L) }),
             toInclusive: true);
 
-        Assert.IsFalse(CostEstimator.ShouldPreferFullScan(bothBounds, tableRowCount: 10),
+        Assert.IsFalse(CostEstimator.ShouldPreferFullScan(bothBounds, tableRowCount: 10, CamusDBConfig.Ambient),
             "a two-sided range (10% fallback) must keep the index");
     }
 }

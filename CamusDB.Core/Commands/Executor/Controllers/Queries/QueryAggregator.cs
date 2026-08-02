@@ -337,7 +337,7 @@ internal sealed class QueryAggregator
     {
         int threshold = context.Options.SpillEffectiveThreshold;
 
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
         if (reader is null) yield break;
 
         GroupKeyBuilder partitionBuilder = new();
@@ -390,7 +390,7 @@ internal sealed class QueryAggregator
         for (int i = 0; i < K; i++)
             subPaths[i] = scope.OpenWriter(out subWriters[i]);
 
-        SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, ct: ct).ConfigureAwait(false);
+        SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
         if (rdr2 is not null)
         {
             GroupKeyBuilder rePartitionBuilder = new();

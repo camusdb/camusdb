@@ -33,10 +33,14 @@ internal sealed class DatabaseDropper
 
     private readonly ILogger<ICamusDB> logger;
 
-    public DatabaseDropper(DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger)
+    /// <summary>Configuration for this engine; injected, never ambient.</summary>
+    private readonly CamusDBOptions options;
+
+    public DatabaseDropper(DatabaseDescriptors databaseDescriptors, ILogger<ICamusDB> logger, CamusDBOptions options)
     {
         this.databaseDescriptors = databaseDescriptors;
         this.logger = logger;
+        this.options = options;
     }
 
     /// <summary>
@@ -438,7 +442,7 @@ internal sealed class DatabaseDropper
     /// </summary>
     private async Task<bool> PurgeBucketAsync(IKahuna kahuna, string id, string bucket, string keyPrefix, CancellationToken ct)
     {
-        int batchSize = CamusDBConfig.KeyspacePurgeBatchSize;
+        int batchSize = options.KeyspacePurgeBatchSize;
         if (batchSize < 1) batchSize = 1;
 
         int failStreak = 0;

@@ -17,6 +17,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 /// </summary>
 internal sealed class GrantValidator : ValidatorBase
 {
+    public GrantValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(GrantTicket ticket)
     {
         ValidateIdentifier(ticket.UserName, "User");

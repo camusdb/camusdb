@@ -27,7 +27,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Verifies that spill-aware GROUP BY aggregation produces correct results at every scale and
 /// that per-partition dictionary growth is bounded by recursive repartitioning when the number
-/// of distinct groups in a single partition exceeds <c>CamusDBConfig.SpillEffectiveThreshold</c>.
+/// of distinct groups in a single partition exceeds <c>CamusDBOptions.SpillEffectiveThreshold</c>.
 ///
 /// The discriminator for the recursion path is <c>StatisticsManager.GroupByPartitionRecursionCount</c>:
 /// the counter is incremented only by the recursive repartitioning branch, so a zero count means
@@ -38,10 +38,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 public sealed class TestGroupBySpill : SharedNodeBaseTest
 {
     private string _dataDir = null!;
-    private bool _savedSpillEnabled;
-    private int _savedThreshold;
-    private int? _savedForceThreshold;
-    private int _savedFanIn;
 
     [SetUp]
     public void SetUpSpill()
@@ -49,12 +45,6 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
         _dataDir = Path.Combine(Path.GetTempPath(), "camusdb_gb_spill_" + System.Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dataDir);
 
-        _savedSpillEnabled   = CamusDBConfig.SpillEnabled;
-        _savedThreshold      = CamusDBConfig.SpillThresholdRows;
-        _savedForceThreshold = CamusDBConfig.ForceSpillThresholdRows;
-        _savedFanIn          = CamusDBConfig.SpillMergeFanIn;
-
-        CamusDBConfig.DataDirectory = _dataDir;
         SpillFileManager.AcquireInstanceLock(_dataDir);
     }
 
@@ -63,22 +53,33 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     {
         SpillFileManager.ReleaseInstanceLock();
 
-        CamusDBConfig.SpillEnabled            = _savedSpillEnabled;
-        CamusDBConfig.SpillThresholdRows      = _savedThreshold;
-        CamusDBConfig.ForceSpillThresholdRows = _savedForceThreshold;
-        CamusDBConfig.SpillMergeFanIn         = _savedFanIn;
-        CamusDBConfig.DataDirectory           = null!;
-
         try { Directory.Delete(_dataDir, recursive: true); } catch { }
     }
 
     // ── helper ───────────────────────────────────────────────────────────────
 
+    /// <summary>Spill disabled — the in-memory grouping path.</summary>
+    private CamusDBOptions SpillOff => Options with { SpillEnabled = false, DataDirectory = _dataDir };
+
+    /// <summary>
+    /// Spill forced after <paramref name="thresholdRows"/> rows so the partitioned aggregate path runs
+    /// on small inputs. Independent of any other configuration in play.
+    /// </summary>
+    private CamusDBOptions SpillOn(int thresholdRows, int fanIn = 4) =>
+        Options with
+        {
+            SpillEnabled = true,
+            ForceSpillThresholdRows = thresholdRows,
+            SpillMergeFanIn = fanIn,
+            DataDirectory = _dataDir,
+        };
+
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupSalesTable(
+        CamusDBOptions options,
         int categoryCount,
         int rowsPerCategory)
     {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
         KvTransaction txn = await database.Transactions.BeginAsync();
 
         await executor.CreateTable(new CreateTableTicket(
@@ -129,13 +130,8 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     /// </summary>
     [Test]
     public async Task GroupBySpill_FlagOff_InMemoryPathUsed()
-    {
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled = false;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
-            categoryCount: 4, rowsPerCategory: 3);
+    {        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
+            SpillOff, categoryCount: 4, rowsPerCategory: 3);
 
 
         List<QueryResultRow> rows = await RunGroupBy(dbname, database, executor,
@@ -157,15 +153,8 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     /// </summary>
     [Test]
     public async Task GroupBySpill_FewGroups_ResultMatchesInMemory()
-    {
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 20;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
-            categoryCount: 4, rowsPerCategory: 3);
+    {        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
+            SpillOn(20, 4), categoryCount: 4, rowsPerCategory: 3);
 
         // threshold=20 → 4 groups per partition easily fit.
         executor.Statistics.GroupByPartitionRecursionCount = 0;
@@ -192,16 +181,8 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     public async Task GroupBySpill_ManyGroups_BelowThreshold_CorrectResult()
     {
         const int categories = 20;
-        const int rowsEach   = 5;
-
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 200;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
-            categoryCount: categories, rowsPerCategory: rowsEach);
+        const int rowsEach   = 5;        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
+            SpillOn(200, 4), categoryCount: categories, rowsPerCategory: rowsEach);
 
         // Threshold exceeds groups-per-partition (with K=4, ~5 groups per partition), no overflow.
 
@@ -222,7 +203,7 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
 
     /// <summary>
     /// When a first-level partition holds more distinct groups than
-    /// <c>CamusDBConfig.SpillEffectiveThreshold</c>, the aggregator recursively repartitions it
+    /// <c>CamusDBOptions.SpillEffectiveThreshold</c>, the aggregator recursively repartitions it
     /// with a new hash seed. The result must be identical to the in-memory path, and
     /// <c>StatisticsManager.GroupByPartitionRecursionCount</c> must be positive, proving the
     /// recursion branch was actually taken (not load-all).
@@ -234,16 +215,8 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     public async Task GroupBySpill_PartitionOverflow_RecursionAndCorrectResult()
     {
         const int categories = 40;
-        const int rowsEach   = 3;
-
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
-            categoryCount: categories, rowsPerCategory: rowsEach);
+        const int rowsEach   = 3;        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
+            SpillOn(2, 4), categoryCount: categories, rowsPerCategory: rowsEach);
 
         // Threshold = 2 means any partition with ≥3 distinct groups triggers recursion.
         // With 40 groups and K=4 partitions, every partition gets ~10 groups → always overflows.
@@ -279,24 +252,10 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     {
         const int categories = 30;
         const int rowsEach   = 4;
-        const string sql = "SELECT category, COUNT(*) AS cnt, SUM(amount) AS total FROM sales GROUP BY category ORDER BY category";
-
-        // In-memory reference.
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled = false;
-
-        (string db1, DatabaseDescriptor d1, CommandExecutor ex1) = await SetupSalesTable(categories, rowsEach);
-        List<QueryResultRow> reference = await RunGroupBy(db1, d1, ex1, sql);
-
-        // Spill path with overflow.
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        (string db2, DatabaseDescriptor d2, CommandExecutor ex2) = await SetupSalesTable(categories, rowsEach);
+        const string sql = "SELECT category, COUNT(*) AS cnt, SUM(amount) AS total FROM sales GROUP BY category ORDER BY category";        (string db1, DatabaseDescriptor d1, CommandExecutor ex1) = await SetupSalesTable(
+            SpillOff, categories, rowsEach);
+        List<QueryResultRow> reference = await RunGroupBy(db1, d1, ex1, sql);        (string db2, DatabaseDescriptor d2, CommandExecutor ex2) = await SetupSalesTable(
+            SpillOn(2, 4), categories, rowsEach);
         List<QueryResultRow> spill = await RunGroupBy(db2, d2, ex2, sql);
 
         Assert.That(spill.Count, Is.EqualTo(reference.Count),
@@ -323,16 +282,8 @@ public sealed class TestGroupBySpill : SharedNodeBaseTest
     [Test]
     public async Task GroupBySpill_SpillFilesRemovedAfterCompletion()
     {
-        const int categories = 20;
-
-        // The engine fixes its configuration when it is built, so this is set before the
-        // table (and the executor behind it) are created.
-        CamusDBConfig.SpillEnabled            = true;
-        CamusDBConfig.ForceSpillThresholdRows = 2;
-        CamusDBConfig.SpillMergeFanIn         = 4;
-
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
-            categoryCount: categories, rowsPerCategory: 2);
+        const int categories = 20;        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesTable(
+            SpillOn(2, 4), categoryCount: categories, rowsPerCategory: 2);
 
 
         await RunGroupBy(dbname, database, executor,

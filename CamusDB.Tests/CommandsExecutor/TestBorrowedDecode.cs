@@ -55,7 +55,7 @@ public sealed class TestBorrowedDecode
     private static Task<QueryRow> DecodeAsync(TableSchema schema, ReadOnlyMemory<byte> payload, bool? borrowed, IReadOnlySet<string>? required = null, long? visibility = null)
     {
         RowEncoder.RowDecodeState state = new() { BorrowedDecode = borrowed };
-        return RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, requiredColumns: required, visibilitySchemaVersion: visibility, decodeState: state).AsTask();
+        return RowEncoder.DecodeToQueryRowAsync(schema, TxId, RowId, payload, CamusDBConfig.Ambient, requiredColumns: required, visibilitySchemaVersion: visibility, decodeState: state).AsTask();
     }
 
     /// <summary>Asserts the borrowed backing yields the same layout and cell values as the eager backing.</summary>

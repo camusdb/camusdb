@@ -129,11 +129,18 @@ public abstract class BaseTest
     /// </summary>
     protected virtual CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults;
 
-    protected virtual CommandExecutor CreateCommandExecutor()
+    protected virtual CommandExecutor CreateCommandExecutor() => CreateCommandExecutor(Options);
+
+    /// <summary>
+    /// An engine configured with <paramref name="options"/> rather than the fixture's defaults, for a
+    /// case that needs a setting the rest of the fixture does not — or two settings at once. Engines
+    /// built this way are independent: nothing one is configured with is visible to another.
+    /// </summary>
+    protected virtual CommandExecutor CreateCommandExecutor(CamusDBOptions options)
     {
-        CommandValidator validator = new();
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, Options,
+        return new(validator, catalogsManager, logger, options,
                    sharedNode: testNode!, registry: sharedRegistry!, isClusterMode: false);
     }
 
@@ -142,9 +149,26 @@ public abstract class BaseTest
     /// </summary>
     protected async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabase()
     {
+        // Routed through the parameterless factory on purpose: fixtures that override it — to inject a
+        // query cache, for instance — must still be consulted. Only CreateDatabase(options) bypasses it.
+        return await CreateDatabaseWith(CreateCommandExecutor()).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Creates a fresh database through an engine configured with <paramref name="options"/>, tracked
+    /// for cleanup like any other. This is how a test states the configuration it needs: the engine
+    /// fixes its settings when it is built, so they are supplied here rather than assigned to a
+    /// process-wide value beforehand.
+    /// </summary>
+    protected Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabase(
+        CamusDBOptions options)
+        => CreateDatabaseWith(CreateCommandExecutor(options));
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabaseWith(
+        CommandExecutor executor)
+    {
         string dbname = Guid.NewGuid().ToString("n");
 
-        CommandExecutor executor = CreateCommandExecutor();
 
         CreateDatabaseTicket databaseTicket = new(name: dbname, ifNotExists: false);
         DatabaseDescriptor database = await executor.CreateDatabase(databaseTicket);

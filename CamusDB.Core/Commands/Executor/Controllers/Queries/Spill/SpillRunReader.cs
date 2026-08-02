@@ -53,10 +53,14 @@ internal sealed class SpillRunReader : IAsyncDisposable
     // AdvanceAsync reconstructs each row as a QueryRow using this layout.
     private readonly RowLayout? _layout;
 
-    private SpillRunReader(FileStream stream, RowLayout? layout = null)
+    /// <summary>Frame-size ceiling for this reader, from the engine that opened the spill file.</summary>
+    private readonly int _maxFrameBytes;
+
+    private SpillRunReader(FileStream stream, int maxFrameBytes, RowLayout? layout = null)
     {
         _stream = stream;
         _layout = layout;
+        _maxFrameBytes = maxFrameBytes;
     }
 
     /// <summary>Whether all records have been consumed from the underlying file.</summary>
@@ -82,7 +86,7 @@ internal sealed class SpillRunReader : IAsyncDisposable
     /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> if the file cannot be opened,
     /// matching the fail-loud contract of <see cref="SpillScope.OpenReader"/>.
     /// </summary>
-    internal static async ValueTask<SpillRunReader?> OpenAsync(string path, RowLayout? layout = null, CancellationToken ct = default)
+    internal static async ValueTask<SpillRunReader?> OpenAsync(string path, int maxFrameBytes, RowLayout? layout = null, CancellationToken ct = default)
     {
         FileStream fs;
         try
@@ -96,7 +100,7 @@ internal sealed class SpillRunReader : IAsyncDisposable
                 $"Cannot open spill run file '{path}': {ex.Message}");
         }
 
-        SpillRunReader reader = new(fs, layout);
+        SpillRunReader reader = new(fs, maxFrameBytes, layout);
         try
         {
             if (!await reader.AdvanceAsync(ct).ConfigureAwait(false))
@@ -139,9 +143,9 @@ internal sealed class SpillRunReader : IAsyncDisposable
                 throw new InvalidDataException("SpillRunReader: truncated frame-length header");
 
             int payloadLen = BinaryPrimitives.ReadInt32LittleEndian(_lenBuf);
-            if (payloadLen < 0 || payloadLen > CamusDBConfig.SpillMaxFrameBytes)
+            if (payloadLen < 0 || payloadLen > _maxFrameBytes)
                 throw new InvalidDataException(
-                    $"SpillRunReader: invalid frame length {payloadLen} (max {CamusDBConfig.SpillMaxFrameBytes})");
+                    $"SpillRunReader: invalid frame length {payloadLen} (max {_maxFrameBytes})");
 
             EnsurePayloadCapacity(payloadLen);
             await _stream.ReadExactlyAsync(_payloadBuffer.AsMemory(0, payloadLen), ct).ConfigureAwait(false);

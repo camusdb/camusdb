@@ -12,6 +12,8 @@ namespace CamusDB.Core.CommandsValidator.Validators;
 
 internal sealed class RelinkDatabaseValidator : ValidatorBase
 {
+    public RelinkDatabaseValidator(CamusDBOptions options) : base(options) { }
+
     public void Validate(RelinkDatabaseTicket ticket)
     {
         ValidateIdentifier(ticket.NewName, "Database");

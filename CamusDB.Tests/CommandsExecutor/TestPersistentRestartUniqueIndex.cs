@@ -54,7 +54,7 @@ internal sealed class TestPersistentRestartUniqueIndex : BaseTest
         }.WithFastTestTimers());
 
     private CommandExecutor NewExecutor(EmbeddedKahuna node) =>
-        new(new CommandValidator(), new CatalogsManager(logger), logger, CamusDBConfig.Ambient, sharedNode: node, isClusterMode: true);
+        new(new CommandValidator(CamusDBConfig.Ambient), new CatalogsManager(logger), logger, CamusDBConfig.Ambient, sharedNode: node, isClusterMode: true);
 
     private static async Task<int> CountAll(string dbname, DatabaseDescriptor db, CommandExecutor ex)
     {
