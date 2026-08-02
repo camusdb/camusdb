@@ -63,7 +63,7 @@ internal sealed class QueryPlannerTestContext : IAsyncDisposable
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         TableSchema schema = BuildRobotsSchema();
         KvTableStore store = new(kahuna.Kahuna, CamusDBOptions.Default, "testdb", schema.Id!);

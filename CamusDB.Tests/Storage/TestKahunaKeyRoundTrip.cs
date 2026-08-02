@@ -47,7 +47,7 @@ public sealed class TestKahunaKeyRoundTrip
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
     private static async Task SetKey(IKahuna kahuna, string key, string value)
     {

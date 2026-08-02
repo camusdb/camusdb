@@ -39,6 +39,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   6. Residual non-equi conjunct (ON a.x = b.x AND a.z &gt; b.z).
 ///   7. Build-row cap fallback (tiny cap → nested-loop, still correct).
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestHashJoinExecutor : SharedNodeBaseTest
 {

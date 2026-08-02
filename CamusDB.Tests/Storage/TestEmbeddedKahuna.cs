@@ -40,6 +40,8 @@ namespace CamusDB.Tests.Storage;
 ///   4. Disposes cleanly via IAsyncDisposable.
 /// </summary>
 [TestFixture]
+// Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
+// other node-booting fixtures.
 [NonParallelizable]
 public sealed class TestEmbeddedKahuna
 {
@@ -395,7 +397,7 @@ public sealed class TestEmbeddedKahuna
                 Storage = "memory",
                 WalStorage = "memory",
                 InitialPartitions = 3
-            }.WithFastTestTimers(),
+            }.WithTestNodeDefaults(),
             interNode,
             raftCommunication,
             new StaticDiscovery(peers)

@@ -33,6 +33,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// so row + indexes share a partition and the bug is masked. This fixture spins up its own node with
 /// many partitions to exercise cross-partition unique-index lookups and 2PC.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestMultiPartitionUniqueIndex : BaseTest
 {
@@ -60,7 +62,7 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
             WalStorage = "sqlite",
             WalPath = storageRoot,
             InitialPartitions = Partitions
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);

@@ -27,6 +27,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// teardown.
 /// </summary>
 [TestFixture]
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestSqlAuthEnforcement : BaseTest
 {
@@ -101,8 +103,10 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     [Test]
     public async Task Disabled_NoPrincipalRequired()
     {
-        // Auth off (default in teardown state): statements run with no principal, as before Phase 2.
-        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        // Auth off: statements run with no principal. This fixture's engines are authenticated by
+        // default, so the auth-off case builds its own.
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase(
+            Options with { AuthenticationEnabled = false });
         await RunTxnDdl(executor, dbname, "CREATE TABLE t (id int64 PRIMARY KEY NOT NULL)", principal: null);
         await RunQuery(executor, dbname, "SELECT id FROM t", principal: null);
         Assert.Pass();
@@ -264,7 +268,10 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     [Test]
     public async Task BootstrapFailsClosed_WhenNoSecret()
     {
-        CommandExecutor executor = CreateCommandExecutor();
+        // Auth on but no bootstrap secret configured: seeding must refuse rather than start a server
+        // whose superuser has no password. This fixture's default supplies a secret, so it is removed
+        // here — the missing secret is the condition under test.
+        CommandExecutor executor = CreateCommandExecutor(Options with { BootstrapSuperuserPassword = "" });
         string dbname = "authdb" + Guid.NewGuid().ToString("n");
         await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
         TrackDatabase(dbname, executor);

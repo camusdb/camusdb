@@ -45,6 +45,8 @@ namespace CamusDB.Tests.Cluster;
 /// (EmbeddedRaftCommunication) — no real gRPC needed.
 /// </summary>
 [TestFixture]
+// Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
+// each other's Raft election timing, which shows up as spurious leadership churn.
 [NonParallelizable]
 public sealed class TestMultiPartitionRouting
 {

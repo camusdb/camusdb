@@ -32,6 +32,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// facet of the statistics produced by ANALYZE.
 /// </summary>
 [TestFixture]
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 public sealed class TestAnalyzeTable : BaseTest
 {

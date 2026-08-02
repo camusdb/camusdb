@@ -42,6 +42,8 @@ using CamusConfig = CamusDB.Core.CamusDBConfig;
 namespace CamusDB.Tests.CommandsExecutor;
 
 [TestFixture]
+// Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
+// each other's Raft election timing, which shows up as spurious leadership churn.
 [NonParallelizable]
 public sealed class TestSchemaDdlForwarding
 {
@@ -710,7 +712,7 @@ public sealed class TestSchemaDdlForwarding
                     Storage = "memory",
                     WalStorage = "memory",
                     InitialPartitions = 3
-                }.WithFastTestTimers(),
+                }.WithTestNodeDefaults(),
                 interNode,
                 raftCommunication,
                 new StaticDiscovery(peers)

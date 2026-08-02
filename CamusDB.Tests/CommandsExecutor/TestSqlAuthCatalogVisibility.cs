@@ -26,6 +26,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// erroring would itself confirm the object exists.
 /// </summary>
 [TestFixture]
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestSqlAuthCatalogVisibility : BaseTest
 {
@@ -374,7 +376,7 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
 
         // An engine fixes its configuration when it is constructed, so the unauthenticated listing is
         // exercised through a second executor built with authentication off.
-        CommandExecutor unauthenticated = CreateCommandExecutor();
+        CommandExecutor unauthenticated = CreateCommandExecutor(Options with { AuthenticationEnabled = false });
 
         CollectionAssert.AreEquivalent(
             new[] { child, grandchild },
@@ -403,7 +405,7 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         // they did before visibility filtering existed. An engine fixes its configuration when it is
         // constructed, so the unauthenticated behaviour is exercised through a second executor built
         // with authentication off, not by flipping a flag under the one that created the tables.
-        CommandExecutor unauthenticated = CreateCommandExecutor();
+        CommandExecutor unauthenticated = CreateCommandExecutor(Options with { AuthenticationEnabled = false });
 
         CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTables(unauthenticated, db, null));
         Assert.IsTrue((await ShowDatabases(unauthenticated, db, null)).Contains(db));

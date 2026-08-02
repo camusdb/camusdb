@@ -33,6 +33,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// NULL-to-value, value-to-NULL), and that the SpillEffectiveThreshold chunking produces correct
 /// results even when rows span multiple chunks.
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestRowUpdaterBatch : SharedNodeBaseTest
 {

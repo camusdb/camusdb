@@ -31,6 +31,8 @@ namespace CamusDB.Tests.Cluster;
 /// per-object meta scan + persisted-staleness load) rather than a node-local open-object list.
 /// </summary>
 [TestFixture]
+// Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
+// each other's Raft election timing, which shows up as spurious leadership churn.
 [NonParallelizable]
 public sealed class TestAutoAnalyzeCluster
 {

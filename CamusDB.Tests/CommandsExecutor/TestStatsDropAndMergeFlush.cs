@@ -39,6 +39,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///      persisted counters instead of last-writer-wins overwriting deltas another node flushed.
 /// </summary>
 [TestFixture]
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestStatsDropAndMergeFlush : SharedNodeBaseTest
 {

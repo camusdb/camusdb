@@ -34,6 +34,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// must return an id that is free, and registration must not collide with a live one.</para>
 /// </summary>
 [TestFixture]
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 public sealed class TestDatabaseIdAllocationRecovery : BaseTest
 {

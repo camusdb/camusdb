@@ -32,6 +32,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// causality without TrueTime.
 /// </summary>
 [TestFixture]
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestSerializableCausalToken : SharedNodeBaseTest
 {

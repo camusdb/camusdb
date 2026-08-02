@@ -48,11 +48,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   avoids the 10 000-row events full scan that the heuristic must pay up-front).
 /// </summary>
 [TestFixture]
-// The planner cases now state their configuration as options passed to the planner they construct, so
-// they no longer touch the process-wide flag. A few executor-level cases below still toggle it — those
-// drive a shared executor that was built before the toggle — and under the assembly's
-// ParallelScope.Fixtures that would race any concurrent fixture reading the same flag, flipping join
-// order mid-plan. NonParallelizable isolates those remaining toggles until they are converted too.
+// Serial: boots an embedded Kahuna node per test. Every case here — planner-level and executor-level
+// alike — now states its configuration as options on the planner or engine it constructs, so nothing
+// process-wide is left to race; the node is the only remaining reason.
 [NonParallelizable]
 public sealed class TestPlanCostBasedJoinOrder : BaseTest
 {

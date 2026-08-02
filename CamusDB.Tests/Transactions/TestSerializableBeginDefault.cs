@@ -35,6 +35,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// The Read Committed case builds its own engine rather than changing what the others see.
 /// </summary>
 [TestFixture]
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestSerializableBeginDefault : SharedNodeBaseTest
 {

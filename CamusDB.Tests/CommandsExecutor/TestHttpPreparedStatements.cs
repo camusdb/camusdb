@@ -39,8 +39,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// that have no gRPC counterpart — node-local handles, principal ownership, idle expiry, and caps —
 /// since those exist precisely because HTTP has no session the server can trust.
 ///
-/// <para>Toggles process-wide config statics for the cap and timeout cases, so
-/// <c>[NonParallelizable]</c>.</para>
+/// <para>Serial: boots an embedded Kahuna node per test. The caps and timeouts belong to the registry
+/// each case constructs, so the node is the only remaining reason.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

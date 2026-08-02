@@ -30,6 +30,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   - No table rows are scanned (the plan is built but the data cursor is never opened).
 ///   - The node sequence matches the expected physical plan shape.
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public class TestExplainExecutor : SharedNodeBaseTest
 {

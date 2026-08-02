@@ -83,7 +83,7 @@ public abstract class BaseTest
                 Storage = "memory",
                 WalStorage = "memory",
                 InitialPartitions = 1
-            }.WithFastTestTimers());
+            }.WithTestNodeDefaults());
             await testNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
             await testNode.WaitForLeaderAsync("warmup", CancellationToken.None).ConfigureAwait(false);
             await testNode.FlushAsync().ConfigureAwait(false);

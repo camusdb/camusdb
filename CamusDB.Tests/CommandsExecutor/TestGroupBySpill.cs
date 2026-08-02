@@ -34,6 +34,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// unbounded dictionary growth is still occurring.
 /// </summary>
 [TestFixture]
+// Serial: SpillFileManager's instance lock is process-wide, so two fixtures holding it at once
+// would write spill files into each other's directory.
 [NonParallelizable]
 public sealed class TestGroupBySpill : SharedNodeBaseTest
 {

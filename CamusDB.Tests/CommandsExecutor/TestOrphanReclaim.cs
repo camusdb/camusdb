@@ -34,6 +34,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// unexpired ones alone, respects the disable switch, and (crash-window guard) never purges an object
 /// that has since been relinked.
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 internal sealed class TestOrphanReclaim : SharedNodeBaseTest
 {

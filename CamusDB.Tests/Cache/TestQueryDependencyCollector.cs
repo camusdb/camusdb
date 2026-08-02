@@ -29,7 +29,6 @@ namespace CamusDB.Tests.Cache;
 /// end-to-end assertions for all three scenarios — not just structural checks.</para>
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestQueryDependencyCollector
 {
     // ─────────────────────────────────────────────────────────────────────────

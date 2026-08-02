@@ -37,6 +37,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Branch-aware read-layer tests: the branch-aware read layer (KvTableStore) walks ancestry so a branch
 /// returns inherited data without physically copying rows or index entries.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestBranchAwareStorage : BaseTest
 {

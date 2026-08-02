@@ -28,6 +28,8 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Cluster;
 
 [TestFixture]
+// Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
+// each other's Raft election timing, which shows up as spurious leadership churn.
 [NonParallelizable]
 public sealed class TestInProcessSchemaCluster
 {

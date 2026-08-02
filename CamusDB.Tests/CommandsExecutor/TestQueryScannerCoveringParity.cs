@@ -41,6 +41,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   - UPDATE and DELETE visibility (covering scan reflects mutations committed before the scan)
 ///   - batch fetch correctness (multi-page paging via a temporarily small IndexScanFetchBatchSize)
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 public class TestQueryScannerCoveringParity : BaseTest
 {

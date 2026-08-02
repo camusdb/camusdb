@@ -65,7 +65,7 @@ public sealed class TestSchemaDdlForwardController
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1,
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);

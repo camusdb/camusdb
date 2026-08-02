@@ -18,9 +18,9 @@ namespace CamusDB.Tests.Config;
 /// <see cref="CamusDBOptions"/> correctly, and that an unknown or misspelled spill key
 /// is rejected at startup rather than silently dropped.
 ///
-/// <para>Non-parallelizable: applying a config rewrites <b>every</b> process-wide knob from that one
-/// definition, not just the keys the YAML mentions, so a fixture that applies a config concurrently
-/// with this one would reset the spill values back to their defaults mid-assertion.</para>
+/// <para>Serial: retained as a precaution while the config surface settles. Resolution is now pure —
+/// it returns options rather than writing process-wide values — so these cases no longer interact with
+/// anything outside the fixture.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

@@ -35,7 +35,8 @@ namespace CamusDB.Tests.Transactions;
 /// Tests build their manager with <see cref="CamusDBOptions.LockEscalationThreshold"/> at 3 so escalation triggers
 /// after a few reads rather than the default 50.
 ///
-/// [NonParallelizable] because config knobs are process-global.
+/// Serial: each test starts its own embedded Kahuna node. The escalation threshold belongs to the
+/// manager and store the test constructs, so the node is the only remaining reason.
 /// </summary>
 [TestFixture]
 [NonParallelizable]

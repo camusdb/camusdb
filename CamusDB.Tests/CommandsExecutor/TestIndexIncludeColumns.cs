@@ -26,6 +26,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// DDL surface (metadata only): parsing, validation, persistence of <c>IncludeColumnIds</c>, and
 /// re-resolution to <c>IncludeColumns</c> after a close/reopen.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestIndexIncludeColumns : BaseTest
 {

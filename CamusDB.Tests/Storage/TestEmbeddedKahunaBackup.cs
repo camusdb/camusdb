@@ -31,6 +31,8 @@ namespace CamusDB.Tests.Storage;
 /// offline restore into a fresh directory).
 /// </summary>
 [TestFixture]
+// Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
+// other node-booting fixtures.
 [NonParallelizable]
 public sealed class TestEmbeddedKahunaBackup
 {
@@ -51,7 +53,7 @@ public sealed class TestEmbeddedKahunaBackup
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             BackupDir = backupDir ?? "",
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
     // Persistent node laid out exactly as CamusDB's standalone builder does for a given data root:
     // storage under {dataRoot}/kv, WAL under {dataRoot}/wal. Used to prove a restored data root actually
@@ -72,7 +74,7 @@ public sealed class TestEmbeddedKahunaBackup
             ReadIOThreads = 1,
             WriteIOThreads = 1,
             BackupDir = backupDir ?? "",
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
     [Test]
     public async Task IsBackupConfigured_FalseWhenNoBackupDir_AndCallsThrow()

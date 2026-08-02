@@ -32,6 +32,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// releases it. State is observed through Kahuna's <c>GetSnapshotFloor</c> introspection so the
 /// tests exercise the real hold, not just the persisted id.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 public sealed class TestBranchSnapshotHold : BaseTest
 {

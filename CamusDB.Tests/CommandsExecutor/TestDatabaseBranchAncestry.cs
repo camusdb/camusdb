@@ -29,6 +29,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Tests for branch ancestry on <see cref="DatabaseRegistryEntry"/> and
 /// cross-node entry resolution via <see cref="DatabaseRegistry.TryResolveEntryAsync"/>.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestDatabaseBranchAncestry
 {
@@ -50,7 +52,7 @@ internal sealed class TestDatabaseBranchAncestry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
         await sharedNode.StartAsync(CancellationToken.None);
         await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);
     }
@@ -285,7 +287,7 @@ internal sealed class TestDatabaseBranchAncestry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
 
@@ -332,6 +334,8 @@ internal sealed class TestDatabaseBranchAncestry
 /// verify that <see cref="DatabaseDescriptor.Ancestors"/> is populated correctly by
 /// <see cref="DatabaseOpener"/> — the production path consumed by branch-aware table opens.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestDatabaseBranchAncestryEndToEnd : BaseTest
 {

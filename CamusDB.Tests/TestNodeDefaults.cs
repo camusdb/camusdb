@@ -12,7 +12,8 @@ using Kahuna;
 namespace CamusDB.Tests;
 
 /// <summary>
-/// Raft timings for the single-node, in-memory nodes that tests boot. The embedded defaults are sized
+/// Settings for the single-node, in-memory nodes that tests boot — Raft timings and executor pool size.
+/// Both exist for the same reason: the embedded defaults are sized
 /// for a real node that must replay a WAL and join peers before it may participate in elections; a
 /// test node has neither, so it spends that grace period idle and every node-booting test pays it.
 ///
@@ -29,17 +30,17 @@ namespace CamusDB.Tests;
 /// the rationale in <c>CamusDB.Cluster.Tests/InProcessSchemaCluster.cs</c>). A single node wins its
 /// own election uncontested, so the same aggression is safe here regardless of partition count.</para>
 ///
-/// <para>The values move together: Kommander's <c>RaftConfiguration.Validate()</c> rejects a
+/// <para>The timing values move together: Kommander's <c>RaftConfiguration.Validate()</c> rejects a
 /// heartbeat interval that is not well below the election timeout (guideline: at most a fifth of it),
 /// and likewise for the leader-check interval. Changing one means rechecking the others.</para>
 /// </summary>
-public static class TestNodeTimers
+public static class TestNodeDefaults
 {
     /// <summary>
-    /// Applies the fast single-node timings and returns the same instance, so it can be chained onto
+    /// Applies the single-node test settings and returns the same instance, so it can be chained onto
     /// an object initializer at a node construction site.
     /// </summary>
-    public static EmbeddedKahunaOptions WithFastTestTimers(this EmbeddedKahunaOptions options)
+    public static EmbeddedKahunaOptions WithTestNodeDefaults(this EmbeddedKahunaOptions options)
     {
         options.TimerInitialDelay = TimeSpan.FromMilliseconds(100);
         options.StartElectionTimeout = 150;
@@ -47,6 +48,23 @@ public static class TestNodeTimers
         options.HeartbeatInterval = TimeSpan.FromMilliseconds(20);
         options.CheckLeaderInterval = TimeSpan.FromMilliseconds(25);
         options.VotingTimeout = TimeSpan.FromMilliseconds(300);
+
+        // One Raft executor thread instead of one per processor. The pool size defaults to 0, which
+        // Kommander reads as Environment.ProcessorCount, so every node gets that many dedicated OS
+        // threads and their stacks — for a node that runs a single partition and can only ever drain
+        // it serially anyway. The pool preserves per-partition serial execution regardless of its
+        // size, so one thread costs these nodes no concurrency they could have used.
+        //
+        // Measured on this repository (8 cores): a freshly booted node adds ~18 OS threads with the
+        // auto-sized pool and ~11 with one, so this removes 7 threads and their stacks per node. That
+        // is the whole point — the suite boots a node per test in most fixtures, and thread stacks are
+        // what makes running them concurrently exhaust memory. Do not raise it here to chase
+        // throughput: a single-partition node has none to gain.
+        //
+        // Single-node only, like the timings above. A multi-node in-process cluster runs several Raft
+        // groups per node, where one worker really can serialize work that needs to overlap and a
+        // delayed heartbeat becomes a spurious election.
+        options.PartitionExecutorPoolSize = 1;
 
         return options;
     }

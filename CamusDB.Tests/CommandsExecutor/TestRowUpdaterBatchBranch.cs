@@ -29,6 +29,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// ancestry probe (<c>ResolveBranchUniqueFlagsAsync</c>), and branch writes must stay isolated from
 /// the ancestor. The root-only tests in <see cref="TestRowUpdaterBatch"/> never take this path.
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestRowUpdaterBatchBranch : BaseTest
 {

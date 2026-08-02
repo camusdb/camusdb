@@ -55,7 +55,7 @@ public sealed class TestDatabaseOpener : BaseTest
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);

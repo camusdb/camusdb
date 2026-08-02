@@ -62,6 +62,8 @@ namespace CamusDB.Tests.Cluster;
 /// (where rows are distributed by key value). Optional hardening for a future test.
 /// </summary>
 [TestFixture]
+// Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
+// each other's Raft election timing, which shows up as spurious leadership churn.
 [NonParallelizable]
 public sealed class TestSnapshotReadCluster
 {

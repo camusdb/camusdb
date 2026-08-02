@@ -32,7 +32,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Integration tests for the REST auth surface: <c>/login</c> issues a token, the bearer flow is
 /// resolved and enforced by the engine (200 authorized / 401 unauthenticated / 403 denied), and a
 /// plaintext connection is refused when TLS is required. Driven through the real controllers with a
-/// <see cref="DefaultHttpContext"/>. Toggles the process-wide auth flag, so <c>[NonParallelizable]</c>.
+/// <see cref="DefaultHttpContext"/>.
+///
+/// <para>Serial: boots an embedded Kahuna node per test. Nothing here is process-wide any more — the
+/// auth settings belong to each engine — so the node is the only remaining reason.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

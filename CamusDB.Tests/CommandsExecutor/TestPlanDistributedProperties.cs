@@ -651,6 +651,8 @@ public class TestPlanDistributedProperties
 /// future distributed sharding pass begins populating these properties for join plans, these
 /// tests must be updated to reflect the new contract.
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public class TestPlanJoinDistributedPropertiesLimitation : SharedNodeBaseTest
 {

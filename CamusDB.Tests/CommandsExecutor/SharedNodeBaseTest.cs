@@ -43,7 +43,7 @@ public abstract class SharedNodeBaseTest : BaseTest
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await sharedNode.StartAsync(CancellationToken.None);
         await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);

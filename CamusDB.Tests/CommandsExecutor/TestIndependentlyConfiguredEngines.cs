@@ -34,6 +34,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///
 /// <para>The knobs chosen are deterministic — identifier and column ceilings — so a failure means
 /// configuration leaked between engines, never a timing artefact.</para>
+///
+/// <para>Serial: one case deliberately replaces the ambient options to prove an already-built engine
+/// ignores the change. That replacement is process-wide for the length of the case, so this is one of
+/// the few fixtures whose isolation really is about configuration.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

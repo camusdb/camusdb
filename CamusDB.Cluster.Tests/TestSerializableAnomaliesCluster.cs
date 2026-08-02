@@ -47,6 +47,8 @@ namespace CamusDB.Tests.Cluster;
 /// outcomes for the write-skew scenario across both topologies.
 /// </summary>
 [TestFixture]
+// Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
+// each other's Raft election timing, which shows up as spurious leadership churn.
 [NonParallelizable]
 public sealed class TestSerializableAnomaliesCluster
 {

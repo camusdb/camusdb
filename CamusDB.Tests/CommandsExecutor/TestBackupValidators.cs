@@ -21,7 +21,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// restore target-directory and PITR window checks. These are pure validation with no running node.
 /// </summary>
 [TestFixture]
-[NonParallelizable]
 public sealed class TestBackupValidators
 {
     private static long UnixMsNow() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();

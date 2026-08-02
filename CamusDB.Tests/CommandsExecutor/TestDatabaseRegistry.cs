@@ -27,6 +27,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Unit tests for <see cref="DatabaseRegistry"/>.
 /// </summary>
+// Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
+// other node-booting fixtures.
 [NonParallelizable]
 internal sealed class TestDatabaseRegistry
 {
@@ -49,7 +51,7 @@ internal sealed class TestDatabaseRegistry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
         await sharedNode.StartAsync(CancellationToken.None);
         await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);
     }
@@ -570,7 +572,7 @@ internal sealed class TestDatabaseRegistry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
@@ -602,7 +604,7 @@ internal sealed class TestDatabaseRegistry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
@@ -657,7 +659,7 @@ internal sealed class TestDatabaseRegistry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);
@@ -710,7 +712,7 @@ internal sealed class TestDatabaseRegistry
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 1
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         await clusterNode.StartAsync(CancellationToken.None);
         await clusterNode.WaitForLeaderAsync("warmup", CancellationToken.None);

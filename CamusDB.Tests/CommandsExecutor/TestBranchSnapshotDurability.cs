@@ -76,7 +76,7 @@ public sealed class TestBranchSnapshotDurability
             InitialPartitions = 1,
             RevisionRetention = RetentionWindow,
             RevisionsToKeepCached = RetentionWindow,
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
         await node.FlushAsync();

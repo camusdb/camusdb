@@ -35,6 +35,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// cached registry. The load now runs as a zero-identity read-only snapshot with no rollback to
 /// route, so opening/reloading the registry must succeed regardless of partition count.</para>
 /// </summary>
+// Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
+// other node-booting fixtures.
 [NonParallelizable]
 internal sealed class TestDatabaseRegistryMultiPartition
 {
@@ -56,7 +58,7 @@ internal sealed class TestDatabaseRegistryMultiPartition
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
         await sharedNode.StartAsync(CancellationToken.None);
         await sharedNode.WaitForLeaderAsync("warmup", CancellationToken.None);
     }
@@ -102,7 +104,7 @@ internal sealed class TestDatabaseRegistryMultiPartition
             Storage = "memory",
             WalStorage = "memory",
             InitialPartitions = 3
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
         try
         {

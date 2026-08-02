@@ -30,6 +30,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// iterations, so if a <c>RowView</c>'s backing bytes were reused or freed early, these shapes would
 /// diverge from the eager path.
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestBorrowedDecodeParity : SharedNodeBaseTest
 {

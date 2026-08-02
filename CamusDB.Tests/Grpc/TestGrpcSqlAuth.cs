@@ -27,8 +27,10 @@ namespace CamusDB.Tests.Grpc;
 /// Verifies that the gRPC surface resolves the bearer token from request metadata, threads the
 /// principal into the engine, and is enforced there: an authorized call succeeds, a missing token
 /// maps to <see cref="StatusCode.Unauthenticated"/>, and an insufficiently-privileged call maps to
-/// <see cref="StatusCode.PermissionDenied"/>. Toggles the process-wide auth flag, so it is
-/// <c>[NonParallelizable]</c> and restores config in teardown.
+/// <see cref="StatusCode.PermissionDenied"/>. 
+///
+/// <para>Serial: shares one embedded Kahuna node across the fixture. The auth settings belong to the
+/// services each test builds, so the node is the only remaining reason.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -52,14 +54,21 @@ internal sealed class TestGrpcSqlAuth : BaseTest
 
     [SetUp]
     public void SetUpGrpcAuth()
+        => BuildServices(Options);
+
+    /// <summary>
+    /// Builds the executor and the SQL service in front of it under <paramref name="options"/>. Both fix
+    /// their configuration when constructed, so a test that needs different auth settings rebuilds the
+    /// pair rather than changing anything afterwards.
+    /// </summary>
+    private void BuildServices(CamusDBOptions options)
     {
-        CommandValidator validator = new(Options);
+        CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        serviceExecutor = new(validator, catalogsManager, logger, Options,
+        serviceExecutor = new(validator, catalogsManager, logger, options,
             sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
         service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
-
+            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), options);
     }
 
     [TearDown]
@@ -82,14 +91,7 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     // table already created through the gRPC surface as the superuser.
     private async Task<(string db, string rootToken)> SetupAuthenticated()
     {
-        // An engine fixes its configuration when it is constructed, so the executor and the service in
-        // front of it are rebuilt here — after the authentication policy and signing key are in place —
-        // rather than in set-up, where they would have captured auth-disabled settings.
-        serviceExecutor = new CommandExecutor(
-            new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
-            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
-        service = new(serviceExecutor, new HttpTransactionCoordinator(serviceExecutor), logger,
-            TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
+        BuildServices(Options);
 
         await serviceExecutor.EnsureBootstrapSuperuserAsync();
         string rootToken = (await serviceExecutor.LoginAsync("root", "root-password")).Token;
@@ -104,6 +106,9 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     [Test]
     public async Task AuthDisabled_NoTokenWorks()
     {
+        // This fixture's services are authenticated by default; the auth-off case rebuilds them.
+        BuildServices(Options with { AuthenticationEnabled = false });
+
         string db = "grpcauthdb" + Guid.NewGuid().ToString("n");
         await service.ExecuteDdl(Req("", $"CREATE DATABASE {db}"), Ctx());
         TrackDatabase(db, serviceExecutor);

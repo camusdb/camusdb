@@ -35,6 +35,8 @@ namespace CamusDB.Tests.Storage;
 /// a round trip re-asserting coverage it already holds, which is what these counts pin down.
 /// </summary>
 [TestFixture]
+// Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
+// other node-booting fixtures.
 [NonParallelizable]
 public sealed class TestOptimisticLockAudit
 {

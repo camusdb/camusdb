@@ -28,6 +28,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// (a selectivity-dependent perf trade), so without this test the slot path would never be exercised;
 /// here every shape is run under both flag states and compared cell-for-cell.
 /// </summary>
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestSlotBackedDecodeParity : SharedNodeBaseTest
 {

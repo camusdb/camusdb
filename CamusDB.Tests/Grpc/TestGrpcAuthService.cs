@@ -30,7 +30,10 @@ namespace CamusDB.Tests.Grpc;
 ///
 /// <para>The token a login returns must actually work on the data plane, and the reported expiry must
 /// match the server's configured TTL — a client renews against that figure, so a wrong one is worse than
-/// none. Toggles the process-wide auth flags, hence <c>[NonParallelizable]</c>.</para>
+/// none.</para>
+///
+/// <para>Serial: shares one embedded Kahuna node across the fixture. The auth settings belong to the
+/// services each test builds, so the node is the only remaining reason.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

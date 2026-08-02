@@ -43,6 +43,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// </para>
 /// </summary>
 [TestFixture]
+// Serial: SpillFileManager's instance lock is process-wide, so two fixtures holding it at once
+// would write spill files into each other's directory.
 [NonParallelizable]
 public sealed class TestSubqueryMaterializationSpill : SharedNodeBaseTest
 {

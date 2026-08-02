@@ -36,6 +36,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// resolved default is Serializable — against the configuration its engine was built with.
 /// </summary>
 [TestFixture]
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestSerializableAutoRetry : SharedNodeBaseTest
 {

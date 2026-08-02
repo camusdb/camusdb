@@ -25,9 +25,10 @@ namespace CamusDB.Tests.Config;
 /// <summary>
 /// Merge-precedence tests for YAML / CLI resolution and the process-wide knobs it applies.
 ///
-/// <para>Non-parallelizable: applying a config rewrites <b>every</b> static from that one definition,
-/// not just the keys the YAML mentions, so two fixtures applying configs at once clobber each other's
-/// values mid-assertion.</para>
+/// <para>Serial: two cases set and restore the <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable to
+/// prove it overrides the YAML. Environment variables are process-wide, so a concurrent fixture reading
+/// one mid-assertion would see the other's value. Resolution itself is now pure — it returns options
+/// rather than writing statics — so nothing else here needs isolating.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

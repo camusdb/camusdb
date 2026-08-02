@@ -33,6 +33,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// time, very plausibly across restarts). Single-node, SQLite-backed, 8 partitions, on a fixed
 /// storage path that survives the simulated restart (dispose + recreate the node).
 /// </summary>
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 internal sealed class TestPersistentRestartUniqueIndex : BaseTest
 {
@@ -51,7 +53,7 @@ internal sealed class TestPersistentRestartUniqueIndex : BaseTest
             WalStorage = "sqlite",
             WalPath = storageRoot,
             InitialPartitions = 8
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
 
     private CommandExecutor NewExecutor(EmbeddedKahuna node) =>
         new(new CommandValidator(Options), new CatalogsManager(logger), logger, Options, sharedNode: node, isClusterMode: true);

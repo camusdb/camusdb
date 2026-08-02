@@ -39,6 +39,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// builds its own engine rather than changing anything the others can see.
 /// </summary>
 [TestFixture]
+// Serial: shares one embedded Kahuna node across the fixture, so concurrent fixtures would
+// interleave transactions and database names on the same node.
 [NonParallelizable]
 public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
 {

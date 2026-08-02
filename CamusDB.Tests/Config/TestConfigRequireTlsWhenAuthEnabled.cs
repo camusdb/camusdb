@@ -25,8 +25,8 @@ namespace CamusDB.Tests.Config;
 /// would reject every forwarded request otherwise — and that an omitted CLI flag does not silently
 /// re-enable it over an operator's YAML choice.</para>
 ///
-/// <para>Marked non-parallelizable because one test mutates the process-wide
-/// <see cref="CamusDBOptions.RequireTlsWhenAuthEnabled"/>.</para>
+/// <para>Serial: retained as a precaution while the config surface settles. The TLS requirement is
+/// now read from the options an engine was built with, so no case here mutates anything shared.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]

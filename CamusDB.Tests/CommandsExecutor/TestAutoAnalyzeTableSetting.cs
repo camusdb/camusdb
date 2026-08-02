@@ -30,6 +30,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// and that the background scheduler honors the opt-out while manual ANALYZE ignores it.
 /// </summary>
 [TestFixture]
+// Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
+// multiplies live nodes and is what exhausted memory in the suite before they were serialized.
 [NonParallelizable]
 public sealed class TestAutoAnalyzeTableSetting : BaseTest
 {

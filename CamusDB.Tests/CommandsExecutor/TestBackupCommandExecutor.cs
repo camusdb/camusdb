@@ -40,6 +40,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Requires Kahuna 0.9.3+ (typed outcomes, artifact verification, coverage bounds, restore confinement).
 /// </summary>
 [TestFixture]
+// Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
+// other node-booting fixtures.
 [NonParallelizable]
 public sealed class TestBackupCommandExecutor
 {
@@ -95,7 +97,7 @@ public sealed class TestBackupCommandExecutor
             WriteIOThreads = 1,
             BackupDir = backup ? backupDir : "",
             RestoreRoot = restore ? restoreRoot : "",
-        }.WithFastTestTimers());
+        }.WithTestNodeDefaults());
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync("warmup", CancellationToken.None);
         await node.FlushAsync();
