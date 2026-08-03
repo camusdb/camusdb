@@ -370,4 +370,11 @@ public enum NodeType
     /// current authenticated principal. Server-level query — dispatched before any database is opened.
     /// </summary>
     ShowGrants,
+
+    /// <summary>
+    /// <c>SHOW ENGINE STATS [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, or null for
+    /// no filter. Reports the local process's embedded Kommander/Kahuna metrics, so it is dispatched
+    /// before any database is opened and never forwards to the leader.
+    /// </summary>
+    ShowEngineStats,
 }

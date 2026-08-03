@@ -142,6 +142,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly SQLParser.SqlParserCache sqlParserCache;
 
+    /// <summary>
+    /// Backs <c>SHOW ENGINE STATS</c>. Null when <see cref="CamusDBOptions.EngineMetricsEnabled"/> is
+    /// off, in which case the statement reports no rows rather than failing.
+    /// </summary>
+    private readonly Diagnostics.EngineMetricsCollector? engineMetrics;
+
     // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
     // batches keeps transaction size manageable and allows a leader-change resume to skip
     // already-indexed rows via the persisted StartOffset checkpoint.
@@ -234,6 +240,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, options, statisticsManager, semiJoinAnalyzer);
         tableAnalyzer = new TableAnalyzer(statisticsManager, options);
+
+        // Observing the embedded Kommander/Kahuna meters costs nothing while no instrument fires, and
+        // the listener replays instruments published before it started, so it can be built here
+        // regardless of how far along the shared node is.
+        if (options.EngineMetricsEnabled)
+            engineMetrics = new Diagnostics.EngineMetricsCollector();
 
         sqlParserCache = new SQLParser.SqlParserCache(
             logger,
@@ -2543,6 +2555,17 @@ public sealed class CommandExecutor : IAsyncDisposable
             return;
         }
 
+        // Engine metrics are deliberately held to a higher bar than the introspection statements below.
+        // Raft partition ids, WAL batch sizes, and transaction-abort rates describe cluster topology and
+        // workload volume for the whole node, which no per-database grant scopes down — unlike SHOW
+        // DATABASES, whose output is filtered to what the caller can already reach.
+        if (ast.nodeType is NodeType.ShowEngineStats)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Engine statistics require a superuser");
+            return;
+        }
+
         // Server-level introspection: any authenticated caller may run these.
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
             or NodeType.ShowOrphanDatabases or NodeType.ShowGrants)
@@ -2597,6 +2620,25 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private Principal? VisibilityPrincipal(ExecuteSQLTicket ticket)
         => options.AuthenticationEnabled ? ticket.Principal : null;
+
+    /// <summary>
+    /// Names this process for the <c>node</c> column of <c>SHOW ENGINE STATS</c>, so output pasted into
+    /// an issue says which node produced it. This is the Raft endpoint, the identity peers use. An
+    /// engine built without a shared node (some tests) has no endpoint and reports an empty label.
+    /// </summary>
+    private string LocalNodeLabel()
+    {
+        try
+        {
+            return sharedNode?.Raft.GetLocalEndpoint() ?? "";
+        }
+        catch (Exception)
+        {
+            // A node still starting up (or already torn down) has no endpoint to give. Reporting the
+            // metrics without a label beats failing an introspection statement.
+            return "";
+        }
+    }
 
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
     private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
@@ -3606,6 +3648,19 @@ public sealed class CommandExecutor : IAsyncDisposable
             return (null!, schemaQuerier.ShowDatabases(reg.List(), dbPattern, VisibilityPrincipal(ticket)));
         }
 
+        // SHOW ENGINE STATS reports this process's own embedded Kommander/Kahuna metrics. Node-local by
+        // definition — it must not forward to the leader — and it opens no database and no transaction.
+        if (ast.nodeType == NodeType.ShowEngineStats)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowEngineStatsSchema;
+
+            return (null!, schemaQuerier.ShowEngineStats(
+                engineMetrics,
+                UnquoteLikePattern(ast.leftAst?.yytext),
+                LocalNodeLabel()));
+        }
+
         // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.
         if (ast.nodeType == NodeType.ShowOrphanDatabases)
         {
@@ -4148,6 +4203,11 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);
+
+        // The Kommander/Kahuna meters are static, so a listener that outlived its engine would keep
+        // observing for the life of the process — which the test suite, building many engines, would
+        // accumulate.
+        engineMetrics?.Dispose();
 
         if (ownsRegistry)
         {

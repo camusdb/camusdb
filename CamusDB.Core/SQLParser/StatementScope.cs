@@ -56,5 +56,7 @@ public static class StatementScope
             NodeType.ShowBranches or
             NodeType.ShowAncestors or
             NodeType.ShowOrphanDatabases or
-            NodeType.ShowGrants;
+            NodeType.ShowGrants or
+            // Per-process metrics; there is no database to read them from.
+            NodeType.ShowEngineStats;
 }

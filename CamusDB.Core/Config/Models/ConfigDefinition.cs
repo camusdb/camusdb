@@ -174,6 +174,13 @@ public class ConfigDefinition
     public long OrphanRetentionMs { get; set; } = 7L * 24 * 60 * 60 * 1000;
 
     /// <summary>
+    /// Observes the embedded Kommander/Kahuna meters in-process so <c>SHOW ENGINE STATS</c> can
+    /// report them. Maps to <c>CamusDBOptions.EngineMetricsEnabled</c> (yml
+    /// <c>engine_metrics_enabled</c>). Default on.
+    /// </summary>
+    public bool EngineMetricsEnabled { get; set; } = true;
+
+    /// <summary>
     /// Interval, in milliseconds, of the background orphan-reclamation sweep. <c>&lt;= 0</c> disables
     /// the loop. Maps to <c>CamusDBOptions.OrphanReclaimIntervalMs</c> (yml
     /// <c>orphan_reclaim_interval_ms</c>). Default 5 minutes.

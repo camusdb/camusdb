@@ -105,6 +105,7 @@ public class ConfigReader
         "query_result_cache_sweep_interval_ms",
         "orphan_retention_ms",
         "orphan_reclaim_interval_ms",
+        "engine_metrics_enabled",
         "kahuna",
         "diagnostics",
     };

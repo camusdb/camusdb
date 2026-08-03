@@ -220,6 +220,26 @@ internal sealed class TestHttpAuth : BaseTest
         Assert.AreEqual(403, r.StatusCode);
     }
 
+    /// <summary>
+    /// Covers the REST layer's own database-less allowlist. SHOW ENGINE STATS opens no database and no
+    /// transaction, so a controller that did not recognise it would route the statement down the normal
+    /// path and fail on the empty database name — something the engine-level tests cannot catch. Also
+    /// pins the superuser gate at the transport boundary, where a client actually meets it.
+    /// </summary>
+    [Test]
+    public async Task ShowEngineStats_SuperuserOverRest_ReaderForbidden()
+    {
+        (_, CommandExecutor ex) = await Setup();
+
+        string root = await TokenFor(ex, "root", "root-pw");
+        JsonResult ok = await QueryRest(ex, "", "SHOW ENGINE STATS", root);
+        Assert.AreEqual(200, ok.StatusCode ?? 200);
+
+        string reader = await TokenFor(ex, "reader", "reader-pw");
+        JsonResult denied = await QueryRest(ex, "", "SHOW ENGINE STATS", reader);
+        Assert.AreEqual(403, denied.StatusCode);
+    }
+
     [Test]
     public async Task Plaintext_Refused_400()
     {

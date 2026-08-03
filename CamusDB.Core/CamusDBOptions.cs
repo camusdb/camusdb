@@ -151,6 +151,18 @@ public sealed record CamusDBOptions
     public long OrphanRetentionMs { get; init; } = 7L * 24 * 60 * 60 * 1000;
 
     /// <summary>
+    /// Attaches an in-process listener to the embedded Kommander and Kahuna
+    /// <see cref="System.Diagnostics.Metrics.Meter"/>s so <c>SHOW ENGINE STATS</c> can report them.
+    /// Independent of the <c>diagnostics:</c> exporter section: those meters are published whether or
+    /// not an exporter is configured, and observing them in-process costs one delegate call plus a
+    /// dictionary lookup per measurement. When false no listener is created and the meters revert to
+    /// their zero-cost unobserved state, and <c>SHOW ENGINE STATS</c> returns no rows (never an
+    /// error, so a script probing a fleet behaves uniformly). Default on; the flag exists as an
+    /// escape hatch for benchmarking the measurement overhead itself.
+    /// </summary>
+    public bool EngineMetricsEnabled { get; init; } = true;
+
+    /// <summary>
     /// Interval, in milliseconds, of the background <c>OrphanReclaimer</c> sweep that physically
     /// reclaims orphaned databases/tables past <see cref="OrphanRetentionMs"/>. The sweep runs on a
     /// single elected node (registry-partition leader). A value <c>&lt;= 0</c> disables the loop

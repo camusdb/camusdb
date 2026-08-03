@@ -120,6 +120,8 @@ public static class ConfigResolver
         OrphanRetentionMs = config.OrphanRetentionMs,
         OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs,
 
+        EngineMetricsEnabled = config.EngineMetricsEnabled,
+
         DefaultIsolationLevel = config.ParseDefaultIsolationLevel(),
         DefaultTransactionLocking = config.ParseDefaultTransactionLocking(),
         RangeLockExpiresMs = config.RangeLockExpiresMs,

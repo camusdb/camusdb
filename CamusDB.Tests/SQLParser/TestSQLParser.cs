@@ -1512,6 +1512,57 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseShowEngineStats()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW ENGINE STATS");
+
+        Assert.AreEqual(NodeType.ShowEngineStats, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+    }
+
+    [Test]
+    public void TestParseShowEngineStatsLowercase()
+    {
+        Assert.AreEqual(NodeType.ShowEngineStats, SQLParserProcessor.Parse("show engine stats").nodeType);
+    }
+
+    [Test]
+    public void TestParseShowEngineStatsLike()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW ENGINE STATS LIKE 'raft.wal%'");
+
+        Assert.AreEqual(NodeType.ShowEngineStats, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
+        Assert.AreEqual("'raft.wal%'", ast.leftAst.yytext);
+    }
+
+    [Test]
+    public void TestParseShowEngineStatsRejectsOtherWords()
+    {
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW ENGINE FOO"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW FOO STATS"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW ENGINE STATS LIKE 'x' EXTRA"));
+    }
+
+    /// <summary>
+    /// ENGINE and STATS are matched as identifiers rather than reserved as keywords, precisely so DDL
+    /// that already uses those words keeps parsing. Reserving them would have been a silent breaking
+    /// change to existing schemas.
+    /// </summary>
+    [Test]
+    public void TestEngineAndStatsRemainOrdinaryIdentifiers()
+    {
+        Assert.AreEqual(
+            NodeType.CreateTable,
+            SQLParserProcessor.Parse("CREATE TABLE stats (id oid PRIMARY KEY, engine string(64))").nodeType);
+
+        Assert.AreEqual(NodeType.Select, SQLParserProcessor.Parse("SELECT engine FROM stats").nodeType);
+        Assert.AreEqual(NodeType.Select, SQLParserProcessor.Parse("SELECT * FROM engine WHERE stats = 1").nodeType);
+        Assert.AreEqual(NodeType.Insert, SQLParserProcessor.Parse("INSERT INTO stats (engine) VALUES ('raft')").nodeType);
+    }
+
+    [Test]
     public void TestParseShowColumns()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW COLUMNS FROM robots");

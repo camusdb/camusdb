@@ -94,6 +94,23 @@ internal static class DerivedTableSchemaBuilder
         new("expires_at",  ColumnType.String),
     ];
 
+    // SHOW ENGINE STATS: one row per aggregated instrument + tag-set from the embedded Kommander and
+    // Kahuna meters. total/min/max/last are NULL where the metric kind does not define them — a
+    // counter has no min, a gauge has no sum.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowEngineStatsSchema =
+    [
+        new("node",   ColumnType.String),
+        new("source", ColumnType.String),
+        new("metric", ColumnType.String),
+        new("tags",   ColumnType.String),
+        new("kind",   ColumnType.String),
+        new("count",  ColumnType.Integer64),
+        new("total",  ColumnType.Float64),
+        new("min",    ColumnType.Float64),
+        new("max",    ColumnType.Float64),
+        new("last",   ColumnType.Float64),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowOrphanTablesSchema =
     [
         new("id",          ColumnType.String),

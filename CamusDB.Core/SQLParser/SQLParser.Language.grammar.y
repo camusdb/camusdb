@@ -450,6 +450,26 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TORPHAN TDATABASES { $$.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS { $$.n = new(NodeType.ShowGrants, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS TFOR any_identifier { $$.n = new(NodeType.ShowGrants, $4.n, null, null, null, null, null, null, null); }
+          /* ENGINE and STATS are matched as plain identifiers, not keywords, so both remain usable as
+             column and table names. The words are validated here instead, the same way EVICT CACHE is. */
+          | TSHOW TIDENTIFIER TIDENTIFIER
+          {
+            if (!string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>']");
+            $$.n = new(NodeType.ShowEngineStats, null, null, null, null, null, null, null, null);
+          }
+          | TSHOW TIDENTIFIER TIDENTIFIER TLIKE string
+          {
+            if (!string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>']");
+            $$.n = new(NodeType.ShowEngineStats, $5.n, null, null, null, null, null, null, null);
+          }
           ;
 
 analyze_stmt : TANALYZE any_identifier

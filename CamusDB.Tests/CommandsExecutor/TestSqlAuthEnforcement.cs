@@ -162,6 +162,40 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
     }
 
+    /// <summary>
+    /// SHOW ENGINE STATS sits above the other server-level introspection statements: SHOW DATABASES is
+    /// filtered down to what the caller can already reach, whereas engine metrics expose Raft topology
+    /// and whole-node workload volume that no per-database grant scopes. A user with grants on the
+    /// database must therefore still be refused.
+    /// </summary>
+    [Test]
+    public async Task ShowEngineStats_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER metrics_reader IDENTIFIED BY 'metrics-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO metrics_reader", root);
+        Principal granted = await LoginAsync(executor, "metrics_reader", "metrics-pw");
+
+        // A grant that is enough for SHOW DATABASES is not enough here.
+        await RunServerQuery(executor, "SHOW DATABASES", granted);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunServerQuery(executor, "SHOW ENGINE STATS", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        // The superuser gets rows.
+        await RunServerQuery(executor, "SHOW ENGINE STATS", root);
+    }
+
+    /// <summary>Runs a server-level statement: no database context and no transaction.</summary>
+    private static async Task RunServerQuery(CommandExecutor executor, string sql, Principal? principal)
+    {
+        (_, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(txnState: null!, database: "", sql: sql, parameters: null, principal: principal));
+        await foreach (QueryResultRow _ in cursor) { }
+    }
+
     [Test]
     public async Task NonSuperuser_CannotAdministerUsers()
     {

@@ -11,6 +11,7 @@ using System.Text;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
@@ -426,6 +427,53 @@ internal sealed class SchemaQuerier
         foreach (OrphanDatabaseRecord orphan in orphans)
             yield return OrphanRow(orphan.Id, orphan.FormerName, orphan.DroppedAt);
     }
+
+    /// <summary>
+    /// Reports the embedded Kommander/Kahuna metrics observed by this process, optionally narrowed by a
+    /// LIKE <paramref name="pattern"/> on the metric name.
+    ///
+    /// <para>Node-local by construction: the meters belong to this process, so the rows describe
+    /// <paramref name="node"/> alone and are never gathered from peers. A null
+    /// <paramref name="collector"/> — metric collection turned off by configuration — yields no rows
+    /// rather than raising, so a script polling a fleet gets the same shape from every node whether or
+    /// not that node has collection enabled.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowEngineStats(
+        EngineMetricsCollector? collector,
+        string? pattern,
+        string node)
+    {
+        await Task.CompletedTask;
+
+        if (collector is null)
+            yield break;
+
+        ColumnValue nodeValue = new(ColumnType.String, node);
+
+        foreach (EngineMetricRow metric in collector.Snapshot())
+        {
+            if (pattern is not null && !LikeMatch(metric.Metric, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "node",   nodeValue },
+                { "source", new ColumnValue(ColumnType.String, metric.Source) },
+                { "metric", new ColumnValue(ColumnType.String, metric.Metric) },
+                { "tags",   new ColumnValue(ColumnType.String, metric.Tags) },
+                { "kind",   new ColumnValue(ColumnType.String, metric.Kind.ToString().ToLowerInvariant()) },
+                { "count",  new ColumnValue(ColumnType.Integer64, metric.Count) },
+                { "total",  Float(metric.Total) },
+                { "min",    Float(metric.Min) },
+                { "max",    Float(metric.Max) },
+                { "last",   Float(metric.Last) },
+            });
+        }
+    }
+
+    /// <summary>Renders an optional metric component, absent components becoming SQL NULL.</summary>
+    private static ColumnValue Float(double? value)
+        => value is null ? ColumnValue.Null : new ColumnValue(ColumnType.Float64, value.Value);
 
     /// <summary>
     /// Lists tables in <paramref name="database"/> that were dropped but retained as recoverable

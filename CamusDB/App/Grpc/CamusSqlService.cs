@@ -128,7 +128,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             QueryStreamSink sink = new(responseStream);
 
             // SHOW DATABASES / BRANCHES / ANCESTORS need no db context or transaction.
-            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
+            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases
+                or NodeType.ShowEngineStats)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
@@ -774,7 +775,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
 
-        if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases)
+        if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases
+                or NodeType.ShowEngineStats)
         {
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: resolved.Database, sql: sql,

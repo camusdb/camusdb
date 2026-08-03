@@ -293,6 +293,23 @@ public class TestGrpcSqlService : BaseTest
             Is.True);
     }
 
+    /// <summary>
+    /// Covers the transport's own database-less allowlist. SHOW ENGINE STATS is dispatched with no
+    /// database and no transaction, so a gRPC path that did not recognise it would try to open a
+    /// database named "" and fail — which the core-level tests would never catch.
+    /// </summary>
+    [Test]
+    public async Task ExecuteQuery_ShowEngineStats_ReturnsSchemaAndRows()
+    {
+        await CreateTestDatabaseAsync();
+
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync("", "SHOW ENGINE STATS");
+
+        Assert.That(msgs.Count, Is.GreaterThanOrEqualTo(2));
+        Assert.That(msgs[0].PayloadCase, Is.EqualTo(QueryStreamMessage.PayloadOneofCase.Schema));
+        Assert.That(msgs.Skip(1).All(m => m.PayloadCase == QueryStreamMessage.PayloadOneofCase.Row), Is.True);
+    }
+
     // ─── Transaction lifecycle ────────────────────────────────────────────────
 
     [Test]
