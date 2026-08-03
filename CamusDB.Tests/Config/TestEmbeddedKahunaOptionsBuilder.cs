@@ -220,14 +220,43 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
-    public void UnsetSharedMemoryFields_KeepBaselineDefaults()
+    public void UnsetSharedMemoryFields_SizeProportionallyToMachineMemory()
     {
+        // Unset shared-memory knobs are sized against the machine (respecting container limits)
+        // rather than left at the fixed baseline: block cache = 25% of RAM clamped to [320 MB, 8 GB],
+        // memtable budget = a quarter of that clamped to [128 MB, 1 GB]. The expected values are
+        // recomputed here from the same input the builder reads, so the assertion holds on any
+        // machine — hardcoding the baseline is what made this test machine-dependent before.
+        const long OneMb = 1024L * 1024;
+        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
+
+        int expectedBlockCacheMb = (int)Math.Clamp(totalRam / 4 / OneMb, 320, 8192);
+        int expectedMemtableMb   = (int)Math.Clamp(expectedBlockCacheMb / 4, 128, 1024);
+
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryEnabled, Is.True);
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(320));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(128));
+        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(expectedBlockCacheMb));
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(expectedMemtableMb));
+
+        // The derived pair must never invert, or the build-time cross-field check would reject its
+        // own defaults on a machine whose RAM lands near a clamp boundary.
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.RocksDbSharedMemoryBudgetMb));
+    }
+
+    [Test]
+    public void UnsetSharedMemoryFields_StayWithinSizingClamps()
+    {
+        // Guards the clamp bounds independently of the machine this runs on: a very small container
+        // must still get the 320/128 MB floor, and a very large host must not hand RocksDB more than
+        // the 8 GB / 1 GB ceiling.
+        KahunaOptionsConfig kahuna = new();
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-clamps", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.InRange(320, 8192));
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.InRange(128, 1024));
     }
 
     [Test]
