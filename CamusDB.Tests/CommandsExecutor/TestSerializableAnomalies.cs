@@ -12,6 +12,8 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using Kahuna.Shared.KeyValue;
+
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
@@ -43,11 +45,33 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///
 /// The cluster equivalents (N = 3) are in CamusDB.Cluster.Tests/TestSerializableAnomaliesCluster.cs.
 /// Together they satisfy the single-node ≡ cluster invariant.
+///
+/// <para><b>Every anomaly is asserted under both concurrency strategies.</b> Serializability is a
+/// property of the isolation level, not of the locking mode: the shared predicate locks, and the
+/// S→X upgrade that a read-then-write performs, are gated on Serializable+ReadWrite and never on
+/// <c>tx.Locking</c>. Optimistic only skips the explicit exclusive write lock, which is why
+/// Serializable+Optimistic is a hybrid rather than a weaker level — so it must eliminate exactly the
+/// same anomalies, and the fixture runs the suite twice to prove it rather than assuming it. The
+/// concurrent writers each test spawns inherit the cell too, so the read-only cases exercise a
+/// snapshot against an optimistic writer as well as a pessimistic one.</para>
 /// </summary>
-[TestFixture]
+[TestFixture(KeyValueTransactionLocking.Pessimistic)]
+[TestFixture(KeyValueTransactionLocking.Optimistic)]
 [NonParallelizable]
 public sealed class TestSerializableAnomalies : SharedNodeBaseTest
 {
+    private readonly KeyValueTransactionLocking locking;
+
+    public TestSerializableAnomalies(KeyValueTransactionLocking locking) => this.locking = locking;
+
+    /// <summary>
+    /// Applies the cell's concurrency strategy to every transaction the fixture begins. The tests
+    /// state their isolation level explicitly (that is what they are about) but never their locking
+    /// mode, so it is inherited from here.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
+        => defaults with { DefaultTransactionLocking = locking };
+
     // accounts(id Id PK, name String NOT NULL, balance Integer64)
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor, string aliceId, string bobId)>
         SetupAccountsAsync()
