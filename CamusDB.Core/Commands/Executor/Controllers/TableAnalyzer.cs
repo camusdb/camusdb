@@ -33,6 +33,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 ///   • per-column equi-depth histograms
 ///   • per-composite-index-prefix key-tuple NDV
 ///   • per-index entry counts
+///
+/// The scan always runs under ANALYZE's own read-only snapshot rather than the caller's
+/// transaction, so published statistics describe committed data only. That is also why a caller
+/// with uncommitted writes is rejected up front (<see cref="CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites"/>):
+/// the snapshot would block on the caller's own unresolved write intents, which only the blocked
+/// caller could resolve.
 /// </summary>
 internal sealed class TableAnalyzer
 {
@@ -49,8 +55,20 @@ internal sealed class TableAnalyzer
 
     internal async Task<QueryResultRow> AnalyzeAsync(
         DatabaseDescriptor database,
-        TableDescriptor table)
+        TableDescriptor table,
+        KvTransaction callerTxn)
     {
+        // The scan below runs under its own snapshot, which cannot see past the caller's unresolved
+        // write intents: the storage layer makes a snapshot read wait for an intent whose commit
+        // timestamp is undetermined, and nothing but this caller can resolve those intents — it is
+        // blocked here. Refuse instead of stalling until the transaction is reaped.
+        if (callerTxn.HasPendingWrites)
+            throw new CamusDBException(
+                CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites,
+                $"ANALYZE cannot run on transaction {callerTxn.UniqueId} because it has uncommitted writes; " +
+                "commit or roll back before collecting statistics"
+            );
+
         int sampleLimit = options.StatsAnalyzeSampleRows;
         int bucketCount = options.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;

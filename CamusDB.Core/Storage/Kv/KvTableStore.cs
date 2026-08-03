@@ -469,6 +469,7 @@ public sealed class KvTableStore
                         CamusDBErrorCodes.TransactionMustRetry,
                         LockWaitDeadlineMessage(tx, $"{mode} range-lock acquisition on {DescribeBucket(bucketPrefix)} over " +
                                                     $"[{Printable(startKey ?? "-∞")}, {Printable(endKey ?? "+∞")}]"));
+                ServerDiagnostics.AddKvRetryWait("rangelock_transient");
                 await Task.Delay(RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -489,6 +490,7 @@ public sealed class KvTableStore
                 bool requesterIsOlder = holder != HLCTimestamp.Zero && tx.TransactionId.CompareTo(holder) < 0;
                 if (requesterIsOlder && Stopwatch.GetTimestamp() < deadline)
                 {
+                    ServerDiagnostics.AddKvRetryWait("rangelock_holder_wait");
                     await Task.Delay(RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
                     // A confirmed denial ends this observation; the wait-then-retry is a fresh acquire
                     // attempt, so mint a new id rather than replay the denied one.
@@ -592,6 +594,7 @@ public sealed class KvTableStore
         {
             type = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                ServerDiagnostics.AddKvRetryWait("mustretry_595");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
@@ -742,6 +745,7 @@ public sealed class KvTableStore
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
                     $"Batch read was not ready after {MaxKahunaRetries} retries — retry the operation from BeginAsync");
 
+            ServerDiagnostics.AddKvRetryWait("get_rows_batch");
             await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
 
             // Shrinking set (some reads confirmed) → new, smaller declaration under a fresh id on the
@@ -1829,6 +1833,7 @@ public sealed class KvTableStore
                     CamusDBErrorCodes.TransactionMustRetry,
                     WriteConflictMessage(tx, "batched exclusive lock acquisition", retry.Select(r => r.Item1).ToList(), retry.Count));
 
+            ServerDiagnostics.AddKvRetryWait("acquire_many");
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
 
             // A shrinking pending set (some keys were confirmed Locked) is a new, smaller declaration —
@@ -1909,6 +1914,7 @@ public sealed class KvTableStore
                     CamusDBErrorCodes.TransactionMustRetry,
                     WriteConflictMessage(tx, "batched write", retry.Select(i => i.Key ?? "").ToList(), retry.Count));
 
+            ServerDiagnostics.AddKvRetryWait("set_many");
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
 
             // Shrinking set (some keys confirmed Set/NotSet) → new, smaller declaration under a fresh id.
@@ -2427,6 +2433,7 @@ public sealed class KvTableStore
                     CamusDBErrorCodes.TransactionMustRetry,
                     WriteConflictMessage(tx, "batched delete", retry.Select(i => i.Key ?? "").ToList(), retry.Count));
 
+            ServerDiagnostics.AddKvRetryWait("delete_many");
             await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
 
             // Shrinking set (some deletes confirmed) → new, smaller declaration under a fresh id.
@@ -2557,6 +2564,7 @@ public sealed class KvTableStore
         {
             (type, entry) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                ServerDiagnostics.AddKvRetryWait("mustretry_2560");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
@@ -2580,6 +2588,7 @@ public sealed class KvTableStore
         {
             (type, revision, ts) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                ServerDiagnostics.AddKvRetryWait("mustretry_2583");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
@@ -2603,6 +2612,7 @@ public sealed class KvTableStore
         {
             (type, endpoint, durability) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                ServerDiagnostics.AddKvRetryWait("mustretry_2606");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
@@ -2828,6 +2838,7 @@ public sealed class KvTableStore
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
                     throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage(tx, operation, [key]));
+                ServerDiagnostics.AddKvRetryWait("mustretry_locked_2831");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
@@ -2857,6 +2868,7 @@ public sealed class KvTableStore
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
                     throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, LockWaitDeadlineMessage(tx, operation, [key]));
+                ServerDiagnostics.AddKvRetryWait("mustretry_locked_2860");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }

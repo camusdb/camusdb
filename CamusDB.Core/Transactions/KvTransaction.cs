@@ -666,6 +666,19 @@ public sealed class KvTransaction
     }
 
     /// <summary>
+    /// True once this transaction has written or deleted at least one key that is still unresolved,
+    /// i.e. it owns live write intents in the store. A statement that must read committed state under
+    /// its own snapshot (rather than under this transaction) has to refuse to run in that situation:
+    /// a snapshot read blocks on a foreign live intent whose commit timestamp is undetermined, and
+    /// these intents can only be resolved by the very caller that is waiting for the read — a
+    /// self-deadlock that resolves only when the session reaper eventually aborts the transaction.
+    /// </summary>
+    public bool HasPendingWrites
+    {
+        get { lock (trackSync) return modifiedKeys is { Count: > 0 }; }
+    }
+
+    /// <summary>
     /// Returns the modified-keys set as raw (key, durability) pairs. Used by the cache
     /// invalidation path, which needs the keys in tuple form to call
     /// <see cref="IQueryResultCache.InvalidateByModifiedKeys"/> without an extra allocation.

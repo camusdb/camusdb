@@ -3843,7 +3843,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.AnalyzeTableSchema;
                     TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
-                    QueryResultRow result = await tableAnalyzer.AnalyzeAsync(database, table).ConfigureAwait(false);
+                    QueryResultRow result = await tableAnalyzer.AnalyzeAsync(database, table, ticket.TxnState).ConfigureAwait(false);
                     return (database, ToAsyncEnumerable(result));
                 }
 

@@ -14,8 +14,13 @@ data_dir: /tmp/camusdb/
 # raft_node_id: 1          # cluster: numeric Raft node id (> 0)
 # raft_host: localhost     # cluster: Raft bind/advertise host
 # raft_port: 7070          # cluster: Raft gRPC port (1..65535)
-initial_partitions: 4      # Raft partition count (>= 1). More partitions spread writes across more WAL
-                           # queues, so concurrent commits can group-commit into denser fsyncs.
+initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 1: a single node has one
+                           # disk / one fsync target, so partition fan-out buys nothing — and a single
+                           # partition makes every transaction single-participant, enabling the one-phase
+                           # commit fast path (one durable barrier per commit instead of two). Measured on
+                           # TPC-C (1000 warehouses, 8 clients): 28.8 tx/s with 1 partition + one-phase vs
+                           # 7.0 tx/s with 4 partitions (commit p50 7.6 ms vs ~107 ms). Raise only for
+                           # cluster deployments, where partitions map to distinct leaders.
 # http_port: 5095          # HTTP API port (1..65535)
 # https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
 # https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS

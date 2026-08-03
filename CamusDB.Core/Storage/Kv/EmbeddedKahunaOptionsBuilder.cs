@@ -65,6 +65,11 @@ public static class EmbeddedKahunaOptionsBuilder
             WalRevision = "v1",
             InitialPartitions = 1,
             RaftWalSingleFsyncCommit = true,
+            // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
+            // default of a single Raft partition, TPC-C measured ProcessorCount actors at 28.8 tx/s vs
+            // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
+            // serializes the write path. Multi-partition deployments can raise kahuna.key_value_workers
+            // (with 4 partitions on the pre-WriteIOThreads-fix stack, 8x actors measured ~3x at 64 clients).
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -91,6 +96,11 @@ public static class EmbeddedKahunaOptionsBuilder
             WalRevision = "v1",
             InitialPartitions = 1,
             RaftWalSingleFsyncCommit = true,
+            // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
+            // default of a single Raft partition, TPC-C measured ProcessorCount actors at 28.8 tx/s vs
+            // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
+            // serializes the write path. Multi-partition deployments can raise kahuna.key_value_workers
+            // (with 4 partitions on the pre-WriteIOThreads-fix stack, 8x actors measured ~3x at 64 clients).
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -272,6 +282,50 @@ public static class EmbeddedKahunaOptionsBuilder
         if (lifetimeMs > 0 && baseline.MaxTransactionTimeout < lifetimeMs)
             baseline.MaxTransactionTimeout = lifetimeMs;
 
+        ApplyMemoryProportionalDefaults(baseline, kahuna);
+
         return baseline;
+    }
+
+    /// <summary>
+    /// Sizes the read caches proportionally to the machine instead of the old fixed values, for every
+    /// knob the operator did not set explicitly. Measured motivation: the fixed 320 MB RocksDB block
+    /// cache forced a 1.2 GB TPC-C working set through disk reads on nearly every statement — raising
+    /// it to 2 GB on a 16 GB machine took the same workload from 24.5 to 119.6 tx/s at 8 clients
+    /// (and resolved a pipelining collapse to 3.4 tx/s that was pure read-I/O queueing).
+    ///
+    /// <para>Sizing policy, all against <see cref="GCMemoryInfo.TotalAvailableMemoryBytes"/> (which
+    /// respects container memory limits): RocksDB block cache = 25% of RAM clamped to [320 MB, 8 GB];
+    /// memtable budget = a quarter of that, clamped to [128 MB, 1 GB]; key/value actor caches = 12.5%
+    /// of RAM divided across the shard actors, clamped to [64 MB, 4 GB] per actor, with the per-actor
+    /// entry cap derived at an assumed ~512 B/entry, clamped to [50k, 4M]. Roughly 40% of RAM across
+    /// both cache layers at the defaults — sized as a database server's working assumption, like a
+    /// buffer pool. Every value remains overridable via the corresponding <c>kahuna.*</c> key.</para>
+    ///
+    /// <para>Runs after every explicit override has been applied, and touches only knobs whose
+    /// config value is null — an operator's explicit setting always wins. Must also run after the
+    /// <c>key_value_workers</c> override, since the per-actor split divides by the final actor count.</para>
+    /// </summary>
+    private static void ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna)
+    {
+        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        if (totalRam <= 0)
+            return; // Unknown memory size: keep the fixed baseline values.
+
+        const long OneMb = 1024L * 1024;
+
+        if (kahuna.RocksdbSharedMemoryBudgetMb is null)
+            baseline.RocksDbSharedMemoryBudgetMb = (int)Math.Clamp(totalRam / 4 / OneMb, 320, 8192);
+
+        if (kahuna.RocksdbSharedMemtableBudgetMb is null)
+            baseline.RocksDbSharedMemtableBudgetMb = (int)Math.Clamp(baseline.RocksDbSharedMemoryBudgetMb / 4, 128, 1024);
+
+        int actorCount = Math.Max(1, baseline.KeyValueWorkers);
+
+        if (kahuna.MaxBytesPerActor is null)
+            baseline.MaxBytesPerActor = Math.Clamp(totalRam / 8 / actorCount, 64L * OneMb, 4096L * OneMb);
+
+        if (kahuna.MaxEntriesPerActor is null)
+            baseline.MaxEntriesPerActor = (int)Math.Clamp(baseline.MaxBytesPerActor / 512, 50_000, 4_000_000);
     }
 }

@@ -82,6 +82,7 @@ public static class GrpcErrorMapper
         // Failed precondition (non-retryable transaction state)
         CamusDBErrorCodes.TransactionAlreadyCompleted => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.DatabaseHasLiveDescendants  => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites => StatusCode.FailedPrecondition,
 
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
         CamusDBErrorCodes.TransactionConflict        => StatusCode.Aborted,

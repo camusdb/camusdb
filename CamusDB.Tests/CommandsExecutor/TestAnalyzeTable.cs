@@ -596,18 +596,18 @@ public sealed class TestAnalyzeTable : BaseTest
     }
 
     /// <summary>
-    /// ANALYZE scans under its own read-only snapshot pinned after the baseline capture, not the
-    /// caller's transaction: statistics must reflect committed data only (a scan inside a user
-    /// transaction would publish that transaction's uncommitted rows into global statistics), and
-    /// pinning after the baseline keeps the `scanned − baseline` row-count correction unbiased.
+    /// ANALYZE refuses to run on a transaction that still holds uncommitted writes. Its scan uses
+    /// its own read-only snapshot (so global statistics describe committed data only), and that
+    /// snapshot cannot read past the caller's own unresolved write intents — the read would wait
+    /// for intents that only the blocked caller could resolve. A fast, explicit rejection is the
+    /// correct outcome; without it the statement stalls until the storage layer reaps the session.
     /// </summary>
     [Test]
-    public async Task AnalyzeIgnoresUncommittedRowsFromCallerTransaction()
+    public async Task AnalyzeRejectsCallerTransactionWithUncommittedWrites()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
 
-        const int committed = 4;
-        await InsertRobotsAsync(executor, database, dbname, committed);
+        await InsertRobotsAsync(executor, database, dbname, 4);
 
         // Open a transaction and insert rows WITHOUT committing, then run ANALYZE on that
         // same transaction's ticket.
@@ -629,9 +629,65 @@ public sealed class TestAnalyzeTable : BaseTest
 
         try
         {
+            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            {
+                (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) =
+                    await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+                        txnState: txn,
+                        database: dbname,
+                        sql: "ANALYZE robots",
+                        parameters: null));
+
+                await foreach (QueryResultRow _ in cursor) { }
+            });
+
+            Assert.AreEqual(CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites, ex!.Code,
+                "ANALYZE on a transaction with pending writes must be rejected, not stall on its own intents");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(txn);
+        }
+    }
+
+    /// <summary>
+    /// Once the caller's writes are resolved, ANALYZE runs on that same transaction and counts the
+    /// rows that are actually committed — the rolled-back inserts leave no trace in the statistics.
+    /// This is the companion to <see cref="AnalyzeRejectsCallerTransactionWithUncommittedWrites"/>:
+    /// the rejection is about *pending* writes, not about running ANALYZE inside a transaction.
+    /// </summary>
+    [Test]
+    public async Task AnalyzeAfterRollbackCountsCommittedRowsOnly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable();
+
+        const int committed = 4;
+        await InsertRobotsAsync(executor, database, dbname, committed);
+
+        KvTransaction writeTxn = await database.Transactions.BeginAsync();
+        for (int i = 0; i < 5; i++)
+            await executor.Insert(new InsertTicket(
+                txnState: writeTxn,
+                databaseName: dbname,
+                tableName: "robots",
+                values: new()
+                {
+                    new()
+                    {
+                        { "id",   new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "name", new(ColumnType.String, "RolledBack" + i) },
+                        { "year", new(ColumnType.Integer64, 3000L + i) },
+                    }
+                }));
+
+        await database.Transactions.RollbackIfNotCompletedAsync(writeTxn);
+
+        KvTransaction analyzeTxn = await database.Transactions.BeginAsync();
+        try
+        {
             (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) =
                 await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
-                    txnState: txn,
+                    txnState: analyzeTxn,
                     database: dbname,
                     sql: "ANALYZE robots",
                     parameters: null));
@@ -642,11 +698,11 @@ public sealed class TestAnalyzeTable : BaseTest
 
             Assert.IsTrue(result!.Value.Row.TryGetValue("rows", out ColumnValue? rowsVal));
             Assert.AreEqual(committed, rowsVal!.LongValue,
-                "ANALYZE must count only committed rows, not the caller transaction's uncommitted inserts");
+                "ANALYZE must count only committed rows; the rolled-back inserts must not appear");
         }
         finally
         {
-            await database.Transactions.RollbackIfNotCompletedAsync(txn);
+            await database.Transactions.RollbackIfNotCompletedAsync(analyzeTxn);
         }
     }
 }

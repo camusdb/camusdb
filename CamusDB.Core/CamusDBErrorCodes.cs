@@ -235,6 +235,21 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string PreparedStatementLimitExceeded = "CADB0521";
 
+    /// <summary>
+    /// <c>ANALYZE</c> was issued on a transaction that has already written rows it has not committed.
+    ///
+    /// <para>ANALYZE deliberately scans under its own read-only snapshot so the statistics it
+    /// publishes globally describe committed data only. That snapshot cannot read past the caller's
+    /// own unresolved write intents: a snapshot read waits for an intent whose commit timestamp is
+    /// still undetermined, and here only the caller could resolve it — but the caller is blocked
+    /// waiting for ANALYZE. Refusing is the honest outcome; the alternative is a stall that lasts
+    /// until the storage layer reaps the transaction.</para>
+    ///
+    /// <para>Permanent for this transaction, not transient: commit or roll back first, then run
+    /// ANALYZE. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string AnalyzeRequiresNoPendingWrites = "CADB0522";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -336,6 +351,7 @@ public static class CamusDBErrorCodes
         BackupCancelled => 499,
         RemoteRestoreDisabled => 403,
         TransactionMutationLimitExceeded => 400,
+        AnalyzeRequiresNoPendingWrites => 400,
         CheckConstraintViolation => 400,
         InvalidAsOfSystemTime => 400,
         CommentTooLong => 400,

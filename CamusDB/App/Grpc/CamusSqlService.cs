@@ -492,6 +492,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         int maxInFlight = Math.Max(1, options.GrpcBatchMaxInFlight);
         SemaphoreSlim inFlight = new(maxInFlight, maxInFlight);
 
+        // Bounds how many requests may be read-and-buffered (queued in a per-handle chain or executing)
+        // before the read loop pauses — a memory guard only. Deliberately much wider than the execution
+        // limit: a pipelining client fires a whole transaction's statements at once, and each queues
+        // behind its chain predecessor. When those queued ops counted against the EXECUTION limit, ~3
+        // pipelining transactions exhausted it, the read loop stalled, and every unread op behind them
+        // (other transactions' statements and commits) waited seconds — measured as a 7x throughput
+        // collapse with execute p99 at 2s. Queued chain ops cost only memory; only running ops cost CPU.
+        int maxBuffered = maxInFlight * 8;
+        SemaphoreSlim readBuffer = new(maxBuffered, maxBuffered);
+
         // Per-txn-handle serial chains so same-handle ops run strictly in arrival order. The chain is
         // per stream (this call): it orders only same-handle ops that arrive here, which is why the
         // client must pin all of a transaction's ops to one stream — see the client routing contract.
@@ -514,22 +524,25 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             await foreach (BatchExecuteRequest req in requestStream.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                await inFlight.WaitAsync(ct).ConfigureAwait(false);   // backpressure
+                // Memory-bound only. The execution limit (inFlight) is acquired inside the op, AFTER its
+                // chain predecessor completes, so an op queued behind its transaction's chain never pins
+                // an execution slot it cannot use yet — see maxBuffered above for the failure this avoids.
+                await readBuffer.WaitAsync(ct).ConfigureAwait(false);
 
                 (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
                 Task op;
                 if (handleKey is { } hk)
                 {
                     Task prev = chains.TryGetValue(hk, out Task? p) ? p : Task.CompletedTask;
-                    op = RunBatchOpAfterAsync(prev, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
+                    op = RunBatchOpAfterAsync(prev, inFlight, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
                     chains[hk] = op;
                 }
                 else
                 {
-                    op = RunBatchOpAsync(req, responseStream, writeLock, startedHandles, prepared, principal, ct);
+                    op = RunBatchOpGatedAsync(inFlight, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
                 }
 
-                _ = op.ContinueWith(_ => inFlight.Release(), TaskScheduler.Default);
+                _ = op.ContinueWith(_ => readBuffer.Release(), TaskScheduler.Default);
                 ops.Add(op);
             }
 
@@ -579,6 +592,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>Chains a batch op after the previous op for the same handle so they run in order.</summary>
     private async Task RunBatchOpAfterAsync(
         Task prev,
+        SemaphoreSlim inFlight,
         BatchExecuteRequest req,
         IServerStreamWriter<BatchExecuteResponse> stream,
         SemaphoreSlim writeLock,
@@ -589,8 +603,42 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     {
         // RunBatchOpAsync never throws, so the previous op cannot fault the chain — but await it
         // defensively so a same-handle op only starts once its predecessor has fully completed.
+        // The execution slot is acquired only AFTER the predecessor: while queued in the chain this op
+        // consumes no execution capacity, so a pipelining transaction cannot starve the stream.
         try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
-        await RunBatchOpAsync(req, stream, writeLock, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+        await RunBatchOpGatedAsync(inFlight, req, stream, writeLock, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Acquires an execution slot, runs the op, releases the slot. The slot bounds concurrently
+    /// EXECUTING ops only; buffering is bounded separately by the read loop's memory guard.</summary>
+    private async Task RunBatchOpGatedAsync(
+        SemaphoreSlim inFlight,
+        BatchExecuteRequest req,
+        IServerStreamWriter<BatchExecuteResponse> stream,
+        SemaphoreSlim writeLock,
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
+        StreamPreparedStatements prepared,
+        Principal? principal,
+        CancellationToken ct)
+    {
+        try
+        {
+            await inFlight.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Stream tearing down before this op could start; nothing was executed, nothing to report.
+            return;
+        }
+
+        try
+        {
+            await RunBatchOpAsync(req, stream, writeLock, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            inFlight.Release();
+        }
     }
 
     /// <summary>

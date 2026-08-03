@@ -44,6 +44,20 @@ public static class ServerDiagnostics
     private static readonly UpDownCounter<long> RequestInFlight =
         Meter.CreateUpDownCounter<long>("camus.request.in_flight", unit: "{request}", description: "Requests currently being handled.");
 
+    // ── KV retry waits ─────────────────────────────────────────────────────────
+    // One count per backoff sleep inside a KvTableStore retry loop, tagged by call site. Localizes
+    // which retry loop a latency tail is spending its time in — added while chasing the back-to-back
+    // statement stall (execute p99 ~2s under client pipelining, p50 normal).
+    private static readonly Counter<long> KvRetryWaits =
+        Meter.CreateCounter<long>("camus.kv.retry_waits", unit: "{wait}", description: "Backoff sleeps in KV retry loops, by site.");
+
+    public static void AddKvRetryWait(string site)
+    {
+        if (!Enabled)
+            return;
+        KvRetryWaits.Add(1, new TagList { { "site", site } });
+    }
+
     // ── SQL execution ───────────────────────────────────────────────────────────
     private static readonly Histogram<double> ExecuteDuration =
         Meter.CreateHistogram<double>("camus.execute.duration", unit: "ms", description: "Command executor duration by statement family.");
