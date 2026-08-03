@@ -59,24 +59,28 @@ public sealed class BackupController : CommandsController
         }
         catch (CamusDBException e)
         {
+            AuditBackup("take:Incremental", principal: null, e.Code, failure: true);
             return Failure(e);
         }
     }
 
     private async Task<JsonResult> TakeBackup(BackupKind kind, Guid? parentBackupId)
     {
+        Principal? principal = null;
         try
         {
             EnsureBackupTransportAllowed();
-            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
             TakeBackupTicket ticket = new(kind, parentBackupId, principal);
             BackupInfo info = await executor.TakeBackup(ticket).ConfigureAwait(false);
 
+            AuditBackup($"take:{kind}", principal, "ok", failure: false);
             return new JsonResult(new BackupResponse("ok") { Backup = BackupInfoModel.From(info) });
         }
         catch (CamusDBException e)
         {
+            AuditBackup($"take:{kind}", principal, e.Code, failure: true);
             return Failure(e);
         }
     }
@@ -85,13 +89,15 @@ public sealed class BackupController : CommandsController
     [Route("/v1/backups")]
     public async Task<JsonResult> ListBackups()
     {
+        Principal? principal = null;
         try
         {
             EnsureBackupTransportAllowed();
-            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
             IReadOnlyList<BackupInfo> backups = await executor.ListBackups(new ListBackupsTicket(principal)).ConfigureAwait(false);
 
+            AuditBackup("list", principal, "ok", failure: false);
             return new JsonResult(new BackupListResponse("ok")
             {
                 Backups = backups.Select(BackupInfoModel.From).ToList(),
@@ -99,6 +105,7 @@ public sealed class BackupController : CommandsController
         }
         catch (CamusDBException e)
         {
+            AuditBackup("list", principal, e.Code, failure: true);
             return FailureList(e);
         }
     }
@@ -107,14 +114,16 @@ public sealed class BackupController : CommandsController
     [Route("/v1/backups/{id}/chain")]
     public async Task<JsonResult> GetBackupChain(string id)
     {
+        Principal? principal = null;
         try
         {
             EnsureBackupTransportAllowed();
-            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
             Guid leaf = ParseGuid(id, "id");
             IReadOnlyList<BackupInfo> chain = await executor.GetBackupChain(new GetBackupChainTicket(leaf, principal)).ConfigureAwait(false);
 
+            AuditBackup("chain", principal, "ok", failure: false);
             return new JsonResult(new BackupListResponse("ok")
             {
                 Backups = chain.Select(BackupInfoModel.From).ToList(),
@@ -122,6 +131,7 @@ public sealed class BackupController : CommandsController
         }
         catch (CamusDBException e)
         {
+            AuditBackup("chain", principal, e.Code, failure: true);
             return FailureList(e);
         }
     }
@@ -130,16 +140,19 @@ public sealed class BackupController : CommandsController
     [Route("/v1/backups/gc")]
     public async Task<JsonResult> RunGarbageCollection([FromQuery] bool dryRun = false)
     {
+        Principal? principal = null;
         try
         {
             EnsureBackupTransportAllowed();
-            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
             BackupGcResult result = await executor.RunBackupGarbageCollection(dryRun, principal).ConfigureAwait(false);
+            AuditBackup(dryRun ? "gc:dry-run" : "gc", principal, "ok", failure: false);
             return new JsonResult(BackupGcResponse.Ok(result));
         }
         catch (CamusDBException e)
         {
+            AuditBackup(dryRun ? "gc:dry-run" : "gc", principal, e.Code, failure: true);
             return new JsonResult(new BackupGcResponse("failed", e.Code, e.Message))
             {
                 StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code),
@@ -151,10 +164,11 @@ public sealed class BackupController : CommandsController
     [Route("/v1/restore")]
     public async Task<JsonResult> Restore()
     {
+        Principal? principal = null;
         try
         {
             EnsureBackupTransportAllowed();
-            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync().ConfigureAwait(false);
@@ -170,10 +184,12 @@ public sealed class BackupController : CommandsController
             RestoreBackupTicket ticket = new(leaf, request.TargetDir ?? "", request.TargetTimeMs, principal);
             RestoreResult result = await executor.RestoreBackup(ticket).ConfigureAwait(false);
 
+            AuditBackup("restore", principal, "ok", failure: false);
             return new JsonResult(RestoreResponse.Ok(result));
         }
         catch (CamusDBException e)
         {
+            AuditBackup("restore", principal, e.Code, failure: true);
             return new JsonResult(new RestoreResponse("failed", e.Code, e.Message))
             {
                 StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code),
@@ -200,6 +216,25 @@ public sealed class BackupController : CommandsController
             throw new CamusDBException(
                 CamusDBErrorCodes.InsufficientPrivilege,
                 "Backup administration over the network requires authentication to be enabled");
+    }
+
+    /// <summary>
+    /// Emits one audit record per backup/restore admin request and its outcome, so a privileged
+    /// server operation is always attributable: the operation, the acting user (or anonymous/
+    /// unauthenticated), the remote address, and the result (<c>ok</c> or the failure code). Successes
+    /// log at Information; failures at Warning so they surface in a security review.
+    /// </summary>
+    private void AuditBackup(string operation, Principal? principal, string outcome, bool failure)
+    {
+        string user = principal?.UserName ?? (options.AuthenticationEnabled ? "unauthenticated" : "anonymous");
+        string remote = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+        if (failure)
+            logger.LogWarning("Backup admin audit: op={Operation} user={User} remote={Remote} outcome={Outcome}",
+                operation, user, remote, outcome);
+        else
+            logger.LogInformation("Backup admin audit: op={Operation} user={User} remote={Remote} outcome={Outcome}",
+                operation, user, remote, outcome);
     }
 
     private static Guid ParseGuid(string? value, string field)

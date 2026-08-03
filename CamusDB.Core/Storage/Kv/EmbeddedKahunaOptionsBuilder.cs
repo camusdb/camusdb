@@ -250,6 +250,12 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.BackupRestoreThrottleBytesPerSec is long throttle)
             baseline.BackupRestoreThrottleBytesPerSec = throttle;
 
+        if (kahuna.BackupClusterId is not null)
+            baseline.BackupClusterId = kahuna.BackupClusterId;
+
+        if (kahuna.BackupMacKeyFile is not null)
+            baseline.BackupMacKeyFile = kahuna.BackupMacKeyFile;
+
         // Kahuna only builds the shared bundle when sharing is enabled and both databases are RocksDB;
         // otherwise the budgets are ignored. In that build case the memtable sub-budget must fit inside
         // the total cache budget, or Kahuna's RocksDbSharedResources.CreateWithUnifiedBudget throws an

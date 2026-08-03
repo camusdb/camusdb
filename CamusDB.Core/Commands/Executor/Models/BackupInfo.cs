@@ -38,4 +38,6 @@ public sealed record BackupInfo(
     bool IsInvalid,
     string? InvalidReason,
     long? MinRecoverablePhysicalMs,
-    long? MaxRecoverablePhysicalMs);
+    long? MaxRecoverablePhysicalMs,
+    string? ClusterId,
+    string? CoordinatorNode);

@@ -57,6 +57,8 @@ public sealed class KahunaOptionsConfig
         "base_snapshot_interval_seconds",
         "restore_root",
         "allow_unconfined_remote_restore",
+        "backup_cluster_id",
+        "backup_mac_key_file",
         "backup_retention_max_chains",
         "backup_retention_max_age_seconds",
         "backup_retention_max_bytes",
@@ -261,6 +263,22 @@ public sealed class KahunaOptionsConfig
     public long? BackupRestoreThrottleBytesPerSec { get; set; }
 
     /// <summary>
+    /// Cluster identity stamped into backup manifests. Set the <b>same</b> value on every node so a
+    /// restore refuses to chain artifacts produced by a different cluster (or a stale topology). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.BackupClusterId"/>. Empty on a standalone node is fine.
+    /// </summary>
+    public string? BackupClusterId { get; set; }
+
+    /// <summary>
+    /// Path to the HMAC-SHA-256 key file used to sign and verify backup manifests (authenticity — detects
+    /// malicious replacement, not just accidental corruption). Use the <b>same</b> key file on every node,
+    /// kept outside the backup directory. When unset, manifests are unsigned and a node with a key
+    /// configured will refuse to restore them. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.BackupMacKeyFile"/>.
+    /// Must not be blank when the key is present.
+    /// </summary>
+    public string? BackupMacKeyFile { get; set; }
+
+    /// <summary>
     /// Returns an independent copy. <see cref="CamusDBOptions"/> is immutable, but this class is a
     /// YAML-bound settings object with ordinary setters, so holding the deserialized instance directly
     /// would leave one mutable object reachable from every options value derived by <c>with</c> —
@@ -390,6 +408,9 @@ public sealed class KahunaOptionsConfig
 
         if (RestoreRoot is not null && string.IsNullOrWhiteSpace(RestoreRoot))
             throw InvalidConfig("'kahuna.restore_root' must not be blank when set (omit the key to disable confined remote restore)");
+
+        if (BackupMacKeyFile is not null && string.IsNullOrWhiteSpace(BackupMacKeyFile))
+            throw InvalidConfig("'kahuna.backup_mac_key_file' must not be blank when set (omit the key to disable manifest signing)");
 
         if (BackupRetentionMaxChains is < 0)
             throw InvalidConfig($"'kahuna.backup_retention_max_chains' must be >= 0, got {BackupRetentionMaxChains}");

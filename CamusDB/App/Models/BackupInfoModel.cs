@@ -54,6 +54,12 @@ public sealed class BackupInfoModel
 
     public long? MaxRecoverablePhysicalMs { get; set; }
 
+    /// <summary>Cluster identity the backup was taken under (foreign-cluster chains are rejected on restore); null on a standalone/pre-cluster backup.</summary>
+    public string? ClusterId { get; set; }
+
+    /// <summary>The node that coordinated the backup; null on a standalone/pre-cluster backup.</summary>
+    public string? CoordinatorNode { get; set; }
+
     public static BackupInfoModel From(BackupInfo info) => new()
     {
         BackupId = info.BackupId.ToString(),
@@ -72,5 +78,7 @@ public sealed class BackupInfoModel
         InvalidReason = info.InvalidReason,
         MinRecoverablePhysicalMs = info.MinRecoverablePhysicalMs,
         MaxRecoverablePhysicalMs = info.MaxRecoverablePhysicalMs,
+        ClusterId = info.ClusterId,
+        CoordinatorNode = info.CoordinatorNode,
     };
 }

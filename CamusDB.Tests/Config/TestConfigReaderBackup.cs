@@ -114,6 +114,32 @@ public sealed class TestConfigReaderBackup
     }
 
     [Test]
+    public void ClusterIdentityAndMacKeys_AcceptedByReader_ValuesApplied()
+    {
+        const string yml = """
+            kahuna:
+              backup_cluster_id: prod-cluster-a
+              backup_mac_key_file: /etc/camusdb/backup.key
+            """;
+
+        ConfigDefinition config = new ConfigReader().Read(yml);
+
+        Assert.AreEqual("prod-cluster-a", config.Kahuna.BackupClusterId);
+        Assert.AreEqual("/etc/camusdb/backup.key", config.Kahuna.BackupMacKeyFile);
+    }
+
+    [Test]
+    public void BlankMacKeyFile_Rejected()
+    {
+        const string yml = """
+            kahuna:
+              backup_mac_key_file: "  "
+            """;
+
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read(yml));
+    }
+
+    [Test]
     public void OneSidedWindowAboveDefaultSnapshot_Accepted()
     {
         // window=3000 >= default snapshot 1800 → effective pair is valid.

@@ -69,7 +69,26 @@ so the substitution is visible rather than silent.
 Error codes surface as JSON `{ "status": "failed", "code": "...", "message": "..." }` with a matching
 HTTP status: `BackupNotConfigured` → 503, `RemoteRestoreDisabled` → 403, `BackupChainInvalid` → 422,
 `BackupCorruptArtifact` → 422, `RestoreTargetConflict` → 409, `RestorePointOutOfWindow` → 422,
-`BackupNeedsFullBackup` → 409, `BackupExactCheckpointUnavailable` → 409, `InsufficientPrivilege` → 403.
+`BackupNeedsFullBackup` → 409, `BackupExactCheckpointUnavailable` → 409, `InsufficientPrivilege` → 403,
+`BackupTopologyChanged` → 503, `BackupNotCoordinator` → 421, `BackupInsecureRoot` → 500.
+
+### Cluster, consistency, and authenticity
+
+- **Consistency.** A coordinated backup (`/v1/backups/coordinated`) is a single consistent HLC cut across
+  all partitions; a cross-partition transaction cannot be torn (both capture and restore cut on the
+  shared commit HLC, not per-shard WAL time). Issue coordinated backups on the **coordinator** node — a
+  non-coordinator returns `BackupNotCoordinator` (421); if the topology changes mid-backup it aborts with
+  `BackupTopologyChanged` (503) and publishes nothing, so retry once stable.
+- **Cluster identity.** Set `kahuna.backup_cluster_id` identically on every node. Manifests carry it (and
+  the coordinator node), and a restore refuses to chain artifacts from a different cluster or a stale
+  topology. Listings surface `clusterId` / `coordinatorNode`.
+- **Authenticity.** Set `kahuna.backup_mac_key_file` (the same HMAC-SHA-256 key file on every node, kept
+  outside `backup_dir`) to sign manifests; a node with a key then refuses an unsigned or tampered
+  manifest. The backup/restore root must be owner-only (0700) and not a symlink, or operations fail with
+  `BackupInsecureRoot`.
+- **Confidentiality.** There is **no encryption at rest** — artifacts are plaintext protected by
+  filesystem permissions and the integrity MAC. Keep `backup_dir` on an access-controlled, ideally
+  encrypted, volume.
 
 ### Examples
 
