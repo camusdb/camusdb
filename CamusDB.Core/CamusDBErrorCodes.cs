@@ -332,6 +332,27 @@ public static class CamusDBErrorCodes
     public const string RemoteRestoreDisabled = "CADB070C";
 
     /// <summary>
+    /// The cluster topology (partition map or membership) changed during a coordinated backup, so the
+    /// captured partition set is not one consistent snapshot; the backup was aborted and nothing
+    /// published. Transient — retry once the topology is stable. Maps to HTTP 503.
+    /// </summary>
+    public const string BackupTopologyChanged = "CADB070D";
+
+    /// <summary>
+    /// A coordinated (cluster-wide) backup was requested on a node that does not lead the backup meta
+    /// partition, so it cannot own the backup. Retry against the current coordinator node. Maps to
+    /// HTTP 421 (Misdirected Request).
+    /// </summary>
+    public const string BackupNotCoordinator = "CADB070E";
+
+    /// <summary>
+    /// The configured backup or restore root is unsafe (a symlink/reparse point, or group/world-writable
+    /// on POSIX), so backups are refused before anything is written. Restrict the directory to the
+    /// server's user and retry. A server misconfiguration — maps to HTTP 500.
+    /// </summary>
+    public const string BackupInsecureRoot = "CADB070F";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -350,6 +371,9 @@ public static class CamusDBErrorCodes
         BackupRetryableLeadershipLoss => 503,
         BackupCancelled => 499,
         RemoteRestoreDisabled => 403,
+        BackupTopologyChanged => 503,
+        BackupNotCoordinator => 421,
+        BackupInsecureRoot => 500,
         TransactionMutationLimitExceeded => 400,
         AnalyzeRequiresNoPendingWrites => 400,
         CheckConstraintViolation => 400,

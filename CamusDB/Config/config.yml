@@ -312,6 +312,11 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   backup_retention_max_bytes: 0               # cap total backup bytes (0 = unlimited)
 #   backup_gc_interval_seconds: 3600            # background GC reaper cadence (0 = disabled). Default 3600 (1h)
 #   backup_restore_throttle_bytes_per_sec: 0    # throttle a restore's checkpoint copy (0 = unlimited)
+#   # Cluster + authenticity. Set the SAME value on every node. The backup root must be owner-only
+#   # (0700) or backups fail with BackupInsecureRoot. Encryption-at-rest is not offered — keep backups
+#   # on an access-controlled (ideally encrypted) volume.
+#   backup_cluster_id: prod-cluster-a           # stamped into manifests; a restore refuses a foreign cluster's chain. Empty on standalone is fine
+#   backup_mac_key_file: /etc/camusdb/backup.key # HMAC-SHA-256 key file signing manifests (authenticity). Same file on all nodes, kept outside backup_dir. Omit = unsigned
 
 # ── Diagnostics (standalone only; opt-in) ─────────────────────────────────────
 # Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:

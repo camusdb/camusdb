@@ -168,7 +168,9 @@ internal sealed class BackupManager
         IsInvalid: info.IsInvalid,
         InvalidReason: info.InvalidReason,
         MinRecoverablePhysicalMs: info.MinRecoverablePhysicalMs,
-        MaxRecoverablePhysicalMs: info.MaxRecoverablePhysicalMs);
+        MaxRecoverablePhysicalMs: info.MaxRecoverablePhysicalMs,
+        ClusterId: info.ClusterId,
+        CoordinatorNode: info.CoordinatorNode);
 
     /// <summary>
     /// Maps a Kahuna backup/PITR failure to a <see cref="CamusDBException"/> with a stable error code, or
@@ -204,6 +206,9 @@ internal sealed class BackupManager
         KahunaBackupOutcome.RetryableLeadershipLoss => CamusDBErrorCodes.BackupRetryableLeadershipLoss,
         KahunaBackupOutcome.ExactCheckpointUnavailable => CamusDBErrorCodes.BackupExactCheckpointUnavailable,
         KahunaBackupOutcome.UnsupportedFormat => CamusDBErrorCodes.BackupUnsupportedFormat,
+        KahunaBackupOutcome.TopologyChanged => CamusDBErrorCodes.BackupTopologyChanged,
+        KahunaBackupOutcome.NotBackupCoordinator => CamusDBErrorCodes.BackupNotCoordinator,
+        KahunaBackupOutcome.InsecureRoot => CamusDBErrorCodes.BackupInsecureRoot,
         _ => CamusDBErrorCodes.RestoreFailed,
     };
 }
