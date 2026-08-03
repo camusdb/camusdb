@@ -16,6 +16,10 @@
     <InternalsVisibleTo Include="CamusDB.Tests" />
     <InternalsVisibleTo Include="CamusDB.Cluster.Tests" />
     <InternalsVisibleTo Include="CamusDB.MicroBenchmarks" />
+    <!-- The API host's response sinks (gRPC value codec) serialize directly from the internal
+         ValueSlot pipeline cell so a projected cell never materializes a ColumnValue on its way
+         to the wire. ColumnValue remains the public contract for everything else. -->
+    <InternalsVisibleTo Include="CamusDB" />
   </ItemGroup>
 
   <ItemGroup>
@@ -77,7 +81,7 @@
   </ItemGroup>
   
   <ItemGroup>
-    <PackageReference Include="Kahuna.Core" Version="0.9.9" /> 
+    <PackageReference Include="Kahuna.Core" Version="0.9.10" /> 
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />

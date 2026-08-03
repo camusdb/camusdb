@@ -623,9 +623,10 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     {
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
 
+        ResultRowBinder binder = new();
         await responseStream.WriteAsync(CamusSqlService.BuildSchema(schema), ct).ConfigureAwait(false);
         await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
-            await responseStream.WriteAsync(CamusSqlService.BuildRow(row.Row, schema), ct).ConfigureAwait(false);
+            await responseStream.WriteAsync(CamusSqlService.BuildRow(row.Row, schema, binder), ct).ConfigureAwait(false);
     }
 
     /// <summary>

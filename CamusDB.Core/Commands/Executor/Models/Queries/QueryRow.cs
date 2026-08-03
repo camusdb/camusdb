@@ -200,6 +200,42 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     }
 
     /// <summary>
+    /// Exposes the cell at <paramref name="ordinal"/> as a <see cref="ValueSlot"/> without materializing
+    /// a <see cref="ColumnValue"/> — the seam response sinks use to serialize a cell they read exactly
+    /// once, so the projected cell of a slot- or view-backed row never allocates on its way to the wire.
+    /// Succeeds only when serving the slot is genuinely cheaper: the row must not be eager (already
+    /// <see cref="ColumnValue"/>s) and the cell must not already be cached (reuse beats re-decoding).
+    /// A view-backed injected-default cell (stored ordinal -1, absent from the cache) also returns
+    /// <see langword="false"/>; the caller falls back to <see cref="GetColumnValue"/>, which reports it
+    /// as NULL. Deliberately does <b>not</b> populate the per-cell cache: a sink reads each cell once,
+    /// and caching would allocate the cache array for nothing.
+    /// </summary>
+    internal bool TryGetSlot(int ordinal, out ValueSlot slot)
+    {
+        if (_eager is null && (_cellCache is null || _cellCache[ordinal] is null))
+        {
+            if (_slots is not null)
+            {
+                slot = _slots[ordinal];
+                return true;
+            }
+
+            if (_rowView is { } view)
+            {
+                int stored = _outputToStored![ordinal];
+                if (stored >= 0)
+                {
+                    slot = view.GetSlot(stored);
+                    return true;
+                }
+            }
+        }
+
+        slot = ValueSlot.Null;
+        return false;
+    }
+
+    /// <summary>
     /// Orders this row's cell <paramref name="ordinal"/> against <paramref name="other"/>'s cell
     /// <paramref name="otherOrdinal"/> with <see cref="ColumnValue.CompareTo"/> semantics. When both
     /// rows are slot-backed the comparison runs directly on the <see cref="ValueSlot"/>s — no

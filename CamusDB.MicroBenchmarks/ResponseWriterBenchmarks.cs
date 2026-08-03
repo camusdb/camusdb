@@ -15,6 +15,10 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Util.ObjectIds;
 
+// The benchmarks project still carries an earlier standalone ValueSlot prototype; the sink path
+// under test uses the adopted Core cell, so alias it explicitly.
+using CoreValueSlot = CamusDB.Core.CommandsExecutor.Models.ValueSlot;
+
 namespace CamusDB.MicroBenchmarks;
 
 /// <summary>
@@ -41,6 +45,7 @@ public class ResponseWriterBenchmarks
 
     private DerivedColumnSchema[] _schema = null!;
     private QueryResultRow[] _rows = null!;
+    private QueryResultRow[] _slotRows = null!;
     private JsonSerializerOptions _options = null!;
 
     [GlobalSetup]
@@ -83,6 +88,20 @@ public class ResponseWriterBenchmarks
             }
             _rows[i] = new QueryResultRow(new ObjectIdValue(i, i + 1, i + 2), dict);
         }
+
+        // Same values as slot-backed QueryRows — the backing filtered scans produce. Serializing them
+        // repeatedly is safe: the sink's TryGetSlot path never materializes or caches a cell.
+        RowLayout layout = new(_schema.Select(c => c.Name));
+        _slotRows = new QueryResultRow[RowCount];
+        for (int i = 0; i < RowCount; i++)
+        {
+            Dictionary<string, ColumnValue> dict = (Dictionary<string, ColumnValue>)_rows[i].Row;
+            CoreValueSlot[] slots = new CoreValueSlot[layout.Count];
+            for (int c = 0; c < _schema.Length; c++)
+                slots[layout.IndexOf(_schema[c].Name)] = CoreValueSlot.FromColumnValue(dict[_schema[c].Name]);
+            ObjectIdValue id = new(i, i + 1, i + 2);
+            _slotRows[i] = new QueryResultRow(id, QueryRow.FromSlots(id, layout, slots));
+        }
     }
 
     /// <summary>Old path: object?[] per row + boxes, then STJ serializes the graph.</summary>
@@ -112,6 +131,29 @@ public class ResponseWriterBenchmarks
         writer.WriteStartArray();
         for (int i = 0; i < RowCount; i++)
             CompactRowJsonWriter.WriteRow(writer, _rows[i], _schema, ref boundLayout, ref ordinals);
+        writer.WriteEndArray();
+        writer.Flush();
+
+        return buffer.WrittenCount;
+    }
+
+    /// <summary>
+    /// Slot-direct path: rows are slot-backed (as a filtered scan produces them) and each projected
+    /// cell streams straight from its <see cref="ValueSlot"/> — no <see cref="ColumnValue"/> is ever
+    /// materialized at the sink. The delta vs <see cref="Encode_StreamDirect"/> is the per-cell
+    /// boundary conversion this path removes.
+    /// </summary>
+    [Benchmark(Description = "Encode_StreamDirect_Slots")]
+    public long Encode_StreamDirect_Slots()
+    {
+        ArrayBufferWriter<byte> buffer = new(1 << 16);
+        using Utf8JsonWriter writer = new(buffer);
+
+        RowLayout? boundLayout = null;
+        int[]? ordinals = null;
+        writer.WriteStartArray();
+        for (int i = 0; i < RowCount; i++)
+            CompactRowJsonWriter.WriteRow(writer, _slotRows[i], _schema, ref boundLayout, ref ordinals);
         writer.WriteEndArray();
         writer.Flush();
 

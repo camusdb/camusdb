@@ -662,17 +662,19 @@ public sealed record CamusDBOptions
     /// front. Both paths are value-identical.
     ///
     /// <para>
-    /// <b>Default is <c>false</c></b>, and deliberately so: benchmarks show the slot path is a
-    /// selectivity-dependent trade, not a universal win. It allocates ~18% less on a highly selective
-    /// scan (most rows filtered before their projection cells are read), but ~13% more on a
-    /// non-selective scan and ~26% more on <c>SELECT *</c>, because when most cells are read the
-    /// wider slot array plus the lazy materialization cache are pure overhead. Since selectivity is not
-    /// known at decode time, enabling it globally would regress common queries. It stays off until the
-    /// operators consume slots directly (so slots flow without materializing every cell); flip it on
-    /// only for a workload measured to be selective. See BENCH-RESULTS.md → "Slot-backed decode (A/B)".
+    /// <b>Default is <c>true</c></b>. It was originally off because the slot path was a
+    /// selectivity-dependent trade: with the old whole-row consumers, a non-selective scan or
+    /// <c>SELECT *</c> materialized every cell anyway, so the slot array plus lazy cache were pure
+    /// overhead (~26% more allocation on <c>SELECT *</c>). That regression case no longer exists:
+    /// filter, sort, and the hash operators consume slots natively, and the REST/gRPC response sinks
+    /// serialize a projected cell straight from its <c>ValueSlot</c> (<c>QueryRow.TryGetSlot</c>)
+    /// without ever materializing a <c>ColumnValue</c> — measured through the real JSON sink,
+    /// unfiltered <c>SELECT *</c> is now ~12% faster and ~17% lighter slot-backed, and selective
+    /// scans win by more. Set to <c>false</c> as the kill-switch / eager A/B baseline.
+    /// See BENCH-RESULTS.md → "Slot-backed decode (A/B)" and "Slot-direct response sinks".
     /// </para>
     /// </summary>
-    public bool SlotBackedDecode { get; init; } = false;
+    public bool SlotBackedDecode { get; init; } = true;
 
     /// <summary>
     /// Global policy for borrowed (zero-copy) decode, which backs a decoded scan row with a

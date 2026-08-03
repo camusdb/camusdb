@@ -1127,12 +1127,36 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>
     /// Builds a positional <c>ResultRow</c> whose values align to <paramref name="schema"/>.
     /// Missing dictionary keys (null cells) map to a typed NULL value via <see cref="GrpcValueCodec"/>.
+    ///
+    /// <para>A layout-backed <see cref="QueryRow"/> takes the fast path: schema-name→ordinal binding is
+    /// resolved once per <see cref="RowLayout"/> identity (carried across rows by
+    /// <paramref name="binder"/>), and each projected cell of a slot- or view-backed row is serialized
+    /// straight from its <c>ValueSlot</c> — no per-cell dictionary lookup and no <see cref="ColumnValue"/>
+    /// materialization for a value that is read once and written to the wire.</para>
     /// </summary>
     internal static ResultRow BuildResultRow(
         IReadOnlyDictionary<string, ColumnValue> row,
-        IReadOnlyList<DerivedColumnSchema> schema)
+        IReadOnlyList<DerivedColumnSchema> schema,
+        ResultRowBinder? binder = null)
     {
         ResultRow rr = new();
+
+        if (row is QueryRow queryRow)
+        {
+            binder ??= new ResultRowBinder();
+            binder.Bind(queryRow.Layout, schema);
+
+            for (int i = 0; i < schema.Count; i++)
+            {
+                int ord = binder.Ordinals![i];
+                if (ord >= 0 && queryRow.TryGetSlot(ord, out CamusDB.Core.CommandsExecutor.Models.ValueSlot slot))
+                    rr.Values.Add(GrpcValueCodec.ToProto(in slot));
+                else
+                    rr.Values.Add(GrpcValueCodec.ToProto(ord >= 0 ? queryRow.GetColumnValue(ord) : null));
+            }
+            return rr;
+        }
+
         foreach (DerivedColumnSchema col in schema)
         {
             ColumnValue? cv = row.TryGetValue(col.Name, out ColumnValue? v) ? v : null;
@@ -1176,8 +1200,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>Wraps a positional <c>ResultRow</c> in a unary <c>QueryStreamMessage</c>.</summary>
     internal static QueryStreamMessage BuildRow(
         IReadOnlyDictionary<string, ColumnValue> row,
-        IReadOnlyList<DerivedColumnSchema> schema)
-        => new() { Row = BuildResultRow(row, schema) };
+        IReadOnlyList<DerivedColumnSchema> schema,
+        ResultRowBinder? binder = null)
+        => new() { Row = BuildResultRow(row, schema, binder) };
 
     // ─── Causal token helpers ────────────────────────────────────────────────
 
@@ -1395,6 +1420,32 @@ internal interface IQueryRowSink
 }
 
 /// <summary>
+/// Carries the schema-name→ordinal binding for <see cref="CamusSqlService.BuildResultRow"/> across
+/// the rows of one result stream, so the mapping is resolved once per <see cref="RowLayout"/>
+/// identity instead of per cell. One binder belongs to exactly one sequentially-written stream —
+/// it is deliberately not thread-safe (each sink/stream loop owns its own instance).
+/// </summary>
+internal sealed class ResultRowBinder
+{
+    private RowLayout? layout;
+
+    internal int[]? Ordinals { get; private set; }
+
+    /// <summary>Rebinds only when the layout identity or schema width changes (usually never).</summary>
+    internal void Bind(RowLayout rowLayout, IReadOnlyList<DerivedColumnSchema> schema)
+    {
+        if (ReferenceEquals(layout, rowLayout) && Ordinals is { } bound && bound.Length == schema.Count)
+            return;
+
+        layout = rowLayout;
+        if (Ordinals is null || Ordinals.Length != schema.Count)
+            Ordinals = new int[schema.Count];
+        for (int i = 0; i < schema.Count; i++)
+            Ordinals[i] = rowLayout.IndexOf(schema[i].Name);
+    }
+}
+
+/// <summary>
 /// <see cref="IQueryRowSink"/> that writes <c>QueryStreamMessage</c>s onto a unary server stream.
 /// Marks <see cref="HasWritten"/> before each write: once a write has been attempted the stream may
 /// already carry bytes, so a replay must not re-emit.
@@ -1402,6 +1453,7 @@ internal interface IQueryRowSink
 internal sealed class QueryStreamSink : IQueryRowSink
 {
     private readonly IServerStreamWriter<QueryStreamMessage> stream;
+    private readonly ResultRowBinder binder = new();
 
     public bool HasWritten { get; private set; }
 
@@ -1419,7 +1471,7 @@ internal sealed class QueryStreamSink : IQueryRowSink
         CancellationToken ct)
     {
         HasWritten = true;
-        await stream.WriteAsync(CamusSqlService.BuildRow(row, schema), ct).ConfigureAwait(false);
+        await stream.WriteAsync(CamusSqlService.BuildRow(row, schema, binder), ct).ConfigureAwait(false);
     }
 }
 
@@ -1435,6 +1487,7 @@ internal sealed class BatchQuerySink : IQueryRowSink
     private readonly IServerStreamWriter<BatchExecuteResponse> stream;
     private readonly SemaphoreSlim writeLock;
     private readonly int requestId;
+    private readonly ResultRowBinder binder = new();
 
     public bool HasWritten { get; private set; }
 
@@ -1464,7 +1517,9 @@ internal sealed class BatchQuerySink : IQueryRowSink
         await WriteLockedAsync(new BatchExecuteResponse
         {
             RequestId = requestId,
-            Row       = CamusSqlService.BuildResultRow(row, schema),
+            // One binder per sink is safe: a sink belongs to one op, and an op's rows are written
+            // sequentially (the shared write lock guards the stream, not this sink's state).
+            Row       = CamusSqlService.BuildResultRow(row, schema, binder),
         }, ct).ConfigureAwait(false);
     }
 

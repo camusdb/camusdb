@@ -67,6 +67,36 @@ public static class GrpcValueCodec
     }
 
     /// <summary>
+    /// Converts an internal <see cref="ValueSlot"/> straight to its Protobuf <c>Value</c> — the
+    /// slot-direct sink path: a projected cell of a slot- or view-backed row reaches the wire without
+    /// ever materializing a <see cref="ColumnValue"/>. Must produce a message identical to
+    /// <see cref="ToProto(ColumnValue?)"/> over <see cref="ValueSlot.ToColumnValue"/>'s result; every
+    /// case stays in lockstep with that method.
+    /// </summary>
+    internal static ProtoValue ToProto(in ValueSlot slot)
+    {
+        return slot.Type switch
+        {
+            CoreColumnType.Null     => new ProtoValue { NullValue = ProtoNullValue.Unset },
+            CoreColumnType.Id       => new ProtoValue { IdValue = slot.AsString ?? "" },
+            CoreColumnType.Integer64 => new ProtoValue { Int64Value = slot.AsLong },
+            CoreColumnType.String   => new ProtoValue { StringValue = slot.AsString ?? "" },
+            CoreColumnType.Bool     => new ProtoValue { BoolValue = slot.AsBool },
+            CoreColumnType.Float64  => new ProtoValue { Float64Value = slot.AsDouble },
+            CoreColumnType.Float32  => new ProtoValue { Float32Value = (float)slot.AsDouble },
+            CoreColumnType.Bytes    => new ProtoValue { BytesValue = ByteString.CopyFrom(slot.AsBytes ?? []) },
+            CoreColumnType.Date     => new ProtoValue { DateValue = slot.AsLong },
+            CoreColumnType.DateTime => new ProtoValue { DatetimeValue = slot.AsLong },
+            CoreColumnType.Array    => new ProtoValue { ArrayValue = ToProtoArray(in slot) },
+            CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(slot.UuidHigh, slot.UuidLow) },
+
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"GrpcValueCodec: unsupported ColumnType {slot.Type}")
+        };
+    }
+
+    /// <summary>
     /// Converts a Protobuf <c>Value</c> message back to a <see cref="ColumnValue"/>.
     /// Returns <see cref="ColumnValue.Null"/> when the oneof is not set.
     /// Throws <see cref="CamusDBException"/> for unrecognised oneof cases.
@@ -104,6 +134,20 @@ public static class GrpcValueCodec
         IReadOnlyList<ColumnValue> items = cv.ArrayValues ?? [];
         foreach (ColumnValue item in items)
             proto.Items.Add(ToProto(item));
+
+        return proto;
+    }
+
+    private static ProtoArray ToProtoArray(in ValueSlot slot)
+    {
+        ProtoArray proto = new()
+        {
+            ElementType = (ProtoColType)(int)slot.ArrayElementType,
+        };
+
+        ValueSlot[] elements = slot.ArrayElements;
+        for (int i = 0; i < elements.Length; i++)
+            proto.Items.Add(ToProto(in elements[i]));
 
         return proto;
     }

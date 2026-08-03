@@ -59,12 +59,17 @@ public static class CompactRowJsonWriter
                     ordinals[i] = queryRow.Layout.IndexOf(schema[i].Name);
             }
 
-            // Per-cell access (not queryRow.Values): a slot-backed row materializes only the projected
-            // cells it is asked for, never the whole row.
+            // Per-cell access (not queryRow.Values): a slot- or view-backed row serializes each projected
+            // cell straight from its ValueSlot — the sink reads a cell exactly once, so materializing a
+            // ColumnValue for it would be a pure allocation. Cells the slot seam declines (eager rows,
+            // already-cached cells, injected defaults) fall back to the ColumnValue path.
             for (int i = 0; i < schema.Count; i++)
             {
                 int ord = ordinals![i];
-                WriteValue(writer, ord >= 0 ? queryRow.GetColumnValue(ord) : null);
+                if (ord >= 0 && queryRow.TryGetSlot(ord, out ValueSlot slot))
+                    WriteSlot(writer, in slot);
+                else
+                    WriteValue(writer, ord >= 0 ? queryRow.GetColumnValue(ord) : null);
             }
         }
         else
@@ -155,5 +160,75 @@ public static class CompactRowJsonWriter
                 WriteValue(writer, array.ArrayValues[i]);
         }
         writer.WriteEndArray();
+    }
+
+    /// <summary>
+    /// Writes a single <see cref="ValueSlot"/> as its compact-raw JSON token, allocating no
+    /// <see cref="ColumnValue"/> for the cell. Token-for-token identical to
+    /// <see cref="WriteValue(Utf8JsonWriter, ColumnValue?)"/> over <see cref="ValueSlot.ToColumnValue"/>'s
+    /// result — every case below must stay in lockstep with that method (including the Bytes base64
+    /// escaping note there).
+    /// </summary>
+    internal static void WriteSlot(Utf8JsonWriter writer, in ValueSlot slot)
+    {
+        switch (slot.Type)
+        {
+            case ColumnType.Null:
+                writer.WriteNullValue();
+                break;
+
+            case ColumnType.Id:
+            case ColumnType.String:
+                writer.WriteStringValue(slot.AsString);
+                break;
+
+            case ColumnType.Integer64:
+            case ColumnType.Date:
+            case ColumnType.DateTime:
+                writer.WriteNumberValue(slot.AsLong);
+                break;
+
+            case ColumnType.Bool:
+                writer.WriteBooleanValue(slot.AsBool);
+                break;
+
+            case ColumnType.Float64:
+                writer.WriteNumberValue(slot.AsDouble);
+                break;
+
+            case ColumnType.Float32:
+                writer.WriteNumberValue((float)slot.AsDouble);
+                break;
+
+            case ColumnType.Bytes:
+                // Same escaping contract as WriteValue: base64 as a plain STRING value so the writer's
+                // JSON encoder escapes '+' exactly as the object-graph path did.
+                if (slot.AsBytes is { } bytes)
+                    writer.WriteStringValue(Convert.ToBase64String(bytes));
+                else
+                    writer.WriteNullValue();
+                break;
+
+            case ColumnType.Uuid:
+                writer.WriteStartArray();
+                writer.WriteNumberValue(slot.UuidHigh);
+                writer.WriteNumberValue(slot.UuidLow);
+                writer.WriteEndArray();
+                break;
+
+            case ColumnType.Array:
+            {
+                writer.WriteStartArray();
+                ValueSlot[] elements = slot.ArrayElements;
+                for (int i = 0; i < elements.Length; i++)
+                    WriteSlot(writer, in elements[i]);
+                writer.WriteEndArray();
+                break;
+            }
+
+            default:
+                writer.WriteNullValue();
+                break;
+        }
     }
 }

@@ -92,10 +92,11 @@ internal sealed class QueryScanner
         // holds one entry; mixed-version scans hold a handful. The layout is identical for all
         // rows at the same stored version (requiredColumns and visibilityVersion are constant
         // for the life of a scan), so building it once and reusing it is safe.
-        // Adaptive slot-backed decode: only worth it when a residual filter rejects rows (a rejected
-        // row decodes to slots but never materializes its projection cells). With no residual filter
-        // every scanned row is consumed, so the eager path is faster. The global flag still forces slots
-        // on everywhere when set (kill-switch / benchmark baseline) — see RowDecodeState.SlotBackedDecode.
+        // Slot-backed decode is the default (the response sinks serialize straight from ValueSlots, so
+        // even an unfiltered SELECT * no longer materializes ColumnValues — see
+        // CamusDBOptions.SlotBackedDecode). With the flag off (eager A/B baseline), a scan with a
+        // residual filter still opts in adaptively: a rejected row decodes to slots but never
+        // materializes its projection cells.
         RowEncoder.RowDecodeState decodeState =
             new()
             {
@@ -253,10 +254,11 @@ internal sealed class QueryScanner
         // Index order is preserved: the page is filled in scan order and batch results are
         // indexed positionally, so rows are decoded and yielded in scan order. Missing rows
         // (null bytes from the batch) preserve the warn-and-skip contract of the per-entry path.
-        // Adaptive slot-backed decode: only worth it when a residual filter rejects rows (a rejected
-        // row decodes to slots but never materializes its projection cells). With no residual filter
-        // every scanned row is consumed, so the eager path is faster. The global flag still forces slots
-        // on everywhere when set (kill-switch / benchmark baseline) — see RowDecodeState.SlotBackedDecode.
+        // Slot-backed decode is the default (the response sinks serialize straight from ValueSlots, so
+        // even an unfiltered SELECT * no longer materializes ColumnValues — see
+        // CamusDBOptions.SlotBackedDecode). With the flag off (eager A/B baseline), a scan with a
+        // residual filter still opts in adaptively: a rejected row decodes to slots but never
+        // materializes its projection cells.
         RowEncoder.RowDecodeState decodeState =
             new()
             {

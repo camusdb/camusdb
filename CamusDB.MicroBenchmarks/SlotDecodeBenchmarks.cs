@@ -6,8 +6,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
+using System.Text.Json;
 using BenchmarkDotNet.Attributes;
 using CamusDB.Core;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -199,5 +202,42 @@ public class SlotDecodeBenchmarks
             acc += values.Length;
         }
         return acc;
+    }
+
+    /// <summary>
+    /// SELECT * consumed the way the REST sink actually consumes it since the slot-direct writer:
+    /// every cell of every row is serialized via <see cref="CompactRowJsonWriter.WriteRow"/>, whose
+    /// slot seam (<c>QueryRow.TryGetSlot</c>) writes a slot-backed cell to the wire without ever
+    /// materializing a <see cref="ColumnValue"/>. This is the number that decides whether the
+    /// unfiltered-scan case still favors eager decode: <see cref="SelectStar"/> models the OLD
+    /// consumption (whole-row <c>Values</c>), this one models the current pipeline end to end
+    /// (decode → sink), so compare Slot=true vs Slot=false here.
+    /// </summary>
+    [Benchmark(Description = "select-star → JSON sink")]
+    public async Task<long> SelectStarToJson()
+    {
+        RowEncoder.RowDecodeState cache = new();
+        ArrayBufferWriter<byte> buffer = new(1 << 20);
+        using Utf8JsonWriter writer = new(buffer);
+
+        DerivedColumnSchema[] schema =
+        [
+            new("id", ColumnType.Id), new("f", ColumnType.Integer64),
+            new("p1", ColumnType.String), new("p2", ColumnType.Integer64),
+            new("p3", ColumnType.Float64), new("p4", ColumnType.String),
+        ];
+
+        RowLayout? bound = null;
+        int[]? ordinals = null;
+        writer.WriteStartArray();
+        for (int i = 0; i < RowCount; i++)
+        {
+            QueryRow row = await DecodeAsync(i, cache).ConfigureAwait(false);
+            CompactRowJsonWriter.WriteRow(writer, new QueryResultRow(RowId, row), schema, ref bound, ref ordinals);
+        }
+        writer.WriteEndArray();
+        writer.Flush();
+
+        return buffer.WrittenCount;
     }
 }

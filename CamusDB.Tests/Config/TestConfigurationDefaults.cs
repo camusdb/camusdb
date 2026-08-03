@@ -102,7 +102,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(false, CamusDBOptions.Default.SpillEnabled, nameof(CamusDBOptions.Default.SpillEnabled));
         Assert.AreEqual(500_000, CamusDBOptions.Default.SpillThresholdRows, nameof(CamusDBOptions.Default.SpillThresholdRows));
         Assert.AreEqual(16, CamusDBOptions.Default.SpillMergeFanIn, nameof(CamusDBOptions.Default.SpillMergeFanIn));
-        Assert.AreEqual(false, CamusDBOptions.Default.SlotBackedDecode, nameof(CamusDBOptions.Default.SlotBackedDecode));
+        Assert.AreEqual(true, CamusDBOptions.Default.SlotBackedDecode, nameof(CamusDBOptions.Default.SlotBackedDecode));
         Assert.AreEqual(BorrowedDecodePolicy.Adaptive, CamusDBOptions.Default.BorrowedDecode, nameof(CamusDBOptions.Default.BorrowedDecode));
         Assert.AreEqual(256 * 1024 * 1024, CamusDBOptions.Default.SpillMaxFrameBytes, nameof(CamusDBOptions.Default.SpillMaxFrameBytes));
         Assert.IsNull(CamusDBOptions.Default.ForceSpillThresholdRows, nameof(CamusDBOptions.Default.ForceSpillThresholdRows));

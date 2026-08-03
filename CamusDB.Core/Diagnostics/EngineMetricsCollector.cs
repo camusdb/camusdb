@@ -480,11 +480,11 @@ internal sealed class EngineMetricsCollector : IDisposable
         private static void WriteIdentity(ref HashSink sink, string source, string metric, EngineMetricKind kind)
         {
             sink.Write(source);
-            sink.Write(" ");
+            sink.Write("\0");
             sink.Write(metric);
-            sink.Write(" ");
+            sink.Write("\0");
             sink.Write([(char)kind]);
-            sink.Write(" ");
+            sink.Write("\0");
         }
 
         public EngineMetricKey Create(EngineMeasurementKey alternate)
