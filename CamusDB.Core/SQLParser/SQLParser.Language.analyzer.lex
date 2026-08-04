@@ -126,7 +126,8 @@ Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
 Number          ("-"?[0-9]+)|("-"?[0][x][0-9A-Fa-f]+)
-Decimal         ("-"?)([0-9]+)(\.)([0-9]+)
+Exponent        (e|E)("+"|"-")?([0-9]+)
+Decimal         (("-"?)([0-9]+)(\.)([0-9]+){Exponent}?)|(("-"?)([0-9]+){Exponent})
 StrChs          [^\\\"\a\b\f\n\r\t\v\0]
 StrChs2          [^\\\'\a\b\f\n\r\t\v\0]
 DotChr          [^\r\n]

@@ -6,6 +6,15 @@ Converts SQL text into an abstract syntax tree (AST).
 
 The grammar and lexer live in `SQLParser.Language.grammar.y` and `SQLParser.Language.analyzer.lex`; GPPG/GPLEX compile them into `SQLParser.Parser.Generated.cs` and `SQLParser.Scanner.Generated.cs` (regenerated on build — do not edit). `sql.Parser.cs` and `sql.Scanner.cs` are hand-written partial-class companions of the generated `sqlParser` / `sqlScanner` (the `Parse(string)` entry point, the `yyerror` override); they are scaffolded once and are **not** overwritten when the grammar/lexer change, so they are the place for hand-authored parser/scanner code.
 
+## Numeric literals
+
+Integers are decimal (`10`, `-10`) or hexadecimal (`0x1E5`) and produce `NodeType.Integer`. Floats produce `NodeType.Float` and accept an optional exponent in either of two forms:
+
+- with a fractional part: `10.5`, `1.5e3`, `1.5E-3`, `-2.5e+8`
+- without one, where the exponent alone makes it a float: `1e10`, `3E0`, `-4e2`
+
+The exponent marker is `e` or `E`, optionally signed, and must be followed by at least one digit — `1e` is not a float literal, it still lexes as the integer `1` followed by the identifier `e`. The literal text is carried verbatim on the node and converted with invariant-culture `double.TryParse` under `NumberStyles.Float`, so the exponent survives to the `Float64` column value unchanged. Hex integers are unaffected: `0x1E5` matches the hex rule as a whole and is never read as `0` with an exponent.
+
 ## Comments
 
 The lexer recognizes and silently discards both standard SQL comment forms before any token is emitted, so commented SQL parses identically to the same SQL without comments:
