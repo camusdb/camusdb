@@ -431,10 +431,15 @@ CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecuto
 
 // Seed the bootstrap superuser when auth is enabled and the catalog is empty; fail-closed (refuse to
 // start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.
-await commandExecutor.EnsureBootstrapSuperuserAsync();
+//
+// The credentials are passed explicitly from this scope's unscrubbed copy: the CamusDBOptions in DI is
+// registered with the password blanked, so the executor cannot read it back off its injected options.
+await commandExecutor.EnsureBootstrapSuperuserAsync(
+    camusOptions.BootstrapSuperuser,
+    camusOptions.BootstrapSuperuserPassword);
 
 // The bootstrap password was only needed to seed the first hash — drop it from process memory. Both
-// holders are cleared: the ambient value the seeding path read it from, and this scope's own copy.
+// holders are cleared: the ambient value and this scope's own copy.
 camusOptions = camusOptions with { BootstrapSuperuserPassword = "" };
 CamusDBConfig.SetAmbient(camusOptions);
 

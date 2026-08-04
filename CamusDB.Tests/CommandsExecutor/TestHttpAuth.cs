@@ -116,7 +116,7 @@ internal sealed class TestHttpAuth : BaseTest
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
         TrackDatabase(db, ex);
 
-        await ex.EnsureBootstrapSuperuserAsync();
+        await ex.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, Options.BootstrapSuperuserPassword);
         Principal root = await ex.ResolvePrincipalAsync((await ex.LoginAsync("root", "root-pw")).Token);
 
         var d = await ex.OpenDatabase(db);

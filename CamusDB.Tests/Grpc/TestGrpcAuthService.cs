@@ -92,7 +92,7 @@ internal sealed class TestGrpcAuthService : BaseTest
     {
         BuildServices(options ?? Options);
 
-        await serviceExecutor.EnsureBootstrapSuperuserAsync();
+        await serviceExecutor.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, Options.BootstrapSuperuserPassword);
     }
 
     private Task<LoginReply> LoginAsync(string user, string password)

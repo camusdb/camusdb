@@ -93,7 +93,7 @@ internal sealed class TestGrpcSqlAuth : BaseTest
     {
         BuildServices(Options);
 
-        await serviceExecutor.EnsureBootstrapSuperuserAsync();
+        await serviceExecutor.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, Options.BootstrapSuperuserPassword);
         string rootToken = (await serviceExecutor.LoginAsync("root", "root-password")).Token;
 
         string db = "grpcauthdb" + Guid.NewGuid().ToString("n");

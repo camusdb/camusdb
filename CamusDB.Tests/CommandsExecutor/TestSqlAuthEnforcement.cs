@@ -93,7 +93,7 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
         TrackDatabase(dbname, executor);
 
-        await executor.EnsureBootstrapSuperuserAsync();
+        await executor.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, Options.BootstrapSuperuserPassword);
         Principal root = await LoginAsync(executor, "root", "root-password");
 
         await RunTxnDdl(executor, dbname, "CREATE TABLE items (id int64 PRIMARY KEY NOT NULL, name string NOT NULL)", root);
@@ -302,16 +302,37 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     [Test]
     public async Task BootstrapFailsClosed_WhenNoSecret()
     {
-        // Auth on but no bootstrap secret configured: seeding must refuse rather than start a server
-        // whose superuser has no password. This fixture's default supplies a secret, so it is removed
-        // here — the missing secret is the condition under test.
-        CommandExecutor executor = CreateCommandExecutor(Options with { BootstrapSuperuserPassword = "" });
+        // Auth on but no bootstrap secret supplied: seeding must refuse rather than start a server
+        // whose superuser has no password. This fixture's default supplies a secret, so an empty one is
+        // passed here — the missing secret is the condition under test.
+        CommandExecutor executor = CreateCommandExecutor(Options);
         string dbname = "authdb" + Guid.NewGuid().ToString("n");
         await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
         TrackDatabase(dbname, executor);
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await executor.EnsureBootstrapSuperuserAsync())!;
+            await executor.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, ""))!;
         Assert.AreEqual(CamusDBErrorCodes.InvalidConfig, ex.Code);
+    }
+
+    [Test]
+    public async Task BootstrapSucceeds_WhenInjectedOptionsCarryNoPassword()
+    {
+        // Reproduces the production wiring: Program.cs registers CamusDBOptions in DI with
+        // BootstrapSuperuserPassword blanked, so the executor's injected options never carry the secret —
+        // it arrives only as the argument. Seeding read the password off `options` once, which meant a
+        // real server refused to start no matter what CAMUSDB_BOOTSTRAP_PASSWORD was set to, while every
+        // test here passed because its executor was built with the secret still in the options.
+        CommandExecutor executor = CreateCommandExecutor(Options with { BootstrapSuperuserPassword = "" });
+        string dbname = "authdb" + Guid.NewGuid().ToString("n");
+        await executor.CreateDatabase(new CreateDatabaseTicket(name: dbname, ifNotExists: false));
+        TrackDatabase(dbname, executor);
+
+        await executor.EnsureBootstrapSuperuserAsync("root", "root-password");
+
+        // Logging in proves the hash was seeded from the argument, and the superuser attribute proves it
+        // went through the bootstrap path — the only one that grants it.
+        Principal root = await LoginAsync(executor, "root", "root-password");
+        Assert.IsTrue(root.IsSuperuser);
     }
 }

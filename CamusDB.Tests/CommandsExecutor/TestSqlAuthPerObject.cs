@@ -78,7 +78,7 @@ internal sealed class TestSqlAuthPerObject : BaseTest
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
         TrackDatabase(db, ex);
 
-        await ex.EnsureBootstrapSuperuserAsync();
+        await ex.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, Options.BootstrapSuperuserPassword);
         Principal root = await Login(ex, "root", "root-pw");
 
         await TxnDdl(ex, db, "CREATE TABLE t1 (id int64 PRIMARY KEY NOT NULL, v int64 NULL)", root);

@@ -150,8 +150,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
     // batches keeps transaction size manageable and allows a leader-change resume to skip
-    // already-indexed rows via the persisted StartOffset checkpoint.
-    private const int BackfillBatchSize = 500;
+    // already-indexed rows via the persisted StartOffset checkpoint. Shared with the standalone
+    // flux backfill so both paths batch identically.
+    private const int BackfillBatchSize = TableIndexAdder.IndexBackfillBatchSize;
 
     /// <summary>
     /// Initializes the commands executor
@@ -1808,8 +1809,53 @@ public sealed class CommandExecutor : IAsyncDisposable
         ).ConfigureAwait(false);
     }
 
-    private static async Task CompensateAbortedAddIndexAsync(DatabaseDescriptor database, TableDescriptor table, string indexName)
+    /// <summary>
+    /// Undoes a partially applied ADD INDEX after its DDL transaction was rolled back: purges any
+    /// index entries that reached KV, then removes the index from the in-memory schema.
+    ///
+    /// <para>
+    /// The purge matters because a backfill over a table larger than one batch commits its later
+    /// batches in their own transactions (see <c>TableIndexAdder.BackfillIndex</c>), so a rollback of
+    /// the DDL transaction does not take those entries with it. They are unreachable — their index id
+    /// never becomes public — but they would occupy the keyspace forever. Runs in its own transaction,
+    /// which the caller must start only after the DDL transaction has settled: the two contend for the
+    /// same entry keys.
+    /// </para>
+    ///
+    /// <para>
+    /// Best-effort: a failed purge is logged and swallowed so the schema cleanup below still happens.
+    /// Leaving orphaned entries behind is strictly better than leaving a phantom index in the schema.
+    /// </para>
+    /// </summary>
+    private async Task CompensateAbortedAddIndexAsync(DatabaseDescriptor database, TableDescriptor table, string indexName)
     {
+        string? indexKvId = table.Schema.Indexes?
+            .FirstOrDefault(ix => string.Equals(ix.Name, indexName, StringComparison.OrdinalIgnoreCase))?.Id;
+
+        if (indexKvId is not null)
+        {
+            KvTransaction cleanupTx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+                mutationLimitOverride: 0
+            ).ConfigureAwait(false);
+            try
+            {
+                await table.Store.DropIndexEntries(cleanupTx, indexKvId).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(cleanupTx).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(cleanupTx).ConfigureAwait(false);
+
+                logger.LogWarning(
+                    ex,
+                    "Failed to purge index entries of aborted index {IndexName} on table {TableName}; they are unreachable but remain in storage",
+                    indexName,
+                    table.Name
+                );
+            }
+        }
+
         table.MutateIndexes(indexes => indexes.Remove(indexName));
 
         await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
@@ -2781,8 +2827,17 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// user by seeding the configured bootstrap superuser when it is empty. Fails startup (fail-closed)
     /// when auth is enabled, the catalog is empty, and no bootstrap secret was supplied — never opens an
     /// unauthenticated administration window. A no-op when auth is disabled or a user already exists.
+    ///
+    /// <para>The password is a parameter rather than a read of <c>options</c> on purpose: the injected
+    /// <see cref="CamusDBOptions"/> is registered with <see cref="CamusDBOptions.BootstrapSuperuserPassword"/>
+    /// blanked, so no long-lived component retains the one-shot startup secret. The caller — which still
+    /// holds the unscrubbed copy resolved from the environment — passes it here and drops it immediately
+    /// afterwards. Reading it off <c>options</c> would always see the empty string and make seeding
+    /// impossible.</para>
     /// </summary>
-    public async Task EnsureBootstrapSuperuserAsync()
+    /// <param name="bootstrapUser">Bootstrap superuser name, from the unscrubbed startup configuration.</param>
+    /// <param name="bootstrapPassword">Cleartext bootstrap password; hashed here and never persisted or logged.</param>
+    public async Task EnsureBootstrapSuperuserAsync(string bootstrapUser, string bootstrapPassword)
     {
         if (!options.AuthenticationEnabled || authCatalogTask is null)
             return;
@@ -2791,18 +2846,18 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (await catalog.UserCountAsync().ConfigureAwait(false) > 0)
             return;
 
-        if (string.IsNullOrEmpty(options.BootstrapSuperuser) || string.IsNullOrEmpty(options.BootstrapSuperuserPassword))
+        if (string.IsNullOrEmpty(bootstrapUser) || string.IsNullOrEmpty(bootstrapPassword))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidConfig,
                 "Authentication is enabled with an empty user catalog but no bootstrap superuser is configured; " +
                 "refusing to start without an administrator (set the bootstrap superuser secret).");
 
         bool created = await catalog.TryBootstrapSuperuserAsync(
-            options.BootstrapSuperuser,
-            PasswordHasher.Hash(options.BootstrapSuperuserPassword, options.PasswordHashIterations)).ConfigureAwait(false);
+            bootstrapUser,
+            PasswordHasher.Hash(bootstrapPassword, options.PasswordHashIterations)).ConfigureAwait(false);
 
         if (created && logger.IsEnabled(LogLevel.Information))
-            logger.LogInformation("Bootstrap superuser '{User}' created", options.BootstrapSuperuser);
+            logger.LogInformation("Bootstrap superuser '{User}' created", bootstrapUser);
     }
 
     /// <summary>
