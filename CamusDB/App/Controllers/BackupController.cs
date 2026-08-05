@@ -232,7 +232,7 @@ public sealed class BackupController : CommandsController
         if (failure)
             logger.LogWarning("Backup admin audit: op={Operation} user={User} remote={Remote} outcome={Outcome}",
                 operation, user, remote, outcome);
-        else
+        else if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Backup admin audit: op={Operation} user={User} remote={Remote} outcome={Outcome}",
                 operation, user, remote, outcome);
     }
