@@ -30,6 +30,10 @@ public sealed class KahunaOptionsConfig
         "wal_single_fsync_commit",
         "default_transaction_timeout_ms",
         "max_transaction_timeout_ms",
+        "max_concurrent_sessions",
+        "transaction_priority_reserved_slots",
+        "transaction_priority_aging_threshold",
+        "transaction_priority_max_queued",
         "locks_workers",
         "key_value_workers",
         "background_writer_workers",
@@ -113,6 +117,62 @@ public sealed class KahunaOptionsConfig
     /// lengthens how long an abandoned session's MVCC snapshot is retained before reaping.
     /// </summary>
     public int? MaxTransactionTimeoutMs { get; set; }
+
+    // ── Transaction admission gate ────────────────────────────────────────────────────────────
+    // These configure the Kahuna node's priority admission gate, which decides which of several
+    // waiting transactions starts next once the node is at its concurrency ceiling. All default to
+    // "off": with no ceiling every transaction is admitted immediately and priority is recorded but
+    // never consulted.
+    //
+    // Kahuna also exposes a second ceiling, `max_concurrent_transactions`, for its script-transaction
+    // path. It is deliberately NOT exposed here: CamusDB opens every transaction through
+    // LocateAndStartTransaction (the interactive-session path) and never runs a script transaction,
+    // so that knob would gate nothing while advertising that it does.
+
+    /// <summary>
+    /// Maximum Kahuna coordinator sessions open at once on this node; further transactions queue and
+    /// are started in priority order. <c>0</c> (the default) disables the gate.
+    ///
+    /// <para><b>For CamusDB this is a ceiling on concurrent work, not on connections.</b> The engine
+    /// opens a session per transaction — including its own catalog writes, schema checkpoints and
+    /// index backfill — so a ceiling below normal concurrency converts a healthy node into a queueing
+    /// one. Size it at or above observed healthy concurrency, and pair it with
+    /// <see cref="TransactionPriorityReservedSlots"/> so latency-critical engine work can always get
+    /// in. (Kahuna's own guide describes this knob for clients that hold one session per user session,
+    /// where it bounds connections; that advice does not transfer.)</para>
+    ///
+    /// <para>Note a queued transaction currently waits up to the session timeout before being told to
+    /// retry, because Kahuna bounds admission by the transaction's own timeout. Until that is fixed
+    /// upstream, prefer leaving this at <c>0</c>.</para>
+    /// </summary>
+    public int? MaxConcurrentSessions { get; set; }
+
+    /// <summary>
+    /// Session slots only <c>High</c>/<c>Critical</c> transactions may occupy, reserved out of
+    /// <see cref="MaxConcurrentSessions"/>. Guarantees latency-critical work can start no matter how
+    /// much bulk work is offered. <c>0</c> is the default; 1–2 is usually enough, and a large reserve
+    /// throttles ordinary traffic because it is subtracted from what ordinary work may use.
+    /// </summary>
+    public int? TransactionPriorityReservedSlots { get; set; }
+
+    /// <summary>
+    /// Milliseconds a queued transaction waits to gain one effective priority level, compounding up to
+    /// just below <c>Critical</c>. This is the anti-starvation bound. <c>0</c> disables aging and
+    /// permits indefinite starvation of low-priority work.
+    ///
+    /// <para>At the 1 000 ms default a <c>Background</c> transaction reaches <c>High</c> after roughly
+    /// three seconds of waiting, so background work yields for seconds rather than indefinitely. Raise
+    /// it to make low-priority work genuinely patient — but it is a single global rate, so raising it
+    /// also lengthens the worst-case wait for a genuinely starved ordinary transaction.</para>
+    /// </summary>
+    public int? TransactionPriorityAgingThreshold { get; set; }
+
+    /// <summary>
+    /// Maximum transactions that may wait at the gate before further ones are refused outright with a
+    /// retryable backpressure error. Bounds the memory the queue itself consumes during the overload
+    /// it exists to survive. <c>0</c> is unbounded; the Kahuna default is 4 096.
+    /// </summary>
+    public int? TransactionPriorityMaxQueued { get; set; }
 
     public int? LocksWorkers { get; set; }
 
@@ -303,6 +363,30 @@ public sealed class KahunaOptionsConfig
 
         if (MaxTransactionTimeoutMs is <= 0)
             throw InvalidConfig($"'kahuna.max_transaction_timeout_ms' must be > 0, got {MaxTransactionTimeoutMs}");
+
+        if (MaxConcurrentSessions is < 0)
+            throw InvalidConfig($"'kahuna.max_concurrent_sessions' must be >= 0, got {MaxConcurrentSessions}");
+
+        if (TransactionPriorityReservedSlots is < 0)
+            throw InvalidConfig(
+                $"'kahuna.transaction_priority_reserved_slots' must be >= 0, got {TransactionPriorityReservedSlots}");
+
+        if (TransactionPriorityAgingThreshold is < 0)
+            throw InvalidConfig(
+                $"'kahuna.transaction_priority_aging_threshold' must be >= 0, got {TransactionPriorityAgingThreshold}");
+
+        if (TransactionPriorityMaxQueued is < 0)
+            throw InvalidConfig(
+                $"'kahuna.transaction_priority_max_queued' must be >= 0, got {TransactionPriorityMaxQueued}");
+
+        // A reserve at or above the ceiling leaves ordinary work no capacity at all: the gate would
+        // admit High/Critical only and queue every Normal transaction until aging promoted it. That is
+        // a misconfiguration rather than a valid tuning, so reject it instead of deadlocking the node.
+        if (MaxConcurrentSessions is int ceiling and > 0 &&
+            TransactionPriorityReservedSlots is int reserved && reserved >= ceiling)
+            throw InvalidConfig(
+                $"'kahuna.transaction_priority_reserved_slots' ({reserved}) must be less than " +
+                $"'kahuna.max_concurrent_sessions' ({ceiling}), or ordinary transactions can never start");
 
         if (DefaultTransactionTimeoutMs is int defaultTimeout && MaxTransactionTimeoutMs is int maxTimeout && defaultTimeout > maxTimeout)
             throw InvalidConfig(

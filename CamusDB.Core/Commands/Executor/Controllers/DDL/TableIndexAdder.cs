@@ -18,6 +18,7 @@ using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.Transactions;
+using Kahuna.Shared.KeyValue;
 using CamusDB.Core.Storage.Kv;
 using Microsoft.Extensions.Logging;
 
@@ -308,9 +309,14 @@ internal sealed class TableIndexAdder
 
         while (true)
         {
+            // Background priority: the backfill is bulk, deferrable work that already runs in
+            // resumable batches, so on a saturated node it should yield the door to user traffic.
+            // This is the one engine path where admission priority genuinely applies — the backfill
+            // opens a coordinator session per batch, and each batch re-enters the gate.
             KvTransaction tx = await database.Transactions.BeginAsync(
                 CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-                mutationLimitOverride: 0
+                mutationLimitOverride: 0,
+                priority: TransactionPriority.Background
             ).ConfigureAwait(false);
 
             int batchRows = 0;

@@ -576,8 +576,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         }
 
         // Cache miss — try a live point-read from the persistent KV store.
+        //
+        // High priority, to avoid a priority inversion: this lookup runs *underneath* a user request
+        // that is already in flight (opening a database it named). Queueing it behind ordinary traffic
+        // would stall an already-admitted user statement on a transaction that has not been admitted
+        // yet — the caller waits, but its wait is invisible to the gate.
         KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            priority: TransactionPriority.High
         ).ConfigureAwait(false);
         try
         {
@@ -652,9 +658,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         }
 
         // Persistent scan: catch branches registered on other nodes that this node's cache missed.
+        // High for the same reason as the point-read above — it sits underneath an in-flight user
+        // request, so queueing it stalls work the gate has already admitted.
         string namePrefix = NameKeyPrefix;
         KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            priority: TransactionPriority.High
         ).ConfigureAwait(false);
         try
         {

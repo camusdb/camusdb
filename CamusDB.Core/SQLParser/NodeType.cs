@@ -144,6 +144,14 @@ public enum NodeType
     /// statement in the transaction, exactly like <see cref="SetTransaction"/>.
     /// </summary>
     SetTransactionLocking,
+    /// <summary>
+    /// <c>SET TRANSACTION PRIORITY { BACKGROUND | LOW | NORMAL | HIGH | CRITICAL }</c>. Selects the
+    /// admission priority the node's gate uses to decide which queued transaction starts next.
+    /// <c>yytext</c> carries the resolved enum name ("Background" … "Critical"). Must be issued
+    /// before any data statement, exactly like <see cref="SetTransactionLocking"/> — the priority is
+    /// consumed when the coordinator session opens and cannot be changed afterwards.
+    /// </summary>
+    SetTransactionPriority,
     SortAsc,
     SortDesc,
     CreateTable,

@@ -407,8 +407,14 @@ internal sealed class TableAnalyzer
         // its lease mid-scan aborts here instead of publishing. A node that cannot take the fence
         // (another node holds it) or is no longer the owner throws — nothing is persisted, so the table
         // stays stale and is retried by the current owner.
+        // Background priority: publishing refreshed statistics is maintenance and should yield to
+        // user traffic at the door. Note the analyze *scan* is not gated at all — it runs on a
+        // zero-identity snapshot with no coordinator session — so this brief publish is the only
+        // part of auto-analyze the admission gate ever sees. What actually bounds the scan's impact
+        // is its row-rate cap and foreground-load backoff, not this tag.
         KvTransaction fenceTx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            priority: TransactionPriority.Background).ConfigureAwait(false);
         try
         {
             string fenceKey = $"{database.Id}/meta/analyze:{table.Id}";

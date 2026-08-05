@@ -94,6 +94,24 @@ public sealed class TestConfigResolver
     }
 
     [Test]
+    public void Resolve_SetsDefaultTransactionPriorityFromYaml()
+    {
+        ConfigDefinition config = new ConfigReader().Read("default_transaction_priority: background");
+        CamusDBOptions resolved = ConfigResolver.Resolve(config);
+
+        Assert.That(resolved.DefaultTransactionPriority, Is.EqualTo(TransactionPriority.Background));
+    }
+
+    [Test]
+    public void DefaultTransactionPriority_DefaultsToNormalWhenKeyAbsent()
+    {
+        ConfigDefinition config = new ConfigReader().Read("default_isolation_level: serializable");
+        CamusDBOptions resolved = ConfigResolver.Resolve(config);
+
+        Assert.That(resolved.DefaultTransactionPriority, Is.EqualTo(TransactionPriority.Normal));
+    }
+
+    [Test]
     public void DefaultTransactionLocking_DefaultsToPessimisticWhenKeyAbsent()
     {
         // No default_transaction_locking key present → the ConfigDefinition default resolves to Pessimistic.

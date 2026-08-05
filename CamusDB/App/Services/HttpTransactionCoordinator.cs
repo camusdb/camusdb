@@ -91,15 +91,17 @@ public sealed class HttpTransactionCoordinator
         await StartAsync(databaseName, isolationLevel: null, transactionMode: null, locking: null, cancellationToken: cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// Starts a new transaction with the requested isolation level, mode, and locking strategy.
-    /// When any argument is <see langword="null"/> the server default applies:
+    /// Starts a new transaction with the requested isolation level, mode, locking strategy, and
+    /// admission priority. When any argument is <see langword="null"/> the server default applies:
     /// <see cref="CamusDBOptions.DefaultIsolationLevel"/>, <see cref="CamusTransactionMode.ReadWrite"/>,
-    /// and <see cref="CamusDBOptions.DefaultTransactionLocking"/> respectively.
+    /// <see cref="CamusDBOptions.DefaultTransactionLocking"/>, and
+    /// <see cref="CamusDBOptions.DefaultTransactionPriority"/> respectively.
     ///
     /// <para><paramref name="deferStart"/> requests deferred Kahuna-session start: the transaction is
-    /// begun without opening a coordinator session so a following <c>SET TRANSACTION LOCKING</c> can
-    /// still choose the locking mode (which Kahuna pins at session start). Pass it only for explicit
-    /// interactive transactions (<c>/start-transaction</c>); autocommit statements start eagerly.</para>
+    /// begun without opening a coordinator session so a following <c>SET TRANSACTION LOCKING</c> or
+    /// <c>SET TRANSACTION PRIORITY</c> can still choose those values (which Kahuna pins at session
+    /// start). Pass it only for explicit interactive transactions (<c>/start-transaction</c>);
+    /// autocommit statements start eagerly.</para>
     /// </summary>
     public async Task<KvTransaction> StartAsync(
         string databaseName,
@@ -107,6 +109,7 @@ public sealed class HttpTransactionCoordinator
         CamusTransactionMode? transactionMode,
         KeyValueTransactionLocking? locking = null,
         bool deferStart = false,
+        TransactionPriority? priority = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
@@ -116,7 +119,7 @@ public sealed class HttpTransactionCoordinator
 
         KvTransaction tx = await database.Transactions.BeginAsync(
             isolationLevel, transactionMode, locking: locking, deferStart: deferStart,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            priority: priority, cancellationToken: cancellationToken).ConfigureAwait(false);
         Register(database.Transactions, tx);
         return tx;
     }
@@ -136,13 +139,15 @@ public sealed class HttpTransactionCoordinator
         string databaseName,
         bool promote,
         HLCTimestamp? causalToken = null,
+        TransactionPriority? priority = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote, causalToken, cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(
+            promote, causalToken, priority, cancellationToken).ConfigureAwait(false);
 
         // Zero-snapshot fast-path transactions carry no identity and need no tracking or cleanup;
         // a promoted (real-id) transaction is registered so commit/rollback can find and release it.

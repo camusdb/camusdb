@@ -296,6 +296,78 @@ public sealed class TestIsolationLevelPlumbing
     }
 
     // ------------------------------------------------------------------
+    // 6b. SET TRANSACTION PRIORITY parser tests
+    //
+    // PRIORITY shares one 4-token production with LOCKING (a second production of the same shape
+    // would be a reduce/reduce conflict), so these also guard that the shared dispatch did not
+    // break LOCKING or the 5-/7-token isolation forms.
+    // ------------------------------------------------------------------
+
+    [TestCase("BACKGROUND", "Background")]
+    [TestCase("LOW", "Low")]
+    [TestCase("NORMAL", "Normal")]
+    [TestCase("HIGH", "High")]
+    [TestCase("CRITICAL", "Critical")]
+    public void SetTransactionPriority_Parse_AllLevels(string sql, string expected)
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SET TRANSACTION PRIORITY " + sql);
+
+        Assert.AreEqual(NodeType.SetTransactionPriority, ast.nodeType);
+        Assert.AreEqual(expected, ast.yytext);
+    }
+
+    [Test]
+    public void SetTransactionPriority_Parse_IsCaseInsensitive()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("set transaction priority high");
+
+        Assert.AreEqual(NodeType.SetTransactionPriority, ast.nodeType);
+        Assert.AreEqual("High", ast.yytext);
+    }
+
+    [Test]
+    public void SetTransactionPriority_Parse_UnknownLevel_Throws()
+    {
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SET TRANSACTION PRIORITY URGENT"));
+    }
+
+    [Test]
+    public void SetTransaction_Parse_UnknownSetting_Throws()
+    {
+        // The shared production must reject a 4-token SET TRANSACTION that is neither LOCKING nor
+        // PRIORITY, rather than silently accepting it as one of them.
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SET TRANSACTION DURABILITY STRICT"));
+    }
+
+    [Test]
+    public void SetTransactionPriority_Parse_DoesNotConflictWithLockingOrIsolation()
+    {
+        // All three SET TRANSACTION shapes must still resolve to their own node types now that
+        // PRIORITY shares LOCKING's production.
+        Assert.AreEqual(
+            NodeType.SetTransactionPriority,
+            SQLParserProcessor.Parse("SET TRANSACTION PRIORITY BACKGROUND").nodeType);
+
+        Assert.AreEqual(
+            NodeType.SetTransactionLocking,
+            SQLParserProcessor.Parse("SET TRANSACTION LOCKING OPTIMISTIC").nodeType);
+
+        Assert.AreEqual(
+            NodeType.SetTransaction,
+            SQLParserProcessor.Parse("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE").nodeType);
+
+        Assert.AreEqual(
+            NodeType.SetTransaction,
+            SQLParserProcessor.Parse("SET TRANSACTION ISOLATION LEVEL READ COMMITTED").nodeType);
+
+        Assert.AreEqual(
+            NodeType.SetTransaction,
+            SQLParserProcessor.Parse("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY").nodeType);
+    }
+
+    // ------------------------------------------------------------------
     // 7. ApplyLocking on KvTransaction (unit-level, no Kahuna required)
     // ------------------------------------------------------------------
 

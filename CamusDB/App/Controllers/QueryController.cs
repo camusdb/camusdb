@@ -78,7 +78,7 @@ public sealed class QueryController : CommandsController
             async Task AutocommitBody(CancellationToken ct)
             {
                 KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    request.DatabaseName ?? "", promote: true, request.CausalToken, ct).ConfigureAwait(false);
+                    request.DatabaseName ?? "", promote: true, request.CausalToken, cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     QueryTicket ticket = new(

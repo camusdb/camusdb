@@ -375,6 +375,24 @@ public sealed record CamusDBOptions
     public global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking DefaultTransactionLocking { get; init; } = global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic;
 
     /// <summary>
+    /// Default admission priority applied when a transaction is begun without an explicit one.
+    /// <see cref="Kahuna.Shared.KeyValue.TransactionPriority.Normal"/> is the neutral value and keeps
+    /// behavior identical to before priorities existed. A transaction can override it per request
+    /// (HTTP/gRPC <c>priority</c>) or with <c>SET TRANSACTION PRIORITY</c> before its first statement.
+    ///
+    /// <para><b>This is inert on a default-configured node.</b> Priority is consulted only by the
+    /// Kahuna node's admission gate, which is disabled while the concurrency ceiling
+    /// (<c>kahuna.max_concurrent_sessions</c>) is zero — its default. Until a ceiling is set, every
+    /// transaction is admitted immediately and this value is recorded for observability only.</para>
+    ///
+    /// <para><b>It orders starts, not execution.</b> Once admitted, a low-priority transaction competes
+    /// for CPU, I/O and locks exactly like any other — nothing is preempted or throttled, and lock
+    /// conflicts ignore priority entirely. Use it to decide who waits at the door, not to make
+    /// background work cheap while it runs.</para>
+    /// </summary>
+    public global::Kahuna.Shared.KeyValue.TransactionPriority DefaultTransactionPriority { get; init; } = global::Kahuna.Shared.KeyValue.TransactionPriority.Normal;
+
+    /// <summary>
     /// Default read-set validation policy applied when a transaction is begun without an explicit
     /// value. <see cref="Kahuna.Shared.KeyValue.ReadValidation.None"/> keeps the historical behavior:
     /// pessimistic transactions rely on their locks alone and do not fold read observations. A

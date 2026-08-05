@@ -3496,12 +3496,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
-        // Mark the transaction as having executed a statement for every statement type except
-        // SET TRANSACTION / SET TRANSACTION LOCKING — those must be the first statement per standard
-        // SQL semantics, so they are exempt from the gate (mirrors ExecuteSQLQuery). A client routes
-        // these no-rows statements to whichever endpoint it uses for non-SELECT SQL, which is often
-        // this one.
-        if (ast.nodeType != NodeType.SetTransaction && ast.nodeType != NodeType.SetTransactionLocking)
+        // Mark the transaction as having executed a statement for every statement type except the
+        // SET TRANSACTION family — those must be the first statement per standard SQL semantics, so
+        // they are exempt from the gate (mirrors ExecuteSQLQuery). A client routes these no-rows
+        // statements to whichever endpoint it uses for non-SELECT SQL, which is often this one.
+        if (!IsSetTransactionStatement(ast.nodeType))
             ticket.TxnState.MarkStatementExecuted();
 
         // Retry boundary: two transient errors, two different retry owners.
@@ -3630,6 +3629,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.SetTransaction:
             case NodeType.SetTransactionLocking:
+            case NodeType.SetTransactionPriority:
                 ApplySetTransactionStatement(ast, ticket);
                 return new(database, null!, 0);
 
@@ -3776,9 +3776,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 
-        // Mark the transaction as having executed a statement for every statement type except
-        // SET TRANSACTION — that one must be the first statement per standard SQL semantics.
-        if (ast.nodeType != NodeType.SetTransaction && ast.nodeType != NodeType.SetTransactionLocking)
+        // Mark the transaction as having executed a statement for every statement type except the
+        // SET TRANSACTION family — those must be the first statement per standard SQL semantics.
+        if (!IsSetTransactionStatement(ast.nodeType))
             ticket.TxnState.MarkStatementExecuted();
 
         switch (ast.nodeType)
@@ -3959,6 +3959,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.SetTransaction:
             case NodeType.SetTransactionLocking:
+            case NodeType.SetTransactionPriority:
                 ApplySetTransactionStatement(ast, ticket);
                 return (database, AsyncEnumerable.Empty<QueryResultRow>());
 
@@ -4013,11 +4014,36 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return;
                 }
 
+            case NodeType.SetTransactionPriority:
+                {
+                    // yytext carries the resolved enum name ("Background" … "Critical") set by the grammar.
+                    if (!Enum.TryParse(ast.yytext, out Kahuna.Shared.KeyValue.TransactionPriority priority))
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                            $"Unknown transaction priority '{ast.yytext}' in SET TRANSACTION PRIORITY");
+
+                    ticket.TxnState.ApplyPriority(priority);
+                    return;
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt,
                     "ApplySetTransactionStatement called with non-SET node: " + ast.nodeType);
         }
     }
+
+    /// <summary>
+    /// Whether the node is one of the <c>SET TRANSACTION</c> family. These configure the in-flight
+    /// transaction rather than reading or writing data, so they are exempt from the
+    /// "first statement" latch — a <c>SET TRANSACTION</c> must be able to follow another one.
+    ///
+    /// <para>Both SQL dispatchers gate on this. Adding a new <c>SET TRANSACTION</c> node type without
+    /// adding it here silently makes that statement count as a data statement, which then rejects any
+    /// <c>SET TRANSACTION</c> issued after it.</para>
+    /// </summary>
+    private static bool IsSetTransactionStatement(NodeType nodeType) =>
+        nodeType is NodeType.SetTransaction
+                 or NodeType.SetTransactionLocking
+                 or NodeType.SetTransactionPriority;
 
     private static async IAsyncEnumerable<QueryResultRow> ToAsyncEnumerable(QueryResultRow row)
     {

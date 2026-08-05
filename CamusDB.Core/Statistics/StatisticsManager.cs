@@ -1020,8 +1020,12 @@ public sealed class StatisticsManager
         bool absolute = Interlocked.Exchange(ref entry.ForceAbsoluteFlush, 0) == 1;
 
         string kahunaKey = KahunaKey(database.Id, table.Id);
+        // Background priority: flushing the statistics blob is maintenance, not user work, so it
+        // yields the door to foreground traffic on a saturated node. A deferred flush costs only
+        // optimizer freshness.
         KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            priority: TransactionPriority.Background
         ).ConfigureAwait(false);
         try
         {

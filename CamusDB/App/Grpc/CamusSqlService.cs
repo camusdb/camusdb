@@ -26,6 +26,8 @@ using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
 using ProtoColType = CamusDB.Grpc.ColumnType;
+using ProtoPriority = CamusDB.Grpc.TransactionPriority;
+using EnginePriority = Kahuna.Shared.KeyValue.TransactionPriority;
 
 namespace CamusDB.App.Grpc;
 
@@ -151,7 +153,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             // Autocommit: retry transparently on transient serialization failures, but only while
             // nothing has been streamed yet (see RunAutocommitQuery).
-            (CamusIsolationLevel? reqLevel, _, _) = ParseLevelMode(request);
+            (CamusIsolationLevel? reqLevel, _, _, _) = ParseLevelMode(request);
             bool retry = (reqLevel ?? options.DefaultIsolationLevel) == CamusIsolationLevel.Serializable;
 
             CacheMetadataHolder cacheMeta = new();
@@ -245,11 +247,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     {
         HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
         HLCTimestamp commitToken = default;
+        EnginePriority? reqPriority = ToPriority(request.Priority);
 
         async Task<HLCTimestamp> Attempt(CancellationToken innerCt)
         {
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, innerCt).ConfigureAwait(false);
+                request.Database, promote: true, causalToken, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
@@ -292,7 +295,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             CancellationToken ct = context.CancellationToken;
             RejectStatementId(request, "ExecuteNonQuery");
             Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
-            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
+            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, EnginePriority? reqPriority) =
                 ParseLevelMode(request);
 
             // Mirrors the REST non-query path: a database-scoped statement returns no descriptor, so
@@ -343,7 +346,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             async Task AutocommitDml(CancellationToken innerCt)
             {
                 KvTransaction tx = await transactions.StartAsync(
-                    request.Database, reqLevel, reqMode, reqLocking, cancellationToken: innerCt).ConfigureAwait(false);
+                    request.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -400,7 +403,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 if (!isDbManagement)
                 {
-                    (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
+                    (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, EnginePriority? reqPriority) =
                         ParseLevelMode(request);
 
                     if (request.TxnHandle is { TxnIdPt: > 0 } handle)
@@ -410,7 +413,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     else
                     {
                         txnState = await transactions.StartAsync(
-                            request.Database, reqLevel, reqMode, reqLocking, cancellationToken: ct).ConfigureAwait(false);
+                            request.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: ct).ConfigureAwait(false);
                         newTransaction = true;
                     }
                 }
@@ -798,7 +801,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // retryable conflict propagates and is reported as BatchError for the client to replay.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                resolved.Database, promote: true, causalToken, ct).ConfigureAwait(false);
+                resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: ct).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
@@ -844,7 +847,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         CancellationToken ct)
     {
         ResolvedStatement resolved = ResolveStatement(request, prepared);
-        (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking) =
+        (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, EnginePriority? reqPriority) =
             ParseLevelMode(request);
         NonQueryReply reply;
 
@@ -861,7 +864,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         else
         {
             KvTransaction tx = await transactions.StartAsync(
-                resolved.Database, reqLevel, reqMode, reqLocking, cancellationToken: ct).ConfigureAwait(false);
+                resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: ct).ConfigureAwait(false);
             int rows;
             HLCTimestamp token;
             try
@@ -907,11 +910,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
-        (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) =
+        (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking, Kahuna.Shared.KeyValue.TransactionPriority? priority) =
             ParseLevelMode(request);
 
         KvTransaction tx = await transactions.StartAsync(
-            request.Database, level, mode, locking, deferStart: true, cancellationToken: ct).ConfigureAwait(false);
+            request.Database, level, mode, locking, deferStart: true, priority: priority, cancellationToken: ct).ConfigureAwait(false);
 
         TxnHandle handle = new()
         {
@@ -1023,9 +1026,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             CamusIsolationLevel? level   = ToIsolationLevel(request.IsolationLevel);
             CamusTransactionMode? mode   = ToTransactionMode(request.TransactionMode);
             KeyValueTransactionLocking? locking = ToLocking(request.Locking);
+            EnginePriority? priority = ToPriority(request.Priority);
 
             KvTransaction tx = await transactions.StartAsync(
-                request.Database, level, mode, locking, deferStart: true).ConfigureAwait(false);
+                request.Database, level, mode, locking, deferStart: true, priority: priority).ConfigureAwait(false);
 
             return new TxnHandle
             {
@@ -1232,13 +1236,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
     // ─── Request helpers ─────────────────────────────────────────────────────
 
-    private static (CamusIsolationLevel?, CamusTransactionMode?, KeyValueTransactionLocking?) ParseLevelMode(
+    private static (CamusIsolationLevel?, CamusTransactionMode?, KeyValueTransactionLocking?, EnginePriority?) ParseLevelMode(
         SqlRequest request)
     {
         CamusIsolationLevel? level  = ToIsolationLevel(request.IsolationLevel);
         CamusTransactionMode? mode  = ToTransactionMode(request.TransactionMode);
         KeyValueTransactionLocking? locking = ToLocking(request.Locking);
-        return (level, mode, locking);
+        EnginePriority? priority = ToPriority(request.Priority);
+        return (level, mode, locking, priority);
     }
 
     private static CamusIsolationLevel? ToIsolationLevel(IsolationLevel level) => level switch
@@ -1260,6 +1265,22 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         LockingMode.Pessimistic => KeyValueTransactionLocking.Pessimistic,
         LockingMode.Optimistic  => KeyValueTransactionLocking.Optimistic,
         _                       => null,
+    };
+
+    /// <summary>
+    /// Maps the wire priority to the engine enum. Unspecified — which is what a client built before
+    /// the field existed necessarily sends — maps to <c>null</c> so the server default applies. It
+    /// must never map to <c>Background</c>, or upgrading the server would silently demote every
+    /// pre-upgrade client's transactions to the bottom of the admission queue.
+    /// </summary>
+    private static EnginePriority? ToPriority(ProtoPriority priority) => priority switch
+    {
+        ProtoPriority.Background => EnginePriority.Background,
+        ProtoPriority.Low => EnginePriority.Low,
+        ProtoPriority.Normal => EnginePriority.Normal,
+        ProtoPriority.High => EnginePriority.High,
+        ProtoPriority.Critical => EnginePriority.Critical,
+        _                              => null,
     };
 
     private static HLCTimestamp? ToCausalToken(int n, long l, long c)

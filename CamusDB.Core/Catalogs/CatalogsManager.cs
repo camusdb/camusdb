@@ -1184,8 +1184,13 @@ public sealed class CatalogsManager
         if (TestPersistCheckpointException is { } fault)
             throw fault;
 
+        // High priority: this persists the KV checkpoint for a schema change that Raft has already
+        // committed. Delaying it behind a queue of ordinary traffic stalls DDL for the whole cluster,
+        // and the commit here is already bounded by CheckpointCommitTimeout — so waiting at the
+        // admission gate would eat that budget and turn a busy node into a persist failure.
         KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            priority: TransactionPriority.High
         ).ConfigureAwait(false);
 
         try

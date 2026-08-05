@@ -83,6 +83,30 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void RejectsInvalidDefaultTransactionPriority()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("default_transaction_priority: urgent"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("default_transaction_priority"));
+    }
+
+    [Test]
+    public void RejectsReservedSlotsAtOrAboveTheSessionCeiling()
+    {
+        // A reserve >= the ceiling leaves ordinary work no capacity at all — every Normal
+        // transaction would queue until aging promoted it. Reject rather than let a node
+        // configure itself into that state.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read(
+                "kahuna:\n  max_concurrent_sessions: 2\n  transaction_priority_reserved_slots: 2"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("transaction_priority_reserved_slots"));
+    }
+
+    [Test]
     public void RejectsUnknownKahunaStorageBackend()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(

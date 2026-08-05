@@ -124,6 +124,7 @@ public static class ConfigResolver
 
         DefaultIsolationLevel = config.ParseDefaultIsolationLevel(),
         DefaultTransactionLocking = config.ParseDefaultTransactionLocking(),
+        DefaultTransactionPriority = config.ParseDefaultTransactionPriority(),
         RangeLockExpiresMs = config.RangeLockExpiresMs,
         MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs,
         TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs,

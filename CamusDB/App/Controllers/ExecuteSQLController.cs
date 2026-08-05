@@ -149,7 +149,7 @@ public sealed class ExecuteSQLController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
-            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, _) = ParseRequestLevelMode(request);
+            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, _, TransactionPriority? reqPriority) = ParseRequestLevelMode(request);
 
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
@@ -222,7 +222,8 @@ public sealed class ExecuteSQLController : CommandsController
             async Task AutocommitBody(CancellationToken ct)
             {
                 KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    resolved.Database, promote: true, request.CausalToken, ct).ConfigureAwait(false);
+                    resolved.Database, promote: true, request.CausalToken, priority: reqPriority,
+                    cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     QuerySchemaHolder schemaHolder = new();
@@ -390,7 +391,7 @@ public sealed class ExecuteSQLController : CommandsController
             else
             {
                 KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    resolved.Database, promote: true, request.CausalToken, ct).ConfigureAwait(false);
+                    resolved.Database, promote: true, request.CausalToken, cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -534,7 +535,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             LogExecutingSqlRedacted(resolved.Sql);
 
-            (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2) = ParseRequestLevelMode(request);
+            (CamusIsolationLevel? reqLevel2, CamusTransactionMode? reqMode2, KeyValueTransactionLocking? reqLocking2, TransactionPriority? reqPriority2) = ParseRequestLevelMode(request);
 
             // Clients route no-rows statements to whichever endpoint they use for non-SELECT SQL,
             // so a database-scoped statement can arrive here as easily as at /execute-sql-ddl. It
@@ -585,7 +586,9 @@ public sealed class ExecuteSQLController : CommandsController
 
             async Task AutocommitDmlBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.StartAsync(resolved.Database, reqLevel2, reqMode2, reqLocking2, cancellationToken: ct).ConfigureAwait(false);
+                KvTransaction tx = await transactions.StartAsync(
+                    resolved.Database, reqLevel2, reqMode2, reqLocking2, priority: reqPriority2,
+                    cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -664,14 +667,15 @@ public sealed class ExecuteSQLController : CommandsController
                 // so starting a transaction here would hand a null descriptor to the commit below.
                 if (!StatementScope.IsDatabaseScopedMutation(ast.nodeType))
                 {
-                    (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3, KeyValueTransactionLocking? reqLocking3) = ParseRequestLevelMode(request);
+                    (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3, KeyValueTransactionLocking? reqLocking3, TransactionPriority? reqPriority3) = ParseRequestLevelMode(request);
                     (newTransaction, txnState) = await BeginOrResumeAsync(
                         request.DatabaseName,
                         request.TxnIdPT,
                         request.TxnIdCounter,
                         isolationLevel: reqLevel3,
                         transactionMode: reqMode3,
-                        locking: reqLocking3
+                        locking: reqLocking3,
+                        priority: reqPriority3
                     ).ConfigureAwait(false);
                 }
 

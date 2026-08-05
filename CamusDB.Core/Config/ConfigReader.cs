@@ -64,6 +64,7 @@ public class ConfigReader
         "grpc_batch_max_in_flight",
         "default_isolation_level",
         "default_transaction_locking",
+        "default_transaction_priority",
         "range_lock_expires_ms",
         "max_serializable_transaction_lifetime_ms",
         "transaction_idle_timeout_ms",

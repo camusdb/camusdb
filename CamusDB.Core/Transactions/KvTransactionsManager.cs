@@ -169,6 +169,7 @@ public sealed class KvTransactionsManager : IDisposable
         ReadValidation? readValidation = null,
         DecisionDurability? decisionDurability = null,
         bool deferStart = false,
+        TransactionPriority? priority = null,
         CancellationToken cancellationToken = default)
     {
         CamusIsolationLevel level = isolationLevel ?? options.DefaultIsolationLevel;
@@ -177,7 +178,8 @@ public sealed class KvTransactionsManager : IDisposable
         // Serializable + ReadOnly: mint a server HLC timestamp T and return a stateless
         // zero-identity transaction that carries T as its read snapshot.
         if (level == CamusIsolationLevel.Serializable && mode == CamusTransactionMode.ReadOnly)
-            return await BeginSerializableReadOnlyAsync(cancellationToken).ConfigureAwait(false);
+            return await BeginSerializableReadOnlyAsync(
+                priority ?? options.DefaultTransactionPriority, cancellationToken).ConfigureAwait(false);
 
         // Concurrency strategy: caller-chosen, defaulting to pessimistic (acquire-then-write, block on
         // conflict). Optimistic defers conflict detection to the coordinator's read-set validation at
@@ -185,6 +187,11 @@ public sealed class KvTransactionsManager : IDisposable
         KeyValueTransactionLocking lockingMode = locking ?? options.DefaultTransactionLocking;
         ReadValidation readValidationMode = readValidation ?? options.DefaultReadValidation;
         DecisionDurability decisionDurabilityMode = decisionDurability ?? options.DefaultDecisionDurability;
+
+        // Admission priority: caller-chosen, defaulting to the engine-wide setting. Consulted only by
+        // the Kahuna node's admission gate when a concurrency ceiling is configured; with the default
+        // ceiling of zero it is recorded and never gates. See options.DefaultTransactionPriority.
+        TransactionPriority priorityMode = priority ?? options.DefaultTransactionPriority;
 
         string uniqueId = Guid.NewGuid().ToString("N");
         int mutationLimit = mutationLimitOverride ?? options.MaxMutationsPerTransaction;
@@ -207,14 +214,18 @@ public sealed class KvTransactionsManager : IDisposable
             KvTransaction txDeferred = new(
                 Kommander.Time.HLCTimestamp.Zero, uniqueId, isReadOnly: false, level, mode,
                 mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode,
-                clientId: clientId);
+                clientId: clientId, priority: priorityMode);
 
             DecisionDurability capturedDecision = decisionDurabilityMode;
             txDeferred.SessionStarter = async ct =>
             {
+                // Priority is read from the transaction (not captured above) for the same reason
+                // Locking is: a SET TRANSACTION PRIORITY between BeginAsync and the first operation
+                // must be the value the admission gate sees, and the gate runs inside this call.
                 TransactionHandle h = await StartKahunaTransactionAsync(
                     uniqueId, "start Kahuna transaction",
-                    txDeferred.Locking, txDeferred.ReadValidation, capturedDecision, ct
+                    txDeferred.Locking, txDeferred.ReadValidation, capturedDecision,
+                    txDeferred.Priority, ct
                 ).ConfigureAwait(false);
                 txDeferred.SetSessionId(h.TransactionId);
             };
@@ -228,10 +239,11 @@ public sealed class KvTransactionsManager : IDisposable
         // transaction, and whenever deferral was not requested.
         TransactionHandle handle = await StartKahunaTransactionAsync(
             uniqueId, "start Kahuna transaction", lockingMode, readValidationMode, decisionDurabilityMode,
-            cancellationToken).ConfigureAwait(false);
+            priorityMode, cancellationToken).ConfigureAwait(false);
 
         KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: false, level, mode,
-            mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode);
+            mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode,
+            priority: priorityMode);
         Track(tx);
 
         // No client-side range-lock heartbeat: range-lock acquisitions are registered with the
@@ -253,7 +265,8 @@ public sealed class KvTransactionsManager : IDisposable
     /// any data — it is finalized via rollback on commit or rollback (see
     /// <see cref="CommitAsync"/>).</para>
     /// </summary>
-    private async Task<KvTransaction> BeginSerializableReadOnlyAsync(CancellationToken cancellationToken)
+    private async Task<KvTransaction> BeginSerializableReadOnlyAsync(
+        TransactionPriority priority, CancellationToken cancellationToken)
     {
         string uniqueId = Guid.NewGuid().ToString("N");
 
@@ -262,7 +275,7 @@ public sealed class KvTransactionsManager : IDisposable
         TransactionHandle handle = await StartKahunaTransactionAsync(
             uniqueId, "mint read-timestamp for serializable RO transaction",
             KeyValueTransactionLocking.Pessimistic, ReadValidation.None, DecisionDurability.BestEffort,
-            cancellationToken).ConfigureAwait(false);
+            priority, cancellationToken).ConfigureAwait(false);
         Kommander.Time.HLCTimestamp t = handle.TransactionId;
 
         // Keep the Kahuna transaction alive as the tracking handle — its HLC timestamp T doubles as
@@ -274,7 +287,8 @@ public sealed class KvTransactionsManager : IDisposable
             isReadOnly:      true,
             isolationLevel:  CamusIsolationLevel.Serializable,
             transactionMode: CamusTransactionMode.ReadOnly,
-            readTimestamp:   t
+            readTimestamp:   t,
+            priority:        priority
         );
         Track(tx);
         return tx;
@@ -300,7 +314,8 @@ public sealed class KvTransactionsManager : IDisposable
     /// </summary>
     private async Task<TransactionHandle> StartKahunaTransactionAsync(
         string uniqueId, string operation, KeyValueTransactionLocking locking,
-        ReadValidation readValidation, DecisionDurability decisionDurability, CancellationToken cancellationToken)
+        ReadValidation readValidation, DecisionDurability decisionDurability,
+        TransactionPriority priority, CancellationToken cancellationToken)
     {
         KeyValueResponseType type = KeyValueResponseType.MustRetry;
         TransactionHandle handle = default;
@@ -317,6 +332,9 @@ public sealed class KvTransactionsManager : IDisposable
                     Locking           = locking,
                     ReadValidation    = readValidation,
                     DecisionDurability = decisionDurability,
+                    // Consulted by the node's admission gate to decide which queued transaction starts
+                    // next. Inert unless a concurrency ceiling is configured on the node.
+                    Priority          = priority,
                     // Bound an abandoned session server-side: the Kahuna reaper reclaims a session that
                     // is never finalized after this window plus its grace period, releasing its range
                     // locks. Non-positive leaves the server default. This replaces the client-side
@@ -378,6 +396,7 @@ public sealed class KvTransactionsManager : IDisposable
     public async Task<KvTransaction> BeginReadOnlyAsync(
         bool promote,
         Kommander.Time.HLCTimestamp? causalToken = null,
+        TransactionPriority? priority = null,
         CancellationToken cancellationToken = default)
     {
         if (!promote || !options.KeyRangeShardingEnabled)
@@ -399,13 +418,15 @@ public sealed class KvTransactionsManager : IDisposable
         // MustRetry/WaitingForReplication warmup retry as a read-write Begin. A bare start here would
         // give the scan's shared range locks a 5 s session lease and no retry against a still-electing
         // partition, so a slow serializable scan could have its snapshot reaped mid-read.
+        TransactionPriority priorityMode = priority ?? options.DefaultTransactionPriority;
+
         TransactionHandle handle = await StartKahunaTransactionAsync(
             uniqueId, "start read-only transaction",
             KeyValueTransactionLocking.Pessimistic, ReadValidation.None, DecisionDurability.BestEffort,
-            cancellationToken).ConfigureAwait(false);
+            priorityMode, cancellationToken).ConfigureAwait(false);
 
         KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: true,
-            transactionMode: CamusTransactionMode.ReadOnly);
+            transactionMode: CamusTransactionMode.ReadOnly, priority: priorityMode);
         Track(tx);
         return tx;
     }

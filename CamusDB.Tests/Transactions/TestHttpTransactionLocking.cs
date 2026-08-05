@@ -159,22 +159,23 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
     [Test]
     public void ParseRequestLevelMode_ParsesLockingCaseInsensitively()
     {
-        (_, _, KeyValueTransactionLocking? opt) = LockingParseProbe.Parse(new ExecuteSQLRequest { Locking = "optimistic" });
+        (_, _, KeyValueTransactionLocking? opt, _) = LockingParseProbe.Parse(new ExecuteSQLRequest { Locking = "optimistic" });
         Assert.That(opt, Is.EqualTo(KeyValueTransactionLocking.Optimistic));
 
-        (_, _, KeyValueTransactionLocking? pess) = LockingParseProbe.Parse(new ExecuteSQLRequest { Locking = "Pessimistic" });
+        (_, _, KeyValueTransactionLocking? pess, _) = LockingParseProbe.Parse(new ExecuteSQLRequest { Locking = "Pessimistic" });
         Assert.That(pess, Is.EqualTo(KeyValueTransactionLocking.Pessimistic));
     }
 
     [Test]
     public void ParseRequestLevelMode_NullFields_ResolveToNull()
     {
-        (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) =
+        (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking, TransactionPriority? priority) =
             LockingParseProbe.Parse(new ExecuteSQLRequest());
 
         Assert.That(level, Is.Null);
         Assert.That(mode, Is.Null);
         Assert.That(locking, Is.Null);
+        Assert.That(priority, Is.Null);
     }
 
     [Test]
@@ -398,7 +399,7 @@ public sealed class TestHttpTransactionLocking : SharedNodeBaseTest
     {
         private LockingParseProbe() : base(null!, null!, null!, CamusDBOptions.Default) { }
 
-        public static (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking) Parse(ExecuteSQLRequest request)
+        public static (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking, TransactionPriority? priority) Parse(ExecuteSQLRequest request)
             => ParseRequestLevelMode(request);
     }
 }

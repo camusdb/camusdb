@@ -154,6 +154,22 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.MaxTransactionTimeoutMs is int maxTxnTimeout)
             baseline.MaxTransactionTimeout = maxTxnTimeout;
 
+        // Priority admission gate. Left at the Kahuna defaults (ceiling 0 = no gate) unless an
+        // operator sets them, so a default-configured node admits every transaction immediately and
+        // priority is recorded for observability only. MaxConcurrentTransactions (the script-path
+        // ceiling) is intentionally not wired — CamusDB never uses that path.
+        if (kahuna.MaxConcurrentSessions is int maxSessions)
+            baseline.MaxConcurrentSessions = maxSessions;
+
+        if (kahuna.TransactionPriorityReservedSlots is int reservedSlots)
+            baseline.TransactionPriorityReservedSlots = reservedSlots;
+
+        if (kahuna.TransactionPriorityAgingThreshold is int agingThreshold)
+            baseline.TransactionPriorityAgingThreshold = agingThreshold;
+
+        if (kahuna.TransactionPriorityMaxQueued is int maxQueued)
+            baseline.TransactionPriorityMaxQueued = maxQueued;
+
         if (kahuna.LocksWorkers is int locksWorkers)
             baseline.LocksWorkers = locksWorkers;
 

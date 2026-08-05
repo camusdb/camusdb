@@ -300,6 +300,16 @@ public class ConfigDefinition
     public string DefaultTransactionLocking { get; set; } = "pessimistic";
 
     /// <summary>
+    /// Cluster-wide default admission priority when a transaction omits one: <c>background</c>,
+    /// <c>low</c>, <c>normal</c>, <c>high</c>, or <c>critical</c>. Default is <c>normal</c>.
+    ///
+    /// <para>Consulted only by the Kahuna node's admission gate, which is off while
+    /// <c>kahuna.max_concurrent_sessions</c> is zero (its default) — so changing this has no effect
+    /// until a concurrency ceiling is configured.</para>
+    /// </summary>
+    public string DefaultTransactionPriority { get; set; } = "normal";
+
+    /// <summary>
     /// Initial range-lock TTL in milliseconds. The coordinator renews a live session's range locks on
     /// its collection-interval tick, so this must exceed that interval (60 s by default) or a lock
     /// lapses before the first renewal. &lt;= 0 disables expiry. Default 150 000.
@@ -506,6 +516,22 @@ public class ConfigDefinition
         };
     }
 
+    /// <summary>Parses <see cref="DefaultTransactionPriority"/> to the Kahuna enum.</summary>
+    public TransactionPriority ParseDefaultTransactionPriority()
+    {
+        return DefaultTransactionPriority switch
+        {
+            "background" => TransactionPriority.Background,
+            "low" => TransactionPriority.Low,
+            "normal" => TransactionPriority.Normal,
+            "high" => TransactionPriority.High,
+            "critical" => TransactionPriority.Critical,
+            _ => throw Invalid(
+                "'default_transaction_priority' must be one of 'background', 'low', 'normal', 'high', " +
+                "'critical', got '" + DefaultTransactionPriority + "'"),
+        };
+    }
+
     /// <summary>
     /// Validates the configuration, throwing <see cref="CamusDBException"/> with
     /// <see cref="CamusDBErrorCodes.InvalidConfig"/> on the first problem found.
@@ -606,6 +632,11 @@ public class ConfigDefinition
             throw Invalid(
                 "'default_transaction_locking' must be 'pessimistic' or 'optimistic', got '" +
                 DefaultTransactionLocking + "'");
+
+        if (DefaultTransactionPriority is not ("background" or "low" or "normal" or "high" or "critical"))
+            throw Invalid(
+                "'default_transaction_priority' must be one of 'background', 'low', 'normal', 'high', " +
+                "'critical', got '" + DefaultTransactionPriority + "'");
 
         if (LockEscalationThreshold <= 0)
             throw Invalid($"'lock_escalation_threshold' must be > 0, got {LockEscalationThreshold}");

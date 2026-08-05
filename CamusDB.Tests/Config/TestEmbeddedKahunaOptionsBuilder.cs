@@ -348,6 +348,54 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-off", kahuna, CamusDBOptions.Default));
     }
 
+    // ── Priority admission gate ──────────────────────────────────────────────────────────────────
+
+    [Test]
+    public void AdmissionGate_DefaultsToOff_WhenNoKnobsAreSet()
+    {
+        // The whole feature ships dark: with no configuration the ceiling stays at zero, so every
+        // transaction is admitted immediately and priority is recorded but never gates.
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone(
+            "/tmp/admission-default", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(built.MaxConcurrentSessions, Is.EqualTo(0));
+        Assert.That(built.TransactionPriorityReservedSlots, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void AdmissionGateKnobs_ReachTheNodeOptions()
+    {
+        KahunaOptionsConfig kahuna = new()
+        {
+            MaxConcurrentSessions             = 8,
+            TransactionPriorityReservedSlots  = 2,
+            TransactionPriorityAgingThreshold = 30_000,
+            TransactionPriorityMaxQueued      = 512,
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone(
+            "/tmp/admission-set", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.MaxConcurrentSessions, Is.EqualTo(8));
+        Assert.That(built.TransactionPriorityReservedSlots, Is.EqualTo(2));
+        Assert.That(built.TransactionPriorityAgingThreshold, Is.EqualTo(30_000));
+        Assert.That(built.TransactionPriorityMaxQueued, Is.EqualTo(512));
+    }
+
+    [Test]
+    public void ScriptTransactionCeiling_IsNeverConfigured()
+    {
+        // MaxConcurrentTransactions gates Kahuna's script-transaction path, which CamusDB never uses
+        // (every transaction goes through LocateAndStartTransaction). It is deliberately not exposed,
+        // so it must stay at the node default no matter what the session ceiling is set to.
+        KahunaOptionsConfig kahuna = new() { MaxConcurrentSessions = 4 };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone(
+            "/tmp/admission-script", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.MaxConcurrentTransactions, Is.EqualTo(0));
+    }
+
     // ── Transaction-timeout composition (session Timeout vs node MaxTransactionTimeout) ──────────
 
     /// <summary>

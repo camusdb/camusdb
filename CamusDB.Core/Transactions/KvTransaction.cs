@@ -194,6 +194,22 @@ public sealed class KvTransaction
     public KeyValueTransactionLocking Locking { get; private set; }
 
     /// <summary>
+    /// Relative importance of this transaction when the Kahuna node has to choose which of several
+    /// waiting transactions to start next. Governs <b>admission order only</b>: it never preempts a
+    /// running transaction, never affects lock conflict resolution, and never changes isolation or
+    /// commit semantics.
+    ///
+    /// <para>Pinned when the coordinator session opens, because the admission gate is entered inside
+    /// the server's start call — so, exactly like <see cref="Locking"/>, it may be changed via
+    /// <c>SET TRANSACTION PRIORITY</c> only before that point. See <see cref="ApplyPriority"/>.</para>
+    ///
+    /// <para>Note the gate is inert unless an operator has configured a concurrency ceiling on the
+    /// node; with the default ceiling of zero every transaction is admitted immediately and this
+    /// value is recorded but never consulted.</para>
+    /// </summary>
+    public TransactionPriority Priority { get; private set; }
+
+    /// <summary>
     /// Whether reads issued by this transaction are tracked by the coordinator for a commit-time
     /// read-set conflict check. <see cref="ReadValidation.None"/> (the default) skips tracking;
     /// <see cref="ReadValidation.TrackAndValidate"/> requests the check even for a pessimistic
@@ -312,7 +328,8 @@ public sealed class KvTransaction
         int mutationLimit = 0,
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic,
         ReadValidation readValidation = ReadValidation.None,
-        HLCTimestamp clientId = default)
+        HLCTimestamp clientId = default,
+        TransactionPriority priority = TransactionPriority.Normal)
     {
         TransactionId = transactionId;
         // ClientId is the stable tracking identity for HttpTransactionCoordinator. For eager-start
@@ -328,6 +345,7 @@ public sealed class KvTransaction
         this.mutationLimit = mutationLimit;
         Locking = locking;
         ReadValidation = readValidation;
+        Priority = priority;
         if (transactionId != HLCTimestamp.Zero)
             lifetimeWatch = Stopwatch.StartNew();
     }
@@ -449,6 +467,41 @@ public sealed class KvTransaction
                     $"transaction {UniqueId} already has an active session");
 
             Locking = locking;
+        }
+    }
+
+    /// <summary>
+    /// Applies an admission priority to this transaction. Called by the
+    /// <c>SET TRANSACTION PRIORITY</c> SQL handler.
+    ///
+    /// <para>Rejects the same three cases as <see cref="ApplyLocking"/>, and for the same reasons: a
+    /// prior statement means <c>SET TRANSACTION</c> is no longer first (standard SQL), a read-only
+    /// transaction has no coordinator session to admit, and once the session has started the priority
+    /// has already been consumed by the admission gate — accepting the change then would record a
+    /// value that silently governs nothing.</para>
+    /// </summary>
+    public void ApplyPriority(TransactionPriority priority)
+    {
+        lock (trackSync)
+        {
+            if (statementExecuted)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION PRIORITY must be the first statement of a transaction — " +
+                    $"transaction {UniqueId} has already executed a statement");
+
+            if (IsReadOnly)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION PRIORITY cannot be applied to a read-only transaction");
+
+            if (TransactionId != HLCTimestamp.Zero)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION PRIORITY cannot be applied after the coordinator session has started — " +
+                    $"transaction {UniqueId} already has an active session");
+
+            Priority = priority;
         }
     }
 

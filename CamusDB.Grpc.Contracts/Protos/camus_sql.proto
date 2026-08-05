@@ -41,6 +41,22 @@ enum LockingMode {
   LOCKING_MODE_OPTIMISTIC  = 2;
 }
 
+// Admission priority: which transaction the server starts first when the node is at its
+// configured concurrency ceiling. Ordering only — never affects isolation, locking or commit.
+//
+// Deliberately offset by one from the server-side enum so zero means UNSPECIFIED. A client built
+// before this field existed necessarily sends 0, and 0 must fall through to the server default
+// (Normal), never to BACKGROUND — otherwise upgrading the server would silently demote every old
+// client's transactions to the bottom of the queue.
+enum TransactionPriority {
+  TRANSACTION_PRIORITY_UNSPECIFIED = 0;
+  TRANSACTION_PRIORITY_BACKGROUND  = 1;
+  TRANSACTION_PRIORITY_LOW         = 2;
+  TRANSACTION_PRIORITY_NORMAL      = 3;
+  TRANSACTION_PRIORITY_HIGH        = 4;
+  TRANSACTION_PRIORITY_CRITICAL    = 5;
+}
+
 enum OrderDirection {
   ORDER_ASCENDING  = 0;
   ORDER_DESCENDING = 1;
@@ -279,6 +295,11 @@ message SqlRequest {
   // Ordinal parameter values for a prepared execution; index i binds to parameter_names[i] from the
   // PREPARE reply. The count must equal the declared parameter count exactly.
   repeated Value positional_parameters = 12;
+
+  // Optional admission priority for the transaction begun by this request. Ignored when
+  // txn_handle resumes an existing transaction — priority is consumed when the coordinator
+  // session opens, so a resumed transaction has already spent it.
+  TransactionPriority priority = 13;
 }
 
 message NonQueryReply {
@@ -295,10 +316,11 @@ message DdlReply {
 }
 
 message StartTxnRequest {
-  string          database         = 1;
-  IsolationLevel  isolation_level  = 2;
-  TransactionMode transaction_mode = 3;
-  LockingMode     locking          = 4;
+  string              database         = 1;
+  IsolationLevel      isolation_level  = 2;
+  TransactionMode     transaction_mode = 3;
+  LockingMode         locking          = 4;
+  TransactionPriority priority         = 5;
 }
 
 message CommitReply {
@@ -380,6 +402,7 @@ message InsertRowRequest {
   int64     causal_token_c = 6;
   LockingMode locking      = 7;
   int32     causal_token_n = 8;
+  TransactionPriority priority = 9;
 }
 
 message RowQueryRequest {
@@ -395,6 +418,7 @@ message RowQueryRequest {
   int64     causal_token_c = 8;
   LockingMode locking      = 9;
   int32     causal_token_n = 10;
+  TransactionPriority priority = 11;
 }
 
 message RowByIdRequest {
@@ -407,6 +431,7 @@ message RowByIdRequest {
   int64     causal_token_c = 6;
   LockingMode locking      = 7;
   int32     causal_token_n = 8;
+  TransactionPriority priority = 9;
 }
 
 message UpdateRowsRequest {
@@ -421,6 +446,7 @@ message UpdateRowsRequest {
   int64     causal_token_c = 7;
   LockingMode locking      = 8;
   int32     causal_token_n = 9;
+  TransactionPriority priority = 10;
 }
 
 message UpdateByIdRequest {
@@ -435,6 +461,7 @@ message UpdateByIdRequest {
   int64     causal_token_c = 7;
   LockingMode locking      = 8;
   int32     causal_token_n = 9;
+  TransactionPriority priority = 10;
 }
 
 message DeleteRowsRequest {
@@ -448,6 +475,7 @@ message DeleteRowsRequest {
   int64     causal_token_c = 6;
   LockingMode locking      = 7;
   int32     causal_token_n = 8;
+  TransactionPriority priority = 9;
 }
 
 // Typed row-level service: mirrors InsertController / QueryController /

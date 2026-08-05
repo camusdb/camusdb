@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 3/08/2026 9:33:21 AM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 3/08/2026 9:32:55 AM>
+// DateTime: 4/08/2026 7:48:07 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 4/08/2026 7:47:22 PM>
 
 // options: no-lines gplex
 
@@ -1623,23 +1623,49 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 68: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER
 {
-          // SET TRANSACTION LOCKING PESSIMISTIC | OPTIMISTIC
+          // SET TRANSACTION LOCKING  { PESSIMISTIC | OPTIMISTIC }
+          // SET TRANSACTION PRIORITY { BACKGROUND | LOW | NORMAL | HIGH | CRITICAL }
+          //
+          // Both settings share ONE 4-token production and dispatch on $3. A second production with
+          // the same token shape would be a reduce/reduce conflict, so a new 4-token SET TRANSACTION
+          // setting must be added here rather than alongside.
+          //
           // This 4-token form must be listed last so the parser prefers to shift when a 5th
           // TIDENTIFIER follows (gppg resolves shift/reduce by preferring shift, so the 5-token
           // isolation productions fire when there are more identifiers ahead).
-          if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "locking", StringComparison.OrdinalIgnoreCase))
+          if (string.Equals(ValueStack[ValueStack.Depth-2].s, "locking", StringComparison.OrdinalIgnoreCase))
+          {
+              string lockingMode = ValueStack[ValueStack.Depth-1].s.ToUpperInvariant() switch {
+                  "PESSIMISTIC" => "Pessimistic",
+                  "OPTIMISTIC"  => "Optimistic",
+                  _ => throw new CamusDBException(
+                          CamusDBErrorCodes.InvalidInput,
+                          "Unknown locking mode '" + ValueStack[ValueStack.Depth-1].s + "'. Expected: PESSIMISTIC or OPTIMISTIC")
+              };
+              CurrentSemanticValue.n = new(NodeType.SetTransactionLocking,
+                         null, null, null, null, null, null, null, lockingMode);
+          }
+          else if (string.Equals(ValueStack[ValueStack.Depth-2].s, "priority", StringComparison.OrdinalIgnoreCase))
+          {
+              string priority = ValueStack[ValueStack.Depth-1].s.ToUpperInvariant() switch {
+                  "BACKGROUND" => "Background",
+                  "LOW"        => "Low",
+                  "NORMAL"     => "Normal",
+                  "HIGH"       => "High",
+                  "CRITICAL"   => "Critical",
+                  _ => throw new CamusDBException(
+                          CamusDBErrorCodes.InvalidInput,
+                          "Unknown transaction priority '" + ValueStack[ValueStack.Depth-1].s +
+                          "'. Expected: BACKGROUND, LOW, NORMAL, HIGH or CRITICAL")
+              };
+              CurrentSemanticValue.n = new(NodeType.SetTransactionPriority,
+                         null, null, null, null, null, null, null, priority);
+          }
+          else
               throw new CamusDBException(
                   CamusDBErrorCodes.InvalidInput,
-                  "Expected: SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC }");
-          string lockingMode = ValueStack[ValueStack.Depth-1].s.ToUpperInvariant() switch {
-              "PESSIMISTIC" => "Pessimistic",
-              "OPTIMISTIC"  => "Optimistic",
-              _ => throw new CamusDBException(
-                      CamusDBErrorCodes.InvalidInput,
-                      "Unknown locking mode '" + ValueStack[ValueStack.Depth-1].s + "'. Expected: PESSIMISTIC or OPTIMISTIC")
-          };
-          CurrentSemanticValue.n = new(NodeType.SetTransactionLocking,
-                     null, null, null, null, null, null, null, lockingMode);
+                  "Expected: SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC } or " +
+                  "SET TRANSACTION PRIORITY { BACKGROUND | LOW | NORMAL | HIGH | CRITICAL }");
       }
         break;
       case 69: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 

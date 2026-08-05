@@ -70,5 +70,18 @@ public sealed class ExecuteSQLRequest
     /// </summary>
     public string? Locking { get; set; }
 
+    /// <summary>
+    /// Optional admission priority for the transaction begun by this request. Accepted values
+    /// (case-insensitive): <c>"Background"</c>, <c>"Low"</c>, <c>"Normal"</c>, <c>"High"</c>,
+    /// <c>"Critical"</c>. Ignored when <c>TxnIdPT</c> resumes an existing transaction — priority is
+    /// consumed when the coordinator session opens, so a resumed transaction has already spent it.
+    ///
+    /// <para>Unlike <see cref="Locking"/> this <i>does</i> apply on the read-only
+    /// <c>/execute-sql-query</c> path, but only when that path promotes to a real transaction (a
+    /// serializable read-only snapshot or a key-range-sharded scan). A zero-timestamp read-committed
+    /// snapshot opens no session and so is never admission-gated.</para>
+    /// </summary>
+    public string? Priority { get; set; }
+
     public HLCTimestamp? CausalToken { get; set; }
 }

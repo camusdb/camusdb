@@ -58,11 +58,18 @@ public sealed class TransactionsController : CommandsController
                     ? parsedLocking
                     : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown locking mode: {request.Locking}");
 
+            TransactionPriority? priority = request.Priority is null ? null
+                : Enum.TryParse(request.Priority, ignoreCase: true, out TransactionPriority parsedPriority) && Enum.IsDefined(parsedPriority)
+                    ? parsedPriority
+                    : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown transaction priority: {request.Priority}");
+
             // Explicit interactive transaction: defer the Kahuna session start so a following
-            // SET TRANSACTION LOCKING can still choose the locking mode (Kahuna pins it at session
-            // start). The session opens on the first statement's write/lock/folded-read.
+            // SET TRANSACTION LOCKING / SET TRANSACTION PRIORITY can still choose those values
+            // (Kahuna pins both at session start). The session opens on the first statement's
+            // write/lock/folded-read.
             KvTransaction txState = await transactions.StartAsync(
-                request.DatabaseName, isolationLevel, transactionMode, locking, deferStart: true).ConfigureAwait(false);
+                request.DatabaseName, isolationLevel, transactionMode, locking, deferStart: true,
+                priority: priority).ConfigureAwait(false);
 
             return new JsonResult(new StartTransactionResponse("ok", txState.ClientId.L, txState.ClientId.C));
         }

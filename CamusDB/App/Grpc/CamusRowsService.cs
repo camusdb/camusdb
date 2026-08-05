@@ -25,6 +25,8 @@ using ProtoQueryFilter   = CamusDB.Grpc.QueryFilter;
 using ProtoOrderBy       = CamusDB.Grpc.OrderBy;
 using ProtoOrderDir      = CamusDB.Grpc.OrderDirection;
 using CoreColumnType     = CamusDB.Core.Catalogs.Models.ColumnType;
+using ProtoPriority      = CamusDB.Grpc.TransactionPriority;
+using EnginePriority     = Kahuna.Shared.KeyValue.TransactionPriority;
 
 namespace CamusDB.App.Grpc;
 
@@ -79,6 +81,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
+            EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> values = ToColumnValueMap(request.Values);
 
             // Explicit transaction — client owns the lifecycle.
@@ -112,7 +115,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             async Task AutocommitInsert(CancellationToken innerCt)
             {
                 KvTransaction tx = await transactions.StartAsync(
-                    request.Database, null, null, reqLocking, cancellationToken: innerCt).ConfigureAwait(false);
+                    request.Database, null, null, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
                 try
                 {
                     InsertTicket ticket = new(
@@ -191,7 +194,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             // Autocommit: promoted read-only transaction.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, ct).ConfigureAwait(false);
+                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: ct).ConfigureAwait(false);
             try
             {
                 QueryTicket ticket = BuildQueryTicket(tx, request, filters, orderBy);
@@ -265,7 +268,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             // restriction of CommitTrackedAsync.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, ct).ConfigureAwait(false);
+                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: ct).ConfigureAwait(false);
             try
             {
                 await RunQueryById(tx).ConfigureAwait(false);
@@ -295,6 +298,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
+            EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> plainValues = ToColumnValueMap(request.Values);
             List<EngineQueryFilter>? filters = ToFilters(request.Filters);
 
@@ -333,7 +337,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             async Task AutocommitUpdate(CancellationToken innerCt)
             {
                 KvTransaction tx = await transactions.StartAsync(
-                    request.Database, null, null, reqLocking, cancellationToken: innerCt).ConfigureAwait(false);
+                    request.Database, null, null, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
                 try
                 {
                     UpdateTicket ticket = new(
@@ -380,6 +384,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
+            EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> plainValues = ToColumnValueMap(request.Values);
             (_, TableDescriptor table) = await OpenAsync(request.Database, request.Table).ConfigureAwait(false);
             List<EngineQueryFilter> filters = [PrimaryKeyFilter(table, request.Id)];
@@ -419,7 +424,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             async Task AutocommitUpdateById(CancellationToken innerCt)
             {
                 KvTransaction tx = await transactions.StartAsync(
-                    request.Database, null, null, reqLocking, cancellationToken: innerCt).ConfigureAwait(false);
+                    request.Database, null, null, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
                 try
                 {
                     UpdateTicket ticket = new(
@@ -464,6 +469,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
+            EnginePriority? reqPriority = ToPriority(request.Priority);
             List<EngineQueryFilter>? filters = ToFilters(request.Filters);
 
             // Explicit transaction.
@@ -498,7 +504,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             async Task AutocommitDelete(CancellationToken innerCt)
             {
                 KvTransaction tx = await transactions.StartAsync(
-                    request.Database, null, null, reqLocking, cancellationToken: innerCt).ConfigureAwait(false);
+                    request.Database, null, null, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
                 try
                 {
                     DeleteTicket ticket = new(
@@ -541,6 +547,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
+            EnginePriority? reqPriority = ToPriority(request.Priority);
             (_, TableDescriptor table) = await OpenAsync(request.Database, request.Table).ConfigureAwait(false);
             List<EngineQueryFilter> filters = [PrimaryKeyFilter(table, request.Id)];
 
@@ -576,7 +583,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             async Task AutocommitDeleteById(CancellationToken innerCt)
             {
                 KvTransaction tx = await transactions.StartAsync(
-                    request.Database, null, null, reqLocking, cancellationToken: innerCt).ConfigureAwait(false);
+                    request.Database, null, null, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
                 try
                 {
                     DeleteTicket ticket = new(
@@ -802,6 +809,21 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         LockingMode.Pessimistic => KeyValueTransactionLocking.Pessimistic,
         LockingMode.Optimistic  => KeyValueTransactionLocking.Optimistic,
         _                       => null,
+    };
+
+    /// <summary>
+    /// Maps the wire priority to the engine enum. Unspecified maps to <c>null</c> so the server
+    /// default applies — never to <c>Background</c>, which would silently demote every client built
+    /// before the field existed (such a client necessarily sends zero).
+    /// </summary>
+    private static EnginePriority? ToPriority(ProtoPriority priority) => priority switch
+    {
+        ProtoPriority.Background => EnginePriority.Background,
+        ProtoPriority.Low => EnginePriority.Low,
+        ProtoPriority.Normal => EnginePriority.Normal,
+        ProtoPriority.High => EnginePriority.High,
+        ProtoPriority.Critical => EnginePriority.Critical,
+        _                              => null,
     };
 
     private static HLCTimestamp? ToCausalToken(int n, long l, long c)
