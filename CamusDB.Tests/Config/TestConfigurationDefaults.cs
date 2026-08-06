@@ -47,7 +47,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(5000, CamusDBOptions.Default.StatsFlushIntervalMs, nameof(CamusDBOptions.Default.StatsFlushIntervalMs));
         Assert.AreEqual(100_000, CamusDBOptions.Default.StatsAnalyzeSampleRows, nameof(CamusDBOptions.Default.StatsAnalyzeSampleRows));
         Assert.AreEqual(100, CamusDBOptions.Default.StatsHistogramBuckets, nameof(CamusDBOptions.Default.StatsHistogramBuckets));
-        Assert.AreEqual(false, CamusDBOptions.Default.AutoAnalyzeEnabled, nameof(CamusDBOptions.Default.AutoAnalyzeEnabled));
+        Assert.AreEqual(true, CamusDBOptions.Default.AutoAnalyzeEnabled, nameof(CamusDBOptions.Default.AutoAnalyzeEnabled));
         Assert.AreEqual(60_000, CamusDBOptions.Default.AutoAnalyzeCheckIntervalMs, nameof(CamusDBOptions.Default.AutoAnalyzeCheckIntervalMs));
         Assert.AreEqual(0.20, CamusDBOptions.Default.AutoAnalyzeFractionStaleRows, nameof(CamusDBOptions.Default.AutoAnalyzeFractionStaleRows));
         Assert.AreEqual(500, CamusDBOptions.Default.AutoAnalyzeMinStaleRows, nameof(CamusDBOptions.Default.AutoAnalyzeMinStaleRows));
@@ -57,6 +57,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(11, CamusDBOptions.Default.AutoAnalyzeHllPrecision, nameof(CamusDBOptions.Default.AutoAnalyzeHllPrecision));
         Assert.AreEqual(16, CamusDBOptions.Default.AutoAnalyzeLoadPauseThreshold, nameof(CamusDBOptions.Default.AutoAnalyzeLoadPauseThreshold));
         Assert.AreEqual(1000, CamusDBOptions.Default.AutoAnalyzeOwnershipCheckRows, nameof(CamusDBOptions.Default.AutoAnalyzeOwnershipCheckRows));
+        Assert.AreEqual(true, CamusDBOptions.Default.TtlEnabled, nameof(CamusDBOptions.Default.TtlEnabled));
         Assert.AreEqual(512, CamusDBOptions.Default.KeyspacePurgeBatchSize, nameof(CamusDBOptions.Default.KeyspacePurgeBatchSize));
         Assert.AreEqual(7L * 24 * 60 * 60 * 1000, CamusDBOptions.Default.OrphanRetentionMs, nameof(CamusDBOptions.Default.OrphanRetentionMs));
         Assert.AreEqual(5 * 60 * 1000, CamusDBOptions.Default.OrphanReclaimIntervalMs, nameof(CamusDBOptions.Default.OrphanReclaimIntervalMs));

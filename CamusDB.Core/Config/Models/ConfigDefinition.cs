@@ -77,11 +77,11 @@ public class ConfigDefinition
 
     // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────────
     // Keeps optimizer statistics fresh without a user running ANALYZE, while staying low-priority:
-    // lock-free snapshot reads, bounded-memory sampling, a throttled scan, and load backoff. Off by
+    // lock-free snapshot reads, bounded-memory sampling, a throttled scan, and load backoff. On by
     // default. See docs/automatic-analyze.md.
 
     /// <summary>Master switch for automatic background <c>ANALYZE</c>. Maps to <c>CamusDBOptions.AutoAnalyzeEnabled</c>.</summary>
-    public bool AutoAnalyzeEnabled { get; set; } = false;
+    public bool AutoAnalyzeEnabled { get; set; } = true;
 
     /// <summary>
     /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the registry leader
@@ -143,7 +143,7 @@ public class ConfigDefinition
     /// <summary>
     /// Master switch for the row-level TTL sweep. Maps to <c>CamusDBOptions.TtlEnabled</c>.
     /// </summary>
-    public bool TtlEnabled { get; set; } = false;
+    public bool TtlEnabled { get; set; } = true;
 
     /// <summary>
     /// Fallback for the per-table <c>ttl_job_cron</c> storage parameter. Must be a supported

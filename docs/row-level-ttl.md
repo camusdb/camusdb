@@ -12,18 +12,14 @@ CockroachDB](#differences-from-cockroachdb).
 
 ## Turning it on
 
-TTL is off at two levels, and both must be on.
+The node-level switch (`ttl_enabled` in `config.yml`) is **on by default**, so there is one thing left
+to do: name the column that holds the expiry instant on the table you want swept. Until a table does
+that it is not a TTL table and the sweep ignores it entirely.
 
-**1. On the node**, in `config.yml`:
+Setting `ttl_enabled: false` stops the sweep loop node-wide and the feature becomes completely inert —
+an expired row is then never collected, whatever the tables say.
 
-```yml
-ttl_enabled: true
-```
-
-While this is false no sweep loop starts at all and the feature is completely inert — an expired row is
-simply never collected.
-
-**2. On the table**, by naming the column that holds the expiry instant:
+**On the table**, by naming the column that holds the expiry instant:
 
 ```sql
 ALTER TABLE sessions SET (ttl_expiration_expression = 'expires_at');
@@ -82,7 +78,7 @@ override it only where a table needs it.
 
 | Config key | Default | Supplies the default for |
 |---|---|---|
-| `ttl_enabled` | `false` | the master switch |
+| `ttl_enabled` | `true` | the master switch |
 | `ttl_default_job_cron` | `'@daily'` | `ttl_job_cron` |
 | `ttl_default_select_batch_size` | `500` | `ttl_select_batch_size` |
 | `ttl_default_delete_batch_size` | `100` | `ttl_delete_batch_size` |
