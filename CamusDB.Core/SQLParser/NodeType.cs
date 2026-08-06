@@ -211,6 +211,14 @@ public enum NodeType
     /// </summary>
     AlterTableSetSetting,
     /// <summary>
+    /// <c>ALTER TABLE t RESET (key, ...)</c> — removes storage parameters, restoring each to its
+    /// engine default. The counterpart to <see cref="AlterTableSetSetting"/>, which can only ever add
+    /// or overwrite: without a removal path a parameter set once could never be unset, only set to a
+    /// value that happens to match the default. <c>RESET (ttl)</c> is the documented way to turn
+    /// row-level TTL off entirely, and clears every <c>ttl_*</c> key at once.
+    /// </summary>
+    AlterTableResetSetting,
+    /// <summary>
     /// Column-level <c>CONSTRAINT name NOT NULL</c> written inline on a column definition.
     /// <c>yytext</c> = the user-supplied constraint name.
     /// </summary>

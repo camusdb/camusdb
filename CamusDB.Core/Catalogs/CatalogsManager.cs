@@ -304,7 +304,10 @@ public sealed class CatalogsManager
                 Columns = columns,
                 Indexes = indexes,
                 CheckConstraints = checkConstraints,
-                Comment = ticket.Comment
+                Comment = ticket.Comment,
+                Settings = ticket.Settings is null
+                    ? null
+                    : new Dictionary<string, string>(ticket.Settings, StringComparer.Ordinal)
             })
         };
     }
@@ -963,7 +966,8 @@ public sealed class CatalogsManager
     public async Task ReplicateSetTableSettingsAsync(
         DatabaseDescriptor database,
         string tableName,
-        IReadOnlyDictionary<string, string> settings)
+        IReadOnlyDictionary<string, string> settings,
+        IReadOnlyCollection<string>? removedKeys = null)
     {
         SchemaChangeLogEntry entry;
 
@@ -979,7 +983,8 @@ public sealed class CatalogsManager
                 Payload = Serializator.Serialize(new SchemaSetTableSettingsPayload
                 {
                     TableName = tableName,
-                    Settings = new Dictionary<string, string>(settings, StringComparer.Ordinal)
+                    Settings = new Dictionary<string, string>(settings, StringComparer.Ordinal),
+                    RemovedKeys = removedKeys is null ? [] : [.. removedKeys]
                 })
             };
             ValidateSchemaDelta(database, entry);
@@ -1428,6 +1433,9 @@ public sealed class CatalogsManager
             Name = payload.TableName,
             Columns = new(payload.Columns.Length),
             Comment = payload.Comment,
+            Settings = payload.Settings is null
+                ? null
+                : new Dictionary<string, string>(payload.Settings, StringComparer.Ordinal),
             SchemaHistory = []
         };
 
@@ -1596,7 +1604,8 @@ public sealed class CatalogsManager
 
     /// <summary>
     /// Applies a <see cref="SchemaOp.SetTableSettings"/> delta by merging the payload's settings into
-    /// <see cref="TableSchema.Settings"/>. Idempotent; does not bump <see cref="TableSchema.Version"/>.
+    /// <see cref="TableSchema.Settings"/> and removing the payload's reset keys. Idempotent; does not
+    /// bump <see cref="TableSchema.Version"/>.
     /// </summary>
     private static TableSchema ApplySetTableSettings(Schema schema, SchemaSetTableSettingsPayload payload)
     {
@@ -1608,13 +1617,18 @@ public sealed class CatalogsManager
             : new Dictionary<string, string>(tableSchema.Settings, StringComparer.Ordinal);
 
         // Defensive: only apply recognized, lowercase-canonical keys, so a malformed log entry from an
-        // older/other proposer cannot inject divergent settings semantics on apply.
+        // older/other proposer cannot inject divergent settings semantics on apply. The *value* is
+        // stored as proposed — the proposer already canonicalized it, and case is significant for a
+        // value that names a column, so lowercasing here would silently break a camelCase column name.
         foreach (KeyValuePair<string, string> kv in payload.Settings)
         {
             string key = (kv.Key ?? "").Trim().ToLowerInvariant();
-            if (TableSettings.RecognizedKeys.Contains(key))
-                merged[key] = (kv.Value ?? "").Trim().ToLowerInvariant();
+            if (TableSettings.Recognized.ContainsKey(key))
+                merged[key] = (kv.Value ?? "").Trim();
         }
+
+        foreach (string rawKey in payload.RemovedKeys)
+            merged.Remove((rawKey ?? "").Trim().ToLowerInvariant());
 
         tableSchema.Settings = merged;
         return tableSchema;
@@ -1952,6 +1966,21 @@ public sealed class CatalogsManager
         }
 
         tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
+
+        // Storage parameters that name a column store the NAME, not the immutable column id, so a
+        // rename would otherwise leave ttl_expiration_expression pointing at a column that no longer
+        // exists — and a dangling TTL configuration fails only in the background sweep, silently.
+        // Carrying it across keeps the rename a pure label change from the user's point of view.
+        if (tableSchema.Settings is not null &&
+            tableSchema.Settings.TryGetValue(TableSettings.TtlExpirationExpressionKey, out string? ttlColumn) &&
+            string.Equals(ttlColumn, payload.ElementName, StringComparison.OrdinalIgnoreCase))
+        {
+            Dictionary<string, string> settings = new(tableSchema.Settings, StringComparer.Ordinal)
+            {
+                [TableSettings.TtlExpirationExpressionKey] = payload.NewName
+            };
+            tableSchema.Settings = settings;
+        }
 
         return tableSchema;
     }
@@ -2339,7 +2368,8 @@ public sealed class CatalogsManager
     public async Task AlterTableSettingsAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
-        IReadOnlyDictionary<string, string> settings)
+        IReadOnlyDictionary<string, string> settings,
+        IReadOnlyCollection<string>? removedKeys = null)
     {
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
@@ -2363,6 +2393,12 @@ public sealed class CatalogsManager
 
                 foreach (KeyValuePair<string, string> kv in settings)
                     merged[kv.Key] = kv.Value;
+
+                if (removedKeys is not null)
+                {
+                    foreach (string key in removedKeys)
+                        merged.Remove(key);
+                }
 
                 table.Schema.Settings = merged;
                 mutated = true;

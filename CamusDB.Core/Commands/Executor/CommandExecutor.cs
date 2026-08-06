@@ -17,6 +17,7 @@ using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Controllers.Ttl;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -68,6 +69,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     // Leader-owned loop that keeps optimizer statistics fresh via throttled, lock-free background
     // ANALYZE. Started alongside the renewer; disposed on teardown.
     private AutoAnalyzeScheduler? autoAnalyzeScheduler;
+
+    private Controllers.Ttl.TtlScheduler? ttlScheduler;
+
+    private Controllers.Ttl.TtlSpanSweeper? ttlSweeper;
+
+    private Controllers.Ttl.TtlSpanCoordinator? ttlCoordinator;
 
     // Server-level backup / point-in-time-recovery controller over the shared node. Null only when this
     // executor was constructed without a shared node (no backup surface is reachable).
@@ -305,6 +312,143 @@ public sealed class CommandExecutor : IAsyncDisposable
             options);
         analyzeScheduler.Start();
         autoAnalyzeScheduler = analyzeScheduler;
+
+        // Row-level TTL. Planning is elected on the same registry key so exactly one node mints a run
+        // per table; the span work itself runs on every node. Disabled entirely unless TtlEnabled is set.
+        TtlSpanCoordinator ttlCoordinatorInstance = new(
+            node.Kahuna,
+            $"ttl:{node.Raft.GetLocalNodeId()}",
+            options.TtlSpanLeaseMs,
+            options.TtlSpanLeaseRenewIntervalMs);
+
+        TtlSpanSweeper ttlSweeperInstance = new(
+            ttlCoordinatorInstance, rowDeleter, () => ForegroundLoadProbe?.Invoke() ?? 0, options, logger);
+
+        TtlScheduler scheduler = new(
+            node, registry.RegistryBucket, ttlCoordinatorInstance, ttlSweeperInstance,
+            DiscoverTtlTablesAsync, DiscoverOpenDatabasesAsync, logger, options);
+
+        scheduler.Start();
+        ttlScheduler = scheduler;
+        ttlSweeper = ttlSweeperInstance;
+        ttlCoordinator = ttlCoordinatorInstance;
+    }
+
+    /// <summary>
+    /// Cluster-visible candidate discovery for row-level TTL, mirroring
+    /// <see cref="DiscoverStaleTablesAsync"/>: enumerates authoritative metadata rather than this node's
+    /// open-object list, so a table configured and written only on another node is still swept.
+    ///
+    /// <para>The TTL configuration is read straight from the per-object meta blob, so a table with TTL
+    /// off costs discovery one deserialization and is never opened.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>> DiscoverTtlTablesAsync(CancellationToken ct)
+    {
+        var result = new List<(DatabaseDescriptor, TableDescriptor)>();
+        if (sharedNode is null)
+            return result;
+
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
+
+        foreach (DatabaseRegistryEntry entry in entries)
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            DatabaseDescriptor database;
+            try
+            {
+                database = await databaseOpener.Open(entry.Name).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "TTL discovery: could not open database {Db}", entry.Name);
+                continue;
+            }
+
+            foreach ((string _, string tableName) in await ScanTtlTableMetaAsync(entry.Id, ct).ConfigureAwait(false))
+            {
+                if (ct.IsCancellationRequested)
+                    break;
+
+                try
+                {
+                    TableDescriptor table = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+                    result.Add((database, table));
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "TTL discovery: could not open table {Table} in database {Db}", tableName, entry.Name);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Every registered database, opened. Used by the TTL metadata reaper, which must look at databases
+    /// whose tables have <em>stopped</em> being swept — the very tables TTL discovery no longer returns.
+    /// </summary>
+    private async Task<IReadOnlyList<DatabaseDescriptor>> DiscoverOpenDatabasesAsync(CancellationToken ct)
+    {
+        List<DatabaseDescriptor> result = [];
+        if (sharedNode is null)
+            return result;
+
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        foreach (DatabaseRegistryEntry entry in await registry.ScanAllEntriesAsync().ConfigureAwait(false))
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            try
+            {
+                result.Add(await databaseOpener.Open(entry.Name).ConfigureAwait(false));
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "TTL reap discovery: could not open database {Db}", entry.Name);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Enumerates a database's tables that have row-level TTL configured (paused or not), by reading the
+    /// authoritative per-object meta keys — so it sees tables this node has never opened.
+    /// </summary>
+    private async Task<List<(string tableId, string tableName)>> ScanTtlTableMetaAsync(string dbId, CancellationToken ct)
+    {
+        string metaBucket = $"{dbId}/meta";
+        string tablePrefix = $"{dbId}/meta/table:";
+        var tables = new List<(string, string)>();
+
+        await foreach ((string key, Kahuna.Server.KeyValues.ReadOnlyKeyValueEntry kvEntry) in sharedNode!.Kahuna.LocateAndScanRange(
+            Kommander.Time.HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+            Kommander.Time.HLCTimestamp.Zero, Kahuna.Shared.KeyValue.KeyValueDurability.Persistent, ct).ConfigureAwait(false))
+        {
+            if (!key.StartsWith(tablePrefix, StringComparison.Ordinal) || kvEntry.Value is null)
+                continue;
+
+            CamusDB.Core.Catalogs.Models.TableSchema schema = CamusDB.Core.Catalogs.MetaJsonSerializer.Deserialize(
+                kvEntry.Value, CamusDB.Core.Catalogs.MetaJsonContext.Default.TableSchema);
+
+            if (schema.Id is null || schema.Name is null)
+                continue;
+
+            // Configured, not necessarily active: a paused table must still be visited so it can be
+            // reported as paused. Filtering on IsActive here makes "paused" indistinguishable from
+            // "gone" — the table simply disappears from every surface. The tick re-checks IsActive
+            // before doing any work.
+            if (CamusDB.Core.Catalogs.Models.TtlSettings.Resolve(schema.Settings, options).ExpirationColumn is not null)
+                tables.Add((schema.Id, schema.Name));
+        }
+
+        return tables;
     }
 
     /// <summary>
@@ -409,6 +553,137 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (snapshotRenewerStart is not null)
             await snapshotRenewerStart.ConfigureAwait(false);
         return autoAnalyzeScheduler is null ? 0 : await autoAnalyzeScheduler.RunSweepAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only seam: forces one row-level TTL sweep and returns the number of rows deleted, so a test
+    /// can drive it deterministically instead of waiting out a tick and a table's cron cadence.
+    /// Requires <see cref="CamusDBOptions.TtlEnabled"/> to be set.
+    /// </summary>
+    internal async Task<long> RunTtlSweepForTestsAsync()
+    {
+        if (snapshotRenewerStart is not null)
+            await snapshotRenewerStart.ConfigureAwait(false);
+        return ttlScheduler is null ? 0 : await ttlScheduler.RunSweepAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only seam: runs the TTL delete path against an explicit candidate list, so a test can
+    /// present the exact state the sweep is in between its scan and its delete — including a candidate
+    /// whose expiry was extended in that window — without depending on timing.
+    /// </summary>
+    internal async Task<(int deleted, int skipped)> DeleteExpiredRowsForTestsAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        string expirationColumn,
+        long cutoffEpochMs)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+
+        try
+        {
+            (int deleted, int skipped) = await rowDeleter.DeleteExpiredRowsAsync(
+                table, tx, rowIds, expirationColumn, cutoffEpochMs).ConfigureAwait(false);
+
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            return (deleted, skipped);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Row-level TTL counters for <c>SHOW ENGINE STATS</c>. These are maintained by the scheduler rather
+    /// than by a meter, but they follow the statement's existing all-or-nothing rule: with metric
+    /// collection disabled the statement reports nothing, and these are no exception.
+    ///
+    /// <para><c>ttl.rows_skipped_recheck</c> is the one worth watching: it counts rows that looked
+    /// expired during a scan but had their expiry extended before the delete. A steady trickle is
+    /// normal on a session table; a number close to <c>ttl.rows_expired</c> means the sweep is mostly
+    /// racing live traffic and its cadence or batch sizes want revisiting.</para>
+    /// </summary>
+    private IReadOnlyList<EngineMetricRow>? TtlMetricRows()
+    {
+        if (ttlScheduler is null)
+            return null;
+
+        List<EngineMetricRow> rows =
+        [
+            TtlCounter("ttl.rows_expired", Interlocked.Read(ref ttlScheduler.RowsExpired)),
+            TtlCounter("ttl.rows_skipped_recheck", Interlocked.Read(ref ttlScheduler.RowsSkippedByRecheck)),
+            TtlCounter("ttl.rows_failed", Interlocked.Read(ref ttlScheduler.RowsFailed)),
+            TtlCounter("ttl.spans_completed", Interlocked.Read(ref ttlScheduler.SpansCompleted)),
+            TtlCounter("ttl.spans_reclaimed", Interlocked.Read(ref ttlScheduler.SpansReclaimed)),
+            TtlCounter("ttl.runs_planned", Interlocked.Read(ref ttlScheduler.RunsPlanned)),
+            TtlCounter("ttl.runs_completed", Interlocked.Read(ref ttlScheduler.RunsCompleted)),
+            TtlCounter("ttl.sweep_duration_ms", Interlocked.Read(ref ttlScheduler.SweepMillis)),
+        ];
+
+        // Per-table rows, tagged by database and table. Totals say whether TTL works at all; they cannot
+        // say which table stopped, because one healthy table's numbers mask another's silence.
+        foreach (KeyValuePair<string, Controllers.Ttl.TtlTableStatus> entry in ttlScheduler.TableStatus)
+        {
+            Controllers.Ttl.TtlTableStatus status = entry.Value;
+            string tags = $"db={status.DatabaseName},table={status.TableName}";
+
+            rows.Add(TtlGauge("ttl.table.state", tags, (long)status.State));
+            rows.Add(TtlGauge("ttl.table.spans_done", tags, status.SpansDone));
+            rows.Add(TtlGauge("ttl.table.span_count", tags, status.SpanCount));
+            rows.Add(TtlGauge("ttl.table.rows_deleted", tags, status.RowsDeleted));
+            rows.Add(TtlGauge("ttl.table.rows_failed", tags, status.RowsFailed));
+
+            // The horizon is what makes a stalled run diagnosable: it says which instant the run is
+            // still judging rows against, and therefore how far behind the table has fallen.
+            rows.Add(TtlGauge("ttl.table.horizon_ms", tags, status.HorizonPhysical));
+            rows.Add(TtlGauge("ttl.table.last_observed_ms", tags, status.LastObservedPhysical));
+        }
+
+        return rows;
+    }
+
+    private static EngineMetricRow TtlCounter(string metric, long value)
+        => new("camusdb", metric, "", EngineMetricKind.Counter, value, value, null, null, null);
+
+    private static EngineMetricRow TtlGauge(string metric, string tags, long value)
+        => new("camusdb", metric, tags, EngineMetricKind.Gauge, 1, null, null, null, value);
+
+    /// <summary>
+    /// Test-only seam: the table ids that currently have TTL run metadata in a database, so a test can
+    /// assert that abandoned records are actually reclaimed rather than merely unreferenced.
+    /// </summary>
+    internal async Task<IReadOnlyList<string>> ListTtlRunTableIdsForTestsAsync(string dbId)
+    {
+        if (snapshotRenewerStart is not null)
+            await snapshotRenewerStart.ConfigureAwait(false);
+
+        return ttlCoordinator is null
+            ? []
+            : await ttlCoordinator.ListRunTableIdsAsync(dbId, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>Test-only seam: cumulative TTL counters for this node.</summary>
+    internal (long expired, long skipped, long failed, long spans, long runs) TtlCountersForTests()
+        => ttlScheduler is null
+            ? (0, 0, 0, 0, 0)
+            : (ttlScheduler.RowsExpired, ttlScheduler.RowsSkippedByRecheck, ttlScheduler.RowsFailed,
+               ttlScheduler.SpansCompleted, ttlScheduler.RunsPlanned);
+
+    /// <summary>
+    /// Test-only seam: fails the TTL delete for any chunk the predicate selects, so a test can observe
+    /// what the checkpoint does when a delete does not commit. See
+    /// <c>TtlSpanSweeper.DeleteChunkFaultInjector</c> for why this cannot be provoked any other way.
+    /// </summary>
+    internal async Task SetTtlDeleteFaultInjectorForTestsAsync(Func<IReadOnlyList<ObjectIdValue>, bool>? injector)
+    {
+        if (snapshotRenewerStart is not null)
+            await snapshotRenewerStart.ConfigureAwait(false);
+
+        if (ttlSweeper is not null)
+            ttlSweeper.DeleteChunkFaultInjector = injector;
     }
 
     /// <summary>
@@ -2403,17 +2678,34 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private async Task<ExecuteDDLSQLResult> AlterTableSettings(DatabaseDescriptor database, AlterTableSettingsTicket ticket)
     {
-        // Canonical validation for every entry point (SQL and direct ticket): unknown key, non-boolean
-        // value, empty set, or duplicate key are rejected here, and keys/values are lowercased.
+        // Canonical validation for every entry point (SQL and direct ticket): unknown key, malformed
+        // value, empty set, or duplicate key are rejected here, and keys are lowercased.
         Dictionary<string, string> settings = CamusDB.Core.Catalogs.Models.TableSettings.Canonicalize([.. ticket.Settings]);
 
-        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        string tableId;
 
         // Serialize with all other schema changes for this database, exactly like the established DDL
         // paths: the version capture, proposal (cluster), and blob rewrite must not race another DDL.
         await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Open the table and validate INSIDE the semaphore. Validating first would be a
+            // check-then-act against every other DDL: a concurrent RENAME or DROP COLUMN could retire
+            // the column between the check and the write, leaving ttl_expiration_expression pointing at
+            // nothing — a dangling configuration that fails only in a background sweep.
+            TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+            // Validate the MERGED result, not the incoming keys alone. Setting only a batch size on a
+            // table that already has an expiration column must still be checked against that column, and
+            // the bounds below depend on the table's current index count either way.
+            Dictionary<string, string> merged = MergeSettings(table.Schema.Settings, settings, removed: null);
+            ValidateTtlSettingsAgainstSchema(table, merged);
+
+            // The engine-owned marker is derived, never user-supplied: it exists exactly when an
+            // expiration column does, so it is written and cleared alongside it rather than tracked
+            // separately where the two could disagree.
+            ApplyDerivedTtlMarker(settings, merged);
+
             if (isClusterMode)
             {
                 // Settings DDL replicates through the schema log, which only the schema leader may
@@ -2433,14 +2725,208 @@ public sealed class CommandExecutor : IAsyncDisposable
             {
                 await catalogs.AlterTableSettingsAsync(database, table, settings).ConfigureAwait(false);
             }
+
+            tableId = table.Id;
         }
         finally
         {
             database.SchemaDdlSemaphore.Release();
         }
 
-        database.Cache?.InvalidateByTableId(database.Id, table.Id);
+        database.Cache?.InvalidateByTableId(database.Id, tableId);
         return new ExecuteDDLSQLResult(database, true);
+    }
+
+    /// <summary>
+    /// Applies <c>ALTER TABLE t RESET (key, ...)</c>, removing table storage parameters so each falls
+    /// back to its engine default. Version-neutral and replicated exactly like the SET path — the two
+    /// are one schema delta with opposite directions, so they must not diverge in ordering, locking, or
+    /// cache invalidation. Public so a ticket caller can invoke it without the SQL path.
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> AlterTableResetSettings(AlterTableResetSettingsTicket ticket)
+    {
+        DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+        return await AlterTableResetSettings(database, ticket).ConfigureAwait(false);
+    }
+
+    private async Task<ExecuteDDLSQLResult> AlterTableResetSettings(DatabaseDescriptor database, AlterTableResetSettingsTicket ticket)
+    {
+        HashSet<string> keys = CamusDB.Core.Catalogs.Models.TableSettings.CanonicalizeResetKeys([.. ticket.Keys]);
+
+        string tableId;
+
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Opened inside the semaphore for the same reason as the SET path: the table must not change
+            // between the decision and the write.
+            TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            tableId = table.Id;
+
+            // Clearing the expiration column clears the derived marker with it, so the two can never
+            // disagree about whether TTL is configured.
+            if (keys.Contains(CamusDB.Core.Catalogs.Models.TableSettings.TtlExpirationExpressionKey))
+                keys.Add(CamusDB.Core.Catalogs.Models.TableSettings.TtlKey);
+
+            if (isClusterMode)
+            {
+                if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
+                {
+                    string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInternalOperation,
+                        $"ALTER TABLE RESET must be executed by schema leader '{leader}' for database '{database.Name}'");
+                }
+
+                await catalogs.ReplicateSetTableSettingsAsync(
+                    database, ticket.TableName, new Dictionary<string, string>(StringComparer.Ordinal), keys).ConfigureAwait(false);
+            }
+            else
+            {
+                await catalogs.AlterTableSettingsAsync(
+                    database, table, new Dictionary<string, string>(StringComparer.Ordinal), keys).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        database.Cache?.InvalidateByTableId(database.Id, tableId);
+        return new ExecuteDDLSQLResult(database, true);
+    }
+
+    /// <summary>
+    /// Rejects a delete batch size this table cannot actually execute.
+    ///
+    /// <para>Each expired row costs one mutation for the row plus one for every index entry it carries,
+    /// so a table with several indexes multiplies the batch several-fold against
+    /// <see cref="CamusDBOptions.MaxMutationsPerTransaction"/>. Checked here, at configuration time,
+    /// because the alternative is a sweep whose every delete transaction aborts — visible only as a
+    /// table that mysteriously stops expiring, with the cause buried in a background log.</para>
+    ///
+    /// <para>Deliberately conservative: it uses the table's current writable index count, and a later
+    /// <c>CREATE INDEX</c> can still push a previously-valid batch over the line. Sizing to a worst case
+    /// nobody has yet configured would reject reasonable settings today to guard against a schema that
+    /// may never exist.</para>
+    /// </summary>
+    private void ValidateTtlBatchBudget(TableDescriptor table, IReadOnlyDictionary<string, string> settings)
+    {
+        if (!settings.TryGetValue(CamusDB.Core.Catalogs.Models.TableSettings.TtlDeleteBatchSizeKey, out string? raw) ||
+            !int.TryParse(raw, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out int batchSize))
+            return;
+
+        int indexCount = 0;
+        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        {
+            if (SchemaElementStateRules.IsWritableIndex(table.Schema, kv.Value))
+                indexCount++;
+        }
+
+        long mutationsPerRow = 1L + indexCount;
+        long required = (long)batchSize * mutationsPerRow;
+
+        if (required > options.MaxMutationsPerTransaction)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Table setting 'ttl_delete_batch_size' of {batchSize} needs {required} mutations per transaction " +
+                $"({mutationsPerRow} per row across {indexCount} index(es)), exceeding the limit of " +
+                $"{options.MaxMutationsPerTransaction}; lower it to at most " +
+                $"{options.MaxMutationsPerTransaction / mutationsPerRow}");
+    }
+
+    /// <summary>
+    /// Produces the settings bag a table would have after applying a SET and/or RESET, so validation can
+    /// run against the end state rather than the incoming fragment.
+    /// </summary>
+    private static Dictionary<string, string> MergeSettings(
+        IReadOnlyDictionary<string, string>? current,
+        IReadOnlyDictionary<string, string>? added,
+        IReadOnlyCollection<string>? removed)
+    {
+        Dictionary<string, string> merged = current is null
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : new Dictionary<string, string>(current, StringComparer.Ordinal);
+
+        if (added is not null)
+        {
+            foreach (KeyValuePair<string, string> kv in added)
+                merged[kv.Key] = kv.Value;
+        }
+
+        if (removed is not null)
+        {
+            foreach (string key in removed)
+                merged.Remove(key);
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// Adds the derived <c>ttl</c> marker to a pending SET when the merged result configures an
+    /// expiration column. Mirrors CockroachDB's engine-set <c>ttl</c> parameter: it records that TTL is
+    /// active without the user being able to assert it independently, which is what keeps the marker
+    /// from ever contradicting the configuration it describes.
+    /// </summary>
+    private static void ApplyDerivedTtlMarker(
+        Dictionary<string, string> pending, IReadOnlyDictionary<string, string> merged)
+    {
+        if (merged.ContainsKey(CamusDB.Core.Catalogs.Models.TableSettings.TtlExpirationExpressionKey))
+            pending[CamusDB.Core.Catalogs.Models.TableSettings.TtlKey] = "true";
+    }
+
+    /// <summary>
+    /// Rejects a TTL configuration that cannot work against this table's schema. Split from
+    /// <c>TableSettings.Canonicalize</c> because it needs the live table, which that context-free
+    /// validator does not have.
+    ///
+    /// <para>The expiry column must exist and hold an instant (<c>DateTime</c>/<c>Date</c>) or an epoch
+    /// in milliseconds (<c>Integer64</c>). It may not be part of the primary key: the sweep ranges over
+    /// the primary keyspace to divide work, and expiring rows by the value it partitions on has no use
+    /// case and surprising interactions.</para>
+    /// </summary>
+    private void ValidateTtlSettingsAgainstSchema(TableDescriptor table, IReadOnlyDictionary<string, string> settings)
+    {
+        ValidateTtlBatchBudget(table, settings);
+
+        if (!settings.TryGetValue(CamusDB.Core.Catalogs.Models.TableSettings.TtlExpirationExpressionKey, out string? columnName))
+            return;
+
+        TableColumnSchema? column = null;
+        foreach (TableColumnSchema candidate in table.Schema.Columns ?? [])
+        {
+            if (string.Equals(candidate.Name, columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                column = candidate;
+                break;
+            }
+        }
+
+        if (column is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.UnknownColumn,
+                $"Table setting 'ttl_expiration_expression' names column '{columnName}', which does not exist in table '{table.Name}'");
+
+        if (column.Type is not (ColumnType.DateTime or ColumnType.Date or ColumnType.Integer64))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Table setting 'ttl_expiration_expression' requires a DateTime, Date or Integer64 column; " +
+                $"column '{column.Name}' is {column.Type}");
+
+        if (table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? primaryKey) &&
+            primaryKey.Columns is not null)
+        {
+            foreach (string pkColumn in primaryKey.Columns)
+            {
+                if (string.Equals(pkColumn, column.Name, StringComparison.OrdinalIgnoreCase))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Table setting 'ttl_expiration_expression' cannot name primary key column '{column.Name}'");
+            }
+        }
     }
 
     /// <summary>
@@ -2703,7 +3189,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             or NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableDropConstraint
             or NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull
             or NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey
-            or NodeType.AlterTableSetSetting or NodeType.AnalyzeTable
+            or NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or NodeType.AnalyzeTable
             or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,
         NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
             or NodeType.ShowDatabase or NodeType.ShowOrphanTables => Privilege.Select,
@@ -3262,9 +3748,16 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.AlterTableSetSetting:
                 {
-                    // Validation (recognized key, boolean value) happens at ticket creation.
+                    // Context-free validation (recognized key, well-formed value) happens at ticket
+                    // creation; the schema-dependent half runs inside AlterTableSettings.
                     AlterTableSettingsTicket settingsTicket = sqlExecutor.CreateAlterTableSettingsTicket(ticket, ast);
                     return await AlterTableSettings(database, settingsTicket).ConfigureAwait(false);
+                }
+
+            case NodeType.AlterTableResetSetting:
+                {
+                    AlterTableResetSettingsTicket resetTicket = sqlExecutor.CreateAlterTableResetSettingsTicket(ticket, ast);
+                    return await AlterTableResetSettings(database, resetTicket).ConfigureAwait(false);
                 }
 
             case NodeType.AlterTableRenameTo:
@@ -3713,7 +4206,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             return (null!, schemaQuerier.ShowEngineStats(
                 engineMetrics,
                 UnquoteLikePattern(ast.leftAst?.yytext),
-                LocalNodeLabel()));
+                LocalNodeLabel(),
+                TtlMetricRows()));
         }
 
         // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.
@@ -4281,6 +4775,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         if (autoAnalyzeScheduler is not null)
             await autoAnalyzeScheduler.DisposeAsync().ConfigureAwait(false);
+
+        if (ttlScheduler is not null)
+            await ttlScheduler.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

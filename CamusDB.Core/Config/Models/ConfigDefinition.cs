@@ -141,6 +141,71 @@ public class ConfigDefinition
     public int AutoAnalyzeOwnershipCheckRows { get; set; } = 1000;
 
     /// <summary>
+    /// Master switch for the row-level TTL sweep. Maps to <c>CamusDBOptions.TtlEnabled</c>.
+    /// </summary>
+    public bool TtlEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Fallback for the per-table <c>ttl_job_cron</c> storage parameter. Must be a supported
+    /// <c>@macro</c> form. Maps to <c>CamusDBOptions.TtlDefaultJobCron</c>.
+    /// </summary>
+    public string TtlDefaultJobCron { get; set; } = "@daily";
+
+    /// <summary>
+    /// Fallback for <c>ttl_select_batch_size</c>. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBOptions.TtlDefaultSelectBatchSize</c>.
+    /// </summary>
+    public int TtlDefaultSelectBatchSize { get; set; } = 500;
+
+    /// <summary>
+    /// Fallback for <c>ttl_delete_batch_size</c>. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBOptions.TtlDefaultDeleteBatchSize</c>.
+    /// </summary>
+    public int TtlDefaultDeleteBatchSize { get; set; } = 100;
+
+    /// <summary>
+    /// Fallback for <c>ttl_select_rate_limit</c>, rows/second; <c>0</c> is unlimited. Must be
+    /// <c>&gt;= 0</c>. Maps to <c>CamusDBOptions.TtlDefaultSelectRateLimit</c>.
+    /// </summary>
+    public int TtlDefaultSelectRateLimit { get; set; } = 0;
+
+    /// <summary>
+    /// Fallback for <c>ttl_delete_rate_limit</c>, rows/second; <c>0</c> is unlimited. Must be
+    /// <c>&gt;= 0</c>. Maps to <c>CamusDBOptions.TtlDefaultDeleteRateLimit</c>.
+    /// </summary>
+    public int TtlDefaultDeleteRateLimit { get; set; } = 100;
+
+    /// <summary>
+    /// Spans a TTL run divides a table's keyspace into. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBOptions.TtlSpansPerTable</c>.
+    /// </summary>
+    public int TtlSpansPerTable { get; set; } = 64;
+
+    /// <summary>
+    /// Spans one node processes at once. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBOptions.TtlMaxConcurrentSpansPerNode</c>.
+    /// </summary>
+    public int TtlMaxConcurrentSpansPerNode { get; set; } = 1;
+
+    /// <summary>
+    /// Foreground-load threshold above which the sweep pauses. <c>&lt;= 0</c> disables load backoff.
+    /// Maps to <c>CamusDBOptions.TtlLoadPauseThreshold</c>.
+    /// </summary>
+    public int TtlLoadPauseThreshold { get; set; } = 16;
+
+    /// <summary>
+    /// Span claim lease in milliseconds. Must be <c>&gt;= 1</c>.
+    /// Maps to <c>CamusDBOptions.TtlSpanLeaseMs</c>.
+    /// </summary>
+    public int TtlSpanLeaseMs { get; set; } = 30_000;
+
+    /// <summary>
+    /// Span lease renewal interval in milliseconds. Must be <c>&gt;= 1</c> and strictly less than
+    /// <c>ttl_span_lease_ms</c>. Maps to <c>CamusDBOptions.TtlSpanLeaseRenewIntervalMs</c>.
+    /// </summary>
+    public int TtlSpanLeaseRenewIntervalMs { get; set; } = 10_000;
+
+    /// <summary>
     /// Sliding TTL for the SQL parser AST cache, in seconds.
     /// Each cache hit extends the deadline by this interval.
     /// <c>0</c> disables the cache entirely (every parse re-lexes from scratch).
@@ -587,6 +652,44 @@ public class ConfigDefinition
 
         if (AutoAnalyzeOwnershipCheckRows < 1)
             throw Invalid($"'auto_analyze_ownership_check_rows' must be >= 1, got {AutoAnalyzeOwnershipCheckRows}");
+
+        if (TtlDefaultSelectBatchSize < 1)
+            throw Invalid($"'ttl_default_select_batch_size' must be >= 1, got {TtlDefaultSelectBatchSize}");
+
+        if (TtlDefaultDeleteBatchSize < 1)
+            throw Invalid($"'ttl_default_delete_batch_size' must be >= 1, got {TtlDefaultDeleteBatchSize}");
+
+        if (TtlDefaultSelectRateLimit < 0)
+            throw Invalid(
+                $"'ttl_default_select_rate_limit' must be >= 0 (0 = unlimited), got {TtlDefaultSelectRateLimit}");
+
+        if (TtlDefaultDeleteRateLimit < 0)
+            throw Invalid(
+                $"'ttl_default_delete_rate_limit' must be >= 0 (0 = unlimited), got {TtlDefaultDeleteRateLimit}");
+
+        if (TtlSpansPerTable < 1)
+            throw Invalid($"'ttl_spans_per_table' must be >= 1, got {TtlSpansPerTable}");
+
+        if (TtlMaxConcurrentSpansPerNode < 1)
+            throw Invalid($"'ttl_max_concurrent_spans_per_node' must be >= 1, got {TtlMaxConcurrentSpansPerNode}");
+
+        if (TtlSpanLeaseMs < 1)
+            throw Invalid($"'ttl_span_lease_ms' must be >= 1, got {TtlSpanLeaseMs}");
+
+        if (TtlSpanLeaseRenewIntervalMs < 1)
+            throw Invalid($"'ttl_span_lease_renew_interval_ms' must be >= 1, got {TtlSpanLeaseRenewIntervalMs}");
+
+        // A renew interval at or above the lease lets a live owner's lease lapse under it: the span
+        // becomes reclaimable while its owner is still deleting, and two workers process it at once.
+        if (TtlSpanLeaseRenewIntervalMs >= TtlSpanLeaseMs)
+            throw Invalid(
+                $"'ttl_span_lease_renew_interval_ms' ({TtlSpanLeaseRenewIntervalMs}) must be < " +
+                $"'ttl_span_lease_ms' ({TtlSpanLeaseMs})");
+
+        if (!Catalogs.Models.TtlCron.IsSupported(TtlDefaultJobCron))
+            throw Invalid(
+                $"'ttl_default_job_cron' must be one of {Catalogs.Models.TtlCron.SupportedForMessage}, " +
+                $"got '{TtlDefaultJobCron}'");
 
         if (BranchSnapshotHoldLeaseMs <= 0)
             throw Invalid($"'branch_snapshot_hold_lease_ms' must be > 0, got {BranchSnapshotHoldLeaseMs}");

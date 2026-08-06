@@ -877,16 +877,41 @@ public sealed class KvTableStore
     /// backfill, constraint validation — must pass <paramref name="trackReadSet"/> = <c>true</c>:
     /// there the observed rows decide what gets written, so a concurrent modification to a scanned
     /// row has to invalidate the transaction.</para>
+    ///
+    /// <para><paramref name="afterRowId"/> and <paramref name="untilRowId"/> together bound the scan to
+    /// the half-open interval <c>(after, until)</c>. The upper bound exists so a caller can own one
+    /// span of a keyspace partitioned across workers and read only that span; without it every worker
+    /// would scan to the end of the table and discard, which costs exactly the parallelism the
+    /// partitioning bought. Both bounds compare hex ordinally, which matches
+    /// <see cref="ObjectIdValue"/> ordering because <c>ObjectId.ToString</c> writes fixed-width
+    /// big-endian hex.</para>
     /// </summary>
     public async IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> ScanRows(
         KvTransaction tx,
         long? maxRows = null,
         ObjectIdValue? afterRowId = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
-        bool trackReadSet = false)
+        bool trackReadSet = false,
+        ObjectIdValue? untilRowId = null,
+        ObjectIdValue? fromRowId = null)
     {
         if (maxRows is <= 0)
             yield break;
+
+        // Two lower bounds with different meanings, deliberately kept separate.
+        //
+        // fromRowId is INCLUSIVE and describes a partition: it is the first row id that belongs to this
+        // caller's slice of the keyspace. afterRowId is EXCLUSIVE and describes progress: it is the last
+        // row already dealt with. Collapsing them into one exclusive bound loses the row that sits
+        // exactly on a partition edge — the slice below it excludes it as its end, the slice above
+        // excludes it as its start, and nothing ever visits it.
+        //
+        // untilRowId is EXCLUSIVE, so a partition is [from, until) and adjacent partitions share an
+        // endpoint without overlapping. Rows arrive in ascending order on both the root and branch
+        // paths, so reaching the upper bound ends the scan rather than filtering the tail: a caller that
+        // owns one span must not read its neighbours' rows, or every worker reads the whole table.
+        string? untilHex = untilRowId?.ToString();
+        string? fromHex = fromRowId?.ToString();
 
         // Open the deferred Kahuna session before reading tx.TransactionId below: the scan must run
         // under the transaction's own identity, and a tracked scan can only fold reads once the
@@ -927,6 +952,15 @@ public sealed class KvTableStore
 
                 // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
                 ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
+
+                // Ordinal compare matches ObjectId ordering (fixed-width big-endian hex), the same
+                // equivalence afterRowId relies on below.
+                if (untilHex is not null && hex.CompareTo(untilHex.AsSpan(), StringComparison.Ordinal) >= 0)
+                    yield break;
+
+                if (fromHex is not null && hex.CompareTo(fromHex.AsSpan(), StringComparison.Ordinal) < 0)
+                    continue;
+
                 ObjectIdValue rowId = ObjectId.ToValue(hex);
 
                 // Resume uses ObjectIdValue.CompareTo because ObjectId.ToString writes the
@@ -1000,12 +1034,18 @@ public sealed class KvTableStore
                 {
                     (int levelIdx, string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload) = heap.Dequeue();
 
+                    // The heap dequeues in ascending hex order across every lineage level, so the first
+                    // key at or past the bound means the rest of every level is past it too.
+                    if (untilHex is not null && string.CompareOrdinal(rowIdHex, untilHex) >= 0)
+                        yield break;
+
                     if (rowIdHex != lastHex)
                     {
                         lastHex = rowIdHex;
 
                         // Nearest level wins for this rowIdHex.
                         if (kind == BranchKvKind.Value && payload is not null &&
+                            (fromHex is null || string.CompareOrdinal(rowIdHex, fromHex) >= 0) &&
                             (afterHex is null || string.CompareOrdinal(rowIdHex, afterHex) > 0))
                         {
                             yield return (ObjectId.ToValue(rowIdHex), payload.Value);

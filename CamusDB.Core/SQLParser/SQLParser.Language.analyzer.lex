@@ -109,6 +109,7 @@ TCommit         (C|c)(O|o)(M|m)(M|m)(I|i)(T|t)
 TComment        (C|c)(O|o)(M|m)(M|m)(E|e)(N|n)(T|t)
 TRollback       (R|r)(O|o)(L|l)(L|l)(B|b)(A|a)(C|c)(K|k)
 TRename         (R|r)(E|e)(N|n)(A|a)(M|m)(E|e)
+TReset          (R|r)(E|e)(S|s)(E|e)(T|t)
 TTo             (T|t)(O|o)
 TAnalyze        (A|a)(N|n)(A|a)(L|l)(Y|y)(Z|z)(E|e)
 TBranch         (B|b)(R|r)(A|a)(N|n)(C|c)(H|h)
@@ -221,6 +222,7 @@ TFor            (F|f)(O|o)(R|r)
 
 {TRollback} { return (int)Token.TROLLBACK; }
 {TRename} { return (int)Token.TRENAME; }
+{TReset} { return (int)Token.TRESET; }
 {TTo} { return (int)Token.TTO; }
 {TAnalyze} { return (int)Token.TANALYZE; }
 {TBranches} { return (int)Token.TBRANCHES; }

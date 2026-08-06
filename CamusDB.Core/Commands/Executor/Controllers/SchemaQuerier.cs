@@ -209,6 +209,7 @@ internal sealed class SchemaQuerier
 
         createTableSql.Append(')');
         createTableSql.Append(GetSQLComment(table.Schema.Comment));
+        createTableSql.Append(GetSQLSettings(table.Schema.Settings));
         createTableSql.Append(';');
 
         yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
@@ -434,14 +435,22 @@ internal sealed class SchemaQuerier
     ///
     /// <para>Node-local by construction: the meters belong to this process, so the rows describe
     /// <paramref name="node"/> alone and are never gathered from peers. A null
-    /// <paramref name="collector"/> — metric collection turned off by configuration — yields no rows
-    /// rather than raising, so a script polling a fleet gets the same shape from every node whether or
-    /// not that node has collection enabled.</para>
+    /// <paramref name="collector"/> — metric collection turned off by configuration — contributes no
+    /// meter rows rather than raising, so a script polling a fleet gets the same shape from every node
+    /// whether or not that node has collection enabled.</para>
+    ///
+    /// <para><paramref name="engineCounters"/> carries counters the engine maintains itself rather than
+    /// through a meter — the row-level TTL sweep's totals, for instance. They are merged into the same
+    /// ordering as the meter rows (by source, then metric, then tags) so the output stays sorted, and
+    /// they follow the same all-or-nothing rule as everything else: with collection disabled the
+    /// statement reports nothing at all, so a script polling a fleet sees one consistent shape rather
+    /// than a partial result that looks like a node with no activity.</para>
     /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ShowEngineStats(
         EngineMetricsCollector? collector,
         string? pattern,
-        string node)
+        string node,
+        IReadOnlyList<EngineMetricRow>? engineCounters = null)
     {
         await Task.CompletedTask;
 
@@ -450,7 +459,23 @@ internal sealed class SchemaQuerier
 
         ColumnValue nodeValue = new(ColumnType.String, node);
 
-        foreach (EngineMetricRow metric in collector.Snapshot())
+        List<EngineMetricRow> rows = [.. collector.Snapshot()];
+
+        if (engineCounters is { Count: > 0 })
+        {
+            rows.AddRange(engineCounters);
+            rows.Sort(static (a, b) =>
+            {
+                int cmp = string.CompareOrdinal(a.Source, b.Source);
+                if (cmp != 0)
+                    return cmp;
+
+                cmp = string.CompareOrdinal(a.Metric, b.Metric);
+                return cmp != 0 ? cmp : string.CompareOrdinal(a.Tags, b.Tags);
+            });
+        }
+
+        foreach (EngineMetricRow metric in rows)
         {
             if (pattern is not null && !LikeMatch(metric.Metric, pattern))
                 continue;
@@ -610,6 +635,71 @@ internal sealed class SchemaQuerier
     /// </summary>
     private static string GetSQLComment(string? comment)
         => comment is null ? "" : " COMMENT " + RenderStringLiteral(comment);
+
+    /// <summary>
+    /// Renders a table's storage parameters as a trailing <c>SET (key = value, ...)</c> clause, or an
+    /// empty string when the table sets none. Without this, a table's TTL configuration and
+    /// auto-analyze opt-out are invisible to the one statement users reach for to see how a table is
+    /// defined — and a configuration that cannot be seen cannot be reviewed.
+    ///
+    /// <para>Keys are rendered in a stable ordinal order so the output is deterministic across nodes and
+    /// reopens (the settings bag has no inherent order). Values render in the literal form the parser
+    /// accepts for that key — booleans and integers bare, everything else as a quoted string — so the
+    /// rendered statement re-parses and re-creates the same table.</para>
+    ///
+    /// <para><b>Engine-owned parameters are omitted.</b> The derived <c>ttl</c> marker describes state
+    /// the engine maintains, and the settings grammar rejects it from a user. Emitting it would produce
+    /// output that fails when replayed — worse than omitting it, because the marker is reconstructed
+    /// from the expiration column anyway, so a replay of this statement arrives at the same state.</para>
+    /// </summary>
+    private static string GetSQLSettings(IReadOnlyDictionary<string, string>? settings)
+    {
+        if (settings is null || settings.Count == 0)
+            return "";
+
+        List<string> keys = [.. settings.Keys
+            .Where(static k => !TableSettings.IsEngineOwned(k))
+            .OrderBy(static k => k, StringComparer.Ordinal)];
+
+        if (keys.Count == 0)
+            return "";
+
+        StringBuilder builder = new(" WITH (");
+        bool first = true;
+
+        foreach (string key in keys)
+        {
+            if (!first)
+                builder.Append(", ");
+            first = false;
+
+            string value = settings[key];
+            builder.Append(key);
+            builder.Append(" = ");
+            builder.Append(IsBareLiteral(value) ? value : RenderStringLiteral(value));
+        }
+
+        return builder.Append(')').ToString();
+    }
+
+    // A value the grammar accepts unquoted: a boolean keyword or a non-negative integer.
+    private static bool IsBareLiteral(string value)
+    {
+        if (string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "false", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (value.Length == 0)
+            return false;
+
+        foreach (char c in value)
+        {
+            if (!char.IsAsciiDigit(c))
+                return false;
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Renders the trailing <c>DEFAULT(...)</c> clause for a column definition in

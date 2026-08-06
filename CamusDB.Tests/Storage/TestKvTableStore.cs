@@ -305,6 +305,82 @@ public sealed class TestKvTableStore
     }
 
     [Test]
+    public async Task ScanRows_UntilRowIdExcludesTheBoundAndEverythingPastIt()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("ttl-until");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("n", ColumnType.Integer64));
+        ObjectIdValue[] ids = new ObjectIdValue[6];
+        for (int i = 0; i < ids.Length; i++)
+            ids[i] = new(i + 1, 0, 0);
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "ttl-until-insert");
+        foreach (ObjectIdValue id in ids)
+        {
+            byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, 1L) }, id);
+            await store.InsertRow(tx, id, data);
+        }
+        await CommitTransaction(node.Kahuna, tx);
+
+        ObjectIdValue[] ordered = ids.OrderBy(x => x.ToString(), StringComparer.Ordinal).ToArray();
+
+        // The bound itself must NOT appear — it is the first row of the next span, and a span edge
+        // that includes its own upper bound deletes the neighbouring span's first row twice.
+        List<ObjectIdValue> scanned = [];
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(KvTransaction.CreateReadOnly(), untilRowId: ordered[3]))
+            scanned.Add(rowId);
+
+        Assert.AreEqual(ordered.Take(3).ToArray(), scanned, "untilRowId must be an exclusive upper bound");
+    }
+
+    [Test]
+    public async Task ScanRows_SpansPartitionTheKeyspaceExactlyOnce()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("ttl-spans");
+        await using EmbeddedKahuna __ = node;
+
+        TableSchema schema = MakeSchema(Col("n", ColumnType.Integer64));
+        ObjectIdValue[] ids = new ObjectIdValue[12];
+        for (int i = 0; i < ids.Length; i++)
+            ids[i] = new((i + 1) * 7, i, 0);
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "ttl-spans-insert");
+        foreach (ObjectIdValue id in ids)
+        {
+            byte[] data = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>() { ["n"] = new(ColumnType.Integer64, 1L) }, id);
+            await store.InsertRow(tx, id, data);
+        }
+        await CommitTransaction(node.Kahuna, tx);
+
+        ObjectIdValue[] ordered = ids.OrderBy(x => x.ToString(), StringComparer.Ordinal).ToArray();
+
+        // Walk the keyspace as adjacent half-open spans (after, until]: each span's upper bound is the
+        // next span's lower bound. The union must be every row exactly once — an off-by-one at a span
+        // edge either loses a row forever or deletes it twice, and neither is visible from one span.
+        List<ObjectIdValue> union = [];
+        int[] boundaries = [3, 7, 10];
+        ObjectIdValue? after = null;
+
+        foreach (int boundary in boundaries)
+        {
+            await foreach ((ObjectIdValue rowId, _) in store.ScanRows(
+                KvTransaction.CreateReadOnly(), afterRowId: after, untilRowId: ordered[boundary]))
+                union.Add(rowId);
+
+            // The next span resumes strictly after the last row this one could have emitted.
+            after = ordered[boundary - 1];
+        }
+
+        // Final span is unbounded above and picks up the tail.
+        await foreach ((ObjectIdValue rowId, _) in store.ScanRows(
+            KvTransaction.CreateReadOnly(), afterRowId: ordered[boundaries[^1] - 1]))
+            union.Add(rowId);
+
+        Assert.AreEqual(ordered, union.ToArray(), "adjacent spans must partition the keyspace exactly once");
+    }
+
+    [Test]
     public async Task ScanRows_RespectsMaxRows()
     {
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("t7-max");

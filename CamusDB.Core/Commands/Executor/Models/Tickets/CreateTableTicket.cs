@@ -40,10 +40,12 @@ public readonly struct CreateTableTicket
         ConstraintInfo[] constraints,
         bool ifNotExists,
         CheckConstraintInfo[]? checkConstraints = null,
-        string? comment = null
+        string? comment = null,
+        IReadOnlyDictionary<string, string>? settings = null
     )
     {
         Comment = comment;
+        Settings = settings;
         DatabaseName = databaseName;
         TableName = tableName;
         Columns = columns;
@@ -51,5 +53,13 @@ public readonly struct CreateTableTicket
         CheckConstraints = checkConstraints ?? [];
         IfNotExists = ifNotExists;
     }
+
+    /// <summary>
+    /// Table storage parameters supplied inline as <c>WITH (key = value, ...)</c>, or null when none
+    /// were given. Present so <c>SHOW CREATE TABLE</c> renders a statement that re-creates the same
+    /// table — a rendering that silently dropped its settings would look faithful and reproduce a
+    /// differently-configured table.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? Settings { get; }
 }
 

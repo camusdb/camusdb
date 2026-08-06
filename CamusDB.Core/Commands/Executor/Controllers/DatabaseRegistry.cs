@@ -90,11 +90,18 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // the lease in the background (below) for as long as it holds it, so an operation that legitimately
     // outlives one lease period (e.g. a large keyspace purge) never has the fence stolen mid-flight.
 
-    // Background lease renewers for fences this node currently holds, keyed by fence id (a database id or
-    // a composite table-fence id). A renewer re-stamps the lease with a compare-and-set on this node's
-    // owner value, so it renews only while this node still owns the fence and stops the moment the fence
-    // is lost. Populated by AcquireDropIntentAsync, torn down by ReleaseDropIntentAsync / DisposeAsync.
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> fenceRenewers = new(StringComparer.Ordinal);
+    // The lease mechanism itself lives in KeyLeaseFence, shared with the row-level TTL span claims —
+    // acquire with SetIfNotExists + a native expiry, renew with a compare-and-set on this node's owner
+    // value. Two lease implementations with subtly different renewal semantics is how these diverge, so
+    // there is deliberately only one. Assigned in the constructor; see the note there on why not lazily.
+    private readonly KeyLeaseFence dropIntentFence;
+
+    private KeyLeaseFence DropIntentFence => dropIntentFence;
+
+    // Fence id → the token of the acquisition this process currently holds. The public acquire/release
+    // surface stays bool/void for its many call sites; the token is bookkeeping those callers should not
+    // have to carry, but without which a release cannot tell our own live claim from a successor's.
+    private readonly ConcurrentDictionary<string, string> dropIntentTokens = new(StringComparer.Ordinal);
 
     // Database names are case-insensitive but case-preserving. The name is stored and displayed
     // in the exact case the user created it with (DatabaseRegistryEntry.Name), while lookups and
@@ -134,6 +141,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         this.keyPrefix = keyPrefix;
         this.localNodeId = localNodeId;
         this.isClusterMode = isClusterMode;
+
+        // Constructed eagerly, not lazily: a `??=` here would be check-then-act, and two concurrent
+        // acquires could each build a fence while only one landed in the field — so a later release
+        // would cancel the wrong instance's renewer and keep re-stamping a lease it had "released".
+        dropIntentFence = new KeyLeaseFence(
+            kahuna, LocalOwnerValue, options.FenceLeaseMs, options.FenceLeaseRenewIntervalMs);
     }
 
     // -----------------------------------------------------------------------
@@ -1058,10 +1071,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         if (value is null)
             return false;
 
+        // The stored value is "{nodeId}:{epoch}" optionally followed by ":{acquisitionToken}" (the lease
+        // fence appends one per acquisition). Parse the first two fields positionally rather than
+        // splitting on the LAST colon: with a token present, a last-colon split puts "{nodeId}:{epoch}"
+        // in the node field, no marker ever matches this node, and startup recovery silently stops
+        // reclaiming its own crash remnants — leaving a database permanently undroppable.
         string s = System.Text.Encoding.UTF8.GetString(value);
-        int colon = s.LastIndexOf(':');
-        string nodePart = colon >= 0 ? s[..colon] : s;
-        string epochPart = colon >= 0 ? s[(colon + 1)..] : "";
+        string[] parts = s.Split(':');
+        string nodePart = parts[0];
+        string epochPart = parts.Length > 1 ? parts[1] : "";
         return nodePart == localNodeId.ToString() && epochPart != startupEpoch;
     }
 
@@ -1087,83 +1105,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// </summary>
     public async Task<bool> AcquireDropIntentAsync(string dbId)
     {
-        int retries = 0;
-        while (true)
-        {
-            (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, null, -1,
-                KeyValueFlags.SetIfNotExists, options.FenceLeaseMs, KeyValueDurability.Persistent, CancellationToken.None
-            ).ConfigureAwait(false);
-
-            if (type == KeyValueResponseType.Set)
-            {
-                StartFenceRenewer(dbId);
-                return true;
-            }
-
-            // NotSet = a live, non-expired lease genuinely holds the fence. A crashed owner's lease would
-            // already have lapsed and this Set would have succeeded, so NotSet is real contention.
-            if (type == KeyValueResponseType.NotSet)
-                return false;
-
-            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
-                && ++retries < MaxRetries)
-            {
-                await Task.Delay(retries * 10).ConfigureAwait(false);
-                continue;
-            }
-
-            // Any other status (or exhausted retries) is treated as "not acquired" — the caller leaves the
-            // work for a later pass rather than proceeding without the fence.
+        string? token = await DropIntentFence.TryAcquireAsync(DropIntentKey(dbId)).ConfigureAwait(false);
+        if (token is null)
             return false;
-        }
-    }
 
-    /// <summary>
-    /// Starts (or replaces) the background lease renewer for a fence this node just acquired. The renewer
-    /// re-stamps the lease every <see cref="CamusDBOptions.FenceLeaseRenewIntervalMs"/> with a compare-and-set on this node's
-    /// owner value, so it renews only while this node still owns the fence and self-terminates the moment
-    /// the fence is lost (e.g. the lease lapsed during a stall and another node took it) or released.
-    /// </summary>
-    private void StartFenceRenewer(string dbId)
-    {
-        CancellationTokenSource cts = new();
-        // Replace any prior renewer for this id (should not exist while we hold the fence, but be safe).
-        if (fenceRenewers.TryRemove(dbId, out CancellationTokenSource? old))
-        {
-            try { old.Cancel(); } catch { }
-            old.Dispose();
-        }
-        fenceRenewers[dbId] = cts;
-        _ = RenewFenceLoopAsync(dbId, cts.Token);
-    }
-
-    private async Task RenewFenceLoopAsync(string dbId, CancellationToken ct)
-    {
-        try
-        {
-            while (!ct.IsCancellationRequested)
-            {
-                await Task.Delay(options.FenceLeaseRenewIntervalMs, ct).ConfigureAwait(false);
-
-                // SetIfEqualToValue: renew (refresh the expiry) only if the stored value is still THIS
-                // node's owner value. If the lease lapsed and another node re-acquired, the compare fails
-                // (NotSet) and we stop renewing — we no longer own the fence and must not overwrite it.
-                (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                    HLCTimestamp.Zero, DropIntentKey(dbId), LocalOwnerValue, LocalOwnerValue, -1,
-                    KeyValueFlags.SetIfEqualToValue, options.FenceLeaseMs, KeyValueDurability.Persistent, ct
-                ).ConfigureAwait(false);
-
-                if (type is KeyValueResponseType.Set
-                    or KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
-                    continue; // renewed, or a transient status — try again next tick
-
-                // NotSet (lost the fence) or any hard error: stop renewing.
-                return;
-            }
-        }
-        catch (OperationCanceledException) { /* released — normal */ }
-        catch { /* best-effort renewal; a missed renewal only shortens the lease */ }
+        // Remember which acquisition this is so the release can be fenced against it. A fence id has at
+        // most one live acquisition in this process, so a plain map is sufficient — the token exists to
+        // distinguish acquisitions across *time* (ours vs. a successor's after our lease lapsed), which
+        // is precisely what an unconditional release cannot see.
+        dropIntentTokens[dbId] = token;
+        return true;
     }
 
     /// <summary>
@@ -1232,21 +1183,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// </summary>
     public async Task ReleaseDropIntentAsync(string dbId)
     {
-        // Stop renewing first so the renewer cannot refresh the lease after we delete the marker.
-        if (fenceRenewers.TryRemove(dbId, out CancellationTokenSource? cts))
-        {
-            try { await cts.CancelAsync().ConfigureAwait(false); } catch { }
-            cts.Dispose();
-        }
+        // TryRemove, not a read-then-remove: two callers releasing the same fence must not both proceed
+        // to the conditional expire with the same token.
+        if (!dropIntentTokens.TryRemove(dbId, out string? token))
+            return; // not held by this process — releasing would be someone else's fence to free
 
-        try
-        {
-            await kahuna.LocateAndTryDeleteKeyValue(
-                HLCTimestamp.Zero, DropIntentKey(dbId),
-                KeyValueDurability.Persistent, CancellationToken.None
-            ).ConfigureAwait(false);
-        }
-        catch { }
+        await DropIntentFence.ReleaseAsync(DropIntentKey(dbId), token).ConfigureAwait(false);
     }
 
     // ── Drop-in-progress markers (crash-resumable keyspace purge) ──────────────────────────────
@@ -1902,12 +1844,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     {
         // Stop every background fence-lease renewer this node still holds. Their leases then lapse on
         // their own, freeing the fences for another node without leaving a live renewer rooted here.
-        foreach (KeyValuePair<string, CancellationTokenSource> kv in fenceRenewers)
-        {
-            try { await kv.Value.CancelAsync().ConfigureAwait(false); } catch { }
-            kv.Value.Dispose();
-        }
-        fenceRenewers.Clear();
+        await dropIntentFence.DisposeAsync().ConfigureAwait(false);
 
         // Roll back any transaction still active on the system store while the node is alive so the
         // coordinator releases their working set, then dispose the transactions manager to release the

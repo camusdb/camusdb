@@ -33,6 +33,8 @@ internal sealed class TableColumnAlterer
 
     public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {
+        RejectDropOfTtlColumn(table, ticket);
+
         return ticket.Operation switch
         {
             AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
@@ -40,7 +42,36 @@ internal sealed class TableColumnAlterer
             AlterTableOperation.RenameColumn => await RenameColumn(database, table, ticket, tx).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
         };
-    }    
+    }
+
+    /// <summary>
+    /// Refuses to drop the column a table's row-level TTL expires on.
+    ///
+    /// <para>Dropping it would leave <c>ttl_expiration_expression</c> pointing at nothing. Nothing would
+    /// fail at drop time — the failure would surface later, inside a background sweep, as a table that
+    /// silently stops expiring anything. A configuration error must be reported where it is made, so the
+    /// user is told to <c>RESET (ttl)</c> first and the intent stays explicit.</para>
+    ///
+    /// <para>Renaming, by contrast, is allowed: the setting is rewritten to follow the new name (see
+    /// <c>CatalogsManager</c>'s rename path), because the user's intent there is unambiguous.</para>
+    /// </summary>
+    private static void RejectDropOfTtlColumn(TableDescriptor table, AlterTableTicket ticket)
+    {
+        if (ticket.Operation != AlterTableOperation.DropColumn)
+            return;
+
+        if (table.Schema.Settings is null ||
+            !table.Schema.Settings.TryGetValue(Catalogs.Models.TableSettings.TtlExpirationExpressionKey, out string? ttlColumn))
+            return;
+
+        if (!string.Equals(ttlColumn, ticket.Column.Name, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Column '{ticket.Column.Name}' cannot be dropped while it is the row-level TTL expiration " +
+            $"column of table '{table.Name}'; run ALTER TABLE {table.Name} RESET (ttl) first");
+    }
 
     private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {

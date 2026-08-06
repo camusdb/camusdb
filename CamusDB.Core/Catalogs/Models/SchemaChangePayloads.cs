@@ -22,6 +22,13 @@ public enum SchemaElementKind
 
 public sealed class SchemaCreateTablePayload
 {
+    /// <summary>
+    /// Storage parameters supplied inline on <c>CREATE TABLE ... WITH (...)</c>, or null when none.
+    /// Replicated with the rest of the table definition so every node's schema agrees on them from the
+    /// moment the table exists, rather than only after a later ALTER.
+    /// </summary>
+    public Dictionary<string, string>? Settings { get; set; }
+
     public string? TableId { get; set; }
 
     public string TableName { get; set; } = "";
@@ -267,13 +274,26 @@ public sealed class SchemaElementStatePayload
 
 /// <summary>
 /// Payload for <see cref="SchemaOp.SetTableSettings"/>: table storage parameters merged into
-/// <see cref="TableSchema.Settings"/> (e.g. <c>sql_stats_automatic_collection_enabled</c>).
+/// <see cref="TableSchema.Settings"/> (e.g. <c>sql_stats_automatic_collection_enabled</c>, the
+/// <c>ttl_*</c> family).
+///
+/// <para>One payload carries both directions of the change. <c>ALTER TABLE … SET</c> populates
+/// <see cref="Settings"/>; <c>ALTER TABLE … RESET</c> populates <see cref="RemovedKeys"/>. Both are a
+/// version-neutral rewrite of the same bag, so they share an op rather than splitting the apply path in
+/// two — a second op would have to duplicate the merge, the validation, and the ordering guarantees.</para>
 /// </summary>
 public sealed class SchemaSetTableSettingsPayload
 {
     public string TableName { get; set; } = "";
 
+    /// <summary>Keys to set or overwrite. Empty for a pure RESET.</summary>
     public Dictionary<string, string> Settings { get; set; } = new();
+
+    /// <summary>
+    /// Keys to remove, already expanded (a <c>RESET (ttl)</c> arrives as every TTL key, never as the
+    /// group name) so apply never has to know what a group means. Empty for a pure SET.
+    /// </summary>
+    public List<string> RemovedKeys { get; set; } = new();
 }
 
 /// <summary>

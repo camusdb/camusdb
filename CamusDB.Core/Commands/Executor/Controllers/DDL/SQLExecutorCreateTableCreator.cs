@@ -71,8 +71,49 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             constraints: [.. constraintInfos],
             ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists,
             checkConstraints: [.. checkConstraintInfos],
-            comment: GetInlineComment(ast.extendedTwo)
+            comment: GetInlineComment(ast.extendedTwo),
+            settings: GetInlineSettings(ast.extendedThree)
         );
+    }
+
+    /// <summary>
+    /// Reads a <c>WITH (key = value, ...)</c> clause into canonical storage parameters, or null when the
+    /// statement has none. Shares <c>TableSettings.Canonicalize</c> with the ALTER path so a parameter
+    /// means exactly the same thing however it was supplied.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? GetInlineSettings(NodeAst? settingsAst)
+    {
+        if (settingsAst is null)
+            return null;
+
+        List<KeyValuePair<string, string>> raw = [];
+        CollectCreateTableSettings(settingsAst, raw);
+
+        return raw.Count == 0 ? null : TableSettings.Canonicalize(raw);
+    }
+
+    private static void CollectCreateTableSettings(NodeAst node, List<KeyValuePair<string, string>> raw)
+    {
+        if (node.nodeType == NodeType.UpdateList)
+        {
+            if (node.leftAst is not null) CollectCreateTableSettings(node.leftAst, raw);
+            if (node.rightAst is not null) CollectCreateTableSettings(node.rightAst, raw);
+            return;
+        }
+
+        if (node.nodeType != NodeType.UpdateItem)
+            return;
+
+        NodeAst valueNode = node.rightAst!;
+
+        string value = valueNode.nodeType switch
+        {
+            NodeType.Bool or NodeType.Integer => valueNode.yytext ?? "",
+            NodeType.String => SqlStringLiteral.Decode(valueNode.yytext ?? ""),
+            _ => "",
+        };
+
+        raw.Add(new KeyValuePair<string, string>(node.leftAst!.yytext ?? "", value));
     }
 
     private static void GetCreateTableConstraintList(NodeAst? constraintList, List<ConstraintInfo> constraintInfos)

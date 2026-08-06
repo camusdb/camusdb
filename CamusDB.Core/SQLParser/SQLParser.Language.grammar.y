@@ -42,6 +42,7 @@
 %token TASOFSYSTEMTIME
 %token TCOMMENT
 %token TUSER TIDENTIFIED TWITH TGRANT TGRANTS TREVOKE TPRIVILEGES TFOR
+%token TRESET
 
 %%
 
@@ -306,10 +307,10 @@ set_transaction_stmt
     ;
 
 create_table_stmt : TCREATE TTABLE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateTableRelink, $3.n, $6.n, null, null, null, null, null, null); }
-                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN opt_table_comment { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, $7.n, null, null, null, null); }
-                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN opt_table_comment { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, $10.n, null, null, null, null); }
-                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
-                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $10.n, $11.n, null, null, null, null); }
+                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, $7.n, $8.n, null, null, null); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, $10.n, $11.n, null, null, null); }
+                  | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, $8.n, $9.n, null, null, null); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $10.n, $11.n, $12.n, null, null, null); }
                   ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
@@ -429,6 +430,7 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TALTER any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TSET LPAREN table_setting_list RPAREN { $$.n = new(NodeType.AlterTableSetSetting, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TRESET LPAREN table_setting_key_list RPAREN { $$.n = new(NodeType.AlterTableResetSetting, $3.n, $6.n, null, null, null, null, null, null); }
 				 ;
 
 table_setting_list : table_setting_list TCOMMA table_setting { $$.n = new(NodeType.UpdateList, $1.n, $3.n, null, null, null, null, null, null); }
@@ -436,7 +438,13 @@ table_setting_list : table_setting_list TCOMMA table_setting { $$.n = new(NodeTy
                    ;
 
 table_setting : any_identifier TEQUALS bool { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null, null); }
+              | any_identifier TEQUALS string { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null, null); }
+              | any_identifier TEQUALS int { $$.n = new(NodeType.UpdateItem, $1.n, $3.n, null, null, null, null, null, null); }
               ;
+
+table_setting_key_list : table_setting_key_list TCOMMA any_identifier { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+                       | any_identifier { $$.n = $1.n; $$.s = $1.s; }
+                       ;
 
 create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, $9.n, null, null, null, null); }
                   | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $10.n, $12.n, null, null, null, null); }
@@ -458,6 +466,10 @@ opt_inline_comment : { $$.n = null; }
 opt_table_comment : { $$.n = null; }
                   | TCOMMENT string { $$.n = $2.n; }
                   ;
+
+opt_table_settings : { $$.n = null; }
+                   | TWITH LPAREN table_setting_list RPAREN { $$.n = $3.n; }
+                   ;
 
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TTABLES { $$.n = NodeAst.ShowTables; }

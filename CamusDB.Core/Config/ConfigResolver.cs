@@ -113,6 +113,18 @@ public static class ConfigResolver
         AutoAnalyzeLoadPauseThreshold = config.AutoAnalyzeLoadPauseThreshold,
         AutoAnalyzeOwnershipCheckRows = config.AutoAnalyzeOwnershipCheckRows,
 
+        TtlEnabled = config.TtlEnabled,
+        TtlDefaultJobCron = config.TtlDefaultJobCron,
+        TtlDefaultSelectBatchSize = config.TtlDefaultSelectBatchSize,
+        TtlDefaultDeleteBatchSize = config.TtlDefaultDeleteBatchSize,
+        TtlDefaultSelectRateLimit = config.TtlDefaultSelectRateLimit,
+        TtlDefaultDeleteRateLimit = config.TtlDefaultDeleteRateLimit,
+        TtlSpansPerTable = config.TtlSpansPerTable,
+        TtlMaxConcurrentSpansPerNode = config.TtlMaxConcurrentSpansPerNode,
+        TtlLoadPauseThreshold = config.TtlLoadPauseThreshold,
+        TtlSpanLeaseMs = config.TtlSpanLeaseMs,
+        TtlSpanLeaseRenewIntervalMs = config.TtlSpanLeaseRenewIntervalMs,
+
         SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds,
         SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries,
         SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds,

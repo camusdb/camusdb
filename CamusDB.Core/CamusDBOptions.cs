@@ -132,6 +132,89 @@ public sealed record CamusDBOptions
     /// </summary>
     public int AutoAnalyzeOwnershipCheckRows { get; init; } = 1000;
 
+    // Row-level TTL. Per-table tuning (which column expires, how often, batch sizes, rate limits)
+    // lives on the table as storage parameters, because the right rate for a 10M-row session table
+    // is not the right rate for a small one and a node-global cap would force one table's setting
+    // onto every other. The TtlDefault* options below supply the fallback a table that sets nothing
+    // resolves to; the remainder are genuinely node- or cluster-level.
+
+    /// <summary>
+    /// Master switch for the row-level TTL sweep. Opt-in: while false neither the planner nor the
+    /// worker loop starts and there is zero behavioral change — an expired row is simply never
+    /// collected. Equivalent in role to CockroachDB's <c>sql.ttl.job.enabled</c> cluster setting.
+    /// </summary>
+    public bool TtlEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Fallback for the per-table <c>ttl_job_cron</c> storage parameter: how often a table's sweep
+    /// runs. Matches CockroachDB's default, which moved from <c>@hourly</c> to <c>@daily</c>. Only the
+    /// <c>@macro</c> forms are accepted for now (see <see cref="Catalogs.Models.TtlCron"/>).
+    /// </summary>
+    public string TtlDefaultJobCron { get; init; } = "@daily";
+
+    /// <summary>
+    /// Fallback for <c>ttl_select_batch_size</c>: rows read per batch while scanning a span for
+    /// expired rows. Larger amortizes the round-trip; smaller shortens the read transaction.
+    /// </summary>
+    public int TtlDefaultSelectBatchSize { get; init; } = 500;
+
+    /// <summary>
+    /// Fallback for <c>ttl_delete_batch_size</c>: rows deleted per transaction. Deliberately far
+    /// smaller than the select batch — each row costs one mutation <em>per index entry</em> plus the
+    /// row itself, so the mutation count grows with the table's index count and must stay well under
+    /// <see cref="MaxMutationsPerTransaction"/>. A short delete transaction is also what keeps
+    /// foreground writers from queueing behind the sweep's exclusive locks.
+    /// </summary>
+    public int TtlDefaultDeleteBatchSize { get; init; } = 100;
+
+    /// <summary>
+    /// Fallback for <c>ttl_select_rate_limit</c>, in rows/second. <c>0</c> means <b>unlimited</b>, not
+    /// "stopped" — the scan is already bounded by the delete rate downstream of it.
+    /// </summary>
+    public int TtlDefaultSelectRateLimit { get; init; } = 0;
+
+    /// <summary>
+    /// Fallback for <c>ttl_delete_rate_limit</c>, in rows/second — the primary throttle on the sweep's
+    /// write load. <c>0</c> means unlimited.
+    /// </summary>
+    public int TtlDefaultDeleteRateLimit { get; init; } = 100;
+
+    /// <summary>
+    /// How many spans a table's primary keyspace is divided into per run. Deliberately far more than
+    /// the number of workers: row ids are time-ordered ObjectIds, so a uniform split of the hex space
+    /// is skewed on the append-heavy tables TTL targets (most rows land in the newest prefix).
+    /// Over-splitting lets work-stealing absorb that skew without coupling TTL to <c>ANALYZE</c>
+    /// freshness. Rounded up to the next power of 16 so spans align on hex-digit boundaries.
+    /// </summary>
+    public int TtlSpansPerTable { get; init; } = 64;
+
+    /// <summary>
+    /// Spans one node processes concurrently. Keep small: each span holds a Kahuna session and issues
+    /// exclusive-lock deletes, and the point of the sweep is to be invisible to foreground traffic.
+    /// </summary>
+    public int TtlMaxConcurrentSpansPerNode { get; init; } = 1;
+
+    /// <summary>
+    /// Foreground-load surge protector, mirroring <see cref="AutoAnalyzeLoadPauseThreshold"/>: when
+    /// in-flight foreground transactions exceed this, the sweep pauses at the next batch boundary
+    /// rather than only at span start. <c>&lt;= 0</c> disables load-based backoff. CamusDB extension —
+    /// CockroachDB has no equivalent.
+    /// </summary>
+    public int TtlLoadPauseThreshold { get; init; } = 16;
+
+    /// <summary>
+    /// Lease on a claimed span, in milliseconds, renewed while the owner processes it. A worker that
+    /// crashes stops renewing, the lease lapses, and another worker reclaims the span and resumes from
+    /// its checkpoint — so a dead node costs one lease period, not a stalled run.
+    /// </summary>
+    public int TtlSpanLeaseMs { get; init; } = 30_000;
+
+    /// <summary>
+    /// How often a span's owner re-stamps its lease. Must be well under <see cref="TtlSpanLeaseMs"/> so
+    /// replication lag or a delayed tick cannot let a live owner's lease lapse under it.
+    /// </summary>
+    public int TtlSpanLeaseRenewIntervalMs { get; init; } = 10_000;
+
     /// <summary>
     /// Max keys the non-transactional <c>DROP DATABASE</c> keyspace purge scans and deletes per batch.
     /// The purge pages through each bucket one batch at a time so peak memory is bounded to this many

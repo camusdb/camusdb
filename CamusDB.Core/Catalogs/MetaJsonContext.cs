@@ -77,4 +77,6 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(OrderType))]
 [JsonSerializable(typeof(OrderType[]))]
+[JsonSerializable(typeof(CamusDB.Core.CommandsExecutor.Controllers.Ttl.TtlRunManifest))]
+[JsonSerializable(typeof(CamusDB.Core.CommandsExecutor.Controllers.Ttl.TtlSpanCheckpoint))]
 internal sealed partial class MetaJsonContext : JsonSerializerContext;

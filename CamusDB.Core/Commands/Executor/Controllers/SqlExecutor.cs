@@ -156,8 +156,8 @@ internal sealed class SqlExecutor()
 
     /// <summary>
     /// Builds a ticket for <c>ALTER TABLE t SET (key = value, ...)</c>. Validates at parse time that
-    /// every key is a recognized table setting and every value is a boolean literal, so an unknown or
-    /// malformed storage parameter is rejected before any schema mutation.
+    /// every key is a recognized table setting and every value matches that key's value shape, so an
+    /// unknown or malformed storage parameter is rejected before any schema mutation.
     /// </summary>
     internal AlterTableSettingsTicket CreateAlterTableSettingsTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
@@ -172,9 +172,27 @@ internal sealed class SqlExecutor()
         return new AlterTableSettingsTicket(ticket.DatabaseName, tableName, settings);
     }
 
+    /// <summary>
+    /// Builds a ticket for <c>ALTER TABLE t RESET (key, ...)</c>. The key list is a bare identifier
+    /// list, so there is no value to type-check — only the keys themselves, and the <c>ttl</c> group
+    /// expansion, both of which <c>TableSettings.CanonicalizeResetKeys</c> owns.
+    /// </summary>
+    internal AlterTableResetSettingsTicket CreateAlterTableResetSettingsTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        string tableName = ast.leftAst!.yytext!;
+
+        List<string> raw = [];
+        CollectSettingKeys(ast.rightAst!, raw);
+
+        HashSet<string> keys = Catalogs.Models.TableSettings.CanonicalizeResetKeys(raw);
+        return new AlterTableResetSettingsTicket(ticket.DatabaseName, tableName, keys);
+    }
+
     // Walks the SET (...) list (reusing the UpdateList/UpdateItem AST shape) into raw key→value pairs.
-    // Value nodes must be boolean literals; all other validation/canonicalization is centralized in
-    // TableSettings.Canonicalize.
+    // The grammar admits a boolean, string, or integer literal per value; which of those a given key
+    // actually accepts — and every other validation/canonicalization — is centralized in
+    // TableSettings.Canonicalize. An unexpected node shape yields an empty string so that validator
+    // produces the user-facing message rather than this walker silently dropping the pair.
     private static void CollectSettings(NodeAst node, List<KeyValuePair<string, string>> raw)
     {
         if (node.nodeType == NodeType.UpdateList)
@@ -189,8 +207,30 @@ internal sealed class SqlExecutor()
 
         string key = node.leftAst!.yytext ?? "";
         NodeAst valueNode = node.rightAst!;
-        string value = valueNode.nodeType == NodeType.Bool ? valueNode.yytext ?? "" : "";
+
+        string value = valueNode.nodeType switch
+        {
+            NodeType.Bool or NodeType.Integer => valueNode.yytext ?? "",
+            // A plain '…' literal carries no escape processing; Decode applies the dialect's rules so a
+            // column name written as an E'…' literal resolves the same way it would anywhere else.
+            NodeType.String => SqlStringLiteral.Decode(valueNode.yytext ?? ""),
+            _ => "",
+        };
+
         raw.Add(new KeyValuePair<string, string>(key, value));
+    }
+
+    // Walks the RESET (...) identifier list into raw key names.
+    private static void CollectSettingKeys(NodeAst node, List<string> raw)
+    {
+        if (node.nodeType == NodeType.IdentifierList)
+        {
+            if (node.leftAst is not null) CollectSettingKeys(node.leftAst, raw);
+            if (node.rightAst is not null) CollectSettingKeys(node.rightAst, raw);
+            return;
+        }
+
+        raw.Add(node.yytext ?? "");
     }
 
     /// <summary>

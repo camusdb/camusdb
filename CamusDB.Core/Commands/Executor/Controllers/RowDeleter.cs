@@ -18,6 +18,7 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
+using CamusDB.Core.CommandsExecutor.Controllers.Ttl;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
@@ -47,6 +48,85 @@ internal sealed class RowDeleter
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
 
         return await DeleteInternal(machine, state).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes an explicit set of rows that a row-level TTL sweep found expired, re-asserting the expiry
+    /// predicate on each one under the mutation lock. Returns how many rows were deleted and how many
+    /// were spared by the re-check.
+    ///
+    /// <para><b>Why this exists instead of a <c>DELETE … WHERE</c>.</b> A TTL span is a range of
+    /// <em>row id</em>, and row id is not addressable from a WHERE clause — there is no SQL predicate
+    /// that means "this span". The sweep therefore arrives with row ids in hand.</para>
+    ///
+    /// <para><b>Why it re-checks rather than trusting the scan.</b> Between the scan that found a row
+    /// expired and this delete, another transaction may have extended its expiry — and on a session or
+    /// heartbeat table, which is exactly what TTL is for, that is the single most common write there is.
+    /// Deleting by primary key alone would silently destroy live data. The re-check costs nothing extra
+    /// because <see cref="KvTableStore.GetRowsBatchLockedForMutation"/> has already re-read and decoded
+    /// the row under the lock that makes the answer trustworthy.</para>
+    ///
+    /// <para>A row that fails the re-check is dropped from the batch and counted, never retried in a
+    /// tight loop: the sweep will see it again next run, by which time it may legitimately have
+    /// expired.</para>
+    /// </summary>
+    public async Task<(int deleted, int skipped)> DeleteExpiredRowsAsync(
+        TableDescriptor table,
+        KvTransaction tx,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        string expirationColumn,
+        long cutoffEpochMs,
+        CancellationToken cancellationToken = default)
+    {
+        if (rowIds.Count == 0)
+            return (0, 0);
+
+        List<ObjectIdValue> chunk = [.. rowIds];
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, chunk, cancellationToken).ConfigureAwait(false);
+
+        List<KvTableStore.RowDelete> batch = new(chunk.Count);
+        int skipped = 0;
+
+        for (int i = 0; i < chunk.Count; i++)
+        {
+            ObjectIdValue rowId = chunk[i];
+            ReadOnlyMemory<byte>? data = rawRows[i];
+
+            // Unlike the user-facing delete path, a row that vanished is not an error here: a
+            // concurrent user DELETE removing the same expired row is a perfectly ordinary race, and
+            // the sweep's goal (the row is gone) is already satisfied.
+            if (data is null || data.Value.Length == 0)
+                continue;
+
+            Dictionary<string, ColumnValue> writableRow = await RowEncoder.DecodeWritableAsync(
+                table.Schema, tx.TransactionId, rowId, data.Value,
+                visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+
+            if (!TtlExpiryPredicate.IsExpired(writableRow, expirationColumn, cutoffEpochMs))
+            {
+                skipped++;
+                continue;
+            }
+
+            batch.Add(new KvTableStore.RowDelete
+            {
+                RowId = rowId,
+                IndexEntries = CollectIndexDeletes(table, rowId, writableRow),
+            });
+        }
+
+        if (batch.Count == 0)
+            return (0, skipped);
+
+        // The same batched primitive the user-facing delete uses, so the row and every one of its index
+        // entries go in one transaction — an expired row that lost its row but kept an index entry would
+        // make index-only scans return rows that no longer exist.
+        await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
+
+        foreach (KvTableStore.RowDelete row in batch)
+            Log.LogRowDeleted(logger, row.RowId);
+
+        return (batch.Count, skipped);
     }
 
     private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
