@@ -9,8 +9,8 @@ This document describes how it works and how to tune it. For the statistics them
 planner consumes them, see [`docs/query-planner.md`](./query-planner.md). Manual `ANALYZE TABLE` is
 unchanged and remains the authoritative way to force a refresh.
 
-> **Status:** the feature is **off by default** (`auto_analyze_enabled = false`). Turn it on per the
-> config below once you've validated it for your workload.
+> **Status:** the feature is **on by default** (`auto_analyze_enabled = true`). Set it to `false` in
+> `config.yml` to go back to manual-only `ANALYZE`.
 
 ## Why it exists
 
@@ -139,11 +139,11 @@ the same table on one node.
 ## Configuration
 
 All knobs live in `CamusDBConfig` (see [`docs/configuration.md`](./configuration.md) for how config is
-loaded). Defaults are conservative; the feature is opt-in.
+loaded). The feature is on by default; the tuning defaults around it are deliberately conservative.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `auto_analyze_enabled` | `false` | Master switch. Off ⇒ the loop never runs; zero behavioral change. |
+| `auto_analyze_enabled` | `true` | Master switch. Off ⇒ the loop never runs; statistics refresh only on manual `ANALYZE`. |
 | `auto_analyze_check_interval_ms` | `60000` | Sweep interval. `<= 0` also disables the loop. |
 | `auto_analyze_fraction_stale_rows` | `0.20` | Proportional staleness trigger. |
 | `auto_analyze_min_stale_rows` | `500` | Absolute mutation floor before a table is ever stale. |

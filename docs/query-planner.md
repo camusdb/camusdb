@@ -787,7 +787,10 @@ declared-first `events` outermost (paying a full `events` scan), while the DP dr
 | `key_range_sharding` | `KeyRangeShardingEnabled` | `false` | Enables `Partitioned` distributions + non-zero `NetworkFactor` |
 | `initial_partitions` | `ClusterPartitionCount` | `1` | `N` in the `(N−1)/N` remote-fraction estimate |
 
-All cost flags are **off by default and additive**: off (or with no stats) → the planner is byte-identical
+All cost flags are **off by default and additive**. Note that access-path costing engages on a
+DML-maintained row count alone: a table that has never been `ANALYZE`d is costed with default
+selectivities rather than histograms/NDV, so turning the flag on before statistics exist can pick
+worse plans than the heuristic. With the flags off (or with no stats) → the planner is byte-identical
 to the heuristic. This is a hard invariant — a bad histogram or stale row count cannot silently regress a
 production plan until an operator opts in.
 

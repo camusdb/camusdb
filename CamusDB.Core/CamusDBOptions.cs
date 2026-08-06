@@ -74,10 +74,12 @@ public sealed record CamusDBOptions
     // peak memory with sampling, throttles its scan rate, and backs off under load.
 
     /// <summary>
-    /// Master switch for automatic background <c>ANALYZE</c>. Opt-in for now: while false the
-    /// scheduler never runs and there is zero behavioral change from manual-only ANALYZE.
+    /// Master switch for automatic background <c>ANALYZE</c>. On by default: stale statistics make the
+    /// cost-based planner choose badly, and requiring an operator to schedule <c>ANALYZE</c> by hand is
+    /// the common way that happens. Set false to restore manual-only ANALYZE — the scheduler then never
+    /// runs and nothing else changes.
     /// </summary>
-    public bool AutoAnalyzeEnabled { get; init; } = false;
+    public bool AutoAnalyzeEnabled { get; init; } = true;
 
     /// <summary>
     /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the schema/registry
@@ -139,11 +141,13 @@ public sealed record CamusDBOptions
     // resolves to; the remainder are genuinely node- or cluster-level.
 
     /// <summary>
-    /// Master switch for the row-level TTL sweep. Opt-in: while false neither the planner nor the
-    /// worker loop starts and there is zero behavioral change — an expired row is simply never
-    /// collected. Equivalent in role to CockroachDB's <c>sql.ttl.job.enabled</c> cluster setting.
+    /// Master switch for the row-level TTL sweep. On by default: a table only enters the sweep once it
+    /// sets <c>ttl_expiration_expression</c>, so a database whose tables configure no TTL sees nothing
+    /// beyond an idle poll, while a table that <em>did</em> ask for expiry does not silently retain rows
+    /// forever. Set false to stop the sweep node-wide — expired rows are then never collected.
+    /// Equivalent in role to CockroachDB's <c>sql.ttl.job.enabled</c> cluster setting.
     /// </summary>
-    public bool TtlEnabled { get; init; } = false;
+    public bool TtlEnabled { get; init; } = true;
 
     /// <summary>
     /// Fallback for the per-table <c>ttl_job_cron</c> storage parameter: how often a table's sweep
@@ -388,6 +392,12 @@ public sealed record CamusDBOptions
     /// unchanged, so plans are byte-identical to the heuristic planner regardless of whether
     /// statistics have been collected. Set via <c>cost_based_access_path_enabled</c>
     /// in <c>config.yml</c>.
+    ///
+    /// <para>Still opt-in. Costing engages on a DML-maintained row count alone, so a table that has
+    /// never been analyzed is costed without histograms or NDV and can be planned worse than the
+    /// heuristic — and a small table never reaches <see cref="AutoAnalyzeMinStaleRows"/>, so nothing
+    /// fills those in for it. Turning it on also changes which keys a read touches, which changes
+    /// what an optimistic transaction folds into its read set.</para>
     /// </summary>
     public bool CostBasedAccessPathEnabled { get; init; } = true;
 

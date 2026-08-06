@@ -139,9 +139,9 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # ── Automatic (background) ANALYZE ────────────────────────────────────────────
 # Keeps optimizer statistics fresh without a user running ANALYZE. Stays low-priority: it reads a
 # lock-free snapshot (never blocks/aborts foreground work), bounds memory with sampling, throttles
-# its scan rate, and backs off under load. Off by default. See docs/automatic-analyze.md.
+# its scan rate, and backs off under load. On by default. See docs/automatic-analyze.md.
 #
-# auto_analyze_enabled: master switch. Default false.
+# auto_analyze_enabled: master switch. Default true; set false for manual-only ANALYZE.
 # auto_analyze_check_interval_ms: sweep interval; only the registry leader sweeps (once per cluster).
 #   <= 0 also disables the loop. Default 60000.
 # auto_analyze_fraction_stale_rows: proportional trigger — stale once mutations reach
@@ -156,7 +156,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # auto_analyze_load_pause_threshold: in-flight foreground work above which the sweep backs off;
 #   <= 0 disables load backoff. Default 16.
 # auto_analyze_ownership_check_rows: rows between mid-scan ownership/load re-checks (>= 1). Default 1000.
-# auto_analyze_enabled: false
+# auto_analyze_enabled: true
 # auto_analyze_check_interval_ms: 60000
 # auto_analyze_fraction_stale_rows: 0.20
 # auto_analyze_min_stale_rows: 500
@@ -166,6 +166,37 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # auto_analyze_hll_precision: 11
 # auto_analyze_load_pause_threshold: 16
 # auto_analyze_ownership_check_rows: 1000
+
+# ── Row-level TTL ─────────────────────────────────────────────────────────────
+# Background sweep that deletes rows whose expiry column has passed. On by default, but a table only
+# enters the sweep once it sets the ttl_expiration_expression storage parameter — a database with no
+# TTL-configured table costs an idle poll and nothing else. Per-table tuning (cadence, batch sizes,
+# rate limits, pause) lives on the table; the values below are only the fallback a table that sets
+# nothing resolves to. See docs/row-level-ttl.md.
+#
+# ttl_enabled: master switch. Default true; set false to stop collecting expired rows node-wide.
+# ttl_default_job_cron: fallback ttl_job_cron; @macro forms only. Default "@daily".
+# ttl_default_select_batch_size: rows read per scan batch (> 0). Default 500.
+# ttl_default_delete_batch_size: rows deleted per transaction (> 0). Default 100.
+# ttl_default_select_rate_limit: scan rows/second; 0 = unlimited. Default 0.
+# ttl_default_delete_rate_limit: delete rows/second; 0 = unlimited. Default 100.
+# ttl_spans_per_table: spans a table's keyspace is split into per run (> 0). Default 64.
+# ttl_max_concurrent_spans_per_node: spans one node processes at once (>= 1). Default 1.
+# ttl_load_pause_threshold: in-flight foreground work above which the sweep pauses; <= 0 disables.
+#   Default 16.
+# ttl_span_lease_ms: lease on a claimed span (> 0). Default 30000.
+# ttl_span_lease_renew_interval_ms: lease re-stamp cadence; must be well under the lease. Default 10000.
+# ttl_enabled: true
+# ttl_default_job_cron: "@daily"
+# ttl_default_select_batch_size: 500
+# ttl_default_delete_batch_size: 100
+# ttl_default_select_rate_limit: 0
+# ttl_default_delete_rate_limit: 100
+# ttl_spans_per_table: 64
+# ttl_max_concurrent_spans_per_node: 1
+# ttl_load_pause_threshold: 16
+# ttl_span_lease_ms: 30000
+# ttl_span_lease_renew_interval_ms: 10000
 
 # ── SQL parser AST cache ──────────────────────────────────────────────────────
 # Identical SQL texts skip lexing+parsing on the second and later executions.
@@ -199,6 +230,10 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # spill_merge_fan_in: 16          # max simultaneous run readers in a k-way merge; must be > 0
 
 # ── Cost-based optimizer ──────────────────────────────────────────────────────
+# Both cost-based switches are still opt-in. They engage on a DML-maintained row count alone, so a
+# table that has never been ANALYZEd is costed without histograms or NDV and can be planned worse
+# than the heuristic; auto_analyze_enabled fills those in only once a table passes
+# auto_analyze_min_stale_rows.
 # cost_based_access_path_enabled: false   # cost all index access paths, pick cheapest
 # cost_based_join_order_enabled: false    # System-R DP join-order enumeration
 # plan_cache_enabled: false               # SQL plan cache (reuse parsed+planned queries)
