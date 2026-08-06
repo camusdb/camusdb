@@ -72,8 +72,8 @@ public class TestConfigurationDefaults
         Assert.IsFalse(CamusDBOptions.Default.KeyRangeShardingEnabled, nameof(CamusDBOptions.Default.KeyRangeShardingEnabled));
         Assert.AreEqual(1, CamusDBOptions.Default.ClusterPartitionCount, nameof(CamusDBOptions.Default.ClusterPartitionCount));
         Assert.AreEqual(0.01, CamusDBOptions.Default.NetWeight, nameof(CamusDBOptions.Default.NetWeight));
-        Assert.AreEqual(false, CamusDBOptions.Default.CostBasedAccessPathEnabled, nameof(CamusDBOptions.Default.CostBasedAccessPathEnabled));
-        Assert.AreEqual(false, CamusDBOptions.Default.CostBasedJoinOrderEnabled, nameof(CamusDBOptions.Default.CostBasedJoinOrderEnabled));
+        Assert.AreEqual(true, CamusDBOptions.Default.CostBasedAccessPathEnabled, nameof(CamusDBOptions.Default.CostBasedAccessPathEnabled));
+        Assert.AreEqual(true, CamusDBOptions.Default.CostBasedJoinOrderEnabled, nameof(CamusDBOptions.Default.CostBasedJoinOrderEnabled));
         Assert.AreEqual(false, CamusDBOptions.Default.PlanCacheEnabled, nameof(CamusDBOptions.Default.PlanCacheEnabled));
         Assert.AreEqual(512, CamusDBOptions.Default.PlanCacheMaxEntries, nameof(CamusDBOptions.Default.PlanCacheMaxEntries));
         Assert.AreEqual(CamusIsolationLevel.Serializable, CamusDBOptions.Default.DefaultIsolationLevel, nameof(CamusDBOptions.Default.DefaultIsolationLevel));

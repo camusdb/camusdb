@@ -670,17 +670,15 @@ public sealed class KvTableStore
     /// modified. Serializable read-write callers that need shared point locks must use
     /// <see cref="GetRow"/> per entry.
     ///
-    /// <paramref name="trackReadSet"/> controls commit-time read-set folding, and defaults to
-    /// <c>true</c> so a mutation batch-read keeps its read dependencies. Pass <c>false</c> from a
-    /// plain query fetch: registering one read dependency per fetched row makes the coordinator
-    /// probe every one of them again at commit, which turns a large scan into a commit-time cost
-    /// proportional to the rows it touched. See <see cref="ScanRows"/> for the full rationale.
+    /// Commit-time read-set folding follows <see cref="KvTransaction.FoldReads"/>: a transaction
+    /// that promises read validation folds every fetched row, query fetch or mutation batch-read
+    /// alike — otherwise plan choice (point lookup vs batch fetch) would decide whether a read is
+    /// validated. See <see cref="ScanRows"/> for the full rationale and the commit-cost trade-off.
     /// </summary>
     public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
-        CancellationToken cancellationToken = default,
-        bool trackReadSet = true)
+        CancellationToken cancellationToken = default)
     {
         if (rowIds.Count == 0)
             return [];
@@ -711,7 +709,7 @@ public sealed class KvTableStore
         // the identical batch, which the coordinator can only replay idempotently under the same id) and a
         // fresh id is minted only when the set shrinks (confirmed reads removed). Unregistered reads carry
         // the default id (no folding), so the identity is immaterial there.
-        string readCoordinatorKey = trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "";
+        string readCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
         TransactionOperationId readOperationId = readCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
         while (pending.Count > 0)
@@ -863,35 +861,34 @@ public sealed class KvTableStore
     /// the scan is pinned to that snapshot for its entire duration, including across page
     /// boundaries. All other transaction types pass Zero (read-committed fast path, unchanged).
     ///
-    /// <para><b>Read-set folding is off by default for scans.</b> A folded read registers one
-    /// commit-time dependency per scanned key, and the coordinator re-probes every one of them
-    /// before it can decide — so folding a scan makes commit cost scale with rows scanned, which
-    /// is exactly the cost a scan-heavy transaction cannot afford. A query scan does not need it:
-    /// a Serializable read-write transaction already holds a shared range lock over the same
-    /// bucket for the life of the transaction (see <see cref="AcquireRowRangeLockAsync"/>), which
-    /// is strictly stronger — it also fences phantom inserts, which per-key folding can never
-    /// detect. Under Read Committed there is no repeatable-read promise for a plain query to
-    /// weaken.</para>
+    /// <para><b>Read-set folding follows <see cref="KvTransaction.FoldReads"/>, never the call
+    /// site.</b> A transaction that promises commit-time read validation (optimistic locking, or an
+    /// explicit <see cref="ReadValidation.TrackAndValidate"/>) must fold <em>every</em> read it
+    /// performs — scans included. Folding only point reads would make isolation depend on plan
+    /// choice: the same predicate answered by a PK lookup would be validated at commit while a
+    /// table scan of it would not, silently weakening the optimistic contract whenever the planner
+    /// prefers a scan. The shared range lock is not a substitute here — it fires only for
+    /// Serializable read-write transactions or under key-range sharding (see
+    /// <see cref="AcquireRowRangeLockAsync"/>), so a Read Committed optimistic scan would otherwise
+    /// carry no read protection at all. The price is that an optimistic transaction's commit cost
+    /// scales with the rows its scans observed; a transaction that cannot afford that should use
+    /// pessimistic locking, whose scans (FoldReads false) register nothing.</para>
     ///
-    /// <para>Callers whose scan drives a subsequent write — the UPDATE/DELETE locate scan, index
-    /// backfill, constraint validation — must pass <paramref name="trackReadSet"/> = <c>true</c>:
-    /// there the observed rows decide what gets written, so a concurrent modification to a scanned
-    /// row has to invalidate the transaction.</para>
-    ///
-    /// <para><paramref name="afterRowId"/> and <paramref name="untilRowId"/> together bound the scan to
-    /// the half-open interval <c>(after, until)</c>. The upper bound exists so a caller can own one
-    /// span of a keyspace partitioned across workers and read only that span; without it every worker
-    /// would scan to the end of the table and discard, which costs exactly the parallelism the
-    /// partitioning bought. Both bounds compare hex ordinally, which matches
-    /// <see cref="ObjectIdValue"/> ordering because <c>ObjectId.ToString</c> writes fixed-width
-    /// big-endian hex.</para>
+    /// <para><paramref name="fromRowId"/> (inclusive), <paramref name="afterRowId"/> (exclusive) and
+    /// <paramref name="untilRowId"/> (exclusive) bound the scan. They exist so a caller can own one
+    /// span of a keyspace partitioned across workers and read only that span; without them every
+    /// worker would scan the whole table and discard, which costs exactly the parallelism the
+    /// partitioning bought. All three are pushed down as key bounds so the store <em>seeks</em> to the
+    /// span rather than returning rows this method then drops — the difference between each worker
+    /// reading its own slice and each worker re-reading the table from its start. Bounds compare hex
+    /// ordinally, which matches <see cref="ObjectIdValue"/> ordering because <c>ObjectId.ToString</c>
+    /// writes fixed-width big-endian hex.</para>
     /// </summary>
     public async IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> ScanRows(
         KvTransaction tx,
         long? maxRows = null,
         ObjectIdValue? afterRowId = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
-        bool trackReadSet = false,
         ObjectIdValue? untilRowId = null,
         ObjectIdValue? fromRowId = null)
     {
@@ -913,6 +910,32 @@ public sealed class KvTableStore
         string? untilHex = untilRowId?.ToString();
         string? fromHex = fromRowId?.ToString();
 
+        // Resume position as ordinal-comparable hex. Ordinal hex comparison matches ObjectId ordering
+        // because ObjectId.ToString writes all three unsigned segments as fixed-width big-endian hex,
+        // which is the same equivalence the partition bounds above rely on.
+        string? afterHex = afterRowId?.ToString();
+
+        // All three bounds are pushed into the KV scan instead of being applied to what comes back.
+        // The store seeks to the start key, so a worker that owns one slice reads only that slice;
+        // filtering client-side made every slice re-read the prefix from its beginning, so a table
+        // divided into N slices was read N times over. Ordinal comparison on the whole key is the
+        // same comparison as on the hex suffix, since every row key shares rowKeyPrefix.
+        //
+        // The two lower bounds collapse into the single one the store accepts: whichever is higher
+        // wins, and on a tie the exclusive progress cursor does, because the row it names has already
+        // been dealt with.
+        string? startHex = fromHex;
+        bool startInclusive = true;
+
+        if (afterHex is not null && (startHex is null || string.CompareOrdinal(afterHex, startHex) >= 0))
+        {
+            startHex = afterHex;
+            startInclusive = false;
+        }
+
+        string? scanStartKey = startHex is not null ? rowKeyPrefix + startHex : null;
+        string? scanEndKey = untilHex is not null ? rowKeyPrefix + untilHex : null;
+
         // Open the deferred Kahuna session before reading tx.TransactionId below: the scan must run
         // under the transaction's own identity, and a tracked scan can only fold reads once the
         // session exists (FoldReads is false while TransactionId is Zero). No-op for eager,
@@ -925,17 +948,19 @@ public sealed class KvTableStore
             long emitted = 0;
             int prefixLen = rowKeyPrefix.Length;
 
-            // Register the scan for read-set folding only when the caller asked for it (a scan that
-            // drives a write) and the transaction folds reads at all; otherwise the empty
-            // coordinatorKey leaves every scanned row out of the commit-time read set.
-            string scanCoordinatorKey = trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "";
+            // Register the scan for read-set folding whenever the transaction folds reads at all
+            // (optimistic / TrackAndValidate); the empty coordinatorKey leaves every scanned row
+            // out of the commit-time read set for transactions guarded by locks instead.
+            string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
                 tx.TransactionId,
                 rowBucketPrefix,
-                null, true,
-                null, true,
+                scanStartKey, startInclusive,
+                // The upper bound is exclusive when there is one; with no end key the flag carries no
+                // meaning, and true is what every other unbounded scan in the engine passes.
+                scanEndKey, scanEndKey is null,
                 DefaultPageSize,
                 tx.ReadTimestamp,
                 KeyValueDurability.Persistent,
@@ -951,23 +976,9 @@ public sealed class KvTableStore
                     continue;
 
                 // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
-                ReadOnlySpan<char> hex = key.AsSpan(prefixLen);
-
-                // Ordinal compare matches ObjectId ordering (fixed-width big-endian hex), the same
-                // equivalence afterRowId relies on below.
-                if (untilHex is not null && hex.CompareTo(untilHex.AsSpan(), StringComparison.Ordinal) >= 0)
-                    yield break;
-
-                if (fromHex is not null && hex.CompareTo(fromHex.AsSpan(), StringComparison.Ordinal) < 0)
-                    continue;
-
-                ObjectIdValue rowId = ObjectId.ToValue(hex);
-
-                // Resume uses ObjectIdValue.CompareTo because ObjectId.ToString writes the
-                // same unsigned a/b/c segments in big-endian hex. Keep that equivalence
-                // pinned by tests before changing ObjectId formatting or comparison.
-                if (afterRowId is not null && rowId.CompareTo(afterRowId.Value) <= 0)
-                    continue;
+                // Every key the scan returns already lies within the bounds; they are enforced once,
+                // by the store, and deliberately not re-checked here.
+                ObjectIdValue rowId = ObjectId.ToValue(key.AsSpan(prefixLen));
 
                 if (maxRows is not null && emitted >= maxRows.Value)
                     yield break;
@@ -989,11 +1000,15 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, cancellationToken, trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
+            // Every level is bounded identically, and each level builds the bound keys in its own
+            // namespace. Applying the same bounds everywhere is what keeps nearest-wins intact: a
+            // tombstone and the value it suppresses share a row id, so they are either both inside
+            // the bounds or both outside — a bound can never admit one and drop the other.
+            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, startHex, startInclusive, untilHex, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
-                iters[ai + 1] = ancestorStore.ScanRowsRawAsync(HLCTimestamp.Zero, forkTimestamp, cancellationToken).GetAsyncEnumerator(cancellationToken);
+                iters[ai + 1] = ancestorStore.ScanRowsRawAsync(HLCTimestamp.Zero, forkTimestamp, startHex, startInclusive, untilHex, cancellationToken).GetAsyncEnumerator(cancellationToken);
             }
 
             if (ancestorStores.Length > 0)
@@ -1007,10 +1022,6 @@ public sealed class KvTableStore
                     int c = string.CompareOrdinal(a.hex, b.hex);
                     return c != 0 ? c : a.level.CompareTo(b.level);
                 }));
-
-            // afterRowId as ordinal-comparable hex; ordinal hex comparison matches ObjectId ordering
-            // because ObjectId.ToString() writes all three unsigned segments as fixed-width big-endian hex.
-            string? afterHex = afterRowId.HasValue ? afterRowId.Value.ToString() : null;
 
             // The heap priority is (hex, levelIndex) — for the same hex, level 0 (branch) dequeues
             // before level 1 (nearest ancestor) and so on. This guarantees all entries for a given
@@ -1034,19 +1045,14 @@ public sealed class KvTableStore
                 {
                     (int levelIdx, string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload) = heap.Dequeue();
 
-                    // The heap dequeues in ascending hex order across every lineage level, so the first
-                    // key at or past the bound means the rest of every level is past it too.
-                    if (untilHex is not null && string.CompareOrdinal(rowIdHex, untilHex) >= 0)
-                        yield break;
-
+                    // No bound checks here: every level was scanned within the same bounds, so the
+                    // heap only ever holds keys that already satisfy them.
                     if (rowIdHex != lastHex)
                     {
                         lastHex = rowIdHex;
 
                         // Nearest level wins for this rowIdHex.
-                        if (kind == BranchKvKind.Value && payload is not null &&
-                            (fromHex is null || string.CompareOrdinal(rowIdHex, fromHex) >= 0) &&
-                            (afterHex is null || string.CompareOrdinal(rowIdHex, afterHex) > 0))
+                        if (kind == BranchKvKind.Value && payload is not null)
                         {
                             yield return (ObjectId.ToValue(rowIdHex), payload.Value);
                             emitted++;
@@ -1258,10 +1264,9 @@ public sealed class KvTableStore
     /// the same consistent snapshot as <see cref="GetRow"/> and <see cref="LookupUnique"/>
     /// across all pages. Zero is passed for non-snapshot transactions (read-committed fast path).
     ///
-    /// <paramref name="trackReadSet"/> follows the same rule as <see cref="ScanRows"/>: off for a
-    /// query scan, because folding one commit-time dependency per scanned entry makes commit cost
-    /// scale with the scan while the index range lock held by a Serializable read-write transaction
-    /// already covers the same bucket more strongly; on for a scan that decides a subsequent write.
+    /// Commit-time read-set folding follows <see cref="KvTransaction.FoldReads"/>, the same rule
+    /// as <see cref="ScanRows"/> — see there for why folding is a transaction property rather than
+    /// a call-site choice, and for the commit-cost trade-off it implies.
     /// </summary>
     public async IAsyncEnumerable<(CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)> ScanIndex(
         KvTransaction tx,
@@ -1273,8 +1278,7 @@ public sealed class KvTableStore
         bool fromInclusive = true,
         bool toInclusive = true,
         long? maxRows = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default,
-        bool trackReadSet = false)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (maxRows is <= 0)
             yield break;
@@ -1314,9 +1318,9 @@ public sealed class KvTableStore
         if (ancestorStores.Length == 0)
         {
             // Root database: stream directly without materialization. Register for read-set folding
-            // only when the caller asked for it (a scan that drives a write) and the transaction
-            // folds reads at all; empty coordinatorKey = unregistered.
-            string scanCoordinatorKey = trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "";
+            // whenever the transaction folds reads at all (optimistic / TrackAndValidate); empty
+            // coordinatorKey = unregistered.
+            string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
             await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
@@ -1410,7 +1414,7 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, trackReadSet && tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound).GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound).GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
@@ -3079,13 +3083,21 @@ public sealed class KvTableStore
     // caller can apply the nearest-wins/tombstone-suppression rule across levels.
     // Yields every row entry from this store's namespace at the given snapshot.
     // txId is the live transaction id for level-0 reads (use HLCTimestamp.Zero for ancestor snapshots).
+    // startHex/endHex are bare row-id hex bounds (no prefix) so each store in a lineage builds the
+    // bound keys in its own namespace; endHex is always exclusive.
     private async IAsyncEnumerable<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)> ScanRowsRawAsync(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
+        string? startHex,
+        bool startInclusive,
+        string? endHex,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
         string coordinatorKey = "")
     {
         int prefixLen = rowKeyPrefix.Length;
+
+        string? startKey = startHex is not null ? rowKeyPrefix + startHex : null;
+        string? endKey = endHex is not null ? rowKeyPrefix + endHex : null;
 
         // Non-empty coordinatorKey registers the scan so every row it returns folds as a read
         // observation for commit-time validation; the coordinator derives a distinct operation id per
@@ -3093,7 +3105,7 @@ public sealed class KvTableStore
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            txId, rowBucketPrefix, null, true, null, true, DefaultPageSize,
+            txId, rowBucketPrefix, startKey, startInclusive, endKey, endKey is null, DefaultPageSize,
             readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
         {
             if (entry.Value is null) continue;

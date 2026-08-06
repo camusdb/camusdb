@@ -249,6 +249,69 @@ public sealed class TestPlanCostBasedAccessPath : BaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // A covered projection keeps the index even at low selectivity: the scan
+    // fetches zero primary rows, so its cost has no per-entry row fetch and it
+    // is at least as cheap as the full scan for any fraction of the table.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task LowSelectivity_CoveredProjection_KeepsIndex_ViaCoveringAwareCost()
+    {
+        // Same predicate as LowSelectivity_Range_FallsToFullScan_ViaCostComparison, but the
+        // projection is only "category" — supplied by category_idx's key, so the scan is covering:
+        //   Estimated rows = 50 × 0.8 = 40 → covered index scan cost = 40 (entries only, no fetches)
+        //   Full scan cost = 50
+        // Costed with the row fetch (as SELECT * is), the index scan would be 80 and wrongly lose.
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
+        TableDescriptor table = await OpenTableAsync(database);
+        await SeedStatsAsync(executor, database, table);
+
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT category FROM things WHERE category >= 0");
+
+        bool hasIndexScan = rows.Any(r =>
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "index-range-scan");
+        bool hasTableScan = rows.Any(r =>
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "table-scan");
+
+        Assert.IsTrue(hasIndexScan,
+            "a covered low-selectivity range must keep the index: it reads 40 entries and fetches no rows");
+        Assert.IsFalse(hasTableScan,
+            "the full table scan must not be chosen over a cheaper covered index scan");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // A DML-maintained row count alone must not engage costing: without an
+    // ANALYZE (histograms), estimates would be fixed fallback selectivities.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [Test]
+    public async Task RowCountWithoutHistograms_KeepsRuleBasedPlan()
+    {
+        // TrackInsert gives the table a positive row count, but no histograms and no analyze
+        // timestamp — the state every never-ANALYZEd table with data is in. The cost-based
+        // branch must not engage: the rule-based path picks category_idx by score (equality
+        // prefix, 5010) over priority_idx (one-bound range, 5001).
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
+        TableDescriptor table = await OpenTableAsync(database);
+        executor.Statistics.TrackInsert(database, table, 50);
+        await Task.Delay(150); // let the tracked count flush so GetRowCountEstimate returns it
+
+        List<QueryResultRow> rows = await ExplainAsync(executor, database, dbname,
+            "EXPLAIN SELECT * FROM things WHERE category = 2 AND priority > 45");
+
+        QueryResultRow? scanRow = rows.FirstOrDefault(r =>
+            r.Row.TryGetValue("node", out ColumnValue? n) && n!.StrValue == "index-range-scan");
+
+        Assert.IsNotNull(scanRow, "the rule-based path must still pick an index scan");
+        Assert.IsTrue(scanRow!.Value.Row.TryGetValue("detail", out ColumnValue? detail));
+        Assert.IsTrue(detail!.StrValue!.Contains("category_idx", System.StringComparison.Ordinal),
+            $"without histograms the score-based choice (category_idx) must stand, detail was: {detail.StrValue}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // High-selectivity range keeps the index via cost comparison
     // ─────────────────────────────────────────────────────────────────────────
 

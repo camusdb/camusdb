@@ -672,6 +672,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             : (ttlScheduler.RowsExpired, ttlScheduler.RowsSkippedByRecheck, ttlScheduler.RowsFailed,
                ttlScheduler.SpansCompleted, ttlScheduler.RunsPlanned);
 
+    /// <summary>Test-only seam: the most TTL spans this node has had in flight at once.</summary>
+    internal int TtlPeakConcurrentSpansForTests() => ttlScheduler?.PeakConcurrentSpans ?? 0;
+
     /// <summary>
     /// Test-only seam: fails the TTL delete for any chunk the predicate selects, so a test can observe
     /// what the checkpoint does when a delete does not commit. See
@@ -1800,7 +1803,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 // Each scanned row produces an index entry in this same transaction, so the rows read
                 // are a genuine commit dependency and must stay in the read set.
                 await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                    tx, afterRowId: afterRowId, trackReadSet: true).ConfigureAwait(false))
+                    tx, afterRowId: afterRowId).ConfigureAwait(false))
                 {
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                         table.Schema, tx.TransactionId, rowId, data,

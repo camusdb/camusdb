@@ -254,19 +254,19 @@ public class ConfigDefinition
 
     /// <summary>
     /// Enables cost-based access-path selection in the query planner.
-    /// When <c>true</c>, the planner costs all viable index steps and picks the cheapest.
-    /// When <c>false</c> (default), the rule-based (score-based) path is used unchanged.
-    /// Maps to <c>CamusDBOptions.CostBasedAccessPathEnabled</c>.
+    /// When <c>true</c> (default), the planner costs all viable index steps for ANALYZEd tables
+    /// and picks the cheapest. When <c>false</c>, the rule-based (score-based) path is used
+    /// unchanged. Maps to <c>CamusDBOptions.CostBasedAccessPathEnabled</c>.
     /// </summary>
-    public bool CostBasedAccessPathEnabled { get; set; } = false;
+    public bool CostBasedAccessPathEnabled { get; set; } = true;
 
     /// <summary>
     /// Enables cost-based join-order enumeration (System-R–style DP).
-    /// When <c>true</c>, the planner prices all left-deep orderings and picks the cheapest.
-    /// When <c>false</c> (default), the rule-based heuristic is used unchanged.
+    /// When <c>true</c> (default), the planner prices all left-deep orderings and picks the
+    /// cheapest. When <c>false</c>, the rule-based heuristic is used unchanged.
     /// Maps to <c>CamusDBOptions.CostBasedJoinOrderEnabled</c>.
     /// </summary>
-    public bool CostBasedJoinOrderEnabled { get; set; } = false;
+    public bool CostBasedJoinOrderEnabled { get; set; } = true;
 
     /// <summary>
     /// Enables the query plan cache.

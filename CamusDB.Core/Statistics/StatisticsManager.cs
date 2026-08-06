@@ -154,6 +154,25 @@ public sealed class StatisticsManager
             : 0;
     }
 
+    /// <summary>
+    /// True once this table carries column statistics produced by a real ANALYZE — histograms
+    /// published in-process or loaded from the persisted blob, or a recorded analyze timestamp.
+    /// Cost-based access-path selection keys off this rather than the DML-maintained row count:
+    /// a bare row count engages the cost model with fixed fallback selectivities, which is enough
+    /// to wrongly abandon a correct index or covered path on small, never-analyzed tables (and
+    /// auto-analyze staleness thresholds mean a small table may never earn histograms at all).
+    /// Returns false while the background stats load is still pending — the caller's preceding
+    /// <see cref="GetRowCountEstimate"/> call fires that load, so the answer converges.
+    /// </summary>
+    public bool HasAnalyzedStatistics(DatabaseDescriptor database, TableDescriptor table)
+    {
+        if (!_cache.TryGetValue(CacheKey(database.Id, table.Id), out Entry? entry))
+            return false;
+
+        lock (entry.ColumnStatsLock)
+            return entry.Histograms is { Count: > 0 } || !entry.LastAnalyzedAt.IsNull();
+    }
+
     // Minimum interval between background-load attempts fired by GetRowCountEstimate for one
     // table. Purely a retry-storm guard; a successful load makes the check moot (Loaded=true).
     private const int LoadRetryBackoffMs = 1_000;
@@ -1363,7 +1382,15 @@ public sealed class StatisticsManager
 
         lock (entry.ColumnStatsLock)
         {
-            entry.Histograms ??= new Dictionary<string, ColumnHistogram>(persisted, StringComparer.Ordinal);
+            if (entry.Histograms is not null)
+                return;
+
+            entry.Histograms = new Dictionary<string, ColumnHistogram>(persisted, StringComparer.Ordinal);
+
+            // Installing loaded histograms is a histogram publish on this node: bump the analyze
+            // generation so plans cached before the load (planned rule-based, without histograms)
+            // are invalidated and re-planned against the real statistics.
+            Volatile.Write(ref entry.AnalyzeGeneration, Interlocked.Increment(ref globalAnalyzeGeneration));
         }
     }
 

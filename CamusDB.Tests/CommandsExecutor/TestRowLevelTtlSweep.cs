@@ -508,9 +508,9 @@ public sealed class TestRowLevelTtlSweep : BaseTest
     [Test]
     public async Task ConfiguredConcurrencyGreaterThanOneOverlapsSpanWork()
     {
-        // Sixteen spans, each holding rows, with a delete rate low enough that the work is
-        // time-dominated. If spans ran sequentially the tick would take about 16 × the per-span time;
-        // overlapping four at a time must be materially faster than that.
+        // Overlap is asserted from spans observed in flight together, not from elapsed time. Wall clock
+        // cannot answer this question: a sweep gets faster when each span gets cheaper, whether or not
+        // any two of them ever ran at the same time.
         CamusDBOptions serial = EagerTtl with
         {
             TtlSpansPerTable = 16,
@@ -523,9 +523,7 @@ public sealed class TestRowLevelTtlSweep : BaseTest
         await InsertSessionsAsync(exec1, database1, db1, 60, -60_000, "expired");
         await ExecDdlAsync(exec1, db1, "ALTER TABLE sessions SET (ttl_expiration_expression = 'expires_at')");
 
-        System.Diagnostics.Stopwatch serialWatch = System.Diagnostics.Stopwatch.StartNew();
         await exec1.RunTtlSweepForTestsAsync();
-        serialWatch.Stop();
 
         // A second engine is required, not a reconfigured one: options are captured at construction, so
         // setting the knob afterwards would be a no-op that still passed.
@@ -534,14 +532,15 @@ public sealed class TestRowLevelTtlSweep : BaseTest
         await InsertSessionsAsync(exec2, database2, db2, 60, -60_000, "expired");
         await ExecDdlAsync(exec2, db2, "ALTER TABLE sessions SET (ttl_expiration_expression = 'expires_at')");
 
-        System.Diagnostics.Stopwatch parallelWatch = System.Diagnostics.Stopwatch.StartNew();
         await exec2.RunTtlSweepForTestsAsync();
-        parallelWatch.Stop();
 
         Assert.AreEqual(0, await CountRowsAsync(exec1, database1, db1, "SELECT * FROM sessions"));
         Assert.AreEqual(0, await CountRowsAsync(exec2, database2, db2, "SELECT * FROM sessions"));
 
-        Assert.That(parallelWatch.Elapsed, Is.LessThan(serialWatch.Elapsed),
+        Assert.AreEqual(1, exec1.TtlPeakConcurrentSpansForTests(),
+            "A concurrency limit of one must never put two spans in flight together");
+
+        Assert.That(exec2.TtlPeakConcurrentSpansForTests(), Is.GreaterThan(1),
             "Raising the concurrency knob must actually overlap span work, not merely change a counter");
     }
 
@@ -958,4 +957,5 @@ public sealed class TestRowLevelTtlSweep : BaseTest
         Assert.AreEqual(0, await executor.RunTtlSweepForTestsAsync());
         Assert.AreEqual(4, await CountRowsAsync(executor, database, dbname, "SELECT * FROM sessions"));
     }
+
 }

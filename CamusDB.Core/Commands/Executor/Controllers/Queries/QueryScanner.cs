@@ -119,7 +119,7 @@ internal sealed class QueryScanner
             // where the rows observed here decide what is written. A plain SELECT relies on the range
             // lock taken above instead, so its commit cost stays independent of how many rows it read.
             await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, trackReadSet: plan.Ticket.ExclusivePredicateLocks))
+                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
             {
                 if (data.Length == 0)
                     continue;
@@ -234,8 +234,7 @@ internal sealed class QueryScanner
                 unique,
                 fromInclusive: true,
                 toInclusive: true,
-                maxRows: plan.ScanRowLimit,
-                trackReadSet: ticket.ExclusivePredicateLocks))
+                maxRows: plan.ScanRowLimit))
             {
                 rowsScanned++;
                 if (scanStats is not null)
@@ -272,7 +271,7 @@ internal sealed class QueryScanner
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page, trackReadSet: ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+                ticket.TxnState, page).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 ObjectIdValue batchRowId = page[i];
@@ -302,8 +301,7 @@ internal sealed class QueryScanner
             unique,
             fromInclusive: true,
             toInclusive: true,
-            maxRows: plan.ScanRowLimit,
-            trackReadSet: ticket.ExclusivePredicateLocks))
+            maxRows: plan.ScanRowLimit))
         {
             rowsScanned++;
             if (scanStats is not null)

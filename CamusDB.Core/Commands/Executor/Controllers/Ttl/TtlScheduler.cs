@@ -81,6 +81,16 @@ internal sealed class TtlScheduler : IAsyncDisposable
     internal long SweepMillis;
 
     /// <summary>
+    /// Spans in flight right now, and the most this node has ever had in flight at once. The high-water
+    /// mark is how the concurrency limit is confirmed to be doing something: whether span work actually
+    /// overlaps cannot be read off elapsed time, because a faster span makes a sweep quicker whether or
+    /// not anything ran in parallel.
+    /// </summary>
+    private int spansInFlight;
+
+    internal int PeakConcurrentSpans;
+
+    /// <summary>
     /// Per-table run state, keyed "{dbId}/{tableId}". Cumulative counters answer "is the sweep working
     /// at all"; this answers "which table is stuck", which is the question an operator actually has when
     /// one table stops shrinking and the totals still look healthy.
@@ -583,6 +593,20 @@ internal sealed class TtlScheduler : IAsyncDisposable
         Action<long> addDeleted,
         CancellationToken ct)
     {
+        int inFlight = Interlocked.Increment(ref spansInFlight);
+
+        // Raise the high-water mark without a lock: re-read and retry, since another span may have
+        // pushed it higher between the read and the exchange.
+        int observedPeak = Volatile.Read(ref PeakConcurrentSpans);
+        while (inFlight > observedPeak)
+        {
+            int previous = Interlocked.CompareExchange(ref PeakConcurrentSpans, inFlight, observedPeak);
+            if (previous == observedPeak)
+                break;
+
+            observedPeak = previous;
+        }
+
         try
         {
             (long spanDeleted, long spanSkipped, long spanFailed) = await sweeper.SweepSpanAsync(
@@ -609,6 +633,7 @@ internal sealed class TtlScheduler : IAsyncDisposable
             // out the lease — a span held by a finished worker is the same stall as one held by a
             // dead worker, just shorter.
             await coordinator.ReleaseSpanAsync(database.Id, manifest.TableId, spanIndex, claimToken).ConfigureAwait(false);
+            Interlocked.Decrement(ref spansInFlight);
             slots.Release();
         }
     }

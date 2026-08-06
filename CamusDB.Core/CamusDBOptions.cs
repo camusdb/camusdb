@@ -380,25 +380,27 @@ public sealed record CamusDBOptions
     public double NetWeight { get; init; } = 0.01;
 
     /// <summary>
-    /// Enables cost-based access-path selection in the query planner. When <c>true</c>, the
-    /// planner enumerates all viable index steps, costs each against the full-scan baseline,
-    /// and picks the cheapest. When <c>false</c> (default), the rule-based (score-based) path
-    /// is used unchanged, so plans are byte-identical to the heuristic planner regardless of
-    /// whether statistics have been collected. Set via <c>cost_based_access_path_enabled</c>
+    /// Enables cost-based access-path selection in the query planner. When <c>true</c> (default),
+    /// the planner enumerates all viable index steps for tables that have been ANALYZEd, costs
+    /// each against the full-scan baseline, and picks the cheapest; never-ANALYZEd tables keep
+    /// rule-based plans (DML-maintained row counts alone would engage the cost model with fixed
+    /// fallback selectivities). When <c>false</c>, the rule-based (score-based) path is used
+    /// unchanged, so plans are byte-identical to the heuristic planner regardless of whether
+    /// statistics have been collected. Set via <c>cost_based_access_path_enabled</c>
     /// in <c>config.yml</c>.
     /// </summary>
-    public bool CostBasedAccessPathEnabled { get; init; } = false;
+    public bool CostBasedAccessPathEnabled { get; init; } = true;
 
     /// <summary>
     /// Enables cost-based join-order enumeration (System-R–style DP) in the query planner.
-    /// When <c>true</c>, the planner costs all left-deep orderings and picks the cheapest
-    /// using INLJ vs hash-join cost asymmetry. When <c>false</c> (default), the rule-based
+    /// When <c>true</c> (default), the planner costs all left-deep orderings and picks the
+    /// cheapest using INLJ vs hash-join cost asymmetry. When <c>false</c>, the rule-based
     /// heuristic (<see cref="JoinOrderOptimizer"/>) is used and plans are byte-identical
-    /// to today's output. Joins wider than <c>JoinEnumerator.MaxTablesForEnumeration</c>
-    /// always fall back to the heuristic regardless of this flag. Set via
-    /// <c>cost_based_join_order_enabled</c> in <c>config.yml</c>.
+    /// to the heuristic planner's output. Joins wider than
+    /// <c>JoinEnumerator.MaxTablesForEnumeration</c> always fall back to the heuristic
+    /// regardless of this flag. Set via <c>cost_based_join_order_enabled</c> in <c>config.yml</c>.
     /// </summary>
-    public bool CostBasedJoinOrderEnabled { get; init; } = false;
+    public bool CostBasedJoinOrderEnabled { get; init; } = true;
 
     /// <summary>
     /// Enables the per-process query plan cache.

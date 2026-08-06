@@ -33,6 +33,17 @@ namespace CamusDB.Tests.CommandsExecutor;
 [TestFixture]
 public sealed class TestJoinQueryPlanner : BaseTest
 {
+    /// <summary>
+    /// This fixture asserts the rule-based join machinery in isolation: heuristic build-side
+    /// choice, merge-join sort elision, filter pushdown, and cardinality annotation all assume
+    /// table-scan leaves and heuristic ordering. Both cost-based flags are pinned off so the
+    /// assertions keep meaning what they say now that the engine defaults are cost-based;
+    /// cost-based behavior has its own fixtures (TestPlanCostBasedAccessPath,
+    /// TestPlanCostBasedJoinOrder).
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) =>
+        defaults with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false };
+
 
     [Test]
     public async Task Plan_PushesSingleTableWherePredicateToUsersScan()

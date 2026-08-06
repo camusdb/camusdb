@@ -402,8 +402,7 @@ internal sealed class QueryJoinExecutor
             keyTypes,
             lookupKey,
             to: null,
-            unique: false,
-            trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
+            unique: false).ConfigureAwait(false))
         {
             int cmp = key.Values[0].CompareTo(lookupValue);
 
@@ -559,7 +558,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-            plan.Ticket.TxnState, trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
+            plan.Ticket.TxnState).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -618,8 +617,7 @@ internal sealed class QueryJoinExecutor
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
-            from: null, to: null, unique: unique,
-            trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
+            from: null, to: null, unique: unique).ConfigureAwait(false))
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
@@ -686,8 +684,7 @@ internal sealed class QueryJoinExecutor
             to: rangeNode.ToBound,
             fromInclusive: rangeNode.FromInclusive,
             toInclusive: rangeNode.ToInclusive,
-            unique: unique,
-            trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
+            unique: unique).ConfigureAwait(false))
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
@@ -794,7 +791,7 @@ internal sealed class QueryJoinExecutor
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null, trackReadSet: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false))
+                    maxRows: null).ConfigureAwait(false))
                 {
                     if (!seen.Add(rowId))
                         continue;

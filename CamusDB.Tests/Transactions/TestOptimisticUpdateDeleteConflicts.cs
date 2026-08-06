@@ -286,6 +286,42 @@ public sealed class TestOptimisticUpdateDeleteConflicts : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
+    // Read-set validation must not depend on the access path. A predicate on an
+    // unindexed column forces a full table scan; every row that scan observes is
+    // still a folded read, so a peer overwriting one of them invalidates the
+    // transaction exactly as a stale point read would. (Scans historically
+    // registered no read observations at all, so whichever plan the planner
+    // chose silently decided whether the optimistic contract was enforced.)
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task OptimisticUpdate_RejectedWhenATableScanReadGoesStale()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccountsAsync();
+
+        // "balance" is unindexed, so this read is served by a full table scan.
+        KvTransaction doomed = await BeginOptimisticAsync(database);
+        Assert.AreEqual(1,
+            (await SelectIn(executor, dbname, doomed, "SELECT id FROM accounts WHERE balance = 100")).Count);
+
+        // A peer overwrites a row the scan observed, and commits.
+        KvTransaction peer = await database.Transactions.BeginAsync();
+        await ExecIn(executor, dbname, peer, "UPDATE accounts SET balance = 900 WHERE id = \"a\"");
+        await database.Transactions.CommitAsync(peer);
+
+        // The doomed transaction writes a different row; the rejection can only come from
+        // commit-time validation of the scanned read observation on row "a".
+        await ExecIn(executor, dbname, doomed, "UPDATE accounts SET tier = \"bronze\" WHERE id = \"b\"");
+        Assert.That(await TryCommit(database, doomed), Is.False,
+            "commit must be rejected: a row observed by the transaction's table scan was overwritten by a committed peer");
+
+        Assert.AreEqual(0, (await Select(executor, database, dbname, "SELECT id FROM accounts WHERE tier = \"bronze\"")).Count,
+            "the rejected transaction must not leave an index entry behind");
+        Assert.AreEqual(2, (await Select(executor, database, dbname, "SELECT id FROM accounts WHERE tier = \"gold\"")).Count,
+            "both rows must remain reachable under their original index value");
+    }
+
+    // -----------------------------------------------------------------------
     // The rejection an optimistic conflict produces must be in the retryable class
     // the HTTP/gRPC autocommit wrapper replays from BEGIN — otherwise a conflict a
     // retry would resolve surfaces to the client as a hard error.

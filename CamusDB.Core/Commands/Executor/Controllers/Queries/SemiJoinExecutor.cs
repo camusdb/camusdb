@@ -155,7 +155,7 @@ internal sealed class SemiJoinExecutor
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
             false, true, false,
-            maxRows: null, trackReadSet: outerTicket.ExclusivePredicateLocks))
+            maxRows: null))
         {
             ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId).ConfigureAwait(false);
             if (data is null || data.Value.Length == 0)
@@ -187,7 +187,7 @@ internal sealed class SemiJoinExecutor
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: null, trackReadSet: outerTicket.ExclusivePredicateLocks))
+            outerTicket.TxnState, maxRows: null))
         {
             if (data.Length == 0)
                 continue;
@@ -227,7 +227,7 @@ internal sealed class SemiJoinExecutor
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: null, trackReadSet: outerTicket.ExclusivePredicateLocks))
+            outerTicket.TxnState, maxRows: null))
         {
             if (data.Length == 0)
                 continue;
@@ -259,7 +259,7 @@ internal sealed class SemiJoinExecutor
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
 
         await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: 1, trackReadSet: outerTicket.ExclusivePredicateLocks))
+            outerTicket.TxnState, maxRows: 1))
         {
             if (data.Length > 0)
                 return true;

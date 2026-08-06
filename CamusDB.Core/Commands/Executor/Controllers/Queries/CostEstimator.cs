@@ -124,6 +124,13 @@ internal static class CostEstimator
     /// Equivalent to one <see cref="EstimateNodeCost"/> call where the input cardinality equals
     /// the table row count (leaf nodes have no children). The result is used only for candidate
     /// comparison; nodes are annotated with full costs later via <see cref="AnnotatePlan"/>.
+    ///
+    /// <para><paramref name="coversProjection"/>: pass <c>true</c> when the index behind
+    /// <paramref name="scanNode"/> supplies every column the query needs, so the scan fetches
+    /// zero primary rows. The per-node cost model prices every secondary-index scan with a
+    /// primary-row fetch per matched entry (<see cref="PlanCost.RowFetchesAfterIndex"/>);
+    /// without this correction a covered scan is charged double its real cost and loses to a
+    /// full table scan on small tables, defeating the covering-index optimization.</para>
     /// </summary>
     public static double EstimateScanLeafCost(
         PhysicalPlanNode scanNode,
@@ -131,7 +138,8 @@ internal static class CostEstimator
         StatisticsManager? stats,
         DatabaseDescriptor database,
         TableDescriptor table,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        bool coversProjection = false)
     {
         (_, PlanCost cost) = EstimateNodeCost(
             scanNode,
@@ -142,7 +150,11 @@ internal static class CostEstimator
             options: options,
             primaryTable: table,
             resolvedTable: table);
-        return cost.Total;
+
+        // Row fetches carry weight 1.0 in PlanCost.Total; a covering scan performs none of them.
+        return coversProjection
+            ? cost.Total - cost.RowFetchesAfterIndex
+            : cost.Total;
     }
 
     /// <summary>

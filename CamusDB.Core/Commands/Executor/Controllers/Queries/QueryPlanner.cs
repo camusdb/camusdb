@@ -439,6 +439,7 @@ public sealed class QueryPlanner
     private (PhysicalPlanNode Node, QueryPlanStep? Step) PickCheapestIndexOrFullScan(
         DatabaseDescriptor database,
         TableDescriptor table,
+        QueryTicket ticket,
         PredicateAnalysis analysis,
         long tableRowCount)
     {
@@ -446,26 +447,40 @@ public sealed class QueryPlanner
         double bestCost = CostEstimator.EstimateScanLeafCost(fullScanNode, tableRowCount, _stats, database, table, _options);
         PhysicalPlanNode bestNode = fullScanNode;
         QueryPlanStep? bestStep = null;
+        bool bestCovers = false;
 
         foreach (QueryPlanStep step in IndexScanSelector.EnumerateViableSteps(table, analysis))
         {
+            // A covering candidate (index key + INCLUDE columns supply every needed column) fetches
+            // zero primary rows, so it is costed without the per-entry row fetch. This mirrors the
+            // rule-based path's refusal to downgrade a covered scan to a full table scan: a covered
+            // scan reads at most as many index entries as the full scan reads rows, for any table size.
+            bool covers = ScanCoversProjection(step, ticket);
             PhysicalPlanNode candidateNode = WithDistribution(ToScanNode(step), table);
-            double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table, _options);
+            double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table, _options, covers);
 
-            // Deterministic tie-break by index name: candidates arrive in Dictionary iteration
-            // order, which can differ across descriptor rebuilds (and therefore across nodes) —
-            // a strict `<` would then pick different equal-cost plans on different nodes.
+            // Ties resolve in two layers, both required for determinism and plan quality:
+            //   1. A covering candidate beats a non-covering equal-cost best (including the
+            //      full-scan baseline: an unbounded covered scan costs exactly the table row
+            //      count, tying the full scan it must not lose to).
+            //   2. Among candidates alike in coverage, break by ordinal index name: candidates
+            //      arrive in Dictionary iteration order, which can differ across descriptor
+            //      rebuilds (and therefore across nodes) — a strict `<` would then pick
+            //      different equal-cost plans on different nodes.
             bool wins = cost < bestCost
                 || (cost == bestCost
-                    && bestStep is { Index: { } bestIdx }
-                    && step.Index is { } candIdx
-                    && string.CompareOrdinal(candIdx.Name, bestIdx.Name) < 0);
+                    && (covers && !bestCovers
+                        || covers == bestCovers
+                            && bestStep is { Index: { } bestIdx }
+                            && step.Index is { } candIdx
+                            && string.CompareOrdinal(candIdx.Name, bestIdx.Name) < 0));
 
             if (wins)
             {
                 bestCost = cost;
                 bestNode = candidateNode;
                 bestStep = step;
+                bestCovers = covers;
             }
         }
 
@@ -533,11 +548,15 @@ public sealed class QueryPlanner
         QueryTicket ticket,
         PredicateAnalysis analysis)
     {
-        // Cost-based access-path selection: when the feature flag is on AND stats are available
-        // and the predicate drives an index, enumerate all viable steps, cost each against the
-        // full-scan baseline, and pick the cheapest rather than the heuristic-best.
-        // Falls back to the rule-based path when the flag is off, stats are absent, or no
-        // row-count estimate is available — plans are byte-identical to the rule-based path.
+        // Cost-based access-path selection: when the feature flag is on AND the table has been
+        // ANALYZEd and the predicate drives an index, enumerate all viable steps, cost each
+        // against the full-scan baseline, and pick the cheapest rather than the heuristic-best.
+        // Falls back to the rule-based path when the flag is off, stats are absent, no row-count
+        // estimate is available, or the table was never ANALYZEd — plans are then byte-identical
+        // to the rule-based path. The ANALYZE requirement is load-bearing: row counts are
+        // DML-maintained and exist for any table with data, so without it the cost model engages
+        // with fixed fallback selectivities and abandons correct index paths on small tables that
+        // will never cross the auto-analyze staleness threshold.
         // Skipped for UPDATE/DELETE paths (ExclusivePredicateLocks) to avoid widening exclusive
         // row-range locks from a narrow range to the full table.
         // ORDER BY needs no special handling here: sort-elision is applied downstream from the
@@ -550,10 +569,11 @@ public sealed class QueryPlanner
             && !ticket.ExclusivePredicateLocks)
         {
             long? trc = _stats.GetRowCountEstimate(database, table);
-            if (trc is { } tableRowCount && tableRowCount > 0)
+            if (trc is { } tableRowCount && tableRowCount > 0
+                && _stats.HasAnalyzedStatistics(database, table))
             {
                 (PhysicalPlanNode bestNode, QueryPlanStep? bestStep) =
-                    PickCheapestIndexOrFullScan(database, table, analysis, tableRowCount);
+                    PickCheapestIndexOrFullScan(database, table, ticket, analysis, tableRowCount);
 
                 // If the chosen path is a predicate-driven range scan, still check whether an
                 // IN-list scan would be even cheaper (same competition as the rule-based path).

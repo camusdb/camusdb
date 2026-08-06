@@ -136,7 +136,8 @@ batches and short transactions are what protect latency — not the priority tag
 **Spans divide the work; `ttl_max_concurrent_spans_per_node` decides how much runs at once.** The limit
 is node-local, so a cluster of N nodes can have N times that many spans in flight. Rate limits are also
 per node and shared across a table's concurrent spans, so raising concurrency does not multiply the
-configured rate.
+configured rate. A worker reads only its own span — the bounds are seeks into the store, not a filter
+over everything — so adding spans does not add scan work.
 
 **Span division is currently uniform over the row-id space, and that is not balanced.** Row ids embed a
 timestamp in seconds, so 64 spans are roughly two years wide each and an active table's rows land almost

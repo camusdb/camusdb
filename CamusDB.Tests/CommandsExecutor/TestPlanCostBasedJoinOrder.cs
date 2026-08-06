@@ -159,10 +159,10 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     // ─── Tests ───────────────────────────────────────────────────────────────
 
     /// <summary>Cost-based join ordering off — the rule-based heuristic.</summary>
-    private static CamusDBOptions DpOff => CamusDBOptions.Default with { CostBasedJoinOrderEnabled = false };
+    private static CamusDBOptions DpOff => CamusDBOptions.Default with { CostBasedJoinOrderEnabled = false, CostBasedAccessPathEnabled = false };
 
     /// <summary>Cost-based join ordering on — System-R style DP enumeration.</summary>
-    private static CamusDBOptions DpOn => CamusDBOptions.Default with { CostBasedJoinOrderEnabled = true };
+    private static CamusDBOptions DpOn => CamusDBOptions.Default with { CostBasedJoinOrderEnabled = true, CostBasedAccessPathEnabled = false };
 
     [Test]
     public async Task FlagOff_HeuristicKeepsEventsDeclaredFirst()
@@ -284,8 +284,8 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
 
         // A planner takes its configuration when it is constructed, so the two settings under
         // comparison are two planners rather than one planner and a flag flipped between calls.
-        CamusDBOptions flagOff = Options with { CostBasedJoinOrderEnabled = false };
-        CamusDBOptions flagOn  = Options with { CostBasedJoinOrderEnabled = true };
+        CamusDBOptions flagOff = Options with { CostBasedJoinOrderEnabled = false, CostBasedAccessPathEnabled = false };
+        CamusDBOptions flagOn  = Options with { CostBasedJoinOrderEnabled = true, CostBasedAccessPathEnabled = false };
 
         // Plan A: flag off, stats available.  Dispatcher goes: flag=false → heuristic.
         QueryPlan planOff = new JoinQueryPlanner(flagOff, executor.Statistics).GetPlan(database, bound, ticket);
@@ -326,8 +326,8 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
 
         // One engine per ordering: each fixes its own configuration when built, so the two plans are
         // produced under genuinely independent settings rather than a value flipped between the runs.
-        CommandExecutor heuristic = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = false });
-        CommandExecutor costBased = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = true });
+        CommandExecutor heuristic = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = false, CostBasedAccessPathEnabled = false });
+        CommandExecutor costBased = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = true, CostBasedAccessPathEnabled = false });
         TrackDatabase(dbname, heuristic);
 
         List<(string region, string name)> rowsOff = await ExecuteStarJoin(heuristic, dbname);
@@ -355,7 +355,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         // Verifies that WHERE predicates (type="click" on events, region="eu" on sessions)
         // are correctly applied after reordering. Rows that fail either filter must be absent.
         string dbname = await CreateStarJoinDatabase();
-        CommandExecutor executor = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = true });
+        CommandExecutor executor = CreateCommandExecutor(Options with { CostBasedJoinOrderEnabled = true, CostBasedAccessPathEnabled = false });
         TrackDatabase(dbname, executor);
 
         List<(string region, string name)> rows = await ExecuteStarJoin(executor, dbname);
@@ -774,7 +774,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     public async Task FlagOn_FilteredJoinLeafBecomesIndexRangeScan()
     {
 
-            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false };
         // Validates that BuildJoinTree emits IndexRangeScanNode for the orders leaf when
         // CostBasedAccessPathEnabled is true and status has a usable index with low NDV.
         // With the flag off the leaf is always TableScanNode(PrimaryRows) regardless of indexes.
@@ -805,7 +805,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     {
 
 
-        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false };
+        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false };
         // Regression guard: when CostBasedAccessPathEnabled=false the behaviour is unchanged —
         // join leaves remain TableScanNode(PrimaryRows) with a residual ExecutionFilter.
 
@@ -828,8 +828,8 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         string dbname = await CreateIndexedJoinDatabase();
 
         // One engine per access-path setting — see the star-join equivalence test above.
-        CommandExecutor fullScan  = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = false });
-        CommandExecutor indexScan = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = true });
+        CommandExecutor fullScan  = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false });
+        CommandExecutor indexScan = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false });
         TrackDatabase(dbname, fullScan);
 
         List<(string id, string name)> rowsOff = await ExecuteIndexedJoinPlan(fullScan, dbname);
@@ -1039,7 +1039,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     public async Task IndexRangeLeafAnnotation_MatchesEstimatePhysicalNodeRows()
     {
 
-            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false };
         // With CostBasedAccessPathEnabled=true and seeded NDV, AnnotatePlan must assign the
         // same EstimatedCardinality to the IndexRangeScanNode leaf as EstimatePhysicalNodeRows.
         // EstimateNodeCost passes resolvedTable (not null primaryTable) to EstimateRangeScanRows
@@ -1073,7 +1073,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     public async Task IndexRangeLeafAnnotation_UsesSeededStatsNotFallback()
     {
 
-            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false };
         // The annotated leaf cardinality must differ from the fixed-heuristic fallback
         // (10% of trc = 1000) when NDV is seeded.
         // With NDV=5: stats branch → 10000/5 = 2000 rows.
@@ -1186,7 +1186,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     public async Task HashJoinWithIndexedLeftLeaf_ResolveLeftTableForCardinality()
     {
 
-            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false };
         // When the left input to a hash/NLJ join is an IndexRangeScanNode with BoundSource,
         // TryResolveLeftTable must return its table so the unique-key check on the left join
         // key fires.  Here o.id is a unique PK (left join key) and log_entries.order_id is
@@ -1311,7 +1311,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     public async Task FlagOn_InListJoinLeafBecomesIndexInListScan()
     {
 
-            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true };
+            CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false };
         try
         {
             (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
@@ -1338,7 +1338,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     {
 
 
-        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false };
+        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false };
 
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindInListJoinLeafSetup();
@@ -1354,7 +1354,7 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     public async Task LowNdv_InListJoinLeaf_FallsBackToTableScan()
     {
 
-        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false };
+        CamusDBOptions planning = CamusDBOptions.Default with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false };
         // NDV=2, trc=10000, n=2 values → estimated = trc*(2/NDV) = 10000 → breakeven fires.
         try
         {
@@ -1444,8 +1444,8 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         string dbname = await CreateInListJoinDatabase();
 
         // One engine per access-path setting — see the star-join equivalence test above.
-        CommandExecutor fullScan  = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = false });
-        CommandExecutor indexScan = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = true });
+        CommandExecutor fullScan  = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false });
+        CommandExecutor indexScan = CreateCommandExecutor(Options with { CostBasedAccessPathEnabled = true, CostBasedJoinOrderEnabled = false });
         TrackDatabase(dbname, fullScan);
 
         List<(string id, string name)> rowsOff = await ExecuteInListJoinPlan(fullScan, dbname);

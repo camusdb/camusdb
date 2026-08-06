@@ -329,8 +329,7 @@ internal sealed class TableIndexAdder
                 // this batch.
                 await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
                     tx,
-                    afterRowId: afterRowId,
-                    trackReadSet: true).ConfigureAwait(false))
+                    afterRowId: afterRowId).ConfigureAwait(false))
                 {
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                         table.Schema,

@@ -443,7 +443,7 @@ internal sealed class TableConstraintAlterer
         try
         {
             await foreach ((Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data)
-                in table.Store.ScanRows(tx, afterRowId: null, trackReadSet: true).ConfigureAwait(false))
+                in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
             {
                 Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                     table.Schema,
@@ -482,7 +482,7 @@ internal sealed class TableConstraintAlterer
         try
         {
             await foreach ((Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data)
-                in table.Store.ScanRows(tx, afterRowId: null, trackReadSet: true).ConfigureAwait(false))
+                in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
             {
                 Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                     table.Schema,
