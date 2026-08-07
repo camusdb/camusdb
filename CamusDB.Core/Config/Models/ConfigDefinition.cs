@@ -9,11 +9,26 @@
 using CamusDB.Core;
 using CamusDB.Core.Transactions;
 using Kahuna.Shared.KeyValue;
+using YamlDotNet.Serialization;
 
 namespace CamusDB.Core.Config.Models;
 
 public class ConfigDefinition
 {
+    /// <summary>
+    /// Root keys the operator actually supplied, as underscored YAML names — populated by
+    /// <see cref="ConfigReader"/> from the parsed document and extended by
+    /// <see cref="ConfigResolver.ApplyCliOverrides"/> for every flag that took effect.
+    /// <para>
+    /// This exists because several settings need a default that depends on the rest of the
+    /// configuration (see <see cref="ConfigResolver.ApplyEffectiveDefaults"/>), and a property
+    /// initializer cannot tell "the operator chose this value" from "nobody said anything". Reading
+    /// the value alone would silently override an explicit choice that happens to equal the default.
+    /// </para>
+    /// </summary>
+    [YamlIgnore]
+    public HashSet<string> ProvidedKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public string DataDir { get; set; } = "";
 
     public string Mode { get; set; } = "standalone";

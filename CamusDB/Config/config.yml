@@ -1,5 +1,20 @@
 # CamusDB configuration reference
 #
+# This file is the annotated reference used by a source checkout and by the container image, and it
+# is tracked in git — a pull or a checkout can replace whatever you edit here. It is NOT where an
+# installed node should keep its settings: run `camusdb init` to write a short, user-owned file to
+# ~/.camusdb/config.yml, which no checkout can touch. The reference is also published at
+# https://camusdb.github.io/docs/configuration/
+#
+# CamusDB reads the first configuration it finds:
+#   1. --config <path>
+#   2. the CAMUS_CONFIG_PATH environment variable
+#   3. ./camusdb.yml or ./Config/config.yml   (this file, when started from the repository root)
+#   4. ~/.camusdb/config.yml                  (%APPDATA%\camusdb\config.yml on Windows)
+#   5. built-in defaults, when no file exists anywhere
+# A path named explicitly by 1 or 2 must exist; startup fails rather than falling through to another
+# file. Setting CAMUS_HOME relocates both the user configuration and the default data directory.
+#
 # Precedence (highest wins): CLI flag > environment variable > config.yml > built-in default.
 # Only explicitly provided CLI flags override YAML — omitting a flag keeps the YAML value.
 #

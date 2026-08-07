@@ -146,6 +146,40 @@ EXPLAIN (ANALYZE) SELECT role, COUNT(*) FROM app_users GROUP BY role;
 
 `SELECT DISTINCT` is row-level distinct. Aggregate-level distinct such as `COUNT(DISTINCT code)` is not supported yet.
 
+Installing
+----------
+CamusDB ships as a .NET global tool. With the [.NET 10 runtime or SDK](https://dotnet.microsoft.com/download)
+installed:
+
+```bash
+dotnet tool install -g CamusDB.Server
+camusdb
+```
+
+That is the whole setup — no clone, no build, no configuration file. The node starts on built-in
+defaults and stores its data under `~/.local/share/camusdb` (`%LOCALAPPDATA%\camusdb` on Windows),
+serving the JSON/REST API on port 5095 and gRPC on 5096. Upgrade with
+`dotnet tool update -g CamusDB.Server`.
+
+To keep settings of your own, write a starter configuration and edit it:
+
+```bash
+camusdb init          # writes ~/.camusdb/config.yml
+```
+
+CamusDB reads the first configuration it finds, in this order:
+
+1. `--config <path>`
+2. the `CAMUS_CONFIG_PATH` environment variable
+3. `./camusdb.yml` or `./Config/config.yml` in the current directory
+4. `~/.camusdb/config.yml` (`%APPDATA%\camusdb\config.yml` on Windows)
+5. built-in defaults, when there is no file anywhere
+
+A path given explicitly (1 or 2) must exist — CamusDB will not quietly start on a different
+configuration than the one you named. The resolved source and data directory are printed at startup.
+Setting `CAMUS_HOME` relocates both the configuration and the data directory. Every available setting
+is documented at [camusdb.github.io/docs/configuration](https://camusdb.github.io/docs/configuration/).
+
 Running with Docker
 -------------------
 A single node can be started from the published image, mapping the JSON/REST and gRPC ports and
@@ -175,7 +209,7 @@ This starts three nodes on a private bridge network:
 | camus2 | localhost:5096    | localhost:6096    | 7072      |
 | camus3 | localhost:5097    | localhost:6097    | 7074      |
 
-To run a single node without Docker:
+To run a single node from a source checkout (the installed tool above needs none of this):
 
 ```bash
 # Standalone (default)

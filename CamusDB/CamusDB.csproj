@@ -6,10 +6,45 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ServerGarbageCollection>true</ServerGarbageCollection>
-    <Version>0.9.6</Version>
+    <Version>0.9.7</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
+
+  <!-- Ship the server as a .NET global tool: install it with `dotnet tool install`, then run `camusdb`.
+       PackAsTool only adds targets under Pack, so `dotnet build`, `dotnet run` against this project
+       and the container publish are unaffected. The Web SDK disables packing by default, hence the
+       explicit IsPackable. PackageId must be set here rather than passed as a global property on the
+       command line, where it would flow to CamusDB.Core and collide in the restore graph. -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>camusdb</ToolCommandName>
+    <PackageId>CamusDB.Server</PackageId>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\artifacts\nupkg</PackageOutputPath>
+
+    <Authors>CamusDB</Authors>
+    <Description>CamusDB — a NewSQL relational database server. Install it as a global tool and run `camusdb` to start a standalone node.</Description>
+    <PackageTags>database;sql;newsql;server;kv</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
+    <PackageProjectUrl>https://github.com/camusdb/camusdb</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/camusdb/camusdb</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- A tool package is installed, never referenced, so a symbols package has no consumer. The
+         Web SDK additionally packs wwwroot a second time under staticwebassets/ for referencing
+         projects; that is ~5% of the uncompressed package and near zero compressed, and switching it
+         off means fighting the SDK's static-asset pipeline, so it is left alone. The size lever that
+         matters is per-RID tool packages (ToolPackageRuntimeIdentifiers), which would drop the ~118 MB
+         of native RocksDB/SQLite binaries down to the one platform being installed. -->
+    <IncludeSymbols>false</IncludeSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="../LICENSE.txt" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Remove="App\" />

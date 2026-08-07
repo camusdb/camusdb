@@ -26,10 +26,16 @@ public static class ConfigResolver
             return;
 
         if (cli.Mode is not null)
+        {
             config.Mode = cli.Mode;
+            config.ProvidedKeys.Add("mode");
+        }
 
         if (cli.DataDir is not null)
+        {
             config.DataDir = cli.DataDir;
+            config.ProvidedKeys.Add("data_dir");
+        }
 
         if (cli.NodeName is not null)
             config.NodeName = cli.NodeName;
@@ -44,7 +50,10 @@ public static class ConfigResolver
             config.RaftPort = raftPort;
 
         if (cli.InitialPartitions is int initialPartitions)
+        {
             config.InitialPartitions = initialPartitions;
+            config.ProvidedKeys.Add("initial_partitions");
+        }
 
         if (cli.Peers is { Count: > 0 })
             config.Peers = [.. cli.Peers];
@@ -72,6 +81,30 @@ public static class ConfigResolver
 
         if (cli.RequireTlsWhenAuthEnabled is bool requireTls)
             config.RequireTlsWhenAuthEnabled = requireTls;
+    }
+
+    /// <summary>
+    /// Fills in the settings whose sensible default depends on the rest of the resolved
+    /// configuration, for keys the operator left unset. Call once, after
+    /// <see cref="ApplyCliOverrides"/> (so an explicit flag is visible) and before
+    /// <see cref="ConfigDefinition.Validate"/>.
+    /// <para>
+    /// Both defaults exist because a node must be able to start with no configuration file at all.
+    /// <c>data_dir</c> otherwise resolves relative to the process working directory, which for an
+    /// installed tool means a different database depending on where the user was standing.
+    /// <c>initial_partitions</c> otherwise defaults to the cluster-shaped value of 3 even on a
+    /// standalone node, where a single partition makes every transaction single-participant and
+    /// enables the one-phase commit fast path — worth several times the write throughput on one
+    /// disk, since fanning out partitions buys nothing when they share a single fsync target.
+    /// </para>
+    /// </summary>
+    public static void ApplyEffectiveDefaults(ConfigDefinition config)
+    {
+        if (!config.ProvidedKeys.Contains("data_dir") || string.IsNullOrWhiteSpace(config.DataDir))
+            config.DataDir = ConfigLocator.DefaultDataDirectory();
+
+        if (!config.ProvidedKeys.Contains("initial_partitions"))
+            config.InitialPartitions = config.IsClusterMode ? 3 : 1;
     }
     /// <summary>
     /// Builds the immutable options instance for one engine from resolved configuration. Precedence

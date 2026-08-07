@@ -16,6 +16,12 @@ namespace CamusDB;
 /// </summary>
 public class CamusCommandLineOptions
 {
+    [Option("config", Required = false,
+        HelpText = "Path to the YAML configuration file. When omitted, CamusDB looks for " +
+                   "CAMUS_CONFIG_PATH, then ./camusdb.yml or ./Config/config.yml, then the user " +
+                   "configuration (~/.camusdb/config.yml), and finally starts on built-in defaults")]
+    public string? ConfigPath { get; set; }
+
     [Option("mode", Required = false, HelpText = "Run mode: standalone | cluster")]
     public string? Mode { get; set; }
 

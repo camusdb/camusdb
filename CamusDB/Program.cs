@@ -28,6 +28,13 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 
+// `camusdb init` writes a starter configuration and exits. Dispatched on the bare first argument
+// rather than through CommandLineParser verbs: verbs would change how every existing server flag is
+// parsed, and the server invocation must stay byte-for-byte compatible. Handled before the banner so
+// the command's output is only the paths it wrote.
+if (InitCommand.Matches(args))
+    return InitCommand.Run(args);
+
 Console.WriteLine("   ____                          ____  ____  ");
 Console.WriteLine("  / ___|__ _ _ __ ___  _   _ ___|  _ \\| __ ) ");
 Console.WriteLine(" | |   / _` | '_ ` _ \\| | | / __| | | |  _ \\ ");
@@ -39,17 +46,30 @@ Console.WriteLine();
 ParserResult<CamusCommandLineOptions> optsResult = Parser.Default.ParseArguments<CamusCommandLineOptions>(args);
 CamusCommandLineOptions opts = optsResult.Value ?? new();
 
-// Read and merge config before building the host so cluster-mode detection
-// can gate DI service registration. CAMUS_CONFIG_PATH lets an orchestration script (e.g. the
-// bottleneck-snapshot harness) supply its own config file without mutating the checked-in default.
-string configPath = Environment.GetEnvironmentVariable("CAMUS_CONFIG_PATH") ?? "Config/config.yml";
-string configYml = await File.ReadAllTextAsync(configPath);
-ConfigDefinition config = new ConfigReader().Read(configYml);
+// Read and merge config before building the host so cluster-mode detection can gate DI service
+// registration. The lookup is ordered and first-hit-wins (--config, CAMUS_CONFIG_PATH, the working
+// directory, the user configuration directory, built-in defaults) — see ConfigLocator for why each
+// step exists. Finding no file at all is normal for a freshly installed tool and is not an error.
+(ConfigDefinition config, ConfigLocation configLocation) = ConfigLocator.Load(opts.ConfigPath);
 
 // CLI > env > YAML > default — only explicitly provided flags override YAML.
 ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
+
+// Settings whose default depends on the rest of the configuration (data directory, standalone
+// partition count) are filled in only where the operator said nothing.
+ConfigResolver.ApplyEffectiveDefaults(config);
+
 config.Validate();
 CamusDBOptions camusOptions = ConfigResolver.ApplyToCamusDBConfig(config);
+
+// A layered lookup makes "which configuration is this node running?" unanswerable from the console
+// unless the resolved source is stated, and that is the first question asked whenever a setting
+// appears not to have taken effect. Printed before the host is built so it survives a later failure.
+Console.WriteLine($"Configuration: {configLocation.Describe()}");
+Console.WriteLine($"Data directory: {camusOptions.DataDirectory}");
+Console.WriteLine();
+
+Directory.CreateDirectory(camusOptions.DataDirectory);
 
 // Authentication policy is resolved here, before anything is registered or the socket is bound, so no
 // component can observe a half-configured policy and no request is served while the flag still holds
@@ -90,7 +110,16 @@ IQueryResultCache? queryResultCache = camusOptions.QueryResultCacheEnabled
     ? new QueryResultCache(camusOptions, sweepIntervalMs: 0)
     : null;
 
-WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+// The content root must be the directory the application was deployed to, not the process working
+// directory. They coincide in a repository checkout and in the container, but not for an installed
+// global tool, where the working directory is wherever the user happened to run `camusdb` from —
+// leaving the Razor UI serving 404s for every asset under wwwroot and silently dropping the log-level
+// defaults in appsettings.json.
+WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory,
+});
 
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
@@ -474,3 +503,7 @@ finally
 
     shutdownLogger.LogInformation("Graceful shutdown complete");
 }
+
+// A clean shutdown is exit code 0. The entry point returns a code because `camusdb init` exits
+// early with a non-zero status when it refuses to overwrite an existing configuration.
+return 0;

@@ -124,13 +124,18 @@ public class ConfigReader
 
     public ConfigDefinition Read(string yml)
     {
-        ValidateUnknownKeys(yml);
+        IReadOnlyCollection<string> providedKeys = ValidateUnknownKeys(yml);
 
         IDeserializer deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .Build();
 
         ConfigDefinition config = deserializer.Deserialize<ConfigDefinition>(yml) ?? new ConfigDefinition();
+
+        // Record what the document actually said, so a setting whose default depends on the rest of
+        // the configuration can distinguish an explicit choice from an untouched default.
+        foreach (string key in providedKeys)
+            config.ProvidedKeys.Add(key);
 
         // Fail fast on a malformed config rather than producing confusing behaviour later
         // (e.g. a zero ack timeout that makes the two-version gate give up instantly, or
@@ -140,10 +145,14 @@ public class ConfigReader
         return config;
     }
 
-    private static void ValidateUnknownKeys(string yml)
+    /// <summary>
+    /// Rejects root and nested keys that <see cref="ConfigDefinition"/> does not model, and returns
+    /// the root keys the document did provide.
+    /// </summary>
+    private static IReadOnlyCollection<string> ValidateUnknownKeys(string yml)
     {
         if (string.IsNullOrWhiteSpace(yml))
-            return;
+            return [];
 
         IDeserializer raw = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
@@ -151,7 +160,7 @@ public class ConfigReader
 
         Dictionary<string, object>? root = raw.Deserialize<Dictionary<string, object>>(yml);
         if (root is null)
-            return;
+            return [];
 
         foreach (string rootKey in root.Keys)
         {
@@ -164,6 +173,8 @@ public class ConfigReader
 
         ValidateNestedKeys(root, "kahuna", KahunaOptionsConfig.AllowedYamlKeys);
         ValidateNestedKeys(root, "diagnostics", DiagnosticsConfig.AllowedYamlKeys);
+
+        return root.Keys;
     }
 
     private static void ValidateNestedKeys(
