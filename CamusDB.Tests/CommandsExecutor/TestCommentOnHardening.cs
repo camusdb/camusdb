@@ -239,6 +239,14 @@ internal sealed class TestCommentOnHardening : BaseTest
             Assert.IsTrue(StatementScope.AllowsEmptyContextDatabase(nodeType), $"{nodeType} must not need a context database");
         }
 
+        // Server-level introspection needs no context database, but is not a mutation either: a
+        // transport that treated it as one would open a transaction it must never commit.
+        foreach (NodeType nodeType in new[] { NodeType.ShowEngineStats, NodeType.ShowVariables })
+        {
+            Assert.IsFalse(StatementScope.IsDatabaseScopedMutation(nodeType), $"{nodeType} mutates nothing");
+            Assert.IsTrue(StatementScope.AllowsEmptyContextDatabase(nodeType), $"{nodeType} must not need a context database");
+        }
+
         // Table-scoped comments are NOT database-scoped: they need an open database.
         foreach (NodeType nodeType in new[] { NodeType.CommentOnTable, NodeType.CommentOnColumn, NodeType.CommentOnIndex })
         {

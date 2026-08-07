@@ -111,6 +111,19 @@ internal static class DerivedTableSchemaBuilder
         new("last",   ColumnType.Float64),
     ];
 
+    // SHOW VARIABLES: one row per configuration setting this node resolved at startup. `value` and
+    // `default` are rendered as strings rather than typed columns because the settings are a mix of
+    // bool/int/double/string/enum and a single result set has one type per column; `type` carries the
+    // real one. Both are NULL for a setting that is genuinely unset, which is distinct from empty.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowVariablesSchema =
+    [
+        new("variable", ColumnType.String),
+        new("value",    ColumnType.String),
+        new("type",     ColumnType.String),
+        new("default",  ColumnType.String),
+        new("source",   ColumnType.String),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowOrphanTablesSchema =
     [
         new("id",          ColumnType.String),

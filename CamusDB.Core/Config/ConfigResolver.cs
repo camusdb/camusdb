@@ -19,6 +19,11 @@ public static class ConfigResolver
 {
     /// <summary>
     /// Applies nullable CLI overrides on top of an already-validated YAML config.
+    ///
+    /// <para>Every override that takes effect records itself as command-line sourced, overwriting the
+    /// file provenance the reader recorded. Only the three keys that a context-dependent default
+    /// consults are also added to <see cref="ConfigDefinition.ProvidedKeys"/> — that set answers a
+    /// narrower question and is deliberately not widened here.</para>
     /// </summary>
     public static void ApplyCliOverrides(ConfigDefinition config, ConfigCliOverrides? cli)
     {
@@ -29,58 +34,100 @@ public static class ConfigResolver
         {
             config.Mode = cli.Mode;
             config.ProvidedKeys.Add("mode");
+            config.RecordSource("mode", ConfigValueSource.CommandLine);
         }
 
         if (cli.DataDir is not null)
         {
             config.DataDir = cli.DataDir;
             config.ProvidedKeys.Add("data_dir");
+            config.RecordSource("data_dir", ConfigValueSource.CommandLine);
         }
 
         if (cli.NodeName is not null)
+        {
             config.NodeName = cli.NodeName;
+            config.RecordSource("node_name", ConfigValueSource.CommandLine);
+        }
 
         if (cli.RaftNodeId is int raftNodeId)
+        {
             config.RaftNodeId = raftNodeId;
+            config.RecordSource("raft_node_id", ConfigValueSource.CommandLine);
+        }
 
         if (cli.RaftHost is not null)
+        {
             config.RaftHost = cli.RaftHost;
+            config.RecordSource("raft_host", ConfigValueSource.CommandLine);
+        }
 
         if (cli.RaftPort is int raftPort)
+        {
             config.RaftPort = raftPort;
+            config.RecordSource("raft_port", ConfigValueSource.CommandLine);
+        }
 
         if (cli.InitialPartitions is int initialPartitions)
         {
             config.InitialPartitions = initialPartitions;
             config.ProvidedKeys.Add("initial_partitions");
+            config.RecordSource("initial_partitions", ConfigValueSource.CommandLine);
         }
 
         if (cli.Peers is { Count: > 0 })
+        {
             config.Peers = [.. cli.Peers];
+            config.RecordSource("peers", ConfigValueSource.CommandLine);
+        }
 
         if (cli.HttpPeers is { Count: > 0 })
+        {
             config.HttpPeers = [.. cli.HttpPeers];
+            config.RecordSource("http_peers", ConfigValueSource.CommandLine);
+        }
 
         if (cli.SchemaAckWaitTimeoutMs is int schemaAckWait)
+        {
             config.SchemaAckWaitTimeoutMs = schemaAckWait;
+            config.RecordSource("schema_ack_wait_timeout_ms", ConfigValueSource.CommandLine);
+        }
 
         if (cli.SchemaAckLiveNodeLeaseMs is int schemaAckLease)
+        {
             config.SchemaAckLiveNodeLeaseMs = schemaAckLease;
+            config.RecordSource("schema_ack_live_node_lease_ms", ConfigValueSource.CommandLine);
+        }
 
         if (cli.HttpPort is int httpPort)
+        {
             config.HttpPort = httpPort;
+            config.RecordSource("http_port", ConfigValueSource.CommandLine);
+        }
 
         if (cli.HttpsPort is int httpsPort)
+        {
             config.HttpsPort = httpsPort;
+            config.RecordSource("https_port", ConfigValueSource.CommandLine);
+        }
 
         if (cli.HttpsCertificate is not null)
+        {
             config.HttpsCertificate = cli.HttpsCertificate;
+            config.RecordSource("https_certificate", ConfigValueSource.CommandLine);
+        }
 
         if (cli.RaftCertificate is not null)
+        {
             config.RaftCertificate = cli.RaftCertificate;
+            config.RecordSource("raft_certificate", ConfigValueSource.CommandLine);
+        }
 
         if (cli.RequireTlsWhenAuthEnabled is bool requireTls)
+        {
             config.RequireTlsWhenAuthEnabled = requireTls;
+            config.RecordSource("require_tls_when_auth_enabled", ConfigValueSource.CommandLine);
+        }
     }
 
     /// <summary>
@@ -123,6 +170,8 @@ public static class ConfigResolver
             keyRangeSharding =
                 string.Equals(envSharding, "1", StringComparison.Ordinal) ||
                 string.Equals(envSharding, "true", StringComparison.OrdinalIgnoreCase);
+
+            config.RecordSource("key_range_sharding", ConfigValueSource.Environment);
         }
 
         return new CamusDBOptions
@@ -235,6 +284,11 @@ public static class ConfigResolver
         RequireTlsWhenAuthEnabled = config.RequireTlsWhenAuthEnabled,
 
         Kahuna = config.Kahuna.Copy(),
+
+            // Carried across so the resolved options can report where each value came from without
+            // holding a reference back to the mutable definition. Snapshotted, not shared: the
+            // definition is still writable after this point and the options record is not.
+        ValueSources = new Dictionary<string, ConfigValueSource>(config.KeySources, StringComparer.OrdinalIgnoreCase),
         };
     }
 

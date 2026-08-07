@@ -508,6 +508,24 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     "Expected: SHOW ENGINE STATS [LIKE '<pattern>']");
             $$.n = new(NodeType.ShowEngineStats, $5.n, null, null, null, null, null, null, null);
           }
+          /* VARIABLES is likewise a plain identifier rather than a keyword, so it stays usable as a
+             column and table name. */
+          | TSHOW TIDENTIFIER
+          {
+            if (!string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>']");
+            $$.n = new(NodeType.ShowVariables, null, null, null, null, null, null, null, null);
+          }
+          | TSHOW TIDENTIFIER TLIKE string
+          {
+            if (!string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>']");
+            $$.n = new(NodeType.ShowVariables, $4.n, null, null, null, null, null, null, null);
+          }
           ;
 
 analyze_stmt : TANALYZE any_identifier

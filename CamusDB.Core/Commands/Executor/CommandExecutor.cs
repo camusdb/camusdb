@@ -3101,6 +3101,17 @@ public sealed class CommandExecutor : IAsyncDisposable
             return;
         }
 
+        // Configuration is held to the same bar, and for the same reason. Even with the three secret
+        // settings masked, the output describes the node's entire security posture and limits — whether
+        // authentication and TLS are on, the password hashing cost, the data directory, every rate-limit
+        // ceiling — which is reconnaissance material that no per-database grant scopes down.
+        if (ast.nodeType is NodeType.ShowVariables)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Configuration variables require a superuser");
+            return;
+        }
+
         // Server-level introspection: any authenticated caller may run these.
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
             or NodeType.ShowOrphanDatabases or NodeType.ShowGrants)
@@ -4211,6 +4222,16 @@ public sealed class CommandExecutor : IAsyncDisposable
                 UnquoteLikePattern(ast.leftAst?.yytext),
                 LocalNodeLabel(),
                 TtlMetricRows()));
+        }
+
+        // SHOW VARIABLES reports the configuration this engine was constructed with. Node-local for the
+        // same reason as the metrics above, and it opens no database and no transaction.
+        if (ast.nodeType == NodeType.ShowVariables)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowVariablesSchema;
+
+            return (null!, schemaQuerier.ShowVariables(options, UnquoteLikePattern(ast.leftAst?.yytext)));
         }
 
         // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.

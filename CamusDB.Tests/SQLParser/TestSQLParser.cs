@@ -1563,6 +1563,81 @@ public class TestSQLParser
     }
 
     [Test]
+    public void TestParseShowVariables()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW VARIABLES");
+
+        Assert.AreEqual(NodeType.ShowVariables, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+
+        Assert.AreEqual(NodeType.ShowVariables, SQLParserProcessor.Parse("show variables").nodeType);
+    }
+
+    [Test]
+    public void TestParseShowVariablesLike()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW VARIABLES LIKE '%cache%'");
+
+        Assert.AreEqual(NodeType.ShowVariables, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
+        Assert.AreEqual("'%cache%'", ast.leftAst.yytext);
+    }
+
+    /// <summary>
+    /// Both quoting styles and the escape-processing form reach the pattern, so an operator does not
+    /// have to know which one this statement happens to accept.
+    /// </summary>
+    [Test]
+    public void TestParseShowVariablesLikeAcceptsEveryLiteralForm()
+    {
+        foreach (string literal in new[] { "'ttl_%'", "\"ttl_%\"", "E'ttl_%'" })
+        {
+            NodeAst ast = SQLParserProcessor.Parse($"SHOW VARIABLES LIKE {literal}");
+
+            Assert.AreEqual(NodeType.ShowVariables, ast.nodeType, literal);
+            Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType, literal);
+        }
+    }
+
+    [Test]
+    public void TestParseShowVariablesRejectsOtherWords()
+    {
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW FOO"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW FOO LIKE 'x'"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW VARIABLES LIKE 'x' EXTRA"));
+    }
+
+    /// <summary>
+    /// VARIABLES is matched as an identifier rather than reserved as a keyword, so schemas that already
+    /// use the word keep parsing. Reserving it would have been a silent breaking change.
+    /// </summary>
+    [Test]
+    public void TestVariablesRemainsAnOrdinaryIdentifier()
+    {
+        Assert.AreEqual(
+            NodeType.CreateTable,
+            SQLParserProcessor.Parse("CREATE TABLE variables (id oid PRIMARY KEY, variables string(64))").nodeType);
+
+        Assert.AreEqual(NodeType.Select, SQLParserProcessor.Parse("SELECT variables FROM variables").nodeType);
+        Assert.AreEqual(NodeType.Insert, SQLParserProcessor.Parse("INSERT INTO variables (variables) VALUES ('x')").nodeType);
+    }
+
+    /// <summary>
+    /// SHOW VARIABLES and SHOW ENGINE STATS share a <c>SHOW &lt;identifier&gt;</c> prefix, so the
+    /// one-token and two-token forms must stay distinguishable — including when a LIKE clause follows,
+    /// which is where a grammar that resolved the prefix too early would break.
+    /// </summary>
+    [Test]
+    public void TestShowVariablesAndEngineStatsDoNotShadowEachOther()
+    {
+        Assert.AreEqual(NodeType.ShowVariables, SQLParserProcessor.Parse("SHOW VARIABLES").nodeType);
+        Assert.AreEqual(NodeType.ShowEngineStats, SQLParserProcessor.Parse("SHOW ENGINE STATS").nodeType);
+        Assert.AreEqual(NodeType.ShowVariables, SQLParserProcessor.Parse("SHOW VARIABLES LIKE 'a%'").nodeType);
+        Assert.AreEqual(NodeType.ShowEngineStats, SQLParserProcessor.Parse("SHOW ENGINE STATS LIKE 'a%'").nodeType);
+    }
+
+    [Test]
     public void TestParseShowColumns()
     {
         NodeAst ast = SQLParserProcessor.Parse("SHOW COLUMNS FROM robots");

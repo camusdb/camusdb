@@ -240,6 +240,62 @@ internal sealed class TestHttpAuth : BaseTest
         Assert.AreEqual(403, denied.StatusCode);
     }
 
+    /// <summary>
+    /// The same coverage for SHOW VARIABLES: the REST controller keeps its own database-less allowlist,
+    /// so a statement missing from it would be routed down the normal path and fail on the empty
+    /// database name no matter how correct the engine is.
+    /// </summary>
+    [Test]
+    public async Task ShowVariables_SuperuserOverRest_ReaderForbidden()
+    {
+        (_, CommandExecutor ex) = await Setup();
+
+        string root = await TokenFor(ex, "root", "root-pw");
+        JsonResult ok = await QueryRest(ex, "", "SHOW VARIABLES", root);
+        Assert.AreEqual(200, ok.StatusCode ?? 200);
+
+        string reader = await TokenFor(ex, "reader", "reader-pw");
+        JsonResult denied = await QueryRest(ex, "", "SHOW VARIABLES", reader);
+        Assert.AreEqual(403, denied.StatusCode);
+    }
+
+    /// <summary>
+    /// The NDJSON streaming endpoint keeps a <em>second</em> copy of the database-less allowlist, so a
+    /// statement added to the buffered path alone works over one REST endpoint and fails over the
+    /// other. Nothing but a test that drives the streaming action catches that.
+    /// </summary>
+    [Test]
+    public async Task ShowVariables_OverStreamingRest_ReturnsRows()
+    {
+        (_, CommandExecutor ex) = await Setup();
+        string root = await TokenFor(ex, "root", "root-pw");
+
+        string body = await QueryRestStream(ex, "", "SHOW VARIABLES LIKE 'ttl_%'", root);
+
+        Assert.IsNotEmpty(body);
+        StringAssert.Contains("ttl_span_lease_ms", body);
+        StringAssert.DoesNotContain("\"error\"", body);
+    }
+
+    /// <summary>Drives the NDJSON streaming action and returns the raw response body.</summary>
+    private async Task<string> QueryRestStream(
+        CommandExecutor ex, string db, string sql, string? bearer, bool https = true)
+    {
+        CamusDBOptions effective = Options;
+        ControllerContext context = Context(JsonSerializer.Serialize(new { databaseName = db, sql }), bearer, https);
+        MemoryStream responseBody = new();
+        context.HttpContext.Response.Body = responseBody;
+
+        ExecuteSQLController c = new(ex, new HttpTransactionCoordinator(ex), new PreparedStatementRegistry(effective), Logger, effective)
+        {
+            ControllerContext = context
+        };
+
+        await c.ExecuteSQLQueryStream();
+
+        return Encoding.UTF8.GetString(responseBody.ToArray());
+    }
+
     [Test]
     public async Task Plaintext_Refused_400()
     {

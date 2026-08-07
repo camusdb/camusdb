@@ -1030,6 +1030,21 @@ public sealed record CamusDBOptions
     /// </summary>
     public Config.Models.KahunaOptionsConfig Kahuna { get; init; } = new();
 
+    /// <summary>
+    /// Which configuration layer supplied each setting, keyed by the underscored YAML name (nested
+    /// section keys use their dotted form, e.g. <c>kahuna.wal_sync_writes</c>). Populated by
+    /// <see cref="Config.ConfigResolver.Resolve"/> and extended by the host for the environment-only
+    /// settings it applies afterwards.
+    ///
+    /// <para>Purely diagnostic — nothing in the engine reads it to decide behavior; it exists so
+    /// <c>SHOW VARIABLES</c> can report not just a value but the layer it came from. Absent keys were
+    /// never overridden and are <see cref="Config.ConfigValueSource.Default"/>, which is why the
+    /// default is an empty map rather than a fully-populated one: an options record built directly by
+    /// a test has no provenance to report, and reporting "default" for all of it is correct.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, Config.ConfigValueSource> ValueSources { get; init; }
+        = new Dictionary<string, Config.ConfigValueSource>(StringComparer.OrdinalIgnoreCase);
+
     // ──────────────────────────────────────────────────────────────────────────
     // Query result cache
     // ──────────────────────────────────────────────────────────────────────────

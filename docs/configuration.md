@@ -3,6 +3,9 @@
 CamusDB reads `CamusDB/Config/config.yml` at startup and merges CLI flags and environment
 variables into a single resolved configuration object.
 
+To see what a running node actually resolved — including which layer supplied each value — run
+[`SHOW VARIABLES`](show-variables.md) against it rather than reconstructing the merge by hand.
+
 ## Precedence
 
 Highest wins:
@@ -74,23 +77,48 @@ The nested `kahuna:` map is an allow-listed passthrough to `EmbeddedKahunaOption
 both the cluster node (`Program.cs`) and standalone per-database nodes (`DatabaseOpener`).
 Unset keys keep the CamusDB baseline for that mode. Unknown keys fail validation at startup.
 
-Allowed keys: `storage`, `storage_revision`, `wal_storage`, `wal_revision`, `wal_sync_writes`,
-`default_transaction_timeout_ms`, `locks_workers`, `key_value_workers`,
-`background_writer_workers`, `read_io_threads`, `write_io_threads`, `start_election_timeout_ms`,
-`end_election_timeout_ms`, `start_election_timeout_increment_ms`,
-`end_election_timeout_increment_ms`, `heartbeat_interval_ms`, `voting_timeout_ms`,
-`max_entries_per_actor`, `max_bytes_per_actor`, `cache_entry_ttl_ms`, `cache_entries_to_remove`,
-`collection_interval_ms`, `compact_every_operations`, `compact_number_entries`,
-`max_entries_per_compaction`.
+The authoritative allow-list is `KahunaOptionsConfig.AllowedYamlKeys`; the commented `kahuna:` block
+in `CamusDB/Config/config.yml` documents each key with its meaning. Broadly it covers storage and
+WAL backends, transaction timeouts and admission control, worker/IO-thread counts, Raft election and
+heartbeat timings, the cache and eviction knobs described below, RocksDB shared memory, and backup /
+PITR settings. A rejected key's error message lists every accepted one.
 
 Entry eviction is governed by two mechanisms: **size-based** caps (`max_entries_per_actor`,
 `max_bytes_per_actor`) that bound how much an actor holds in memory, and a **time-based**
 collection sweep (`collection_interval_ms`) that evicts up to `cache_entries_to_remove` entries
 older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed together by
 `compact_every_operations` (how often), `compact_number_entries` (trailing entries kept), and
-`max_entries_per_compaction` (per-pass removal cap). Every unset key keeps Kahuna's default.
+`max_entries_per_compaction` (per-pass removal cap).
 
 Storage backends: `memory`, `sqlite`, `rocksdb`.
+
+### Memory-proportional cache defaults
+
+Most unset keys keep Kahuna's own default, but the four cache-sizing knobs are an exception: when
+left unset they are computed at startup from the machine's available memory (container limits
+respected) rather than from a fixed constant. A fixed 320 MB block cache was measured forcing a
+1.2 GB TPC-C working set through disk reads on nearly every statement; sizing it to the machine
+took the same workload from 24.5 to 119.6 tx/s at 8 clients.
+
+| Key | Computed when unset | Clamp |
+|-----|---------------------|-------|
+| `rocksdb_shared_memory_budget_mb` | 25% of RAM | 320 MiB – 8 GiB |
+| `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache | 128 MiB – 1 GiB |
+| `max_bytes_per_actor` | 12.5% of RAM ÷ `key_value_workers` | 64 MiB – 4 GiB per actor |
+| `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 50k – 4M |
+
+That is roughly 40% of RAM across both cache layers. An explicit value always wins over the
+computed one. On an 8 GiB machine with none of them set: 2048 MiB block cache, 512 MiB memtable
+sub-budget, and 1 GiB of actor caches in total — about 3.5 GiB.
+
+The RocksDB pair is shared: `rocksdb_shared_memory` (default on, and a no-op unless `storage` and
+`wal_storage` are both `rocksdb`) makes one block cache and one write-buffer manager serve both the
+KV store and the Raft WAL. The memtable sub-budget is charged **inside** the total block-cache
+budget, not added to it, and must be ≤ it. That comparison is made against the *effective*
+post-merge pair, so overriding only one of the two can produce an inconsistent pair — a 100 MiB
+total against a computed 512 MiB memtable — and fails startup with `InvalidConfig`. Set both
+together. Likewise `max_bytes_per_actor` is **per actor**: multiply by `key_value_workers` (default:
+one per CPU) to get the total.
 
 ## Validation errors
 

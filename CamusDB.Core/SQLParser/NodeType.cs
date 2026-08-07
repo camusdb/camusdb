@@ -393,4 +393,18 @@ public enum NodeType
     /// before any database is opened and never forwards to the leader.
     /// </summary>
     ShowEngineStats,
+
+    /// <summary>
+    /// <c>SHOW VARIABLES [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, matched against
+    /// the variable name, or null for no filter.
+    ///
+    /// <para>Reports the configuration this node resolved at startup, read from the options instance
+    /// the engine was constructed with rather than from the configuration file — so what it shows is
+    /// what the engine obeys, including values an environment variable or command-line flag overrode
+    /// after the file was read. Node-local for the same reason as
+    /// <see cref="ShowEngineStats"/>: nodes may legitimately be configured differently, and answering
+    /// from the leader would be actively misleading while debugging one of them. Dispatched before any
+    /// database is opened.</para>
+    /// </summary>
+    ShowVariables,
 }

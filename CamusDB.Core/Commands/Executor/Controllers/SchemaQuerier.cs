@@ -11,6 +11,7 @@ using System.Text;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Config;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
@@ -495,6 +496,56 @@ internal sealed class SchemaQuerier
             });
         }
     }
+
+    /// <summary>
+    /// Reports the configuration this engine is running, optionally narrowed by a LIKE
+    /// <paramref name="pattern"/> on the variable name.
+    ///
+    /// <para>The rows come from <paramref name="options"/> — the instance the engine was constructed
+    /// with — and not from re-reading the configuration file. That distinction is the point of the
+    /// statement: a value overridden by an environment variable or a command-line flag after the file
+    /// was read differs from what the file says, and it is the resolved value the engine actually
+    /// obeys. Secrets are masked by <see cref="ConfigVariableCatalog"/> before they reach here.</para>
+    ///
+    /// <para>Node-local: it describes the node that served the statement and is never gathered from
+    /// peers, because nodes in a cluster can legitimately be configured differently and answering
+    /// from the leader would hide exactly the drift an operator is looking for.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowVariables(CamusDBOptions options, string? pattern)
+    {
+        await Task.CompletedTask;
+
+        foreach (ConfigVariable variable in ConfigVariableCatalog.Describe(options))
+        {
+            if (pattern is not null && !LikeMatch(variable.Name, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "variable", new ColumnValue(ColumnType.String, variable.Name) },
+                { "value",    Text(variable.Value) },
+                { "type",     new ColumnValue(ColumnType.String, variable.Type) },
+                { "default",  Text(variable.Default) },
+                { "source",   new ColumnValue(ColumnType.String, SourceLabel(variable.Source)) },
+            });
+        }
+    }
+
+    /// <summary>Renders an optional string, an unset setting becoming SQL NULL rather than empty.</summary>
+    private static ColumnValue Text(string? value)
+        => value is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, value);
+
+    /// <summary>
+    /// Spells a provenance layer the way an operator names it, rather than leaking the CLR enum
+    /// spelling (<c>ConfigFile</c>, <c>CommandLine</c>) into the result set.
+    /// </summary>
+    private static string SourceLabel(ConfigValueSource source) => source switch
+    {
+        ConfigValueSource.ConfigFile => "config",
+        ConfigValueSource.Environment => "env",
+        ConfigValueSource.CommandLine => "cli",
+        _ => "default",
+    };
 
     /// <summary>Renders an optional metric component, absent components becoming SQL NULL.</summary>
     private static ColumnValue Float(double? value)

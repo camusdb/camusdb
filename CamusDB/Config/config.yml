@@ -329,8 +329,10 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   end_election_timeout_increment_ms: 200
 #   heartbeat_interval_ms: 500
 #   voting_timeout_ms: 1500
-#   max_entries_per_actor: 50000        # size-based eviction: cap on in-memory entries per actor
-#   max_bytes_per_actor: 268435456      # size-based eviction: cap on in-memory bytes per actor (256 MiB)
+#   max_entries_per_actor: 50000        # size-based eviction: cap on in-memory entries per actor.
+#                                       # Unset => sized from RAM (see "memory-proportional defaults" below)
+#   max_bytes_per_actor: 268435456      # size-based eviction: cap on in-memory bytes per actor (256 MiB).
+#                                       # Unset => sized from RAM (see "memory-proportional defaults" below)
 #   cache_entry_ttl_ms: 300000          # idle TTL before an aged cache entry may be evicted (5 min)
 #   cache_entries_to_remove: 1000       # max aged entries evicted per collection sweep
 #   collection_interval_ms: 60000       # background eviction-sweep + range-lock renewal cadence (60 s); range_lock_expires_ms must be >= 2x this
@@ -342,8 +344,31 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # a no-op otherwise). One block cache + one write-buffer manager serve both databases,
 #   # bounding total RocksDB memory with a single budget instead of two.
 #   rocksdb_shared_memory: true                 # set false to give each database its own budget
-#   rocksdb_shared_memory_budget_mb: 320        # total shared block-cache budget (MiB)
-#   rocksdb_shared_memtable_budget_mb: 128      # memtable sub-budget (MiB); must be <= the total
+#   rocksdb_shared_memory_budget_mb: 2048       # total shared block-cache budget (MiB); unset => 25% of RAM
+#   rocksdb_shared_memtable_budget_mb: 512      # memtable sub-budget (MiB), charged INSIDE the total budget
+#                                               # (not added to it); must be <= the total. Unset => a quarter of it
+#
+#   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized
+#   # from the machine's available memory at startup (container limits respected), not left at a fixed
+#   # value: block cache = 25% of RAM clamped to [320 MiB, 8 GiB]; memtable sub-budget = a quarter of
+#   # the block cache clamped to [128 MiB, 1 GiB]; the key/value actor caches together take 12.5% of
+#   # RAM, split across kahuna.key_value_workers actors (default: one per CPU) and clamped to
+#   # [64 MiB, 4 GiB] each, with max_entries_per_actor derived at ~512 B/entry, clamped to [50k, 4M].
+#   # That is roughly 40% of RAM across both cache layers -- a database server's buffer-pool
+#   # assumption. Setting a key explicitly always wins over the computed value.
+#   #
+#   # Worked example, 8 GiB machine, nothing set: block cache 2048 MiB, memtable 512 MiB, actor caches
+#   # 1 GiB total => ~3.5 GiB. To hand most of an 8 GiB machine to CamusDB, set all four together and
+#   # keep ~2.5 GiB for the CLR heap, RocksDB overhead outside the cache, and the OS:
+#   #   rocksdb_shared_memory_budget_mb: 3584
+#   #   rocksdb_shared_memtable_budget_mb: 896
+#   #   max_bytes_per_actor: 134217728          # 128 MiB PER ACTOR -- multiply by key_value_workers
+#   #   max_entries_per_actor: 262144
+#   #
+#   # Trap: rocksdb_shared_memtable_budget_mb must be <= rocksdb_shared_memory_budget_mb, and the two
+#   # are validated AFTER merging with the computed defaults. Overriding only one of the pair can make
+#   # the effective pair inconsistent (e.g. a 100 MiB total against a computed 512 MiB memtable) and
+#   # fails startup with InvalidConfig. Always set both together.
 #
 #   # Backups & point-in-time recovery (opt-in; off unless backup_dir is set).
 #   # When backup_dir is set, the server-admin backup/PITR API (/v1/backups/*, /v1/restore) is

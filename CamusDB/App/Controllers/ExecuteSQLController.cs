@@ -163,7 +163,8 @@ public sealed class ExecuteSQLController : CommandsController
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
             // database context or transaction.
             if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-                                   or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats)
+                                   or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats
+                                   or NodeType.ShowVariables)
             {
                 QuerySchemaHolder schemaHolder = new();
                 ExecuteSQLTicket ticket = new(
@@ -354,7 +355,8 @@ public sealed class ExecuteSQLController : CommandsController
             // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no database
             // context or transaction.
             if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-                                   or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats)
+                                   or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats
+                                   or NodeType.ShowVariables)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,

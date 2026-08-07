@@ -188,6 +188,31 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         await RunServerQuery(executor, "SHOW ENGINE STATS", root);
     }
 
+    /// <summary>
+    /// SHOW VARIABLES is held to the same bar as engine metrics and for the same reason: even with the
+    /// secret settings masked, the output describes the node's whole security posture and limits, which
+    /// no per-database grant scopes down.
+    /// </summary>
+    [Test]
+    public async Task ShowVariables_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER config_reader IDENTIFIED BY 'config-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO config_reader", root);
+        Principal granted = await LoginAsync(executor, "config_reader", "config-pw");
+
+        // A grant that is enough for SHOW DATABASES is not enough here.
+        await RunServerQuery(executor, "SHOW DATABASES", granted);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunServerQuery(executor, "SHOW VARIABLES", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        // The superuser gets rows.
+        await RunServerQuery(executor, "SHOW VARIABLES", root);
+    }
+
     /// <summary>Runs a server-level statement: no database context and no transaction.</summary>
     private static async Task RunServerQuery(CommandExecutor executor, string sql, Principal? principal)
     {

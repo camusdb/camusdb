@@ -78,6 +78,24 @@ Directory.CreateDirectory(camusOptions.DataDirectory);
 // Sourced from the environment / secret provider, never config.yml: a plaintext key or bootstrap
 // password in config.yml would be a leak. The flag defaults off, so a deployment that sets nothing
 // keeps today's unauthenticated behavior.
+// These are applied after Resolve, so their provenance has to be recorded here rather than in the
+// resolver: without it they would report as built-in defaults, which for a value the operator set in
+// the environment is exactly the wrong answer.
+Dictionary<string, CamusDB.Core.Config.ConfigValueSource> authValueSources =
+    new(camusOptions.ValueSources, StringComparer.OrdinalIgnoreCase);
+
+void RecordIfSetFromEnvironment(string environmentVariable, string variableName)
+{
+    if (Environment.GetEnvironmentVariable(environmentVariable) is not null)
+        authValueSources[variableName] = CamusDB.Core.Config.ConfigValueSource.Environment;
+}
+
+RecordIfSetFromEnvironment("CAMUSDB_AUTH_ENABLED", "authentication_enabled");
+RecordIfSetFromEnvironment("CAMUSDB_AUTH_TOKEN_KEY", "access_token_server_key");
+RecordIfSetFromEnvironment("CAMUSDB_BOOTSTRAP_USER", "bootstrap_superuser");
+RecordIfSetFromEnvironment("CAMUSDB_BOOTSTRAP_PASSWORD", "bootstrap_superuser_password");
+RecordIfSetFromEnvironment("CAMUSDB_NODE_SECRET", "node_secret");
+
 camusOptions = camusOptions with
 {
     AuthenticationEnabled = string.Equals(
@@ -90,6 +108,7 @@ camusOptions = camusOptions with
         Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "",
     NodeSecret =
         Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "",
+    ValueSources = authValueSources,
 };
 
 CamusDBConfig.SetAmbient(camusOptions);

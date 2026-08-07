@@ -124,7 +124,8 @@ public class ConfigReader
 
     public ConfigDefinition Read(string yml)
     {
-        IReadOnlyCollection<string> providedKeys = ValidateUnknownKeys(yml);
+        List<string> providedKeys = [];
+        ValidateUnknownKeys(yml, providedKeys);
 
         IDeserializer deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
@@ -134,8 +135,17 @@ public class ConfigReader
 
         // Record what the document actually said, so a setting whose default depends on the rest of
         // the configuration can distinguish an explicit choice from an untouched default.
+        //
+        // The same keys are recorded as file-sourced for reporting. Root keys and the dotted sub-keys
+        // of the nested sections are both recorded: a reader asking where kahuna.wal_sync_writes came
+        // from wants the sub-key answered, not the section it happens to live under.
         foreach (string key in providedKeys)
-            config.ProvidedKeys.Add(key);
+        {
+            if (!key.Contains('.'))
+                config.ProvidedKeys.Add(key);
+
+            config.RecordSource(key, ConfigValueSource.ConfigFile);
+        }
 
         // Fail fast on a malformed config rather than producing confusing behaviour later
         // (e.g. a zero ack timeout that makes the two-version gate give up instantly, or
@@ -146,13 +156,14 @@ public class ConfigReader
     }
 
     /// <summary>
-    /// Rejects root and nested keys that <see cref="ConfigDefinition"/> does not model, and returns
-    /// the root keys the document did provide.
+    /// Rejects root and nested keys that <see cref="ConfigDefinition"/> does not model, appending
+    /// every key the document did provide to <paramref name="providedKeys"/> — root keys by name, and
+    /// the keys of the nested sections in dotted <c>section.key</c> form.
     /// </summary>
-    private static IReadOnlyCollection<string> ValidateUnknownKeys(string yml)
+    private static void ValidateUnknownKeys(string yml, List<string> providedKeys)
     {
         if (string.IsNullOrWhiteSpace(yml))
-            return [];
+            return;
 
         IDeserializer raw = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
@@ -160,7 +171,7 @@ public class ConfigReader
 
         Dictionary<string, object>? root = raw.Deserialize<Dictionary<string, object>>(yml);
         if (root is null)
-            return [];
+            return;
 
         foreach (string rootKey in root.Keys)
         {
@@ -171,14 +182,14 @@ public class ConfigReader
                     string.Join(", ", AllowedRootKeys.OrderBy(k => k)));
         }
 
-        ValidateNestedKeys(root, "kahuna", KahunaOptionsConfig.AllowedYamlKeys);
-        ValidateNestedKeys(root, "diagnostics", DiagnosticsConfig.AllowedYamlKeys);
+        providedKeys.AddRange(root.Keys);
 
-        return root.Keys;
+        ValidateNestedKeys(root, "kahuna", KahunaOptionsConfig.AllowedYamlKeys, providedKeys);
+        ValidateNestedKeys(root, "diagnostics", DiagnosticsConfig.AllowedYamlKeys, providedKeys);
     }
 
     private static void ValidateNestedKeys(
-        Dictionary<string, object> root, string section, HashSet<string> allowedKeys)
+        Dictionary<string, object> root, string section, HashSet<string> allowedKeys, List<string> providedKeys)
     {
         if (!root.TryGetValue(section, out object? raw) || raw is null)
             return;
@@ -198,6 +209,8 @@ public class ConfigReader
                     $"Unknown '{section}' option '{name}'; allowed keys: " +
                     string.Join(", ", allowedKeys.OrderBy(k => k)));
             }
+
+            providedKeys.Add($"{section}.{name}");
         }
     }
 }

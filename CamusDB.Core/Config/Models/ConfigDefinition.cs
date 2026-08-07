@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core;
+using CamusDB.Core.Config;
 using CamusDB.Core.Transactions;
 using Kahuna.Shared.KeyValue;
 using YamlDotNet.Serialization;
@@ -28,6 +29,34 @@ public class ConfigDefinition
     /// </summary>
     [YamlIgnore]
     public HashSet<string> ProvidedKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Which layer supplied each key, as underscored YAML names (nested sections use their dotted
+    /// form, e.g. <c>kahuna.wal_sync_writes</c>). Keys absent from the map were never overridden and
+    /// are <see cref="ConfigValueSource.Default"/>.
+    /// <para>
+    /// This is finer-grained than <see cref="ProvidedKeys"/> and answers a different question.
+    /// <see cref="ProvidedKeys"/> asks "did the operator say anything about this key?" so a
+    /// context-dependent default can avoid overriding an explicit choice; it records only the handful
+    /// of keys those defaults consult, and it cannot tell a file value from a flag. This map records
+    /// every override and which layer won, purely so the value can be reported back.
+    /// </para>
+    /// <para>
+    /// Writers record themselves as they apply their layer — <see cref="ConfigReader"/> for the
+    /// document, <see cref="ConfigResolver.ApplyCliOverrides"/> for flags, <see cref="ConfigResolver.Resolve"/>
+    /// and the host for environment variables — so a later layer overwriting a value also overwrites
+    /// its provenance, and the recorded source stays the one that actually took effect.
+    /// </para>
+    /// </summary>
+    [YamlIgnore]
+    public Dictionary<string, ConfigValueSource> KeySources { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Records that <paramref name="source"/> supplied <paramref name="key"/>, replacing any layer
+    /// recorded earlier. Call from the code that applies the value, not from a later pass, so the two
+    /// cannot disagree.
+    /// </summary>
+    public void RecordSource(string key, ConfigValueSource source) => KeySources[key] = source;
 
     public string DataDir { get; set; } = "";
 
