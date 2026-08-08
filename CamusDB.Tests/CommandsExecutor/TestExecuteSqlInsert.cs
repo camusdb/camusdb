@@ -866,9 +866,9 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     /// read-folding path — the optimistic transaction's read is registered as an observation and
     /// validated against the current committed revision at commit.
     ///
-    /// The read here is a primary-key lookup on purpose. Point reads always fold; a plain query
-    /// SCAN deliberately does not, so a full-table SELECT would no longer produce this abort — see
-    /// <see cref="TestOptimisticQueryScanIsNotFoldedIntoReadSet"/>.
+    /// The read here is a primary-key lookup; a full-table SELECT folds and aborts the same way —
+    /// see <see cref="TestOptimisticQueryScanFoldsIntoReadSet"/> — so isolation does not depend on
+    /// which plan shape answered the read.
     /// </summary>
     [Test]
     [NonParallelizable]
@@ -920,22 +920,24 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// A plain query scan is NOT folded into the commit-time read set. Same shape as
+    /// A plain query scan IS folded into the commit-time read set. Same shape as
     /// <see cref="TestOptimisticReadWriteConflictAbortsAtCommit"/> but the read is a full-table
-    /// SELECT instead of a primary-key lookup, and the transaction must now COMMIT: a concurrent
-    /// update to a row the query merely scanned is not a conflict.
+    /// SELECT instead of a primary-key lookup, and the outcome must be the same: a concurrent
+    /// update to a row the query scanned aborts the optimistic commit.
     ///
-    /// This is deliberate. Folding a scan registers one commit-time dependency per scanned row and
-    /// the coordinator re-probes every one of them before it can decide, so a scan-heavy
-    /// transaction paid a commit cost proportional to the rows it read. A query does not need it:
-    /// under Serializable the scan holds a shared range lock over the same bucket for the life of
-    /// the transaction, which also fences phantoms that per-key folding could never catch; under
-    /// Read Committed there is no repeatable-read promise for a query to weaken. Scans that decide
-    /// a write keep folding — see <see cref="TestUpdateLocateScanStillFoldsScannedRows"/>.
+    /// This is deliberate: read-set folding follows the transaction
+    /// (<c>KvTransaction.FoldReads</c>), never the plan shape. If only point reads folded, the same
+    /// predicate answered by a PK lookup would be validated at commit while a table scan of it
+    /// would not — isolation would silently depend on the planner's choice. The shared range lock
+    /// is not a substitute: it fires only for Serializable read-write transactions or under
+    /// key-range sharding, so a Read Committed optimistic scan would otherwise carry no read
+    /// protection at all. The price — commit cost scaling with rows scanned — is the optimistic
+    /// contract; a transaction that cannot afford it should use pessimistic locking, whose scans
+    /// register nothing.
     /// </summary>
     [Test]
     [NonParallelizable]
-    public async Task TestOptimisticQueryScanIsNotFoldedIntoReadSet()
+    public async Task TestOptimisticQueryScanFoldsIntoReadSet()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
 
@@ -950,7 +952,7 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
             "INSERT INTO balances (id, balance) VALUES (\"a\", \"100\")", null));
         await database.Transactions.CommitAsync(seed);
 
-        // T1 (optimistic) scans the table. No read dependency is registered for the scanned rows.
+        // T1 (optimistic) scans the table. Every scanned row registers a commit-time read dependency.
         KvTransaction t1 = await database.Transactions.BeginAsync(
             isolationLevel: CamusIsolationLevel.ReadCommitted,
             locking: global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Optimistic);
@@ -964,17 +966,22 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
             "UPDATE balances SET balance = \"200\" WHERE id = \"a\"", null));
         await database.Transactions.CommitAsync(t2);
 
-        // T1 writes a disjoint key and commits successfully — the scan was never a dependency.
+        // T1 writes a disjoint key — the write itself is conflict-free, but the scanned row's
+        // observation no longer validates, so the optimistic commit must abort.
         await executor.ExecuteNonSQLQuery(new(t1, dbname,
             "INSERT INTO balances (id, balance) VALUES (\"b\", \"50\")", null));
-        await database.Transactions.CommitAsync(t1);
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await database.Transactions.CommitAsync(t1))!;
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex.Code,
+            "a scanned row modified by a concurrent commit must abort the optimistic transaction");
 
+        // The aborted transaction's insert must not persist.
         KvTransaction txq = await database.Transactions.BeginAsync();
         (_, IAsyncEnumerable<QueryResultRow> cursor) =
             await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT id FROM balances", null));
         int rowCount = (await cursor.ToListAsync()).Count;
         await database.Transactions.CommitAsync(txq);
-        Assert.AreEqual(2, rowCount, "The optimistic transaction's insert must persist: a scanned row is not a read dependency");
+        Assert.AreEqual(1, rowCount, "the aborted optimistic transaction's insert must not persist");
     }
 
     /// <summary>
@@ -985,7 +992,7 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
     /// skipped a matching row.
     ///
     /// Write-intent conflict detection alone cannot catch this — the two transactions wrote
-    /// disjoint rows — which is why a write-driving scan keeps folding while a query scan does not.
+    /// disjoint rows — which is why the locate scan's read-set folding is load-bearing here.
     /// </summary>
     [Test]
     [NonParallelizable]

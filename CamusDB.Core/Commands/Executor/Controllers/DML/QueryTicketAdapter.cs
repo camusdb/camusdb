@@ -28,19 +28,35 @@ internal static class QueryTicketAdapter
     public static QueryTicket ToQueryTicket(BoundSelectQuery bound, ExecuteSQLTicket ticket) =>
         ToQueryTicket(bound, ticket, existsSubqueries: null);
 
+    /// <param name="exclusivePredicateLocks">
+    /// True when the scan drives writes (the rows it reads decide what is written), so its predicate
+    /// range locks must be exclusive and its reads must fold into the commit-time read set. Set by
+    /// <c>INSERT … SELECT</c> for the same reason the UPDATE/DELETE locate scan sets it.
+    /// </param>
+    /// <param name="suppressCacheHint">
+    /// True to drop any <c>{cache=name}</c> hint the source query carries. A write statement's source
+    /// must execute live: serving it from a result cache would copy rows the cache captured at some
+    /// other point in time.
+    /// </param>
     public static QueryTicket ToQueryTicket(
         BoundSelectQuery bound,
         ExecuteSQLTicket ticket,
         ExistsSubqueryRegistry? existsSubqueries,
-        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null) =>
-        ToQueryTicketInternal(bound.Query, ticket, bound.RowNames, existsSubqueries, semiJoinSpecs);
+        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
+        bool exclusivePredicateLocks = false,
+        bool suppressCacheHint = false) =>
+        ToQueryTicketInternal(
+            bound.Query, ticket, bound.RowNames, existsSubqueries, semiJoinSpecs,
+            exclusivePredicateLocks, suppressCacheHint);
 
     private static QueryTicket ToQueryTicketInternal(
         SelectQuery query,
         ExecuteSQLTicket ticket,
         QueryRowNameResolver? rowNameResolver,
         ExistsSubqueryRegistry? existsSubqueries = null,
-        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null)
+        IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
+        bool exclusivePredicateLocks = false,
+        bool suppressCacheHint = false)
     {
         TableSource tableSource = GetPrimaryTableSource(query.Source);
         NodeAst? where = query.Where?.Expression;
@@ -73,7 +89,8 @@ internal static class QueryTicketAdapter
             selectQuery: query,
             semiJoinSpecs: semiJoinSpecs,
             preparedInSets: preparedInSets,
-            cacheHint: query.CacheHint);
+            exclusivePredicateLocks: exclusivePredicateLocks,
+            cacheHint: suppressCacheHint ? null : query.CacheHint);
     }
 
     private static IReadOnlyDictionary<NodeAst, PreparedInSet>? BuildPreparedInSets(PredicateAnalysis analysis)

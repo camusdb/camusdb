@@ -1765,7 +1765,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // The branch target's own hold exists; capture the live-hold count so we can assert the
         // IF NOT EXISTS call adds no further hold.
-        (_, int holdsBefore) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, _, int holdsBefore) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.IsNull(sharedRegistry!.Get(branchTarget), "precondition: branch target absent from local cache");
 
         await using CommandExecutor local = CreateCommandExecutor();
@@ -1775,7 +1775,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         Assert.AreEqual(branchTarget, db.Name, "must open the existing branch target");
 
-        (_, int holdsAfter) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, _, int holdsAfter) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.AreEqual(holdsBefore, holdsAfter,
             "CREATE BRANCH IF NOT EXISTS on an existing target must not acquire a new snapshot-floor hold");
     }

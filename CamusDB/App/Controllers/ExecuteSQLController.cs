@@ -571,7 +571,7 @@ public sealed class ExecuteSQLController : CommandsController
                         principal: principal
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows) { Warning = result.Warning, ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
                 }
                 catch (Exception)
                 {
@@ -584,6 +584,9 @@ public sealed class ExecuteSQLController : CommandsController
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.
             int modifiedRows = 0;
+            // Reset on every attempt below, not accumulated: a retried autocommit statement reports the
+            // warning of the attempt that actually committed, not one left over from an aborted try.
+            string? warning = null;
             Kommander.Time.HLCTimestamp causalToken2 = default;
 
             async Task AutocommitDmlBody(CancellationToken ct)
@@ -603,6 +606,7 @@ public sealed class ExecuteSQLController : CommandsController
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken2 = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
+                    warning = r.Warning;
                 }
                 catch
                 {
@@ -617,7 +621,7 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitDmlBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows) { CausalToken = causalToken2.IsNull() ? null : causalToken2, ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows) { Warning = warning, CausalToken = causalToken2.IsNull() ? null : causalToken2, ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
         }
         catch (CamusDBException e)
         {
@@ -694,7 +698,7 @@ public sealed class ExecuteSQLController : CommandsController
                 if (newTransaction)
                     await transactions.CommitAsync(result.Database, txnState!).ConfigureAwait(false);
 
-                return new JsonResult(new ExecuteDDLSQLResponse("ok"));
+                return new JsonResult(new ExecuteDDLSQLResponse("ok", result.ModifiedRows, result.Warning));
             }
             catch (Exception)
             {

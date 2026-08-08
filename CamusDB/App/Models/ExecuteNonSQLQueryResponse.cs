@@ -20,6 +20,13 @@ public sealed class ExecuteNonSQLQueryResponse
 
     public string? Message { get; set; }
 
+    /// <summary>
+    /// Set when the statement succeeded but the caller should look twice — today, a time-travel copy
+    /// that read no rows, which may mean the requested history had already been reclaimed. Null
+    /// otherwise. Carried in the response because a client cannot see the server's log.
+    /// </summary>
+    public string? Warning { get; set; }
+
     public HLCTimestamp? CausalToken { get; set; }
 
     /// <summary>

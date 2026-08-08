@@ -103,6 +103,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly RowInserter rowInserter;
 
+    private readonly RowInsertSelector rowInsertSelector = new();
+
     private readonly RowUpdater rowUpdater;
 
     private readonly RowDeleter rowDeleter;
@@ -1540,6 +1542,13 @@ public sealed class CommandExecutor : IAsyncDisposable
     // is stalled. 10 s covers leader-election time in a healthy cluster while still
     // converting permanent stalls into a recoverable CamusDBException.
     private static readonly TimeSpan DdlCommitTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How many times a statement re-attempts a table open that failed the schema catch-up fence
+    /// (<see cref="CamusDBErrorCodes.SchemaCatchingUp"/>). The fence fires before any write or
+    /// schema pin, so the in-flight transaction is unmodified and safe to reuse on each attempt.
+    /// </summary>
+    private const int MaxFenceRetries = 3;
 
     /// <summary>
     /// Executes a DDL action in a self-managed Kahuna transaction.
@@ -3120,7 +3129,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         // CREATE TABLE is checked at DATABASE scope here — the table does not exist yet, so it cannot
         // be a per-table grant target, and the check must happen before the table is created (not at
         // the post-create re-open). A db.* / global CreateTable grant (or superuser) passes.
-        if (ast.nodeType is NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink)
+        if (ast.nodeType is NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink
+            or NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists)
         {
             DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
             if (registry.TryResolveId(ticket.DatabaseName, out string createDbId)
@@ -3190,10 +3200,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
     {
         NodeType.Select => Privilege.Select,
-        NodeType.Insert => Privilege.Insert,
+        // INSERT … SELECT maps to the privilege for its TARGET. Its source tables are resolved under
+        // a narrowed Select requirement (see BuildInsertSourceAsync), so this never demands Insert on
+        // a table the statement only reads.
+        NodeType.Insert or NodeType.InsertSelect => Privilege.Insert,
         NodeType.Update => Privilege.Update,
         NodeType.Delete => Privilege.Delete,
-        NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink => Privilege.CreateTable,
+        NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink
+            or NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists => Privilege.CreateTable,
         NodeType.DropTable or NodeType.DropTableIfExists => Privilege.Drop,
         NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists
             or NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists
@@ -3503,7 +3517,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     private static string MapStatementFamily(NodeType nodeType) => nodeType switch
     {
         NodeType.Select => ServerDiagnostics.Tags.Statement.Select,
-        NodeType.Insert => ServerDiagnostics.Tags.Statement.Insert,
+        NodeType.Insert or NodeType.InsertSelect => ServerDiagnostics.Tags.Statement.Insert,
         NodeType.Update => ServerDiagnostics.Tags.Statement.Update,
         NodeType.Delete => ServerDiagnostics.Tags.Statement.Delete,
         _ => ServerDiagnostics.Tags.Statement.Other,
@@ -3820,6 +3834,15 @@ public sealed class CommandExecutor : IAsyncDisposable
                     ).ConfigureAwait(false);
                 }
 
+            case NodeType.CreateTableAsSelect:
+            case NodeType.CreateTableAsSelectIfNotExists:
+                {
+                    (bool ctasCreated, int ctasRows, string? ctasWarning) =
+                        await ExecuteCreateTableAsSelectAsync(database, ast, ticket).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, ctasCreated, ctasRows, ctasWarning);
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown DDL AST stmt: " + ast.nodeType);
         }
@@ -4018,7 +4041,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         //     autocommit statements (via SerializableRetryHelper). The controller replays from a
         //     fresh BeginAsync each time. Explicit multi-statement transactions surface these codes
         //     to the caller, which owns the retry loop.
-        const int MaxFenceRetries = 3;
 
         switch (ast.nodeType)
         {
@@ -4038,6 +4060,37 @@ public sealed class CommandExecutor : IAsyncDisposable
                             // never triggers for the common SQL workload.
                             statisticsManager.TrackInsert(database, table, inserted, insertTicket.Values);
                             return new(database, table, inserted);
+                        }
+                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
+                        }
+                    }
+                }
+
+            case NodeType.InsertSelect:
+                {
+                    InsertSelectTicket insertSelectTicket = sqlExecutor.CreateInsertSelectTicket(ticket, ast);
+                    validator.Validate(insertSelectTicket);
+
+                    for (int fenceAttempt = 0; ; fenceAttempt++)
+                    {
+                        try
+                        {
+                            TableDescriptor table = await tableOpener.Open(database, insertSelectTicket.TableName).ConfigureAwait(false);
+                            PinSchemaVersion(database, table, ticket.TxnState);
+
+                            await using SelectRowSource source = await BuildSelectSourceAsync(
+                                database, insertSelectTicket.SourceSelect, ticket, "INSERT ... SELECT").ConfigureAwait(false);
+
+                            int insertedFromSelect = await rowInsertSelector
+                                .InsertSelect(rowInserter, statisticsManager, database, table, insertSelectTicket, source.Columns, source.Cursor)
+                                .ConfigureAwait(false);
+
+                            string? insertWarning = WarnIfTimeTravelCopyReadNothing(
+                                source, insertedFromSelect, insertSelectTicket.TableName);
+
+                            return new(database, table, insertedFromSelect, insertWarning);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
                         {
@@ -4140,6 +4193,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                 ApplySetTransactionStatement(ast, ticket);
                 return new(database, null!, 0);
 
+            // Reachable here too: a client routes any non-SELECT statement to whichever endpoint it
+            // uses for those, so CTAS must behave the same through either one.
+            case NodeType.CreateTableAsSelect:
+            case NodeType.CreateTableAsSelectIfNotExists:
+                {
+                    (bool _, int ctasRows, string? ctasWarning) =
+                        await ExecuteCreateTableAsSelectAsync(database, ast, ticket).ConfigureAwait(false);
+
+                    TableDescriptor ctasTable = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+                    return new ExecuteNonSQLResult(database, ctasTable, ctasRows, ctasWarning);
+                }
+
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
         }
@@ -4184,6 +4249,413 @@ public sealed class CommandExecutor : IAsyncDisposable
         KvTransaction snapshotTx = KvTransaction.CreateSnapshotReadOnly(snapshotT);
         return new ExecuteSQLTicket(snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters);
     }
+
+    /// <summary>
+    /// Runs a SELECT statement's AST through the full logical pipeline — semi-join extraction,
+    /// subquery rewriting, binding, correlated-EXISTS preparation — and returns the bound query
+    /// together with the executable <see cref="QueryTicket"/>, with every source's schema version
+    /// pinned to the transaction.
+    ///
+    /// <para>This is shared by <c>SELECT</c> and by the statements that consume a query as a row
+    /// source (<c>INSERT … SELECT</c>). Those must go through the identical pipeline: a second copy
+    /// of this sequence would drift, and a source query that skipped, say, subquery rewriting would
+    /// fail or silently read the wrong rows. The stages are order-dependent — semi-join extraction
+    /// must precede subquery rewriting (which would otherwise materialise those subqueries), and
+    /// EXISTS preparation needs the bound sources.</para>
+    /// </summary>
+    /// <param name="exclusivePredicateLocks">
+    /// True when the caller's writes depend on the rows this scan reads, which makes the scan
+    /// write-driving: predicate range locks become exclusive and the scan's reads fold into the
+    /// commit-time read set.
+    /// </param>
+    /// <param name="suppressCacheHint">True to ignore any <c>{cache=name}</c> hint on the query.</param>
+    private async Task<(BoundSelectQuery Bound, QueryTicket QueryTicket)> BuildBoundQueryAsync(
+        DatabaseDescriptor database,
+        NodeAst ast,
+        ExecuteSQLTicket ticket,
+        bool exclusivePredicateLocks = false,
+        bool suppressCacheHint = false,
+        CacheMetadataHolder? metaOut = null)
+    {
+        SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
+
+        // Detect an inner subquery that carries a {cache=name} hint when the outer SELECT has none.
+        // SubqueryRewriter executes all inner subqueries live and discards inner cache hints — they
+        // are inert. Surface the bypass in the outer response so the caller sees an explicit
+        // "inner-hint" bypass rather than silence (which looks identical to an un-hinted query).
+        if (selectQuery.CacheHint is null && metaOut is not null)
+        {
+            CacheHintOptions? innerHint = FindInnerSubqueryCacheHint(selectQuery.Where?.Expression);
+            if (innerHint is not null)
+            {
+                metaOut.CacheName = innerHint.CacheName;
+                metaOut.Status = QueryCacheStatus.Bypass;
+                metaOut.BypassReason = QueryCacheBypassReason.InnerHint;
+            }
+        }
+
+        // Extract eligible IN / NOT IN subqueries as semi/anti-join specs
+        // before SubqueryRewriter materialises them.
+        (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
+            .AnalyzeAsync(database, selectQuery, ticket)
+            .ConfigureAwait(false);
+
+        selectQuery = await subqueryRewriter
+            .RewriteSelectQueryAsync(database, selectQuery, ticket)
+            .ConfigureAwait(false);
+        BoundSelectQuery boundQuery = await queryBinder.BindAsync(database, selectQuery).ConfigureAwait(false);
+        (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
+            .PrepareAsync(
+                database,
+                selectQuery,
+                boundQuery.Sources,
+                boundQuery.DerivedSources,
+                ticket)
+            .ConfigureAwait(false);
+        boundQuery = new BoundSelectQuery(
+            selectQuery,
+            boundQuery.Sources,
+            boundQuery.RowNames,
+            boundQuery.DerivedSources);
+        IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
+        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
+            boundQuery, ticket, existsRegistry, specs, exclusivePredicateLocks, suppressCacheHint);
+        PinSchemaVersions(database, boundQuery.Sources, ticket.TxnState);
+
+        return (boundQuery, queryTicket);
+    }
+
+    /// <summary>
+    /// Executes <c>CREATE TABLE … AS SELECT</c>: derives the new table's schema from the source
+    /// query, creates it through the ordinary CREATE TABLE path, then loads the query's rows into it.
+    ///
+    /// <para><b>The statement is not atomic across schema and data.</b> Creating the table commits its
+    /// own DDL transaction (and in cluster mode replicates it through Raft) before a single row can be
+    /// written, so the two cannot be one unit. A failure during the load therefore drops the table
+    /// again as a compensating action — but if that drop also fails, or the process dies in between,
+    /// an empty table is left behind. The load itself runs in the caller's transaction, so the rows
+    /// become durable only when the caller commits, while the table already is.</para>
+    /// </summary>
+    /// <returns>
+    /// <c>Created</c> is false only when <c>IF NOT EXISTS</c> found the table already present;
+    /// <c>Warning</c> is non-null when the statement succeeded but the caller should look twice
+    /// (see <see cref="WarnIfTimeTravelCopyReadNothing"/>).
+    /// </returns>
+    private async Task<(bool Created, int Rows, string? Warning)> ExecuteCreateTableAsSelectAsync(
+        DatabaseDescriptor database,
+        NodeAst ast,
+        ExecuteSQLTicket ticket)
+    {
+        string tableName = ast.leftAst!.yytext!;
+        NodeAst sourceAst = ast.rightAst!;
+        bool ifNotExists = ast.nodeType == NodeType.CreateTableAsSelectIfNotExists;
+        bool withNoData = string.Equals(ast.yytext, "no data", StringComparison.Ordinal);
+
+        // Checked before anything else so an IF NOT EXISTS over an existing table does not execute the
+        // source query: running it would take locks and read rows on behalf of a statement that is
+        // meant to do nothing.
+        if (ifNotExists && catalogs.TableExists(database, tableName))
+            return (false, 0, null);
+
+        // Binding produces the output schema without reading any rows — the cursor stays unopened
+        // until the table exists.
+        await using SelectRowSource source = await BuildSelectSourceAsync(
+            database, sourceAst, ticket, "CREATE TABLE ... AS SELECT").ConfigureAwait(false);
+
+        IReadOnlyList<DerivedColumnSchema> sourceColumns = source.Columns;
+
+        (ColumnInfo[] columns, ConstraintInfo[] constraints, string _) =
+            CreateTableAsSelectSchemaBuilder.Build(source.Projections, sourceColumns);
+
+        CreateTableTicket createTableTicket = new(
+            databaseName: ticket.DatabaseName,
+            tableName: tableName,
+            columns: columns,
+            constraints: constraints,
+            ifNotExists: ifNotExists
+        );
+
+        validator.Validate(createTableTicket);
+
+        bool? forwarded = await TryForwardCreateTableAsync(database, createTableTicket).ConfigureAwait(false);
+
+        bool created;
+
+        if (forwarded is not null)
+        {
+            created = forwarded.Value;
+        }
+        else
+        {
+            // Allocated before the DDL transaction — only the proposer allocates, and the id travels in
+            // the replicated payload so every node applies the same one.
+            DatabaseRegistry ctasRegistry = await registryTask.ConfigureAwait(false);
+            string ctasTableId = await ctasRegistry.AllocateTableIdAsync().ConfigureAwait(false);
+
+            created = await ExecuteDdlInTransaction(database, async tx =>
+                await tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, createTableTicket, tx, ctasTableId)
+                    .ConfigureAwait(false)
+            ).ConfigureAwait(false);
+        }
+
+        // Lost an IF NOT EXISTS race against a concurrent creator: the table exists but is not ours,
+        // so loading into it would add rows to someone else's table.
+        if (!created)
+            return (false, 0, null);
+
+        if (withNoData)
+            return (true, 0, null);
+
+        try
+        {
+            InsertSelectTicket loadTicket = new(
+                txnState: ticket.TxnState,
+                databaseName: ticket.DatabaseName,
+                tableName: tableName,
+                targetColumns: sourceColumns.Select(column => column.Name).ToList(),
+                sourceSelect: sourceAst,
+                parameters: ticket.Parameters
+            );
+
+            for (int fenceAttempt = 0; ; fenceAttempt++)
+            {
+                try
+                {
+                    TableDescriptor createdTable = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+                    PinSchemaVersion(database, createdTable, ticket.TxnState);
+
+                    int loaded = await rowInsertSelector
+                        .InsertSelect(rowInserter, statisticsManager, database, createdTable, loadTicket, sourceColumns, source.Cursor)
+                        .ConfigureAwait(false);
+
+                    return (true, loaded, WarnIfTimeTravelCopyReadNothing(source, loaded, tableName));
+                }
+                catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < MaxFenceRetries)
+                {
+                    // In cluster mode the CREATE may have been applied by the leader while this node is
+                    // still catching up, so the table it just created is not yet visible here.
+                    await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception loadError)
+        {
+            // Compensate: the table was created by a statement that did not complete, so leaving it
+            // behind would make a retry of the same statement load into a table it did not create.
+            try
+            {
+                await DropTable(new DropTableTicket(ticket.DatabaseName, tableName, ifExists: true, force: true))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception dropError)
+            {
+                logger.LogWarning(
+                    dropError,
+                    "CREATE TABLE AS SELECT failed to load '{TableName}' and could not drop it again; " +
+                    "an empty table is left behind",
+                    tableName);
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"CREATE TABLE ... AS SELECT failed to populate '{tableName}' ({loadError.Message}), and the " +
+                    $"empty table could not be removed ({dropError.Message}); drop it manually before retrying");
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Prepares the row source of an <c>INSERT … SELECT</c>: the source query's output columns and
+    /// its (not yet drained) row cursor.
+    ///
+    /// <para>The source goes through the same pipeline as a top-level SELECT, with two differences
+    /// that follow from feeding a write. The scan is <b>write-driving</b> — the rows it reads decide
+    /// what is written — so it takes exclusive predicate range locks and folds its reads into the
+    /// commit-time read set, exactly as the UPDATE/DELETE locate scan does; without that a
+    /// concurrent insert into the scanned range would be a phantom the statement misses while still
+    /// committing. And any <c>{cache=name}</c> hint is dropped, because copying rows a cache
+    /// captured at some other moment is not the same as copying the table.</para>
+    ///
+    /// <para>Source tables are resolved under a <b>Select</b> requirement rather than the
+    /// statement's Insert requirement, so a caller needs read access to what it copies from and
+    /// write access only to what it copies into.</para>
+    /// </summary>
+    /// <summary>
+    /// Reports a time-travel copy that produced no rows, returning the message so the caller can put
+    /// it in the response as well as the log (null when there is nothing to report).
+    ///
+    /// <para>Zero rows is a legitimate outcome — the source may genuinely have been empty at that
+    /// instant, or the WHERE matched nothing — so this cannot be an error. But it is also exactly what
+    /// a copy reading past Kahuna's revision-retention window looks like, and a recovery that quietly
+    /// creates an empty table is the worst way to find that out. It is returned rather than only
+    /// logged because a remote client never sees this node's log: to an HTTP or gRPC caller, a silent
+    /// empty recovery and a successful one look identical.</para>
+    /// </summary>
+    private string? WarnIfTimeTravelCopyReadNothing(SelectRowSource source, int rows, string tableName)
+    {
+        if (!source.IsTimeTravel || rows > 0)
+            return null;
+
+        string warning =
+            $"AS OF SYSTEM TIME copy into '{tableName}' inserted no rows. The source may have been empty at that " +
+            "snapshot; the history may be older than the configured revision retention and already reclaimed; or " +
+            "the rows were deleted after the snapshot, which time travel cannot recover.";
+
+        logger.LogWarning("{Warning}", warning);
+
+        return warning;
+    }
+
+    private async Task<SelectRowSource> BuildSelectSourceAsync(
+        DatabaseDescriptor database,
+        NodeAst sourceAst,
+        ExecuteSQLTicket ticket,
+        string statementName)
+    {
+        // A time-travel source reads through its OWN read-only snapshot transaction while the writes
+        // keep using the caller's; see PrepareTimeTravelSourceAsync for why that is both possible and
+        // safer than the live path. Null when the source carries no AS OF SYSTEM TIME clause.
+        (ExecuteSQLTicket sourceTicket, Func<Task>? releaseHold) =
+            await PrepareTimeTravelSourceAsync(database, sourceAst, ticket, statementName).ConfigureAwait(false);
+
+        bool isTimeTravel = releaseHold is not null;
+
+        try
+        {
+            using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(Privilege.Select);
+
+            // FROM-less source (SELECT <expressions>): one synthetic row, no scan to plan.
+            if (sourceAst.rightAst is null)
+            {
+                QuerySchemaHolder fromlessSchema = new();
+                IAsyncEnumerable<QueryResultRow> fromlessCursor = await ExecuteFromlessSelectAsync(
+                    database, sourceAst, sourceTicket, fromlessSchema).ConfigureAwait(false);
+
+                List<NodeAst> fromlessProjections = new();
+                FlattenProjectionList(sourceAst.leftAst!, fromlessProjections);
+
+                return new SelectRowSource(fromlessSchema.Schema, fromlessCursor, fromlessProjections, releaseHold);
+            }
+
+            (BoundSelectQuery bound, QueryTicket queryTicket) = await BuildBoundQueryAsync(
+                database,
+                sourceAst,
+                sourceTicket,
+                // A live source scan is write-driving: the rows it reads decide what is written, so its
+                // predicate range locks are exclusive and its reads fold into the commit-time read set.
+                // A historical source needs neither — no transaction can alter what was committed at a
+                // past timestamp, so there is no phantom to fence and nothing to detect at commit. That
+                // also means a large as-of copy does not block concurrent writers on the source range.
+                exclusivePredicateLocks: !isTimeTravel,
+                suppressCacheHint: true).ConfigureAwait(false);
+
+            IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.Build(bound.Query, bound);
+
+            return new SelectRowSource(
+                columns,
+                ExecuteBoundQuery(database, bound, queryTicket),
+                bound.Query.Projections.Select(projection => projection.Expression).ToList(),
+                releaseHold);
+        }
+        catch
+        {
+            // The hold is owned by the SelectRowSource once one exists; if we fail before returning it,
+            // nothing else will ever release it, so do it here rather than leave the MVCC floor pinned
+            // until the lease lapses.
+            if (releaseHold is not null)
+                await releaseHold().ConfigureAwait(false);
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Resolves an <c>AS OF SYSTEM TIME</c> source clause into a read-only snapshot transaction the
+    /// source query alone will use, and pins Kahuna's revision floor for as long as the copy runs.
+    /// Returns the caller's own ticket unchanged, and no hold, when the source is not time-travelling.
+    ///
+    /// <para>The statement ends up using <b>two</b> transactions: this snapshot one for the read, and
+    /// the caller's live one for the writes. That is what makes "recover data as it was" expressible —
+    /// and it is safer than the live path, not riskier. History at a past timestamp is immutable, so
+    /// the source needs no range locks, contributes no phantoms, and cannot observe this statement's
+    /// own writes (the resolver refuses future instants, so the snapshot always precedes them). The
+    /// historical reads are deliberately not folded into the write transaction's read set: nothing a
+    /// concurrent transaction does can change what was committed before the snapshot.</para>
+    ///
+    /// <para><b>Retention is the real hazard.</b> Revision GC is age/count based, so a copy reading at
+    /// T while the sweeper reclaims past T would produce a silently partial table. The hold prevents
+    /// that for the duration of the copy. It cannot resurrect revisions reclaimed <i>before</i> the
+    /// hold was taken — Kahuna exposes no way to ask whether a timestamp is still readable — so a
+    /// recovery from beyond the retention window can still come back empty. Callers report a
+    /// zero-row time-travel copy for that reason.</para>
+    /// </summary>
+    private async Task<(ExecuteSQLTicket SourceTicket, Func<Task>? ReleaseHold)> PrepareTimeTravelSourceAsync(
+        DatabaseDescriptor database,
+        NodeAst sourceAst,
+        ExecuteSQLTicket ticket,
+        string statementName)
+    {
+        if (sourceAst.extendedSeven is null)
+            return (ticket, null);
+
+        if (sharedNode is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "AS OF SYSTEM TIME requires a storage node to resolve the snapshot timestamp.");
+
+        HLCTimestamp now = sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
+        HLCTimestamp snapshotT = AsOfSystemTimeResolver.Resolve(sourceAst.extendedSeven, ticket.Parameters, now);
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string holderId = $"{database.Id}-asof-{ObjectIdGenerator.Generate()}";
+
+        (KeyValueResponseType holdType, string holdId, _) = await kahuna
+            .LocateAndAcquireSnapshotHold(holderId, snapshotT, options.BranchSnapshotHoldLeaseMs, CancellationToken.None)
+            .ConfigureAwait(false);
+
+        if (holdType != KeyValueResponseType.Set || string.IsNullOrEmpty(holdId))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidAsOfSystemTime,
+                $"Could not pin history at the requested snapshot (status {holdType}); the {statementName} was " +
+                "not started because its source could not be guaranteed to stay readable for the whole copy");
+
+        ExecuteSQLTicket snapshotTicket = new(
+            KvTransaction.CreateSnapshotReadOnly(snapshotT),
+            ticket.DatabaseName,
+            ticket.Sql,
+            ticket.Parameters);
+
+        return (snapshotTicket, async () =>
+        {
+            try
+            {
+                await kahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Best effort: a hold that outlives its statement only over-retains revisions until its
+                // lease lapses, which is far better than failing a copy that already succeeded.
+                logger.LogWarning(ex, "Failed to release the snapshot-floor hold {HoldId}", holdId);
+            }
+        }
+        );
+    }
+
+    /// <summary>
+    /// Opens the row cursor for an already-bound query, choosing the join executor or the
+    /// single-table scan the same way the SELECT path does. Callers that consume a query as a row
+    /// source must route through here so a multi-source source query is not silently executed as a
+    /// single-table scan of its first table.
+    /// </summary>
+    private IAsyncEnumerable<QueryResultRow> ExecuteBoundQuery(
+        DatabaseDescriptor database,
+        BoundSelectQuery bound,
+        QueryTicket queryTicket,
+        CacheMetadataHolder? metaOut = null)
+        => bound.IsMultiSource
+            ? queryExecutor.ExecuteJoinQuery(database, bound, queryTicket)
+            : queryExecutor.Query(database, bound.PrimaryTable, queryTicket, metaOut);
 
     /// <summary>
     /// Execute a SQL statement that returns rows
@@ -4314,50 +4786,10 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // one historical point. No-op when the SELECT carries no time-travel clause.
                     ticket = ApplyAsOfSystemTime(ast, ticket);
 
-                    SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
+                    (BoundSelectQuery boundQuery, QueryTicket queryTicket) =
+                        await BuildBoundQueryAsync(database, ast, ticket, metaOut: metaOut).ConfigureAwait(false);
 
-                    // Detect an inner subquery that carries a {cache=name} hint when the outer
-                    // SELECT has none. SubqueryRewriter executes all inner subqueries live and
-                    // discards inner cache hints — they are inert. Surface the bypass in the
-                    // outer response so the caller sees an explicit "inner-hint" bypass rather
-                    // than silence (which looks identical to an un-hinted outer query).
-                    if (selectQuery.CacheHint is null && metaOut is not null)
-                    {
-                        CacheHintOptions? innerHint = FindInnerSubqueryCacheHint(selectQuery.Where?.Expression);
-                        if (innerHint is not null)
-                        {
-                            metaOut.CacheName = innerHint.CacheName;
-                            metaOut.Status = QueryCacheStatus.Bypass;
-                            metaOut.BypassReason = QueryCacheBypassReason.InnerHint;
-                        }
-                    }
-
-                    // Extract eligible IN / NOT IN subqueries as semi/anti-join specs
-                    // before SubqueryRewriter materialises them.
-                    (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
-                        .AnalyzeAsync(database, selectQuery, ticket)
-                        .ConfigureAwait(false);
-
-                    selectQuery = await subqueryRewriter
-                        .RewriteSelectQueryAsync(database, selectQuery, ticket)
-                        .ConfigureAwait(false);
-                    BoundSelectQuery boundQuery = await queryBinder.BindAsync(database, selectQuery).ConfigureAwait(false);
-                    (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
-                        .PrepareAsync(
-                            database,
-                            selectQuery,
-                            boundQuery.Sources,
-                            boundQuery.DerivedSources,
-                            ticket)
-                        .ConfigureAwait(false);
-                    boundQuery = new BoundSelectQuery(
-                        selectQuery,
-                        boundQuery.Sources,
-                        boundQuery.RowNames,
-                        boundQuery.DerivedSources);
-                    IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
-                    QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry, specs);
-                    PinSchemaVersions(database, boundQuery.Sources, ticket.TxnState);
+                    SelectQuery selectQuery = boundQuery.Query;
 
                     // Join queries bypass the result cache: caching a multi-table result
                     // requires fencing ALL involved tables' row keyspaces, not just one.
@@ -4374,15 +4806,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                         }
                         if (schemaOut is not null)
                             schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
-                        return (database, queryExecutor.ExecuteJoinQuery(database, boundQuery, queryTicket));
+                        return (database, ExecuteBoundQuery(database, boundQuery, queryTicket));
                     }
 
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
 
-                    TableDescriptor table = boundQuery.PrimaryTable;
-
-                    return (database, queryExecutor.Query(database, table, queryTicket, metaOut));
+                    return (database, ExecuteBoundQuery(database, boundQuery, queryTicket, metaOut));
                 }
 
             case NodeType.ShowTables:

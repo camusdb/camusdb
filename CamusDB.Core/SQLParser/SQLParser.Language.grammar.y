@@ -154,8 +154,12 @@ group_list : group_list TCOMMA expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, 
            | expr { $$.n = $1.n; }
            ;
 
-insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, null, null, null, null, null); }            
+insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, null, null, null, null, null); }
             | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $5.n, null, null, null, null, null); }
+            /* INSERT ... SELECT: the source query hangs off extendedOne, the same slot the VALUES
+               batch list uses, so both INSERT forms stay structurally parallel. */
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, null, null, null, null, null); }
+            | TINSERT TINTO any_identifier select_stmt { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, null, null, null, null, null); }
 			;
 
 insert_batch_list : insert_batch_list TCOMMA insert_values { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null, null); }
@@ -311,7 +315,33 @@ create_table_stmt : TCREATE TTABLE any_identifier TRELINK TTO string { $$.n = ne
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, null, $10.n, $11.n, null, null, null); }
                   | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTable, $3.n, $5.n, $7.n, $8.n, $9.n, null, null, null); }
                   | TCREATE TTABLE TIF TNOT TEXISTS any_identifier LPAREN create_table_item_list RPAREN create_table_constraint_list opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTableIfNotExists, $6.n, $8.n, $10.n, $11.n, $12.n, null, null, null); }
+                  /* CREATE TABLE ... AS SELECT: no column list — names and types are derived from
+                     the source query's output columns. */
+                  | TCREATE TTABLE any_identifier TAS select_stmt opt_with_data { $$.n = new(NodeType.CreateTableAsSelect, $3.n, $5.n, null, null, null, null, null, $6.s); }
+                  | TCREATE TTABLE TIF TNOT TEXISTS any_identifier TAS select_stmt opt_with_data { $$.n = new(NodeType.CreateTableAsSelectIfNotExists, $6.n, $8.n, null, null, null, null, null, $9.s); }
                   ;
+
+/* WITH [NO] DATA. NO and DATA are matched as plain identifiers and validated here rather than
+   promoted to reserved words, so an existing table or column named "data" keeps working. */
+opt_with_data : TWITH TIDENTIFIER
+                {
+                  if (!string.Equals($2.s, "data", StringComparison.OrdinalIgnoreCase))
+                      throw new CamusDBException(
+                          CamusDBErrorCodes.InvalidInput,
+                          "Expected WITH DATA or WITH NO DATA, got 'WITH " + $2.s + "'");
+                  $$.s = "data";
+                }
+              | TWITH TIDENTIFIER TIDENTIFIER
+                {
+                  if (!string.Equals($2.s, "no", StringComparison.OrdinalIgnoreCase) ||
+                      !string.Equals($3.s, "data", StringComparison.OrdinalIgnoreCase))
+                      throw new CamusDBException(
+                          CamusDBErrorCodes.InvalidInput,
+                          "Expected WITH DATA or WITH NO DATA, got 'WITH " + $2.s + " " + $3.s + "'");
+                  $$.s = "no data";
+                }
+              | { $$.s = null; }
+              ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
                 | TDROP TTABLE any_identifier TFORCE { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, "force"); }

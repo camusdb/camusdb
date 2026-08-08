@@ -56,6 +56,16 @@ internal sealed class SqlExecutor()
         return await sqlExecutorInsertCreator.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Builds a ticket for <c>INSERT … SELECT</c>. Unlike the VALUES form this does not touch the
+    /// table: with no literal values to coerce there is nothing to resolve against the schema until
+    /// the source query has been bound, so the ticket carries the source AST unexecuted.
+    /// </summary>
+    internal InsertSelectTicket CreateInsertSelectTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        return sqlExecutorInsertCreator.CreateInsertSelectTicket(ticket, ast);
+    }
+
     internal UpdateTicket CreateUpdateTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         return sqlExecutorUpdateCreator.CreateUpdateTicket(ticket, ast);

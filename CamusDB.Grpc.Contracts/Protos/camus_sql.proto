@@ -307,12 +307,24 @@ message NonQueryReply {
   int64 causal_token_l = 2;
   int64 causal_token_c = 3;
   int32 causal_token_n = 4;
+
+  // Set when the statement succeeded but the caller should look twice — today, a time-travel copy
+  // that read no rows, which may mean the requested history had already been reclaimed. Empty
+  // otherwise. Carried here because a client cannot see the server's log.
+  string warning = 5;
 }
 
 message DdlReply {
   int64 causal_token_l = 1;
   int64 causal_token_c = 2;
   int32 causal_token_n = 3;
+
+  // Rows written by a DDL statement that also loads data — today only CREATE TABLE ... AS SELECT.
+  // Zero for every other DDL statement, which writes no rows.
+  int32 affected_rows = 4;
+
+  // See NonQueryReply.warning.
+  string warning = 5;
 }
 
 message StartTxnRequest {

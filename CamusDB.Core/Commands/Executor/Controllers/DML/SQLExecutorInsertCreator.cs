@@ -70,34 +70,15 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         if (ast.extendedOne is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing or empty values list");
 
-        // Precompute per-field schema metadata once for the whole statement.
-        // Index i corresponds to fields[i]: the schema entry for coercion, and the default value.
-        List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
-        Dictionary<string, TableColumnSchema> colSchemaByName = new(schemaColumns.Count, StringComparer.Ordinal);
-        foreach (TableColumnSchema col in schemaColumns)
-            colSchemaByName[col.Name] = col;
-
-        (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta = new (TableColumnSchema?, ColumnValue)[fields.Count];
-        for (int i = 0; i < fields.Count; i++)
-        {
-            colSchemaByName.TryGetValue(fields[i], out TableColumnSchema? colDef);
-            ColumnValue defaultVal = colDef?.DefaultValue ?? ColumnValue.Null;
-            fieldMeta[i] = (colDef, defaultVal);
-        }
-
-        // Columns that carry a default (constant or per-row function) but were not listed in the
-        // INSERT field list. A function default has a null DefaultValue, so both are checked.
-        List<TableColumnSchema> extraDefaults = new();
-        foreach (TableColumnSchema col in schemaColumns)
-        {
-            if ((col.DefaultValue is not null || col.DefaultFunction is not null) && !fields.Contains(col.Name))
-                extraDefaults.Add(col);
-        }
+        // Per-field schema metadata and the default-bearing columns the field list omits are resolved
+        // once for the whole statement; the shaper is shared with the INSERT … SELECT path so both
+        // forms coerce and default identically.
+        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, fields);
 
         // Single-pass: build each row dictionary directly from the AST, applying coercion
         // and defaults in the same traversal — no List<List<ColumnValue?>> intermediate.
         List<Dictionary<string, ColumnValue>> batchValues = new();
-        FillBatchDicts(ast.extendedOne, ticket.Parameters, fields, fieldMeta, extraDefaults, batchValues);
+        FillBatchDicts(ast.extendedOne, ticket.Parameters, shaper, batchValues);
 
         return new InsertTicket(
             txnState: ticket.TxnState,
@@ -108,66 +89,73 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
     }
 
     /// <summary>
+    /// Builds the ticket for <c>INSERT INTO t [(c1, …)] SELECT …</c>.
+    ///
+    /// <para>No schema is consulted here, unlike <see cref="CreateInsertTicket"/>: the values come
+    /// from a query rather than literals, so there is nothing to coerce yet, and even the target
+    /// column list cannot be defaulted until the table is opened by the controller. That keeps
+    /// ticket creation free of table access on this path.</para>
+    /// </summary>
+    internal InsertSelectTicket CreateInsertSelectTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        if (ast.leftAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing table name");
+
+        if (ast.extendedOne is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing source query");
+
+        List<string>? targetColumns = null;
+
+        if (ast.rightAst is not null)
+        {
+            targetColumns = new();
+            GetIdentifierList(ast.rightAst, targetColumns);
+        }
+
+        return new InsertSelectTicket(
+            txnState: ticket.TxnState,
+            databaseName: ticket.DatabaseName,
+            tableName: ast.leftAst.yytext!,
+            targetColumns: targetColumns,
+            sourceSelect: ast.extendedOne,
+            parameters: ticket.Parameters
+        );
+    }
+
+    /// <summary>
     /// Recursively walks the batch-list AST and for each VALUES row builds a
     /// <see cref="Dictionary{TKey,TValue}"/> directly — no intermediate
     /// <c>List&lt;List&lt;ColumnValue?&gt;&gt;</c> is allocated. Coercion to the declared column
-    /// type and default substitution are applied in the same pass.
+    /// type and default substitution are applied in the same pass by
+    /// <see cref="InsertRowShaper.ShapeRow"/>.
     /// </summary>
     private static void FillBatchDicts(
         NodeAst batchListAst,
         Dictionary<string, ColumnValue>? parameters,
-        List<string> fields,
-        (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta,
-        List<TableColumnSchema> extraDefaults,
+        InsertRowShaper shaper,
         List<Dictionary<string, ColumnValue>> batchValues)
     {
         if (batchListAst.nodeType == NodeType.InsertBatchList)
         {
             if (batchListAst.leftAst is not null)
-                FillBatchDicts(batchListAst.leftAst, parameters, fields, fieldMeta, extraDefaults, batchValues);
+                FillBatchDicts(batchListAst.leftAst, parameters, shaper, batchValues);
             if (batchListAst.rightAst is not null)
-                FillBatchDicts(batchListAst.rightAst, parameters, fields, fieldMeta, extraDefaults, batchValues);
+                FillBatchDicts(batchListAst.rightAst, parameters, shaper, batchValues);
             return;
         }
 
         // Flatten the ExprList tree into a fixed-size buffer, one slot per field.
-        ColumnValue?[] slots = new ColumnValue?[fields.Count];
+        ColumnValue?[] slots = new ColumnValue?[shaper.FieldCount];
         int filled = 0;
         FillSlots(batchListAst, parameters, slots, ref filled);
 
-        if (filled != fields.Count)
+        if (filled != shaper.FieldCount)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"The number of fields is not equal to the number of values. Fields={fields.Count} != Values={filled} Position={batchValues.Count}"
+                $"The number of fields is not equal to the number of values. Fields={shaper.FieldCount} != Values={filled} Position={batchValues.Count}"
             );
 
-        // Keyed case-insensitively: the INSERT column list may use different case than the schema
-        // (INSERT INTO t (UserName) for a column stored as "username"), and the row is later read
-        // back by the schema's column name during encoding — an ordinal dict would miss and write null.
-        Dictionary<string, ColumnValue> row = new(fields.Count + extraDefaults.Count, StringComparer.OrdinalIgnoreCase);
-
-        for (int i = 0; i < fields.Count; i++)
-        {
-            ColumnValue val = slots[i] ?? fieldMeta[i].Default;
-            if (fieldMeta[i].Schema is { } schema)
-                val = CastScalarFunctions.CoerceToColumnType(val, schema);
-            row[fields[i]] = val;
-        }
-
-        // Add columns that have defaults but were not part of the INSERT field list. A function
-        // default is evaluated here, once per row, so each row gets a fresh value (e.g. a distinct
-        // gen_uuid_v7()); a constant default is copied as-is.
-        foreach (TableColumnSchema col in extraDefaults)
-        {
-            if (row.ContainsKey(col.Name))
-                continue;
-
-            row[col.Name] = col.DefaultFunction is not null
-                ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction)
-                : col.DefaultValue!;
-        }
-
-        batchValues.Add(row);
+        batchValues.Add(shaper.ShapeRow(slots));
     }
 
     /// <summary>

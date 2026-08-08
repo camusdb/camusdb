@@ -133,6 +133,14 @@ public enum NodeType
     Delete,
     Insert,
     InsertBatchList,
+    /// <summary>
+    /// <c>INSERT INTO t [(c1, …)] SELECT …</c>. Shares the shape of <see cref="Insert"/> —
+    /// <c>leftAst</c> is the target table, <c>rightAst</c> the optional target column list — but
+    /// <c>extendedOne</c> holds the source <see cref="Select"/> statement instead of an
+    /// <see cref="InsertBatchList"/>. The source's output columns are mapped onto the target
+    /// columns <b>positionally</b>, so the two lists must have the same arity.
+    /// </summary>
+    InsertSelect,
     Begin,
     Commit,
     Rollback,
@@ -158,6 +166,17 @@ public enum NodeType
     CreateTableIfNotExists,
     /// <summary>Recover a dropped table's data under a new name by re-linking to its orphan id (<c>CREATE TABLE x RELINK TO '&lt;id&gt;'</c>).</summary>
     CreateTableRelink,
+    /// <summary>
+    /// <c>CREATE TABLE t AS SELECT … [WITH [NO] DATA]</c>. <c>leftAst</c> is the target table name,
+    /// <c>rightAst</c> the source <see cref="Select"/> statement, and <c>yytext</c> is
+    /// <c>"no data"</c> when the table is to be created empty (null or <c>"data"</c> otherwise).
+    /// The column names and types are derived from the source query's output, so unlike
+    /// <see cref="CreateTable"/> there is no column list to parse.
+    /// </summary>
+    CreateTableAsSelect,
+    /// <summary><see cref="CreateTableAsSelect"/> with <c>IF NOT EXISTS</c>: an existing table makes
+    /// the statement a no-op and the source query is never executed.</summary>
+    CreateTableAsSelectIfNotExists,
     CreateTableItem,
     CreateTableItemList,
     CreateTableFieldConstraintList,

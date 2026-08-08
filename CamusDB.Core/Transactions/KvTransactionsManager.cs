@@ -354,6 +354,16 @@ public sealed class KvTransactionsManager : IDisposable
         if (type == KeyValueResponseType.Set)
             return handle;
 
+        // The node's admission gate refused the transaction outright (its concurrency ceiling and
+        // queue are both full). Nothing was started, so the refusal is retryable by the caller —
+        // but unlike a warmup MustRetry it is a load signal, not a routing race, so it surfaces
+        // without burning the local retry loop (the server already applied its admission wait).
+        if (type == KeyValueResponseType.AdmissionRefused)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"Failed to {operation}: the node refused admission (concurrency ceiling and queue full); nothing was started — retry the operation"
+            );
+
         // A still-transient signal after exhausting retries is retryable (CADB0504); anything else is
         // a real, non-retryable failure.
         if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)

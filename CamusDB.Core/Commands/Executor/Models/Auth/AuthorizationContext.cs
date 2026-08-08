@@ -36,4 +36,31 @@ public static class AuthorizationContext
         get => current.Value;
         set => current.Value = value;
     }
+
+    /// <summary>
+    /// Temporarily swaps the required privilege, keeping the same principal, until the returned
+    /// value is disposed.
+    ///
+    /// <para>A statement that both reads and writes needs two different privileges on two different
+    /// sets of tables — <c>INSERT … SELECT</c> requires Insert on its target but only Select on its
+    /// sources. Since the per-table check reads this ambient scope at
+    /// <c>TableOpener.Open</c>, the caller narrows the requirement around the phase that resolves
+    /// the source tables, and every source — including join and subquery sources it never names
+    /// itself — is then checked for Select rather than for the statement's write privilege.</para>
+    /// </summary>
+    public static PrivilegeSwap WithRequiredPrivilege(Privilege? required) => new(required);
+
+    /// <summary>Restores the previous <see cref="AuthorizationScope"/> when disposed.</summary>
+    public readonly struct PrivilegeSwap : IDisposable
+    {
+        private readonly AuthorizationScope previous;
+
+        internal PrivilegeSwap(Privilege? required)
+        {
+            previous = Current;
+            Current = previous with { RequiredPrivilege = required };
+        }
+
+        public void Dispose() => Current = previous;
+    }
 }

@@ -87,11 +87,11 @@ public sealed class QueryTicket
     /// concurrent Serializable+RW readers until the modifying transaction commits, preventing
     /// them from observing a partial mutation.
     ///
-    /// <para>It also marks the scan as write-driving, which is what makes it fold its reads into
-    /// the commit-time read set. A plain query scan does not: folding one dependency per scanned
-    /// row makes commit cost scale with rows read, and a query has the range lock instead. Here
-    /// the rows the scan observed decide what is written, so a concurrent change to one of them
-    /// must invalidate the transaction even if that row was never written.</para>
+    /// <para>It also marks the scan as write-driving: the rows it observed decide what is
+    /// written, so a concurrent change to one of them must invalidate the transaction even if
+    /// that row was never written. Whether reads fold into the commit-time read set is decided
+    /// by the transaction (<see cref="Transactions.KvTransaction.FoldReads"/>), not by this
+    /// flag — an optimistic transaction folds every read, plan shape included.</para>
     /// </summary>
     internal bool ExclusivePredicateLocks { get; }
 

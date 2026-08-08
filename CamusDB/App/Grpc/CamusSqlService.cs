@@ -329,7 +329,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         principal: principal
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    return new NonQueryReply { AffectedRows = result.ModifiedRows };
+                    // proto3 strings are never null; an absent warning is the empty string.
+                    return new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
                 }
                 catch (Exception)
                 {
@@ -341,6 +342,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             // Autocommit.
             int modifiedRows = 0;
+            // Reset on every attempt below, not accumulated: a retried autocommit statement reports the
+            // warning of the attempt that actually committed, not one left over from an aborted try.
+            string? warning = null;
             HLCTimestamp causalToken = default;
 
             async Task AutocommitDml(CancellationToken innerCt)
@@ -359,6 +363,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
+                    warning = r.Warning;
                 }
                 catch
                 {
@@ -373,7 +378,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             else
                 await AutocommitDml(ct).ConfigureAwait(false);
 
-            NonQueryReply reply = new() { AffectedRows = modifiedRows };
+            NonQueryReply reply = new() { AffectedRows = modifiedRows, Warning = warning ?? "" };
             if (!causalToken.IsNull())
                 ApplyCausalToken(reply, causalToken);
             return reply;
@@ -432,7 +437,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 if (newTransaction)
                     commitToken = await transactions.CommitAsync(result.Database, txnState!).ConfigureAwait(false);
 
-                DdlReply reply = new();
+                DdlReply reply = new() { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
                 if (!commitToken.IsNull())
                     ApplyCausalToken(reply, commitToken);
                 return reply;
@@ -859,13 +864,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 txnState: txnState, database: resolved.Database, sql: resolved.Sql,
                 parameters: resolved.Parameters, principal: principal);
             ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-            reply = new NonQueryReply { AffectedRows = result.ModifiedRows };
+            reply = new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
         }
         else
         {
             KvTransaction tx = await transactions.StartAsync(
                 resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: ct).ConfigureAwait(false);
             int rows;
+            string? batchWarning;
             HLCTimestamp token;
             try
             {
@@ -875,6 +881,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                 token = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;
+                batchWarning = r.Warning;
             }
             catch
             {
@@ -882,7 +889,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 throw;
             }
 
-            reply = new NonQueryReply { AffectedRows = rows };
+            reply = new NonQueryReply { AffectedRows = rows, Warning = batchWarning ?? "" };
             if (!token.IsNull())
                 ApplyCausalToken(reply, token);
         }

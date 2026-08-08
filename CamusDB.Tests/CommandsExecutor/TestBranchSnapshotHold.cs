@@ -62,7 +62,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
 
         HLCTimestamp forkT = branchEntry.Ancestors[0].ForkTimestamp;
 
-        (HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
 
         Assert.That(live, Is.GreaterThanOrEqualTo(1), "The branch's hold must be live after creation");
         Assert.That(floor, Is.EqualTo(forkT), "The effective floor must sit exactly at the branch's fork timestamp");
@@ -85,7 +85,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
         Assert.That(renewed, Is.EqualTo(1),
             "The sweep must successfully renew exactly the one branch hold (proves the leader gate passed and the hold was targeted)");
 
-        (HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
 
         Assert.That(live, Is.GreaterThanOrEqualTo(1), "The hold must stay live after a renew sweep");
         Assert.That(floor, Is.EqualTo(forkT), "Renewal must not move the effective floor");
@@ -100,12 +100,12 @@ public sealed class TestBranchSnapshotHold : BaseTest
         (_, string branchName, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateRootAndBranch();
 
         // Sanity: the hold is live before the drop.
-        (_, int liveBefore) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, _, int liveBefore) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.That(liveBefore, Is.GreaterThanOrEqualTo(1));
 
         await executor.DropDatabase(new DropDatabaseTicket(branchName));
 
-        (HLCTimestamp floorAfter, int liveAfter) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, HLCTimestamp floorAfter, int liveAfter) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
 
         Assert.That(liveAfter, Is.EqualTo(0), "Dropping the only branch must release its hold");
         Assert.That(floorAfter, Is.EqualTo(HLCTimestamp.Zero), "With no live holds the floor must be cleared");
@@ -143,7 +143,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
 
         // Dropping the renamed branch releases the hold — the floor clears.
         await executor.DropDatabase(new DropDatabaseTicket(renamed));
-        (HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.That(live, Is.EqualTo(0), "dropping the renamed branch must release its hold");
         Assert.That(floor, Is.EqualTo(HLCTimestamp.Zero), "with no live holds the floor must be cleared");
     }
@@ -200,7 +200,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
         Assert.That(renewer.LastSuccessfulSweep, Is.Not.EqualTo(HLCTimestamp.Zero),
             "a successful sweep after the failure must advance the liveness timestamp");
 
-        (HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, HLCTimestamp floor, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.That(live, Is.GreaterThanOrEqualTo(1), "the hold must remain live after the loop recovered");
         Assert.That(floor, Is.EqualTo(forkT), "recovery must not move the effective floor");
     }
@@ -262,7 +262,7 @@ public sealed class TestBranchSnapshotHold : BaseTest
         Assert.That(renewed, Is.GreaterThanOrEqualTo(1),
             "the renewer must find and renew the hold registered by another node (via persistent KV scan)");
 
-        (HLCTimestamp floorAfter, int liveAfter) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, HLCTimestamp floorAfter, int liveAfter) = await TestNode!.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.That(liveAfter, Is.GreaterThanOrEqualTo(1),
             "the hold must still be live after the renewer swept the persistent registry");
         Assert.That(floorAfter, Is.EqualTo(forkT),

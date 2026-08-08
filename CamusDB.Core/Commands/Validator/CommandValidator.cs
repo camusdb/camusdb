@@ -22,6 +22,8 @@ public sealed class CommandValidator
 
     private readonly InsertValidator insertValidator;
 
+    private readonly InsertSelectValidator insertSelectValidator;
+
     private readonly AlterTableValidator alterTableValidator;
 
     private readonly AlterIndexValidator alterIndexValidator;
@@ -64,6 +66,7 @@ public sealed class CommandValidator
         dropDatabaseValidator = new(options);
         createTableValidator = new(options);
         insertValidator = new(options);
+        insertSelectValidator = new(options);
         alterTableValidator = new(options);
         alterIndexValidator = new(options);
         alterConstraintValidator = new(options);
@@ -184,8 +187,13 @@ public sealed class CommandValidator
     }
 
     public void Validate(InsertTicket ticket)
-    {        
+    {
         insertValidator.Validate(ticket);
+    }
+
+    public void Validate(InsertSelectTicket ticket)
+    {
+        insertSelectValidator.Validate(ticket);
     }
 
     public void Validate(UpdateTicket ticket)

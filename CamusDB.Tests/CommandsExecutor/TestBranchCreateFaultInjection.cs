@@ -197,7 +197,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         Assert.That(branchEntry, Is.Not.Null, "the still-registered branch entry must be retained");
 
         // Its snapshot hold on the parent is still live (not released).
-        (_, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        (_, _, int live) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.That(live, Is.GreaterThanOrEqualTo(1),
             "the branch's snapshot hold must NOT be released while it remains registered");
 

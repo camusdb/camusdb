@@ -118,7 +118,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType, long)> TryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp proposalTicketId, KeyValueDurability durability) => inner.TryRollbackMutations(transactionId, key, proposalTicketId, durability);
         public virtual Task<KeyValueTransactionResult> TryExecuteTransactionScript(ReadOnlyMemory<byte> script, string? hash, List<KeyValueParameter>? parameters, TransactionPriority priority = TransactionPriority.Normal) => inner.TryExecuteTransactionScript(script, hash, parameters, priority);
         public virtual Task<KeyValueGetByBucketResult> GetByBucket(HLCTimestamp transactionId, string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => inner.GetByBucket(transactionId, prefixKeyName, readTimestamp, durability);
-        public virtual Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability) => inner.ScanByPrefix(prefixKeyName, readTimestamp, durability);
+        public virtual Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones = false) => inner.ScanByPrefix(prefixKeyName, readTimestamp, durability, includeTombstones);
         public virtual Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) => inner.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
         public virtual Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options) => inner.StartTransaction(options);
         public virtual Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle) => inner.CommitTransaction(handle);
@@ -156,5 +156,5 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType Type, string HoldId, HLCTimestamp LeaseExpiry)> LocateAndAcquireSnapshotHold(string holderId, HLCTimestamp timestamp, int leaseMs, CancellationToken ct) => inner.LocateAndAcquireSnapshotHold(holderId, timestamp, leaseMs, ct);
         public virtual Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) => inner.LocateAndRenewSnapshotHold(holdId, leaseMs, ct);
         public virtual Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => inner.LocateAndReleaseSnapshotHold(holdId, ct);
-        public virtual Task<(HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => inner.GetSnapshotFloor(ct);
+        public virtual Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => inner.GetSnapshotFloor(ct);
 }

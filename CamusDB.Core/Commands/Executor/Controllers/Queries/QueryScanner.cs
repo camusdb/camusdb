@@ -115,9 +115,9 @@ internal sealed class QueryScanner
 
         try
         {
-            // Fold the scanned rows into the commit-time read set only for an UPDATE/DELETE locate scan,
-            // where the rows observed here decide what is written. A plain SELECT relies on the range
-            // lock taken above instead, so its commit cost stays independent of how many rows it read.
+            // Read-set folding follows the transaction (KvTransaction.FoldReads), not the plan shape:
+            // an optimistic transaction folds this scan's rows so its commit validates them, exactly
+            // as a point read would — isolation must not depend on which plan answered the predicate.
             await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
                 plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
             {
