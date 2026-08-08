@@ -654,8 +654,11 @@ public sealed class TestKvTableStoreIndex
     [NonParallelizable]
     public async Task BoundedIndexRangeLock_BlocksWriteInsideRange_AllowsWriteOutside()
     {
-        // Key-range sharding on — the store and transactions take it as configuration.
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        // Key-range sharding on — the store and transactions take it as configuration. The engine's
+        // lock-wait deadline is raised far above the test's 500 ms cancellation so a blocked write
+        // deterministically surfaces as OperationCanceledException instead of racing the engine's
+        // own lock-wait-deadline error (both default to 500 ms).
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         {
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f1", sharded);
             await using EmbeddedKahuna __ = node;
@@ -713,8 +716,10 @@ public sealed class TestKvTableStoreIndex
     [NonParallelizable]
     public async Task PromotedReadOnlyScan_HoldsEnforcedSharedRangeLock_ReleasedOnCommit()
     {
-        // Key-range sharding on — the store and transactions take it as configuration.
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        // Key-range sharding on — the store and transactions take it as configuration. The engine's
+        // lock-wait deadline is raised far above the test's 500 ms cancellation so the blocked write
+        // deterministically surfaces as OperationCanceledException (see BlocksWriteInsideRange test).
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         {
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-rop", sharded);
             await using EmbeddedKahuna __ = node;
@@ -846,8 +851,10 @@ public sealed class TestKvTableStoreIndex
     [NonParallelizable]
     public async Task NonUniqueSentinel_CoversAllRowIdSuffixesAtUpperBound()
     {
-        // Key-range sharding on — the store and transactions take it as configuration.
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        // Key-range sharding on — the store and transactions take it as configuration. The engine's
+        // lock-wait deadline is raised far above the test's 500 ms cancellation so blocked writes
+        // deterministically surface as OperationCanceledException (see BlocksWriteInsideRange test).
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         {
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2a", sharded);
             await using EmbeddedKahuna __ = node;
@@ -899,8 +906,10 @@ public sealed class TestKvTableStoreIndex
     [NonParallelizable]
     public async Task StringBounds_BlocksWriteInsideRange_AllowsWriteOutside()
     {
-        // Key-range sharding on — the store and transactions take it as configuration.
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        // Key-range sharding on — the store and transactions take it as configuration. The engine's
+        // lock-wait deadline is raised far above the test's 500 ms cancellation so blocked writes
+        // deterministically surface as OperationCanceledException (see BlocksWriteInsideRange test).
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         {
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2b", sharded);
             await using EmbeddedKahuna __ = node;
@@ -953,8 +962,10 @@ public sealed class TestKvTableStoreIndex
     [NonParallelizable]
     public async Task ExclusiveBounds_UniqueIndex_BoundaryAllowed_InteriorBlocked()
     {
-        // Key-range sharding on — the store and transactions take it as configuration.
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        // Key-range sharding on — the store and transactions take it as configuration. The engine's
+        // lock-wait deadline is raised far above the test's 500 ms cancellation so the blocked write
+        // deterministically surfaces as OperationCanceledException (see BlocksWriteInsideRange test).
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         {
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2c", sharded);
             await using EmbeddedKahuna __ = node;
@@ -1006,8 +1017,10 @@ public sealed class TestKvTableStoreIndex
     [NonParallelizable]
     public async Task CompositeBounds_BlocksWriteInsideRange_AllowsWriteOutside()
     {
-        // Key-range sharding on — the store and transactions take it as configuration.
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        // Key-range sharding on — the store and transactions take it as configuration. The engine's
+        // lock-wait deadline is raised far above the test's 500 ms cancellation so the blocked write
+        // deterministically surfaces as OperationCanceledException (see BlocksWriteInsideRange test).
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         {
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2d", sharded);
             await using EmbeddedKahuna __ = node;
