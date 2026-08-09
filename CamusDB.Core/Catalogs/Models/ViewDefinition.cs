@@ -107,4 +107,15 @@ public sealed class ViewDefinition
     /// authentication disabled, in which case no base-relation check applies anyway.
     /// </summary>
     public string? Owner { get; set; }
+
+    /// <summary>
+    /// The immutable id of the owner, and the authoritative half of the pair above.
+    ///
+    /// <para>A name can be dropped and re-created by somebody else, so resolving an owner by name
+    /// alone would hand the original owner's access to whoever next claims it. When this no longer
+    /// resolves to a live user — dropped, or a view created before owner ids existed — a query through
+    /// the view fails closed rather than falling back to the caller's own rights, which would quietly
+    /// turn a definer's-rights view into an invoker's-rights one.</para>
+    /// </summary>
+    public string? OwnerId { get; set; }
 }

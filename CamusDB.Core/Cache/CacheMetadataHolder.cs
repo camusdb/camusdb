@@ -87,6 +87,7 @@ public sealed class CacheMetadataHolder
         QueryCacheBypassReason.StrictValidationLimit => "strict-validation-limit",
         QueryCacheBypassReason.UnsupportedStatementType => "unsupported-statement-type",
         QueryCacheBypassReason.Join                  => "join",
+        QueryCacheBypassReason.DerivedSource         => "derived-source",
         QueryCacheBypassReason.InnerHint             => "inner-hint",
         _                                            => null,
     };

@@ -107,6 +107,14 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly Controllers.DDL.ViewCreator viewCreator = new();
 
+    private readonly Controllers.DDL.MaterializedViewCreator matViewCreator = new();
+
+    /// <summary>
+    /// Owned by the executor rather than created per statement because it carries the in-flight
+    /// refresh set: a gate that was rebuilt for every statement would gate nothing.
+    /// </summary>
+    private readonly Controllers.DDL.MaterializedViewRefresher matViewRefresher = new();
+
     private readonly RowUpdater rowUpdater;
 
     private readonly RowDeleter rowDeleter;
@@ -224,7 +232,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
 
         databaseDescriptors = new();
-        databaseOpener = new(this, databaseDescriptors, catalogs, logger, options, sharedNode, registryTask, isClusterMode, cache);
+        // The statistics hook is a lambda over this executor's own manager, which is constructed a few
+        // lines below; it is never invoked before a database is opened, so the later assignment is
+        // already visible by then.
+        databaseOpener = new(
+            this, databaseDescriptors, catalogs, logger, options, sharedNode, registryTask, isClusterMode, cache,
+            (db, tableId) => statisticsManager.EvictTableStats(db, tableId));
         databaseCloser = new(databaseDescriptors, logger);
         databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
@@ -241,7 +254,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna);
         sqlExecutor = new();
         schemaQuerier = new(catalogs, logger, options);
-        queryBinder = new QueryBinder(tableOpener);
+        // The owner resolver is what turns a recorded owner into enforceable definer's rights. Null
+        // when the engine has no auth service (no shared node), in which case there is no principal to
+        // swap to and every view binds as the caller — the same as authentication being off.
+        queryBinder = new QueryBinder(
+            tableOpener,
+            authService is null
+                ? null
+                : (ownerName, ownerId) => authService.TryLoadOwnerPrincipalAsync(ownerName, ownerId));
         SubqueryQueryExecutor subqueryQueryExecutor = new(queryBinder, queryExecutor);
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
         subqueryRewriter = new SubqueryRewriter(
@@ -298,7 +318,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Physically reclaim deferred-dropped databases/tables past their retention window, on the
         // elected node. Kick one immediate sweep so orphans already expired during downtime are cleaned
         // promptly rather than waiting a full interval.
-        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options.OrphanReclaimIntervalMs, options);
+        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options.OrphanReclaimIntervalMs, options)
+        {
+            // Wired here because reclaiming staging storage needs the database opener and the
+            // refresher, neither of which the reclaimer should own.
+            ReclaimRefreshJobsForDatabaseAsync = ReclaimAbandonedRefreshesAsync,
+        };
         reclaimer.Start();
         orphanReclaimer = reclaimer;
         _ = ReclaimExpiredOrphansOnStartupAsync(reclaimer);
@@ -752,6 +777,62 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// waiting a full <see cref="CamusDBOptions.OrphanReclaimIntervalMs"/>. Best-effort and gated by
     /// leader election inside the reclaimer; failures are logged and swallowed so startup never blocks.
     /// </summary>
+    /// <summary>
+    /// Reclaims the staging storage of unfinished materialized-view refreshes in one database, and
+    /// returns how many were removed.
+    /// </summary>
+    /// <remarks>
+    /// Gated on the refresh fence, per job: a rebuild that is still running holds it, so acquiring it
+    /// is proof the run that wrote the record is gone. Nothing here is time-based, which is what keeps
+    /// a slow but healthy rebuild safe from being collected out from under itself.
+    /// </remarks>
+    private async Task<int> ReclaimAbandonedRefreshesAsync(string databaseName, CancellationToken ct)
+    {
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+
+        if (!registry.TryResolveId(databaseName, out string databaseId) || sharedNode is null)
+            return 0;
+
+        // Asked before the database is opened: on the overwhelming majority of ticks there is nothing
+        // to reclaim, and opening every database each time to discover that is pure cost — and, because
+        // opening one competes for the same locks real statements use, avoidable contention.
+        List<Catalogs.Models.MaterializedViewRefreshJob> jobs =
+            await CatalogsManager.ListRefreshJobsAsync(sharedNode.Kahuna, databaseId).ConfigureAwait(false);
+
+        if (jobs.Count == 0)
+            return 0;
+
+        DatabaseDescriptor database = await databaseOpener.Open(databaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+
+        int reclaimed = 0;
+
+        foreach (Catalogs.Models.MaterializedViewRefreshJob job in jobs)
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            string fenceId = DatabaseRegistry.TableFenceId(database.Id, job.ViewTableId);
+
+            if (!await registry.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
+                continue; // a refresh is running right now — this storage is not abandoned
+
+            try
+            {
+                await Controllers.DDL.MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
+                    this, catalogs, database, job.ViewTableId, logger).ConfigureAwait(false);
+
+                reclaimed++;
+            }
+            finally
+            {
+                await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+            }
+        }
+
+        return reclaimed;
+    }
+
     private async Task ReclaimExpiredOrphansOnStartupAsync(OrphanReclaimer reclaimer)
     {
         try
@@ -2353,7 +2434,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
     }
 
-    public async Task<bool> RenameTable(RenameTableTicket ticket)
+    /// <param name="dependentViews">
+    /// Rewritten bodies for views that read this relation, applied in the rename's own delta. When
+    /// null they are computed here; a caller that already resolved them (the materialized-view rename
+    /// path) passes them so the work is not repeated.
+    /// </param>
+    public async Task<bool> RenameTable(
+        RenameTableTicket ticket,
+        Dictionary<string, Catalogs.Models.ViewDefinition>? dependentViews = null)
     {
         validator.Validate(ticket);
 
@@ -2366,8 +2454,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor renameTable = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
+        dependentViews ??= Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
+            database.Schema, renameTable.Id, ticket.TableName, ticket.NewName,
+            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+
         return await ExecuteDdlInTransaction(database,
-            tx => catalogs.RenameTable(database, ticket, tx),
+            tx => catalogs.RenameTable(database, ticket, tx, dependentViews),
             postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTable.Id)
         ).ConfigureAwait(false);
     }
@@ -3221,7 +3313,66 @@ public sealed class CommandExecutor : IAsyncDisposable
             database.Schema,
             ast,
             options.MaxViewExpansionDepth,
-            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+            sql => SQLParserProcessor.Parse(sql, sqlParserCache),
+            // Expansion is the only point at which a read knows a view was named, so the caller is
+            // checked against the view object here or nowhere. Select regardless of the statement's own
+            // requirement: reading through a view is a read of the view, whatever the outer statement
+            // goes on to do with the rows.
+            (viewName, view) => Controllers.ViewAuthorization.Require(
+                database, viewName, view, Privilege.Select));
+
+    /// <summary>
+    /// Requires that the caller may change who owns <paramref name="view"/>: a superuser, or its
+    /// current owner.
+    /// </summary>
+    /// <remarks>
+    /// Ownership decides whose privileges the view's body runs with, so transferring it is a transfer
+    /// of authority — an <c>Alter</c> grant on the view is not enough, or anyone who could rename a
+    /// view could also point its definer's rights at an account they control.
+    /// </remarks>
+    private async Task RequireViewOwnershipAsync(
+        DatabaseDescriptor database, string viewName, Catalogs.Models.ViewSchema view, ExecuteSQLTicket ticket)
+    {
+        await Task.CompletedTask;
+
+        if (!options.AuthenticationEnabled)
+            return;
+
+        Principal? caller = ticket.Principal;
+
+        if (caller is null)
+            throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Authentication is required");
+
+        if (caller.IsSuperuser)
+            return;
+
+        if (view.Definition?.OwnerId is { Length: > 0 } ownerId
+            && string.Equals(caller.UserId, ownerId, StringComparison.Ordinal))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsufficientPrivilege,
+            $"Only a superuser or the current owner may change the owner of view '{database.Name}.{viewName}'");
+    }
+
+    /// <summary>
+    /// Test-only: runs the abandoned-refresh sweep for one database synchronously, so a test can drive
+    /// it instead of waiting for the background reclaimer's interval.
+    /// </summary>
+    internal Task<int> ReclaimAbandonedRefreshesForTesting(string databaseName)
+        => ReclaimAbandonedRefreshesAsync(databaseName, CancellationToken.None);
+
+    /// <summary>
+    /// Test-only: the cross-database registry this engine uses, so a test can take the very fence a
+    /// refresh takes and prove the gate is the cluster-visible one rather than process state.
+    /// </summary>
+    internal Task<DatabaseRegistry> GetDatabaseRegistryAsync() => registryTask;
+
+    /// <summary>
+    /// Test-only: this engine's catalog manager, so a test can inspect and write the durable records
+    /// that own a refresh's staging storage.
+    /// </summary>
+    internal CatalogsManager GetCatalogsManagerForTesting() => catalogs;
 
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
     private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
@@ -3509,6 +3660,22 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // Open the TARGET database (not the empty context database) to resolve the table id.
                     DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
                     using DatabaseUseHandle _ = database.Use();
+
+                    // A view is a grantable object, and it cannot be resolved by opening a relation —
+                    // opening one refuses views outright. Resolved from the view map instead, which is
+                    // what makes a grant on a view expressible at all; without this the per-view
+                    // authorization checks would be unsatisfiable, and every view permanently
+                    // unreachable to anyone but a superuser.
+                    if (database.Schema.Views.TryGetValue(ticket.TableName, out Catalogs.Models.ViewSchema? grantedView))
+                        return new GrantScope
+                        {
+                            Kind = GrantScopeKind.Table,
+                            DatabaseId = entry.Id,
+                            DatabaseName = entry.Name,
+                            TableId = grantedView.Id,
+                            TableName = grantedView.Name,
+                        };
+
                     TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
                     return new GrantScope
@@ -3672,7 +3839,101 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             case NodeType.AlterViewRenameTo:
                 {
-                    await catalogs.RenameViewAsync(database, ast.leftAst!.yytext!, ast.rightAst!.yytext!).ConfigureAwait(false);
+                    string renamedViewName = ast.leftAst!.yytext!;
+
+                    if (!database.Schema.Views.TryGetValue(renamedViewName, out Catalogs.Models.ViewSchema? renamedView))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ViewDoesntExist, $"View '{renamedViewName}' does not exist");
+
+                    Controllers.ViewAuthorization.Require(database, renamedViewName, renamedView, Privilege.Alter);
+
+                    string newViewName = ast.rightAst!.yytext!;
+
+                    // A view can be read by other views, so renaming one has the same single-delta
+                    // requirement as renaming a table: the dependents' rewritten bodies ride the
+                    // rename rather than following it.
+                    Dictionary<string, Catalogs.Models.ViewDefinition>? viewRenameRewrites =
+                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
+                            database.Schema, renamedView.Id!, renamedViewName, newViewName,
+                            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+
+                    await catalogs.RenameViewAsync(
+                        database, renamedViewName, newViewName, viewRenameRewrites).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.AlterViewOwnerTo:
+                {
+                    string ownedViewName = ast.leftAst!.yytext!;
+                    string newOwnerName = ast.rightAst!.yytext!;
+
+                    if (!database.Schema.Views.TryGetValue(ownedViewName, out Catalogs.Models.ViewSchema? ownedView)
+                        || ownedView.Definition is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ViewDoesntExist, $"View '{ownedViewName}' does not exist");
+
+                    await RequireViewOwnershipAsync(database, ownedViewName, ownedView, ticket).ConfigureAwait(false);
+
+                    // The new owner must exist now: a view whose owner cannot be resolved refuses every
+                    // read, so accepting an unknown name here would break the view rather than move it.
+                    Models.UserRecord? newOwner = authService is null
+                        ? null
+                        : await RequireAuthService().TryGetUserAsync(newOwnerName).ConfigureAwait(false);
+
+                    if (authService is not null && (newOwner is null || string.IsNullOrEmpty(newOwner.Id)))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.UserDoesNotExist,
+                            $"User '{newOwnerName}' does not exist, or predates user ids and cannot own a view");
+
+                    Catalogs.Models.ViewDefinition transferred = ownedView.Definition;
+                    transferred.Owner = newOwner?.Name ?? newOwnerName;
+                    transferred.OwnerId = newOwner?.Id;
+
+                    await catalogs.SetViewDefinitionAsync(database, ownedViewName, transferred).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.CreateMaterializedView:
+            case NodeType.CreateMaterializedViewIfNotExists:
+                {
+                    (bool createdMatView, int matViewRows) = await matViewCreator.CreateAsync(
+                        this, matViewRefresher, catalogs, registryTask, database, ast, ticket, logger).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, createdMatView, matViewRows);
+                }
+
+            case NodeType.DropMaterializedView:
+            case NodeType.DropMaterializedViewIfExists:
+                {
+                    bool droppedMatView = await matViewCreator.DropAsync(
+                        this, catalogs, database, ast,
+                        ifExists: ast.nodeType == NodeType.DropMaterializedViewIfExists,
+                        logger).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, droppedMatView);
+                }
+
+            case NodeType.AlterMaterializedViewRenameTo:
+                {
+                    string oldMatViewName = ast.leftAst!.yytext!;
+                    string newMatViewName = ast.rightAst!.yytext!;
+
+                    // Resolved through the materialized-view check first so renaming a plain table with
+                    // this statement is refused rather than quietly succeeding.
+                    TableSchema renamedMatView = Controllers.DDL.MaterializedViewRefresher
+                        .RequireMaterializedView(database, oldMatViewName);
+
+                    // Same single-delta rule as a table rename: the dependents' rewritten bodies ride
+                    // the rename rather than following it.
+                    Dictionary<string, Catalogs.Models.ViewDefinition>? matViewRewrites =
+                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
+                            database.Schema, renamedMatView.Id!, oldMatViewName, newMatViewName,
+                            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+
+                    await RenameTable(new RenameTableTicket(
+                        ticket.DatabaseName, oldMatViewName, newMatViewName), matViewRewrites).ConfigureAwait(false);
+
                     return new ExecuteDDLSQLResult(database, true);
                 }
 
@@ -3867,22 +4128,24 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor renameTableDesc = await tableOpener.Open(database, oldTableName).ConfigureAwait(false);
 
-                    ExecuteDDLSQLResult renameResult = await ExecuteDdlInTransaction(database, async tx =>
+                    // A view stores its body as text, so a rename would leave every dependent naming a
+                    // relation that no longer exists. The rewrites are computed here and carried IN the
+                    // rename's own delta: applied afterwards, there would be an interval in which a
+                    // stale body still names the old relation — and since the rename frees that name,
+                    // anything created under it in the meantime would be read through the stale body
+                    // and return its rows.
+                    Dictionary<string, Catalogs.Models.ViewDefinition>? renameRewrites =
+                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
+                            database.Schema, renameTableDesc.Id, oldTableName, newTableName,
+                            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+
+                    return await ExecuteDdlInTransaction(database, async tx =>
                     {
-                        bool ok = await catalogs.RenameTable(database, renameTableTicket, tx).ConfigureAwait(false);
+                        bool ok = await catalogs.RenameTable(database, renameTableTicket, tx, renameRewrites).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     },
                     postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTableDesc.Id)
                     ).ConfigureAwait(false);
-
-                    // A view stores its body as text, so a rename leaves every dependent view naming a
-                    // relation that no longer exists. Rewriting them here is what reproduces
-                    // PostgreSQL's rename-is-transparent-to-views behavior.
-                    await Controllers.DDL.ViewDependencyMaintainer.RewriteAfterRelationRenameAsync(
-                        catalogs, database, renameTableDesc.Id, oldTableName, newTableName,
-                        sql => SQLParserProcessor.Parse(sql, sqlParserCache)).ConfigureAwait(false);
-
-                    return renameResult;
                 }
 
             case NodeType.DropTable:
@@ -3899,6 +4162,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                         return new(database, false);
 
                     TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName).ConfigureAwait(false);
+
+                    // A materialized view is stored as a relation, so DROP TABLE would happily remove
+                    // one. Refusing keeps the statement that creates an object and the statement that
+                    // removes it symmetric, and matches PostgreSQL.
+                    if (table.Schema.IsMaterializedView)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.TableDoesntExist,
+                            $"'{dropTableTicket.TableName}' is a materialized view; use DROP MATERIALIZED VIEW");
 
                     // Dropping a table a view reads would turn that view into a delayed error for
                     // whoever reads it next. Refuse instead, as PostgreSQL does. DROP TABLE has no
@@ -4004,6 +4275,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        MaterializedViewAccessGuard.RequireReadable(table);
         PinSchemaVersion(database, table, ticket.TxnState);
 
         return (database, queryExecutor.Query(database, table, ticket));
@@ -4021,6 +4293,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
         TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        MaterializedViewAccessGuard.RequireReadable(table);
         PinSchemaVersion(database, table, ticket.TxnState);
 
         return queryExecutor.QueryById(database, table, ticket);
@@ -4286,7 +4559,38 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return new ExecuteNonSQLResult(database, ctasTable, ctasRows, ctasWarning);
                 }
 
+            // REFRESH is routed here rather than through the DDL path because it is a write: it
+            // replaces a relation's contents and reports how many rows it wrote, the same shape a
+            // caller already gets from INSERT … SELECT.
+            case NodeType.RefreshMaterializedView:
+                {
+                    string refreshedName = ast.leftAst!.yytext!;
+                    string refreshOptions = ast.yytext ?? "";
+
+                    int refreshedRows = await matViewRefresher.RefreshAsync(
+                        this, catalogs, registryTask, database, refreshedName,
+                        concurrently: refreshOptions.StartsWith("concurrently", StringComparison.Ordinal),
+                        withNoData: refreshOptions.EndsWith("no data", StringComparison.Ordinal),
+                        ticket, logger).ConfigureAwait(false);
+
+                    return new ExecuteNonSQLResult(database, null!, refreshedRows);
+                }
+
             default:
+                // Same reason CTAS has an arm above: a client routes every non-SELECT statement to
+                // whichever endpoint it uses for those, so schema DDL arrives here as readily as at the
+                // DDL entry point. A statement that works through one and answers "unknown statement"
+                // through the other is, to that client, indistinguishable from one the server does not
+                // support. Both accept it, with one implementation behind them.
+                if (StatementScope.IsSchemaDdl(ast.nodeType))
+                {
+                    ExecuteDDLSQLResult ddlResult = await ExecuteDDLSQL(ticket).ConfigureAwait(false);
+
+                    // No descriptor: DDL returns no relation to the caller, and the row count is
+                    // meaningful only for a CREATE that also populated one.
+                    return new ExecuteNonSQLResult(database, null!, ddlResult.ModifiedRows);
+                }
+
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
         }
     }
@@ -4604,19 +4908,156 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
         => BuildSelectSourceAsync(database, ExpandViews(database, bodyAst), ticket, "CREATE VIEW");
 
+    /// <summary>
+    /// Opens a materialized view's body as a row source pinned to <paramref name="snapshot"/>, with
+    /// the revision floor held for as long as the source lives.
+    ///
+    /// <para>A refresh writes its rows over many transactions, so the pin is what makes the result a
+    /// relation that actually existed: reading each chunk at "now" would assemble a table from
+    /// several different instants and so from a state the database was never in. Pinning also removes
+    /// the need for range locks over the source — history at a past instant cannot gain a phantom —
+    /// so a long rebuild does not block writers on the tables it reads.</para>
+    /// </summary>
+    internal Task<SelectRowSource> BuildMaterializedViewSourceAsync(
+        DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket, HLCTimestamp snapshot)
+        => BuildSelectSourceAsync(
+            database, ExpandViews(database, bodyAst), ticket, "REFRESH MATERIALIZED VIEW", snapshot);
+
+    /// <summary>
+    /// Creates a relation a materialized-view statement needs, in its own DDL transaction: either the
+    /// materialized view itself or the relation a refresh builds into.
+    ///
+    /// <para>The ticket validator is applied only when <paramref name="validate"/> asks for it. A
+    /// materialized view's own ticket is validated like any other <c>CREATE TABLE</c>; a staging
+    /// relation's cannot be, because its generated name is built from characters an identifier may not
+    /// contain (see <see cref="Catalogs.Models.MaterializedViewNaming"/>) — which is exactly what the
+    /// validator rejects. Nothing goes unchecked either way: a staging relation's columns and
+    /// constraints are copied from a relation that was validated when it was created.</para>
+    ///
+    /// <para>The per-table privilege check is suspended for the duration. The relation does not exist
+    /// yet, so no grant can name it; authority for the statement was established at database scope
+    /// before this was reached, exactly as for <c>CREATE TABLE</c>.</para>
+    /// </summary>
+    internal async Task<bool> CreateRelationInDdlTransactionAsync(
+        DatabaseDescriptor database, CreateTableTicket ticket, string tableId, bool validate)
+    {
+        if (validate)
+            validator.Validate(ticket);
+
+        using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(null);
+
+        return await ExecuteDdlInTransaction(database, tx =>
+            tableCreator.Create(queryExecutor, tableOpener, tableIndexAlterer, database, ticket, tx, tableId))
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Destroys a relation a materialized-view statement created and no longer wants: the staging
+    /// relation of a failed rebuild, or a materialized view whose initial population failed.
+    ///
+    /// <para><c>force</c>, not deferred: neither is something anyone would want to relink, so
+    /// retaining them would only leave orphan records nobody can act on. The per-table privilege check
+    /// is suspended for the same reason it is on the way in — this removes an object the running
+    /// statement itself created, and a caller who could not name it in a grant would otherwise be
+    /// unable to clean up after their own failed statement.</para>
+    /// </summary>
+    internal async Task DropStagingRelationAsync(DatabaseDescriptor database, string relationName)
+    {
+        using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(null);
+
+        await DropTable(new DropTableTicket(database.Name, relationName, ifExists: true, force: true))
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes one chunk of a materialized-view rebuild in its own committed transaction, and reports
+    /// how many rows it inserted.
+    ///
+    /// <para>Its own transaction is the point: a rebuild is unbounded in size and a single one would
+    /// hit <see cref="CamusDBOptions.MaxMutationsPerTransaction"/> for any materialized view worth
+    /// materializing. Chunked writes are safe here — and only here — because the rows land in a
+    /// relation no reader can name, and become visible only when the swap publishes them all at
+    /// once.</para>
+    ///
+    /// <para>The per-table privilege check is suspended for the write. The caller's authority to run
+    /// the refresh was established against the materialized view before any of this began; the
+    /// staging relation is engine bookkeeping with an id no grant could ever have been written
+    /// against, so checking it would refuse every non-superuser refresh.</para>
+    /// </summary>
+    internal async Task<int> InsertRefreshChunkAsync(
+        DatabaseDescriptor database,
+        string relationName,
+        IReadOnlyList<DerivedColumnSchema> sourceColumns,
+        IReadOnlyList<string> targetColumns,
+        IReadOnlyList<QueryResultRow> rows)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+
+        try
+        {
+            using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(null);
+
+            TableDescriptor staging = await tableOpener.Open(database, relationName).ConfigureAwait(false);
+
+            InsertSelectTicket chunkTicket = new(
+                txnState: tx,
+                databaseName: database.Name,
+                tableName: relationName,
+                targetColumns: [.. targetColumns],
+                sourceSelect: null!,
+                parameters: null);
+
+            int inserted = await rowInsertSelector.InsertSelect(
+                rowInserter, statisticsManager, database, staging, chunkTicket, sourceColumns,
+                ToAsyncEnumerable(rows)).ConfigureAwait(false);
+
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            return inserted;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> ToAsyncEnumerable(IReadOnlyList<QueryResultRow> rows)
+    {
+        await Task.CompletedTask;
+
+        foreach (QueryResultRow row in rows)
+            yield return row;
+    }
+
+    /// <summary>
+    /// This node's current cluster time. Materialized-view refresh stamps its snapshot with it, so
+    /// staleness is ordered by the same clock as every other distributed event rather than by a wall
+    /// clock that may disagree between nodes.
+    /// </summary>
+    internal HLCTimestamp ClusterNow()
+    {
+        if (sharedNode is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A storage node is required to resolve the current cluster timestamp.");
+
+        return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
+    }
+
     private async Task<SelectRowSource> BuildSelectSourceAsync(
         DatabaseDescriptor database,
         NodeAst sourceAst,
         ExecuteSQLTicket ticket,
-        string statementName)
+        string statementName,
+        HLCTimestamp? explicitSnapshot = null)
     {
         // A time-travel source reads through its OWN read-only snapshot transaction while the writes
         // keep using the caller's; see PrepareTimeTravelSourceAsync for why that is both possible and
         // safer than the live path. Null when the source carries no AS OF SYSTEM TIME clause.
-        (ExecuteSQLTicket sourceTicket, Func<Task>? releaseHold) =
-            await PrepareTimeTravelSourceAsync(database, sourceAst, ticket, statementName).ConfigureAwait(false);
+        (ExecuteSQLTicket sourceTicket, SnapshotHoldLease? lease) =
+            await PrepareTimeTravelSourceAsync(database, sourceAst, ticket, statementName, explicitSnapshot).ConfigureAwait(false);
 
-        bool isTimeTravel = releaseHold is not null;
+        bool isTimeTravel = lease is not null;
 
         try
         {
@@ -4632,7 +5073,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 List<NodeAst> fromlessProjections = new();
                 FlattenProjectionList(sourceAst.leftAst!, fromlessProjections);
 
-                return new SelectRowSource(fromlessSchema.Schema, fromlessCursor, fromlessProjections, releaseHold);
+                return new SelectRowSource(fromlessSchema.Schema, fromlessCursor, fromlessProjections, lease);
             }
 
             (BoundSelectQuery bound, QueryTicket queryTicket) = await BuildBoundQueryAsync(
@@ -4653,15 +5094,15 @@ public sealed class CommandExecutor : IAsyncDisposable
                 columns,
                 ExecuteBoundQuery(database, bound, queryTicket),
                 bound.Query.Projections.Select(projection => projection.Expression).ToList(),
-                releaseHold);
+                lease);
         }
         catch
         {
-            // The hold is owned by the SelectRowSource once one exists; if we fail before returning it,
+            // The lease is owned by the SelectRowSource once one exists; if we fail before returning it,
             // nothing else will ever release it, so do it here rather than leave the MVCC floor pinned
             // until the lease lapses.
-            if (releaseHold is not null)
-                await releaseHold().ConfigureAwait(false);
+            if (lease is not null)
+                await lease.DisposeAsync().ConfigureAwait(false);
 
             throw;
         }
@@ -4687,13 +5128,20 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// recovery from beyond the retention window can still come back empty. Callers report a
     /// zero-row time-travel copy for that reason.</para>
     /// </summary>
-    private async Task<(ExecuteSQLTicket SourceTicket, Func<Task>? ReleaseHold)> PrepareTimeTravelSourceAsync(
+    /// <param name="explicitSnapshot">
+    /// A snapshot chosen by the caller rather than written in the statement, used by materialized-view
+    /// refresh. Supplying it pins the source exactly as an <c>AS OF SYSTEM TIME</c> clause would —
+    /// including dropping the range locks a live source would take — which is what a multi-transaction
+    /// rebuild needs and is the whole reason this parameter exists.
+    /// </param>
+    private async Task<(ExecuteSQLTicket SourceTicket, SnapshotHoldLease? Lease)> PrepareTimeTravelSourceAsync(
         DatabaseDescriptor database,
         NodeAst sourceAst,
         ExecuteSQLTicket ticket,
-        string statementName)
+        string statementName,
+        HLCTimestamp? explicitSnapshot = null)
     {
-        if (sourceAst.extendedSeven is null)
+        if (sourceAst.extendedSeven is null && explicitSnapshot is null)
             return (ticket, null);
 
         if (sharedNode is null)
@@ -4702,20 +5150,18 @@ public sealed class CommandExecutor : IAsyncDisposable
                 "AS OF SYSTEM TIME requires a storage node to resolve the snapshot timestamp.");
 
         HLCTimestamp now = sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
-        HLCTimestamp snapshotT = AsOfSystemTimeResolver.Resolve(sourceAst.extendedSeven, ticket.Parameters, now);
+        HLCTimestamp snapshotT = explicitSnapshot
+            ?? AsOfSystemTimeResolver.Resolve(sourceAst.extendedSeven!, ticket.Parameters, now);
 
         IKahuna kahuna = database.Kahuna.Kahuna;
         string holderId = $"{database.Id}-asof-{ObjectIdGenerator.Generate()}";
 
-        (KeyValueResponseType holdType, string holdId, _) = await kahuna
-            .LocateAndAcquireSnapshotHold(holderId, snapshotT, options.BranchSnapshotHoldLeaseMs, CancellationToken.None)
+        // The hold is leased, and the lease is shorter than a large copy. Renewing it — and failing
+        // closed when renewal stops being confirmed — is what makes "one pinned snapshot" true for the
+        // whole read rather than only for its first few minutes.
+        SnapshotHoldLease lease = await SnapshotHoldLease.AcquireAsync(
+            kahuna, logger, holderId, snapshotT, options.BranchSnapshotHoldLeaseMs, statementName)
             .ConfigureAwait(false);
-
-        if (holdType != KeyValueResponseType.Set || string.IsNullOrEmpty(holdId))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidAsOfSystemTime,
-                $"Could not pin history at the requested snapshot (status {holdType}); the {statementName} was " +
-                "not started because its source could not be guaranteed to stay readable for the whole copy");
 
         ExecuteSQLTicket snapshotTicket = new(
             KvTransaction.CreateSnapshotReadOnly(snapshotT),
@@ -4723,20 +5169,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             ticket.Sql,
             ticket.Parameters);
 
-        return (snapshotTicket, async () =>
-        {
-            try
-            {
-                await kahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                // Best effort: a hold that outlives its statement only over-retains revisions until its
-                // lease lapses, which is far better than failing a copy that already succeeded.
-                logger.LogWarning(ex, "Failed to release the snapshot-floor hold {HoldId}", holdId);
-            }
-        }
-        );
+        return (snapshotTicket, lease);
     }
 
     /// <summary>
@@ -4901,7 +5334,13 @@ public sealed class CommandExecutor : IAsyncDisposable
                         {
                             metaOut.CacheName = joinHint.CacheName;
                             metaOut.Status = QueryCacheStatus.Bypass;
-                            metaOut.BypassReason = QueryCacheBypassReason.Join;
+                            // A query that reads through a view is multi-source only because expansion
+                            // produced a derived table; reporting "Join" would send its author looking
+                            // for a join they did not write.
+                            metaOut.BypassReason =
+                                selectQuery.Source is Models.Queries.JoinSource || boundQuery.Sources.Count > 1
+                                    ? QueryCacheBypassReason.Join
+                                    : QueryCacheBypassReason.DerivedSource;
                         }
                         if (schemaOut is not null)
                             schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
@@ -4926,7 +5365,8 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowViewsSchema;
-                    return (database, schemaQuerier.ShowViews(database, UnquoteLikePattern(ast.leftAst?.yytext)));
+                    return (database, schemaQuerier.ShowViews(
+                        database, UnquoteLikePattern(ast.leftAst?.yytext), VisibilityPrincipal(ticket)));
                 }
 
             case NodeType.ShowMaterializedViews:
@@ -4945,10 +5385,24 @@ public sealed class CommandExecutor : IAsyncDisposable
                         throw new CamusDBException(
                             CamusDBErrorCodes.ViewDoesntExist, $"View '{showViewName}' does not exist");
 
+                    Controllers.ViewAuthorization.Require(
+                        database, showViewName, shownView, Privilege.Select);
+
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateViewSchema;
 
                     return (database, schemaQuerier.ShowCreateView(showViewName, shownView));
+                }
+
+            case NodeType.ShowCreateMaterializedView:
+                {
+                    Catalogs.Models.TableSchema shownMatView = Controllers.DDL.MaterializedViewRefresher
+                        .RequireMaterializedView(database, ast.leftAst!.yytext!);
+
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateMaterializedViewSchema;
+
+                    return (database, schemaQuerier.ShowCreateMaterializedView(shownMatView));
                 }
 
             case NodeType.ShowOrphanTables:
@@ -4968,7 +5422,12 @@ public sealed class CommandExecutor : IAsyncDisposable
                     // Checked before the table open, which resolves physical relations only and would
                     // otherwise refuse a view. DESCRIBE is a read, so it must work on a view.
                     if (database.Schema.Views.TryGetValue(describedName, out Catalogs.Models.ViewSchema? describedView))
+                    {
+                        Controllers.ViewAuthorization.Require(
+                            database, describedName, describedView, Privilege.Select);
+
                         return (database, schemaQuerier.ShowViewColumns(describedView));
+                    }
 
                     TableDescriptor table = await tableOpener.Open(database, describedName).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);

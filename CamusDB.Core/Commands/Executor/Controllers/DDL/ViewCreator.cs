@@ -58,8 +58,22 @@ internal sealed class ViewCreator
         ViewDefinition definition = await BuildDefinitionAsync(
             executor, database, bodyAst, ticket, columnAliasList, checkOption).ConfigureAwait(false);
 
+        // A replace rewrites an existing view's body; it does not re-create the object, so it must not
+        // re-own it. Letting the replacing caller become owner would make CREATE OR REPLACE a way to
+        // seize a definer's-rights view and run its body with one's own privileges instead.
+        if (replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? owned) && owned.Definition is not null)
+        {
+            definition.Owner = owned.Definition.Owner;
+            definition.OwnerId = owned.Definition.OwnerId;
+        }
+
         if (replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? existing) && existing.Definition is not null)
         {
+            // Replacing an existing view rewrites what every reader of it sees, so it needs authority
+            // over that view — the CreateTable privilege this statement mapped to is about creating a
+            // new object, and by itself would let any creator overwrite anyone's view.
+            ViewAuthorization.Require(database, viewName, existing, Privilege.Alter);
+
             ViewShapeComparer.RequireCompatible(viewName, existing.Definition, definition);
             ViewDependencyGraph.RequireAcyclic(database.Schema, existing.Id!, viewName, definition);
 
@@ -124,7 +138,13 @@ internal sealed class ViewCreator
                 throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{name}' does not exist");
             }
 
-            string viewId = database.Schema.Views[name].Id!;
+            ViewSchema dropped = database.Schema.Views[name];
+
+            // Nothing else checks this. A drop opens no relation, so the per-table chokepoint never
+            // sees it, and without an explicit check any authenticated caller could drop any view.
+            ViewAuthorization.Require(database, name, dropped, Privilege.Drop);
+
+            string viewId = dropped.Id!;
             List<string> dependents = ViewDependencyGraph.DirectDependentsOfView(database.Schema, viewId);
 
             if (dependents.Count > 0 && !cascade)
@@ -137,8 +157,14 @@ internal sealed class ViewCreator
             {
                 foreach (string dependent in ViewDependencyGraph.TransitiveDependentsOfView(database.Schema, viewId))
                 {
-                    if (CatalogsManager.ViewExists(database, dependent))
-                        await catalogs.DropViewAsync(database, dependent).ConfigureAwait(false);
+                    if (!CatalogsManager.ViewExists(database, dependent))
+                        continue;
+
+                    // CASCADE is not an escape from authorization: it drops objects the caller did not
+                    // name, so each one is checked on its own before it goes.
+                    ViewAuthorization.Require(database, dependent, database.Schema.Views[dependent], Privilege.Drop);
+
+                    await catalogs.DropViewAsync(database, dependent).ConfigureAwait(false);
                 }
             }
 
@@ -173,7 +199,8 @@ internal sealed class ViewCreator
             columnAliasList,
             checkOption,
             // Null when authentication is off, in which case no base-relation check applies anyway.
-            owner: ticket.Principal?.UserName);
+            owner: ticket.Principal?.UserName,
+            ownerId: ticket.Principal?.UserId);
     }
 
     private static CheckOptionKind ParseCheckOption(string? text) => text switch

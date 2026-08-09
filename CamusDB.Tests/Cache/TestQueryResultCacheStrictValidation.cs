@@ -311,7 +311,7 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
         var deps = new QueryDependencySet(
             rangeDeps: [],
             pointDeps: [],
-            schemaDeps: [(ordersSchema.Id!, currentVersion + 99)]);
+            schemaDeps: [(ordersSchema.Id!, currentVersion + 99, 0L)]);
 
         bool valid = await StrictValidator.ValidateAsync(
             staleResult, deps, database, TestNode!.Kahuna, default);
@@ -352,7 +352,7 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
         var deps = new QueryDependencySet(
             rangeDeps: [],
             pointDeps: [],
-            schemaDeps: [(ordersSchema.Id!, ordersSchema.Version)]);
+            schemaDeps: [(ordersSchema.Id!, ordersSchema.Version, 0L)]);
 
         bool valid = await StrictValidator.ValidateAsync(
             validResult, deps, database, TestNode!.Kahuna, default);

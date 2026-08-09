@@ -361,7 +361,7 @@ internal sealed class QueryJoinExecutor
 
         // Unique index probe: record the index bucket range (membership check) and schema.
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
-        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
+        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey).ConfigureAwait(false);
 
@@ -394,7 +394,7 @@ internal sealed class QueryJoinExecutor
         // Non-unique index equality probe: the index bucket range catches phantom inserts for
         // this key. Per-row point deps are recorded below as each row is fetched.
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
-        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
+        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -555,7 +555,7 @@ internal sealed class QueryJoinExecutor
         RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.RowKeySpace);
-        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
+        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
             plan.Ticket.TxnState).ConfigureAwait(false))
@@ -611,7 +611,7 @@ internal sealed class QueryJoinExecutor
         RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
-        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
+        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -674,7 +674,7 @@ internal sealed class QueryJoinExecutor
         // Index range scan: the index bucket range covers membership phantoms; per-row point
         // deps cover updates to non-indexed projected columns.
         deps?.RecordRange(table.Store.IndexKeySpace(rangeNode.Index.KvId));
-        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
+        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -741,7 +741,7 @@ internal sealed class QueryJoinExecutor
 
         // IN-list scan: record the index bucket once (covers all per-value range probes) and schema.
         deps?.RecordRange(table.Store.IndexKeySpace(inListNode.Index.KvId));
-        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias));
+        deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         foreach (ColumnValue value in inListNode.Values)
         {

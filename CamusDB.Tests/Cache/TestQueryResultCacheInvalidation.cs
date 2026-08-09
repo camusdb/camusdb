@@ -199,7 +199,7 @@ public sealed class TestQueryResultCacheInvalidation
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        QueryDependencySet deps = new([], [], [("tblid001", 1)]);
+        QueryDependencySet deps = new([], [], [("tblid001", 1, 0L)]);
         CacheGenerationToken token = SnapshotToken(cache);
         string fp = "fp-schema-dep";
         await cache.TryPublishAsync(MakeResult("db1", fp), token, deps);
@@ -215,7 +215,7 @@ public sealed class TestQueryResultCacheInvalidation
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        QueryDependencySet deps = new([], [], [("tblid001", 1)]);
+        QueryDependencySet deps = new([], [], [("tblid001", 1, 0L)]);
         CacheGenerationToken token = SnapshotToken(cache);
         string fp = "fp-schema-dep-keep";
         await cache.TryPublishAsync(MakeResult("db1", fp), token, deps);
@@ -231,7 +231,7 @@ public sealed class TestQueryResultCacheInvalidation
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        QueryDependencySet deps = new([], [], [("tblid001", 1)]);
+        QueryDependencySet deps = new([], [], [("tblid001", 1, 0L)]);
         CacheGenerationToken token = SnapshotToken(cache);
         string fp = "fp-schema-dep-db2";
         await cache.TryPublishAsync(MakeResult("db2", fp), token, deps);

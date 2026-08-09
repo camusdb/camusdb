@@ -459,5 +459,30 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         Assert.That(CacheMetadataHolder.ToBypassReasonString(QueryCacheBypassReason.InFlightWrite), Is.EqualTo("in-flight-write"));
         Assert.That(CacheMetadataHolder.ToBypassReasonString(QueryCacheBypassReason.OversizedResult), Is.EqualTo("oversized-result"));
         Assert.That(CacheMetadataHolder.ToBypassReasonString(QueryCacheBypassReason.StrictValidationLimit), Is.EqualTo("strict-validation-limit"));
+        Assert.That(CacheMetadataHolder.ToBypassReasonString(QueryCacheBypassReason.DerivedSource), Is.EqualTo("derived-source"));
+    }
+
+    /// <summary>
+    /// The spot-checks above name the reasons one at a time, so a reason added to the enum without a
+    /// mapping falls through the converter's default arm and reaches clients as a bypass with no
+    /// reason at all — the failure mode the reason exists to prevent, and one no existing assertion
+    /// notices. This iterates the enum instead, so adding a member without mapping it fails here.
+    /// </summary>
+    [Test]
+    public void ToBypassReasonString_EveryReasonExceptNone_HasAString()
+    {
+        foreach (QueryCacheBypassReason reason in Enum.GetValues<QueryCacheBypassReason>())
+        {
+            string? wire = CacheMetadataHolder.ToBypassReasonString(reason);
+
+            if (reason == QueryCacheBypassReason.None)
+            {
+                Assert.That(wire, Is.Null, "None means no bypass and must not surface a reason string");
+                continue;
+            }
+
+            Assert.That(wire, Is.Not.Null.And.Not.Empty,
+                $"QueryCacheBypassReason.{reason} has no wire string; clients would see a reasonless bypass");
+        }
     }
 }

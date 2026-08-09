@@ -132,9 +132,59 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
 
         reclaimed += await ReclaimDatabaseOrphansAsync(now, ct).ConfigureAwait(false);
         reclaimed += await ReclaimTableOrphansAsync(now, ct).ConfigureAwait(false);
+        reclaimed += await ReclaimAbandonedRefreshesAsync(ct).ConfigureAwait(false);
 
         return reclaimed;
     }
+
+    /// <summary>
+    /// Reclaims the staging storage of materialized-view refreshes that never finished.
+    ///
+    /// <para>This is the path that covers what a later refresh cannot. Reclaiming on the next refresh
+    /// only helps a view that is refreshed again, and reclaiming on drop only helps one that is
+    /// dropped; a view that is neither — the ordinary case after a crash on a view refreshed on a
+    /// schedule that has since been turned off — kept its abandoned storage registered indefinitely.
+    /// </para>
+    ///
+    /// <para>Eligibility is decided by the <b>fence</b>, not by elapsed time. A refresh that is still
+    /// running holds it for its whole duration, so anything whose fence can be acquired belongs to a
+    /// run that is gone. That is exact where a staleness timeout would only be a guess, and a guess
+    /// that fired early would delete storage out from under a slow but healthy rebuild.</para>
+    /// </summary>
+    private async Task<int> ReclaimAbandonedRefreshesAsync(CancellationToken ct)
+    {
+        if (ReclaimRefreshJobsForDatabaseAsync is null)
+            return 0;
+
+        int reclaimed = 0;
+
+        foreach (DatabaseRegistryEntry db in await registry.ScanAllEntriesAsync().ConfigureAwait(false))
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            if (!await sharedNode.AmILeaderForKeyAsync(registry.RegistryBucket, ct).ConfigureAwait(false))
+                return reclaimed; // leadership lost mid-sweep
+
+            try
+            {
+                reclaimed += await ReclaimRefreshJobsForDatabaseAsync(db.Name, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // One database's failure must not stop the sweep for the others; the next tick retries.
+                logger.LogWarning(ex, "Failed to reclaim abandoned materialized-view refreshes in database {DbName}", db.Name);
+            }
+        }
+
+        return reclaimed;
+    }
+
+    /// <summary>
+    /// Reclaims abandoned refresh jobs for one database by name, returning how many it removed. Set by
+    /// the engine, which owns the database opener and the refresher; null leaves the sweep inert.
+    /// </summary>
+    internal Func<string, CancellationToken, Task<int>>? ReclaimRefreshJobsForDatabaseAsync { get; set; }
 
     private async Task<int> ReclaimDatabaseOrphansAsync(HLCTimestamp now, CancellationToken ct)
     {
@@ -248,7 +298,12 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
 
                     // PurgeTableKeyspaceAsync deletes the orphan record last, and only if all data is
                     // verified gone; a false return means it left the record for a later sweep.
-                    if (await databaseDropper.PurgeTableKeyspaceAsync(sharedNode.Kahuna, db.Id, orphan.TableId, ct).ConfigureAwait(false))
+                    // The captured schema is what knows where the rows live: a refreshed materialized
+                    // view owns a key-space that is not its id, so purging by id alone would delete an
+                    // empty prefix and leak the real contents indefinitely.
+                    string? orphanStorageId = orphan.Schema?.StorageId;
+
+                    if (await databaseDropper.PurgeTableKeyspaceAsync(sharedNode.Kahuna, db.Id, orphan.TableId, orphanStorageId, ct).ConfigureAwait(false))
                     {
                         reclaimed++;
                         if (logger.IsEnabled(LogLevel.Information))

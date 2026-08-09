@@ -36,8 +36,21 @@ internal sealed class RowDeleter
         _stats = stats;
     }
 
-    public async Task<int> Delete(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket)
+    /// <param name="allowMaterializedView">
+    /// True only for the engine's own row removal when a relation is being dropped. A materialized
+    /// view refuses user DML, but dropping one still has to clear its rows, and that removal is the
+    /// consequence of a statement that was already authorized against the materialized view itself.
+    /// </param>
+    public async Task<int> Delete(
+        QueryExecutor queryExecutor,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        DeleteTicket ticket,
+        bool allowMaterializedView = false)
     {
+        if (!allowMaterializedView)
+            MaterializedViewAccessGuard.RequireWritable(table);
+
         DeleteFluxState state = new(
             queryExecutor: queryExecutor,
             database: database,

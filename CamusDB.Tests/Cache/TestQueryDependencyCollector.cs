@@ -255,14 +255,15 @@ public sealed class TestQueryDependencyCollector
         col.RecordRange("db:tbl:r");
         col.RecordRange("db:tbl:i:idx1");
         col.RecordPoint("db:tbl:r/000000000000000000000001");
-        col.RecordSchema("tbl-uuid", 5);
+        col.RecordSchema("tbl-uuid", 5, 7L);
 
         QueryDependencySet deps = col.Build();
 
         Assert.That(deps.RangeDeps.Count, Is.EqualTo(2));
         Assert.That(deps.PointDeps.Count, Is.EqualTo(1));
         Assert.That(deps.SchemaDeps.Count, Is.EqualTo(1));
-        Assert.That(deps.SchemaDeps[0], Is.EqualTo(("tbl-uuid", 5)));
+        Assert.That(deps.SchemaDeps[0], Is.EqualTo(("tbl-uuid", 5, 7L)),
+            "the contents generation must round-trip alongside the id and schema version");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -323,7 +324,7 @@ public sealed class TestQueryDependencyCollector
         var deps = new QueryDependencySet(
             ["db:tbl:r"],
             [],
-            [("tbl-id", 1)]);
+            [("tbl-id", 1, 0L)]);
 
         index.Add("entry-1", deps, "db");
         index.Remove("entry-1", deps, "db");

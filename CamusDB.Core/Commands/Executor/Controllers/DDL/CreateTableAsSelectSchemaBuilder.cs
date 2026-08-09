@@ -40,16 +40,22 @@ internal static class CreateTableAsSelectSchemaBuilder
     /// the expression list that produced it, consulted only to reject projections that cannot become
     /// a column. The two must come from the same (post-rewrite) query or they can disagree.
     /// </summary>
+    /// <param name="statementName">
+    /// The statement this derivation is for, quoted back in every rejection message. A materialized
+    /// view derives its relation the same way and hits the same limits, and being told to fix a
+    /// "CREATE TABLE ... AS SELECT" it did not write would send the author looking in the wrong place.
+    /// </param>
     public static (ColumnInfo[] Columns, ConstraintInfo[] Constraints, string KeyName) Build(
         IReadOnlyList<NodeAst> projections,
-        IReadOnlyList<DerivedColumnSchema> derived)
+        IReadOnlyList<DerivedColumnSchema> derived,
+        string statementName = "CREATE TABLE ... AS SELECT")
     {
-        RejectUnusableProjections(projections);
+        RejectUnusableProjections(projections, statementName);
 
         if (derived.Count == 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "CREATE TABLE ... AS SELECT requires the source query to project at least one column");
+                $"{statementName} requires the source query to project at least one column");
 
         RejectQualifiedNames(derived);
         RejectDuplicateNames(derived);
@@ -87,7 +93,7 @@ internal static class CreateTableAsSelectSchemaBuilder
     /// with no alias (whose output name would be its ordinal position — a table with a column called
     /// "0" is not what anyone means) and a bare NULL literal (which has no type to declare).
     /// </summary>
-    private static void RejectUnusableProjections(IReadOnlyList<NodeAst> projections)
+    private static void RejectUnusableProjections(IReadOnlyList<NodeAst> projections, string statementName)
     {
         for (int i = 0; i < projections.Count; i++)
         {
@@ -97,7 +103,7 @@ internal static class CreateTableAsSelectSchemaBuilder
             if (target.nodeType == NodeType.Null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    $"Cannot determine a column type for output column {i + 1} of CREATE TABLE ... AS SELECT " +
+                    $"Cannot determine a column type for output column {i + 1} of {statementName} " +
                     "because it is NULL; add an explicit CAST");
 
             // A plain identifier names itself and * expands to real column names; anything else needs
@@ -108,7 +114,7 @@ internal static class CreateTableAsSelectSchemaBuilder
 
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Output column {i + 1} of CREATE TABLE ... AS SELECT is an expression with no name; " +
+                $"Output column {i + 1} of {statementName} is an expression with no name; " +
                 "add an alias (AS ...) so the created column can be named");
         }
     }

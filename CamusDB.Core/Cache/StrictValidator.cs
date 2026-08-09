@@ -79,15 +79,8 @@ internal static class StrictValidator
         // would be incorrect.
         // Note: index adds and drops also bump the table schema version, so index
         // identity changes are caught transitively through the same version check.
-        foreach ((string tableId, int expectedVersion) in deps.SchemaDeps)  // compiler sees (TableId, SchemaVersion)
-        {
-            TableSchema? schema = FindTableById(database, tableId);
-            if (schema is null)
-                return false;  // table dropped
-
-            if (schema.Version != expectedVersion)
-                return false;  // schema changed (column add/drop/rename/index add/drop)
-        }
+        if (!SchemaDepsCurrent(deps, database))
+            return false;
 
         // ── Point deps ─────────────────────────────────────────────────────────
         // Each point dep is the full KV key of a row that was fetched at cache time.
@@ -140,6 +133,39 @@ internal static class StrictValidator
                 if (rangeEntry.LastModified > result.CachedAt)
                     return false;  // phantom insert or untracked update
             }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when every relation a cached result depended on still exists, still has the schema version
+    /// the rows were decoded against, and — for a materialized view — still holds the same generation
+    /// of contents they were read from.
+    /// </summary>
+    /// <remarks>
+    /// The contents generation is checked because neither of the other two moves across a refresh: the
+    /// relation id survives so grants and dependencies do, and the schema version describes the row
+    /// encoding, which a refresh leaves alone. Without it an entry computed from retired contents
+    /// matches on every field compared here.
+    ///
+    /// <para>This is also the backstop for the publish-window race — an in-flight query that publishes
+    /// <em>after</em> the swap's eviction already fired is absent from the dependency index, so no
+    /// later invalidation can find it; it is caught here on the next probe instead.</para>
+    /// </remarks>
+    internal static bool SchemaDepsCurrent(QueryDependencySet deps, DatabaseDescriptor database)
+    {
+        foreach ((string tableId, int expectedVersion, long expectedContents) in deps.SchemaDeps)
+        {
+            TableSchema? schema = FindTableById(database, tableId);
+            if (schema is null)
+                return false;  // table dropped
+
+            if (schema.ContentsGeneration != expectedContents)
+                return false;  // a materialized-view refresh replaced the rows these came from
+
+            if (schema.Version != expectedVersion)
+                return false;  // schema changed (column add/drop/rename/index add/drop)
         }
 
         return true;

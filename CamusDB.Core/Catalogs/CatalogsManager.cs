@@ -267,6 +267,15 @@ public sealed class CatalogsManager
                 Settings = src.Settings is { Count: > 0 } ? new Dictionary<string, string>(src.Settings, StringComparer.Ordinal) : null,
                 // Preserve the table comment too, so a relinked table comes back documented.
                 Comment = src.Comment,
+                // A materialized view must come back as one. Without these it would relink as an
+                // ordinary table: writable, no longer refreshable, and — because a refreshed
+                // materialized view's rows live under a key-space that is not its id — pointed at an
+                // empty key-space, so it would also read as empty while its rows sat untouched.
+                StorageId = src.StorageId,
+                Kind = src.Kind,
+                ViewDefinition = src.ViewDefinition,
+                IsPopulated = src.IsPopulated,
+                RefreshedAt = src.RefreshedAt,
             })
         };
     }
@@ -305,6 +314,12 @@ public sealed class CatalogsManager
                 Indexes = indexes,
                 CheckConstraints = checkConstraints,
                 Comment = ticket.Comment,
+                Kind = ticket.Kind,
+                ViewDefinition = ticket.ViewDefinition,
+                // Never true at creation: even WITH DATA creates the relation empty and then refreshes
+                // it, so a refresh that fails leaves a materialized view that admits it holds nothing
+                // rather than one that claims data it never received.
+                IsPopulated = false,
                 Settings = ticket.Settings is null
                     ? null
                     : new Dictionary<string, string>(ticket.Settings, StringComparer.Ordinal)
@@ -514,7 +529,11 @@ public sealed class CatalogsManager
         };
     }
 
-    private static SchemaChangeLogEntry RenameTableEntry(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
+    private static SchemaChangeLogEntry RenameTableEntry(
+        DatabaseDescriptor database,
+        RenameTableTicket ticket,
+        KvTransaction tx,
+        Dictionary<string, ViewDefinition>? dependentViews)
     {
         return new()
         {
@@ -527,19 +546,22 @@ public sealed class CatalogsManager
             {
                 TableName = ticket.TableName,
                 Kind = SchemaRenameKind.Table,
-                NewName = ticket.NewName
+                NewName = ticket.NewName,
+                DependentViewDefinitions = dependentViews
             })
         };
     }
 
-    private async Task<bool> RenameTableReplicatedAsync(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
+    private async Task<bool> RenameTableReplicatedAsync(
+        DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx,
+        Dictionary<string, ViewDefinition>? dependentViews)
     {
         SchemaChangeLogEntry entry;
 
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = RenameTableEntry(database, ticket, tx);
+            entry = RenameTableEntry(database, ticket, tx, dependentViews);
             ValidateSchemaDelta(database, entry);
         }
         finally
@@ -551,8 +573,15 @@ public sealed class CatalogsManager
         return true;
     }
 
-    public Task<bool> RenameTable(DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx)
-        => RenameTableReplicatedAsync(database, ticket, tx);
+    /// <param name="dependentViews">
+    /// Rewritten bodies for the views that read this relation, applied in the same delta so no node
+    /// ever observes a stale body — which, once the old name is free, can resolve to a different
+    /// relation rather than fail. Null when nothing depends on it.
+    /// </param>
+    public Task<bool> RenameTable(
+        DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx,
+        Dictionary<string, ViewDefinition>? dependentViews = null)
+        => RenameTableReplicatedAsync(database, ticket, tx, dependentViews);
 
     public async Task<bool> RenameIndexInTableAsync(
         DatabaseDescriptor database,
@@ -1106,7 +1135,9 @@ public sealed class CatalogsManager
     }
 
     /// <summary>Proposes a <see cref="SchemaOp.RenameView"/> delta and waits for it to apply locally.</summary>
-    public async Task RenameViewAsync(DatabaseDescriptor database, string viewName, string newName)
+    public async Task RenameViewAsync(
+        DatabaseDescriptor database, string viewName, string newName,
+        Dictionary<string, ViewDefinition>? dependentViews = null)
     {
         SchemaChangeLogEntry entry;
 
@@ -1128,7 +1159,8 @@ public sealed class CatalogsManager
                 {
                     TableName = viewName,
                     Kind = SchemaRenameKind.View,
-                    NewName = newName
+                    NewName = newName,
+                    DependentViewDefinitions = dependentViews
                 })
             };
             ValidateSchemaDelta(database, entry);
@@ -1177,12 +1209,26 @@ public sealed class CatalogsManager
 
     /// <summary>
     /// Proposes a <see cref="SchemaOp.SetMaterializedViewState"/> delta recording a refresh outcome.
+    ///
+    /// <para>When <paramref name="swapToTableId"/> is given this is the <b>swap</b> half of a
+    /// build-and-swap refresh: the materialized view adopts the freshly built key-space in one
+    /// replicated change, so no node ever observes a half-built materialized view and no reader is
+    /// blocked while the rebuild runs. Passing null instead only updates the flags.</para>
     /// </summary>
+    /// <param name="tableId">The materialized view's own relation id. It is unchanged by a swap —
+    /// only the storage it addresses moves — so this identifies the view in both cases.</param>
+    /// <param name="publishHlc">When this change is being made — not when the rebuild read its
+    /// source. It becomes the entry timestamp, and with it the <c>DroppedAt</c> of the storage the
+    /// swap retires, so that storage gets its full retention window starting from the moment it
+    /// actually stopped being read.</param>
     public async Task SetMaterializedViewStateAsync(
         DatabaseDescriptor database,
         string tableId,
         bool isPopulated,
-        HLCTimestamp? refreshedAt)
+        HLCTimestamp? refreshedAt,
+        string? swapToTableId = null,
+        HLCTimestamp publishHlc = default,
+        long? expectedMetadataGeneration = null)
     {
         SchemaChangeLogEntry entry;
 
@@ -1191,6 +1237,7 @@ public sealed class CatalogsManager
         {
             entry = new()
             {
+                Ts = publishHlc,
                 Database = database.Id,
                 FromVersion = database.Schema.SchemaVersion,
                 ToVersion = database.Schema.SchemaVersion + 1,
@@ -1199,7 +1246,9 @@ public sealed class CatalogsManager
                 {
                     TableId = tableId,
                     IsPopulated = isPopulated,
-                    RefreshedAt = refreshedAt
+                    RefreshedAt = refreshedAt,
+                    SwapToTableId = swapToTableId,
+                    ExpectedMetadataGeneration = expectedMetadataGeneration
                 })
             };
             ValidateSchemaDelta(database, entry);
@@ -1416,6 +1465,8 @@ public sealed class CatalogsManager
                 string viewName = GetEntryViewName(entry);
                 if (database.Schema.Views.TryGetValue(viewName, out ViewSchema? viewSchema))
                     await PersistSchemaViewAsync(database, viewSchema, tx).ConfigureAwait(false);
+
+                await PersistRenameDependentViewsAsync(database, entry, tx).ConfigureAwait(false);
             }
             else if (entry.Op == SchemaOp.DropView)
             {
@@ -1428,15 +1479,18 @@ public sealed class CatalogsManager
             {
                 // Keyed by table id, so resolve the relation the same way apply did rather than by
                 // name — a concurrent rename must not send this checkpoint to the wrong relation.
-                string tableId = DecodePayload<SchemaSetMatViewStatePayload>(entry).TableId;
-                foreach (TableSchema candidate in database.Schema.Tables.Values)
-                {
-                    if (!string.Equals(candidate.Id, tableId, StringComparison.Ordinal))
-                        continue;
+                SchemaSetMatViewStatePayload matViewPayload = DecodePayload<SchemaSetMatViewStatePayload>(entry);
 
-                    await PersistSchemaTableAsync(database, candidate, entry.ToVersion, tx).ConfigureAwait(false);
-                    break;
-                }
+                // Keyed by the materialized view's own id in both cases: a swap keeps that id and
+                // changes only which key-space it reads, so the checkpoint always writes the same key.
+                TableSchema? persisted = FindRelationById(database.Schema, matViewPayload.TableId);
+
+                if (persisted is not null && !string.IsNullOrEmpty(matViewPayload.SwapToTableId))
+                    await RetireReplacedMaterializedViewStorageAsync(
+                        database, persisted, matViewPayload.SwapToTableId, entry, tx).ConfigureAwait(false);
+
+                if (persisted is not null)
+                    await PersistSchemaTableAsync(database, persisted, entry.ToVersion, tx).ConfigureAwait(false);
             }
             else if (entry.Op == SchemaOp.DropTable)
             {
@@ -1459,6 +1513,11 @@ public sealed class CatalogsManager
                 string tableName = GetEntryTableName(entry);
                 if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
                     await PersistSchemaTableAsync(database, tableSchema, entry.ToVersion, tx).ConfigureAwait(false);
+
+                // A rename carries its dependents' rewritten bodies, so they are checkpointed in the
+                // very transaction that persists the rename. Splitting them would put back on disk the
+                // same half-applied state the single delta removes from memory.
+                await PersistRenameDependentViewsAsync(database, entry, tx).ConfigureAwait(false);
             }
 
             using CancellationTokenSource cts = new(CheckpointCommitTimeout);
@@ -1467,6 +1526,28 @@ public sealed class CatalogsManager
         finally
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Persists the view bodies a rename rewrote, in the caller's checkpoint transaction. A no-op for
+    /// any other operation, and for a rename nothing depended on.
+    /// </summary>
+    private async Task PersistRenameDependentViewsAsync(
+        DatabaseDescriptor database, SchemaChangeLogEntry entry, KvTransaction tx)
+    {
+        if (entry.Op is not (SchemaOp.RenameTable or SchemaOp.RenameView))
+            return;
+
+        SchemaRenamePayload payload = DecodePayload<SchemaRenamePayload>(entry);
+
+        if (payload.DependentViewDefinitions is not { Count: > 0 } rewrites)
+            return;
+
+        foreach (string viewName in rewrites.Keys)
+        {
+            if (database.Schema.Views.TryGetValue(viewName, out ViewSchema? dependent))
+                await PersistSchemaViewAsync(database, dependent, tx).ConfigureAwait(false);
         }
     }
 
@@ -1667,6 +1748,12 @@ public sealed class CatalogsManager
 
         schema.SchemaVersion = entry.ToVersion;
 
+        // One place, deliberately. Every op that touches a relation lands here, so a generation bump
+        // cannot be forgotten by an apply arm — and a forgotten bump is indistinguishable from "nothing
+        // changed" to anything doing a compare-and-swap against it.
+        if (tableSchema is not null)
+            tableSchema.MetadataGeneration++;
+
         return tableSchema;
     }
 
@@ -1787,6 +1874,11 @@ public sealed class CatalogsManager
             Name = payload.TableName,
             Columns = new(payload.Columns.Length),
             Comment = payload.Comment,
+            StorageId = payload.StorageId,
+            Kind = payload.Kind,
+            ViewDefinition = payload.ViewDefinition,
+            IsPopulated = payload.IsPopulated,
+            RefreshedAt = payload.RefreshedAt,
             SchemaHistory = null,        // lazy-loaded from the retained {dbId}/meta/history:{tableId}:* keys
         };
 
@@ -2054,6 +2146,24 @@ public sealed class CatalogsManager
     /// Applies a RenameView delta by swapping the map key. The view's id is deliberately unchanged,
     /// so dependents that recorded it keep resolving across the rename.
     /// </summary>
+    /// <summary>
+    /// Applies the dependent-view rewrites carried by a rename, in the same apply as the rename
+    /// itself. Idempotent: overwriting a definition with the one already stored is a no-op, so a
+    /// re-delivered entry replays harmlessly. A view that is no longer present is skipped rather than
+    /// failing — it was dropped after the entry was proposed, and a rename must not wedge on that.
+    /// </summary>
+    private static void ApplyDependentViewRewrites(Schema schema, SchemaRenamePayload payload)
+    {
+        if (payload.DependentViewDefinitions is not { Count: > 0 } rewrites)
+            return;
+
+        foreach ((string viewName, ViewDefinition definition) in rewrites)
+        {
+            if (schema.Views.TryGetValue(viewName, out ViewSchema? view))
+                view.Definition = definition;
+        }
+    }
+
     private static TableSchema? ApplyRenameView(Schema schema, SchemaRenamePayload payload)
     {
         if (!schema.Views.TryGetValue(payload.TableName, out ViewSchema? view))
@@ -2075,6 +2185,8 @@ public sealed class CatalogsManager
         schema.Views.Remove(payload.TableName);
         view.Name = payload.NewName;
         schema.Views[payload.NewName] = view;
+
+        ApplyDependentViewRewrites(schema, payload);
 
         return null;
     }
@@ -2106,14 +2218,151 @@ public sealed class CatalogsManager
     /// </remarks>
     private static TableSchema? ApplySetMaterializedViewState(Schema schema, SchemaSetMatViewStatePayload payload)
     {
+        TableSchema? live = FindRelationById(schema, payload.TableId);
+
+        // Not found means the relation was dropped, or this entry is a replay of a swap that already
+        // moved the name onto a different id. Both are no-ops: the flags this entry carries describe
+        // a relation that is no longer the one answering to the name.
+        if (live is null)
+            return null;
+
+        if (string.IsNullOrEmpty(payload.SwapToTableId))
+        {
+            live.IsPopulated = payload.IsPopulated;
+            live.RefreshedAt = payload.RefreshedAt;
+            return live;
+        }
+
+        // Compare-and-swap on the relation's metadata. The staging relation was built from a copy of
+        // this layout taken when the rebuild started; publishing that copy over a definition that has
+        // since changed would silently erase the change — an index created during the rebuild would
+        // vanish from the schema, and its entries were never written to the new key-space either.
+        // Refused rather than merged: a heuristic merge would have to guess which side of a conflict
+        // the user meant, and guessing wrong here loses data rather than an operation.
+        if (payload.ExpectedMetadataGeneration is { } expected && live.MetadataGeneration != expected)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"The definition of materialized view '{live.Name}' changed while it was being refreshed, so the " +
+                "rebuild was discarded rather than published over it. Retry the refresh.");
+
+        // Contents may only move forward in time. Two runs that both got past the fence — a lease that
+        // lapsed under a stalled node, say — would otherwise race at the swap, and the one that finished
+        // last would win regardless of which read the newer source. Ordering by the source snapshot
+        // makes the outcome depend on the data rather than on scheduling.
+        if (payload.RefreshedAt is { } incoming && live.RefreshedAt is { } published
+            && incoming < published)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"A newer refresh of materialized view '{live.Name}' has already been published, so this " +
+                "older rebuild was discarded rather than overwriting it.");
+
+        TableSchema? built = FindRelationById(schema, payload.SwapToTableId);
+
+        if (built is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Cannot swap materialized view '{live.Name}': the rebuilt relation '{payload.SwapToTableId}' is not in the schema");
+
+        // What moves is the *contents*: the key-space the rows were written into, and the column and
+        // index definitions they were encoded against. What deliberately stays is the materialized
+        // view's identity — its id, and with it every privilege grant, dependency edge, cached result
+        // and statistic that names it. A refresh replaces what a materialized view holds; it does not
+        // replace the materialized view, and treating it as a new object would silently revoke every
+        // grant on it.
+        live.StorageId = built.EffectiveStorageId;
+        live.Columns = built.Columns;
+        live.Indexes = built.Indexes;
+        live.CheckConstraints = built.CheckConstraints;
+        live.Version = built.Version;
+        live.SchemaHistory = built.SchemaHistory;
+        live.SchemaHistoryLoader = built.SchemaHistoryLoader;
+        live.IsPopulated = payload.IsPopulated;
+        live.RefreshedAt = payload.RefreshedAt;
+
+        // Bumped on every node as part of the same apply, so the generation is identical everywhere
+        // rather than depending on which node happened to propose the refresh.
+        live.ContentsGeneration++;
+
+        // The relation the rebuild was staged under has served its purpose; only the materialized view
+        // answers for that key-space now.
+        schema.Tables.Remove(built.Name!);
+
+        return live;
+    }
+
+    /// <summary>
+    /// Completes the durable half of a materialized-view refresh swap: retires the key-space the view
+    /// has just stopped reading, and removes the meta key of the relation the rebuild was staged
+    /// under.
+    ///
+    /// <para>Runs in the same checkpoint transaction that publishes the view's new schema, so the
+    /// switch-over is one durable step — a crash cannot leave the view pointing at a key-space that
+    /// has already been retired, or leave both key-spaces live with nothing recording which is which.</para>
+    ///
+    /// <para>The retirement is a <b>deferred</b> drop: the previous contents keep their orphan record,
+    /// stay <c>RELINK</c>-able for the retention window, and are then reclaimed by the ordinary orphan
+    /// collector. Without it every refresh would leak a complete copy of the materialized view.</para>
+    /// </summary>
+    /// <remarks>
+    /// The replaced key-space has no meta key of its own — the view's single meta key described it —
+    /// so its orphan record is built from the schema that key <em>still</em> holds at this point: the
+    /// checkpoint has not overwritten it yet. Idempotent on replay: a record whose key-space no longer
+    /// appears in the stored schema means this already ran, and writing it again would resurrect a
+    /// reference to storage the collector may have purged.
+    /// </remarks>
+    private async Task RetireReplacedMaterializedViewStorageAsync(
+        DatabaseDescriptor database,
+        TableSchema view,
+        string stagingTableId,
+        SchemaChangeLogEntry entry,
+        KvTransaction tx)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? stored) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, TableKey(database.Id, view.Id!), -1, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+        if (getType == KeyValueResponseType.Get && stored?.Value is { Length: > 0 })
+        {
+            TableSchema previous = MetaJsonSerializer.Deserialize(stored.Value, MetaJsonContext.Default.TableSchema);
+            string retiredStorageId = previous.EffectiveStorageId;
+
+            // Equal means the stored schema already names the new key-space: this entry is a replay.
+            if (!string.Equals(retiredStorageId, view.EffectiveStorageId, StringComparison.Ordinal))
+            {
+                // The orphan record stands for the retired key-space, so it must present itself as a
+                // relation whose id *is* that key-space — that is what relink and the collector act on.
+                previous.Id = retiredStorageId;
+                previous.StorageId = null;
+
+                byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
+                {
+                    TableId = retiredStorageId,
+                    FormerName = view.Name ?? "",
+                    DroppedAt = entry.Ts,
+                    Schema = previous,
+                }, MetaJsonContext.Default.OrphanTableRecord);
+
+                await WriteMetaKey(kahuna, tx, OrphanKey(database.Id, retiredStorageId), orphanBytes).ConfigureAwait(false);
+            }
+        }
+
+        // The staging relation is gone from the schema; its meta key must go with it, or a reopen
+        // would load a relation that no statement can reach and that owns the view's live key-space.
+        await DeleteMetaKey(kahuna, tx, TableKey(database.Id, stagingTableId)).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Finds a live relation by its immutable id. Used where a name would be the wrong key because the
+    /// operation can outlive a concurrent rename.
+    /// </summary>
+    private static TableSchema? FindRelationById(Schema schema, string tableId)
+    {
         foreach (TableSchema candidate in schema.Tables.Values)
         {
-            if (!string.Equals(candidate.Id, payload.TableId, StringComparison.Ordinal))
-                continue;
-
-            candidate.IsPopulated = payload.IsPopulated;
-            candidate.RefreshedAt = payload.RefreshedAt;
-            return candidate;
+            if (string.Equals(candidate.Id, tableId, StringComparison.Ordinal))
+                return candidate;
         }
 
         return null;
@@ -2293,6 +2542,11 @@ public sealed class CatalogsManager
         schema.Tables.Remove(payload.TableName);
         tableSchema.Name = payload.NewName;
         schema.Tables.Add(payload.NewName, tableSchema);
+
+        // Same apply as the rename: no node ever sees a dependent body naming the old relation, and
+        // there is no interval in which the freed name could be claimed by something else and read
+        // through a stale body.
+        ApplyDependentViewRewrites(schema, payload);
 
         return tableSchema;
     }
@@ -3101,6 +3355,95 @@ public sealed class CatalogsManager
     // Orphan table records (deferred drop / relink / GC reclamation)
     // -----------------------------------------------------------------------
 
+    // ── Materialized-view refresh jobs (staging ownership + reclamation) ───────
+
+    private static string RefreshJobKeyPrefix(string dbId) => $"{dbId}/meta/mvrefresh:";
+    private static string RefreshJobKey(string dbId, string viewTableId) => $"{RefreshJobKeyPrefix(dbId)}{viewTableId}";
+
+    /// <summary>
+    /// Records that a refresh is building into a staging relation, so that relation has a durable owner
+    /// even if this process never runs again. Written before the staging relation is created: a record
+    /// with no relation is inert, whereas a relation with no record is an untracked leak.
+    /// </summary>
+    public async Task PersistRefreshJobAsync(DatabaseDescriptor database, MaterializedViewRefreshJob job)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+        try
+        {
+            byte[] bytes = MetaJsonSerializer.Serialize(job, MetaJsonContext.Default.MaterializedViewRefreshJob);
+            await WriteMetaKey(database.Kahuna.Kahuna, tx, RefreshJobKey(database.Id, job.ViewTableId), bytes).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Removes a refresh job record: the attempt finished, or its staging storage was reclaimed.</summary>
+    public async Task DeleteRefreshJobAsync(DatabaseDescriptor database, string viewTableId)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+        try
+        {
+            await DeleteMetaKey(database.Kahuna.Kahuna, tx, RefreshJobKey(database.Id, viewTableId)).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Reads the refresh job recorded for one materialized view, or null when none is in flight.</summary>
+    public async Task<MaterializedViewRefreshJob?> TryGetRefreshJobAsync(DatabaseDescriptor database, string viewTableId)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, RefreshJobKey(database.Id, viewTableId), -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 })
+            return null;
+
+        return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.MaterializedViewRefreshJob);
+    }
+
+    /// <summary>
+    /// Every refresh job recorded in this database. Used by the background reclaimer, which is what
+    /// covers the cases a later refresh cannot: a materialized view that was dropped, or that is simply
+    /// never refreshed again.
+    /// </summary>
+    public Task<List<MaterializedViewRefreshJob>> ListRefreshJobsAsync(DatabaseDescriptor database)
+        => ListRefreshJobsAsync(database.Kahuna.Kahuna, database.Id);
+
+    /// <summary>
+    /// The same listing, by database id, for callers that do not have the database open.
+    /// </summary>
+    /// <remarks>
+    /// Exists so the background sweep can ask "is there anything to reclaim here" without opening every
+    /// database on every tick — which is real work, and on a busy node is also avoidable contention.
+    /// </remarks>
+    public static async Task<List<MaterializedViewRefreshJob>> ListRefreshJobsAsync(IKahuna kahuna, string dbId)
+    {
+        string metaBucket = $"{dbId}/meta";
+        string prefix = RefreshJobKeyPrefix(dbId);
+        List<MaterializedViewRefreshJob> jobs = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        {
+            if (!key.StartsWith(prefix, StringComparison.Ordinal) || entry.Value is null)
+                continue;
+
+            jobs.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.MaterializedViewRefreshJob));
+        }
+
+        return jobs;
+    }
+
     private static string OrphanKeyPrefix(string dbId) => $"{dbId}/meta/orphan:";
     private static string OrphanKey(string dbId, string tableId) => $"{OrphanKeyPrefix(dbId)}{tableId}";
 
@@ -3616,6 +3959,17 @@ public sealed class CatalogsManager
             );
     }
 
+    /// <summary>
+    /// The form of a table's schema that is written to its meta key: everything except the retained
+    /// column history, which lives in its own per-version keys.
+    /// </summary>
+    /// <remarks>
+    /// This projection is the durable record of the relation, so every field that must survive a
+    /// reopen has to be listed here — a field omitted is silently lost on the next restart while
+    /// looking perfectly correct in memory for the whole life of the process. That is why the
+    /// materialized-view fields are here: without them a materialized view would come back from disk
+    /// as an ordinary table, readable and writable and with no way left to refresh it.
+    /// </remarks>
     private static TableSchema WithoutHistory(TableSchema tableSchema)
     {
         return new()
@@ -3628,6 +3982,13 @@ public sealed class CatalogsManager
             CheckConstraints = tableSchema.CheckConstraints,
             Settings = tableSchema.Settings,
             Comment = tableSchema.Comment,
+            StorageId = tableSchema.StorageId,
+            ContentsGeneration = tableSchema.ContentsGeneration,
+            MetadataGeneration = tableSchema.MetadataGeneration,
+            Kind = tableSchema.Kind,
+            ViewDefinition = tableSchema.ViewDefinition,
+            IsPopulated = tableSchema.IsPopulated,
+            RefreshedAt = tableSchema.RefreshedAt,
             SchemaHistory = null
         };
     }

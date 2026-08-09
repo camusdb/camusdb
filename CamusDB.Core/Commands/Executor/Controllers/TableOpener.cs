@@ -101,17 +101,22 @@ internal sealed class TableOpener
 
     private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
+        // Rows and index entries are addressed by the STORAGE id, which is the relation's own id for
+        // everything except a materialized view that has been refreshed — a refresh replaces the
+        // key-space while deliberately keeping the identity that grants and dependencies are hung on.
+        string storageId = tableSchema.EffectiveStorageId;
+
         (KvTableStore store, HLCTimestamp forkTimestamp)[]? ancestorStores =
             database.Ancestors.Count > 0
                 ? database.Ancestors
                     .Select(a => (
-                        new KvTableStore(database.Kahuna.Kahuna, database.Options, a.DatabaseId, tableSchema.Id!, tableSchema.Name ?? "", logger),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
+                        new KvTableStore(database.Kahuna.Kahuna, database.Options, a.DatabaseId, storageId, tableSchema.Name ?? "", logger),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
                         a.ForkTimestamp
                     ))
                     .ToArray()
                 : null;
 
-        KvTableStore store = new(database.Kahuna.Kahuna, database.Options, database.Id, tableSchema.Id!, tableSchema.Name ?? "", logger, ancestorStores, database.Name);
+        KvTableStore store = new(database.Kahuna.Kahuna, database.Options, database.Id, storageId, tableSchema.Name ?? "", logger, ancestorStores, database.Name);
 
         // Key-range sharding (opt-in): mark this table's row and eligible index key spaces as
         // key-range routed on the local node and auto-seed their initial whole-space descriptors.

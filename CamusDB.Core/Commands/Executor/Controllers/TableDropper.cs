@@ -92,7 +92,7 @@ internal sealed class TableDropper
                     filters: null
                 );
 
-                await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+                await rowDeleter.Delete(queryExecutor, database, table, deleteTicket, allowMaterializedView: true).ConfigureAwait(false);
             }
         }
 

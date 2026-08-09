@@ -20,6 +20,17 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// </summary>
 public sealed class UserRecord
 {
+    /// <summary>
+    /// Immutable identity, allocated once when the user is created and never reused.
+    ///
+    /// <para>The name is not an identity: it is droppable and re-creatable, so anything that stores
+    /// "who owns this" by name would silently transfer to whoever next claims the name. A view's owner
+    /// is stored as this id for exactly that reason. Null on records written before the field existed;
+    /// such an owner cannot be verified and is therefore treated as absent rather than as matching.
+    /// </para>
+    /// </summary>
+    public string? Id { get; set; }
+
     /// <summary>User-visible name in its original case.</summary>
     public string Name { get; set; } = "";
 
@@ -45,6 +56,7 @@ public sealed class UserRecord
     /// <summary>Returns a field-complete copy so a mutation path never accidentally drops a field.</summary>
     public UserRecord Copy() => new()
     {
+        Id = Id,
         Name = Name,
         Credential = Credential is null ? null : new Credential
         {

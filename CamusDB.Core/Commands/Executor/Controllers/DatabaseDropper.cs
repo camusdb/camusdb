@@ -371,9 +371,22 @@ internal sealed class DatabaseDropper
     /// table fence, that the table is not live (its per-table meta key is absent) before purging — this
     /// method does not re-check.</para>
     /// </summary>
-    internal async Task<bool> PurgeTableKeyspaceAsync(IKahuna kahuna, string dbId, string tableId, CancellationToken ct = default)
+    /// <param name="tableId">
+    /// The relation's immutable identity. Its meta, stats, orphan and keyspace-catalog keys are all
+    /// filed under this.
+    /// </param>
+    /// <param name="storageId">
+    /// The key-space the rows and index entries actually occupy, when that differs from the identity —
+    /// which it does for a materialized view that has been refreshed, because a refresh replaces the
+    /// storage while deliberately keeping the identity. Null means the two are the same, as for every
+    /// ordinary table. Purging the identity's key-space in that case would delete nothing and silently
+    /// leave a full copy of the relation behind forever.
+    /// </param>
+    internal async Task<bool> PurgeTableKeyspaceAsync(
+        IKahuna kahuna, string dbId, string tableId, string? storageId = null, CancellationToken ct = default)
     {
         string catalogKey = $"{dbId}/meta/keyspace:{tableId}";
+        string dataId = string.IsNullOrEmpty(storageId) ? tableId : storageId;
 
         // Collect index ids from the keyspace catalog (grow-only; survives DROP TABLE). A failed read
         // means index buckets may be missed, so it counts against completion.
@@ -403,9 +416,9 @@ internal sealed class DatabaseDropper
         // record is NOT touched here; it is the recovery marker and is deleted only if everything else
         // is confirmed gone, so an incomplete purge leaves the record for a later sweep to finish.
         bool complete = catalogRead;
-        complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/", ct).ConfigureAwait(false);
+        complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{dataId}:r", $"{dbId}:{dataId}:r/", ct).ConfigureAwait(false);
         foreach (string indexId in indexIds)
-            complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{tableId}:i:{indexId}", $"{dbId}:{tableId}:i:{indexId}/", ct).ConfigureAwait(false);
+            complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{dataId}:i:{indexId}", $"{dbId}:{dataId}:i:{indexId}/", ct).ConfigureAwait(false);
 
         foreach (string key in new[]
         {

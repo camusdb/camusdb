@@ -86,7 +86,7 @@ internal sealed class QueryScanner
 
         // Full table scan: the entire row-bucket range is a dependency (catches phantom inserts).
         deps?.RecordRange(table.Store.RowKeySpace);
-        deps?.RecordSchema(table.Id, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         // One RowLayout per stored schema version. Most scans touch only one version so this
         // holds one entry; mixed-version scans hold a handful. The layout is identical for all
@@ -204,7 +204,7 @@ internal sealed class QueryScanner
 
         // Full index scan: record the index bucket range and the schema version.
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
-        deps?.RecordSchema(table.Id, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         // Focused scan instrumentation for the index-driven scan shape. Recorded once on completion
         // (covering path's yield break and the paged path both flow through finally).

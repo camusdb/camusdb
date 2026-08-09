@@ -235,6 +235,39 @@ public sealed class SchemaReplicator
             if (entry.Op == SchemaOp.RenameTable)
                 database.TableDescriptors.TryRemove(payload.NewName, out _);
         }
+
+        // A materialized-view refresh swap moves a different relation — a different table id, and so a
+        // different keyspace and different column ids — under the same name. Both names must be
+        // evicted: the view's own, whose cached descriptor still reads the replaced relation, and the
+        // name the rebuilt relation was staged under, whose descriptor would otherwise be handed to
+        // the *next* refresh's staging relation and silently write rows into the previous one.
+        if (entry.Op == SchemaOp.SetMaterializedViewState && tableSchema?.Name is not null)
+        {
+            SchemaSetMatViewStatePayload payload = DecodePayload<SchemaSetMatViewStatePayload>(entry);
+            if (!string.IsNullOrEmpty(payload.SwapToTableId))
+            {
+                database.TableDescriptors.TryRemove(tableSchema.Name, out _);
+                database.TableDescriptors.TryRemove(
+                    MaterializedViewNaming.StagingRelationName(payload.TableId, payload.SwapToTableId), out _);
+
+                // Cached results and statistics are invalidated HERE — in the replicated apply, which
+                // runs on every node — and deliberately not at the statement that proposed the swap.
+                // A refresh keeps the relation's id and its schema version, so nothing a cached result
+                // or a costed plan keys on changes; a node that did not issue the statement would go on
+                // answering from rows the swap retired, and costing plans against a distribution that
+                // no longer describes anything. The proposer reaches this same callback, so it needs no
+                // separate invalidation of its own.
+                //
+                // Cached plans need no explicit eviction: they are validated against the descriptor's
+                // IndexSetGeneration, which comes from a process-global counter, so the descriptor
+                // eviction above guarantees the rebuild cannot alias the value a stale plan captured.
+                if (tableSchema.Id is { Length: > 0 } relationId)
+                {
+                    database.Cache?.InvalidateByTableId(database.Id, relationId);
+                    database.EvictTableStatistics?.Invoke(relationId);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -498,7 +531,18 @@ public sealed class SchemaReplicator
             SchemaHistory = table.SchemaHistory is null
                 ? null
                 : table.SchemaHistory.Select(CloneHistory).ToList(),
-            SchemaHistoryLoader = table.SchemaHistoryLoader
+            SchemaHistoryLoader = table.SchemaHistoryLoader,
+            // Whether a relation is a materialized view, and what query defines it, must survive the
+            // clone for the same reason its indexes must: this clone is what schema deltas are
+            // dry-run against, so a clone that reports every relation as a plain table would validate
+            // a refresh swap against a schema in which no materialized view exists.
+            StorageId = table.StorageId,
+            ContentsGeneration = table.ContentsGeneration,
+            MetadataGeneration = table.MetadataGeneration,
+            Kind = table.Kind,
+            ViewDefinition = table.ViewDefinition,
+            IsPopulated = table.IsPopulated,
+            RefreshedAt = table.RefreshedAt
         };
     }
 

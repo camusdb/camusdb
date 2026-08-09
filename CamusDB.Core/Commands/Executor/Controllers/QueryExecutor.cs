@@ -628,7 +628,7 @@ internal sealed class QueryExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
-        deps?.RecordSchema(table.Id, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         if (plan.IndexOnly)
         {
@@ -713,7 +713,7 @@ internal sealed class QueryExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
-        deps?.RecordSchema(table.Id, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         // Acquire a range lock scoped to [fromBound, toBound]. Shared for SELECT; Exclusive for
         // UPDATE/DELETE so concurrent Serializable+RW readers cannot enter the mutated sub-range.
@@ -829,7 +829,7 @@ internal sealed class QueryExecutor
         QueryDependencyCollector? deps = plan.DepCollector;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
-        deps?.RecordSchema(table.Id, table.Schema.Version);
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
@@ -1038,7 +1038,7 @@ internal sealed class QueryExecutor
     /// </summary>
     private static bool SchemaDepsCurrent(QueryDependencySet deps, DatabaseDescriptor database)
     {
-        foreach ((string tableId, int expectedVersion) in deps.SchemaDeps)
+        foreach ((string tableId, int expectedVersion, long expectedContents) in deps.SchemaDeps)
         {
             TableSchema? schema = null;
             foreach (TableSchema s in database.Schema.Tables.Values)
@@ -1049,6 +1049,8 @@ internal sealed class QueryExecutor
                 return false;  // table was dropped
             if (schema.Version != expectedVersion)
                 return false;  // schema changed (column add/drop/rename, index add/drop)
+            if (schema.ContentsGeneration != expectedContents)
+                return false;  // a materialized-view refresh replaced the rows these were read from
         }
         return true;
     }

@@ -61,7 +61,7 @@ internal sealed class DependencyIndex
             ids.Add(entryId);
         }
 
-        foreach ((string tableId, _) in deps.SchemaDeps)
+        foreach ((string tableId, _, _) in deps.SchemaDeps)
         {
             string key = databaseId + ":" + tableId;
             if (!_schemaIndex.TryGetValue(key, out HashSet<string>? ids))
@@ -96,7 +96,7 @@ internal sealed class DependencyIndex
             }
         }
 
-        foreach ((string tableId, _) in deps.SchemaDeps)
+        foreach ((string tableId, _, _) in deps.SchemaDeps)
         {
             string key = databaseId + ":" + tableId;
             if (_schemaIndex.TryGetValue(key, out HashSet<string>? ids))

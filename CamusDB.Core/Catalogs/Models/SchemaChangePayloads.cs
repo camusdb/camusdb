@@ -138,6 +138,19 @@ public sealed class SchemaSetMatViewStatePayload
     /// change is the swap half of a build-and-swap refresh. Null for a plain flag update.
     /// </summary>
     public string? SwapToTableId { get; set; }
+
+    /// <summary>
+    /// The materialized view's metadata generation when the rebuild began, for a swap to compare
+    /// against before publishing. Null skips the check — a plain flag update replaces no definition
+    /// and so cannot lose one.
+    /// </summary>
+    /// <remarks>
+    /// Carried in the payload rather than checked only at the proposer so the comparison happens
+    /// inside the apply: it is then evaluated during the dry-run under the schema lock (which is what
+    /// aborts the refresh) and again on every node, so a swap can never be applied somewhere its
+    /// precondition does not hold.
+    /// </remarks>
+    public long? ExpectedMetadataGeneration { get; set; }
 }
 
 public sealed class SchemaAlterColumnPayload
@@ -226,6 +239,25 @@ public sealed class SchemaDropTablePayload
 /// </summary>
 public sealed class SchemaRelinkTablePayload
 {
+    /// <summary>
+    /// The relation's own key-space when it differs from its id — a refreshed materialized view. Null
+    /// for every ordinary table. Carried so a relink reattaches to the storage that actually holds the
+    /// retained rows rather than to an empty prefix named after the identity.
+    /// </summary>
+    public string? StorageId { get; set; }
+
+    /// <summary>Whether the reattached relation is a table or a materialized view.</summary>
+    public RelationKind Kind { get; set; }
+
+    /// <summary>The defining query, so a relinked materialized view can still be refreshed.</summary>
+    public ViewDefinition? ViewDefinition { get; set; }
+
+    /// <summary>Whether the retained contents are a populated materialization.</summary>
+    public bool IsPopulated { get; set; }
+
+    /// <summary>The snapshot the retained contents are consistent as of.</summary>
+    public HLCTimestamp? RefreshedAt { get; set; }
+
     public string? TableId { get; set; }
 
     public string TableName { get; set; } = "";
@@ -285,6 +317,21 @@ public enum SchemaRenameKind
 /// </summary>
 public sealed class SchemaRenamePayload
 {
+    /// <summary>
+    /// The rewritten bodies of every view that reads the relation being renamed, keyed by view name,
+    /// applied in the <b>same</b> delta as the rename. Null when nothing depends on it.
+    /// </summary>
+    /// <remarks>
+    /// They ride the rename rather than following it as separate deltas because the gap between two
+    /// deltas is not merely a window of unavailability. A view whose stored body still names the old
+    /// relation does not fail during that gap — it <em>resolves</em>, and if anything has since created
+    /// a new relation under the freed name it resolves to that one and returns its rows. One delta
+    /// removes the gap: every node observes the complete old graph or the complete new one. It also
+    /// removes the second failure mode, where a crash or leadership change between deltas left the
+    /// rewrites permanently half-applied.
+    /// </remarks>
+    public Dictionary<string, ViewDefinition>? DependentViewDefinitions { get; set; }
+
     /// <summary>Current (pre-rename) table name. Always the table being touched.</summary>
     public string TableName { get; set; } = "";
 

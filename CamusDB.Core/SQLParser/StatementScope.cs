@@ -45,6 +45,42 @@ public static class StatementScope
         NodeType.Grant or NodeType.Revoke;
 
     /// <summary>
+    /// True for schema DDL: statements that change what objects a database contains, run inside their
+    /// own DDL transaction, and return no rows.
+    ///
+    /// <para>Its purpose is to let the <b>non-query</b> entry point accept them. A client routes every
+    /// non-SELECT statement to whichever endpoint it uses for those, so DDL arrives there as readily
+    /// as at the DDL endpoint — and a statement that works through one and reports "unknown statement"
+    /// through the other is, to that client, indistinguishable from one the server does not support.
+    /// The non-query path recognizes them here and hands them to the same implementation rather than
+    /// carrying a second copy of it.</para>
+    ///
+    /// <para>Deliberately excluded: <c>CREATE TABLE … AS SELECT</c> and the <c>COMMENT ON</c> family,
+    /// which the non-query path already handles itself — the first because it writes rows and returns
+    /// the table it created, the second because it is reachable without a DDL transaction. Also
+    /// excluded is <c>REFRESH MATERIALIZED VIEW</c>, which is not DDL at all: it replaces a relation's
+    /// contents and reports a row count.</para>
+    /// </summary>
+    public static bool IsSchemaDdl(NodeType nodeType) => nodeType is
+        NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink or
+        NodeType.DropTable or NodeType.DropTableIfExists or
+        NodeType.AlterTableAddColumn or NodeType.AlterTableDropColumn or
+        NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists or
+        NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists or
+        NodeType.AlterTableDropIndex or
+        NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey or
+        NodeType.AlterTableRenameTo or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex or
+        NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableDropConstraint or
+        NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull or
+        NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or
+        NodeType.CreateView or NodeType.CreateOrReplaceView or
+        NodeType.DropView or NodeType.DropViewIfExists or
+        NodeType.AlterViewRenameTo or NodeType.AlterViewOwnerTo or
+        NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists or
+        NodeType.DropMaterializedView or NodeType.DropMaterializedViewIfExists or
+        NodeType.AlterMaterializedViewRenameTo;
+
+    /// <summary>
     /// True for statements that are valid without a context database — every database-scoped
     /// mutation above, plus the server-level introspection statements, which resolve their own
     /// target (or none at all) rather than reading the current database's schema.

@@ -15,9 +15,9 @@ public readonly struct ExecuteDDLSQLResult
     public bool Success { get; }
 
     /// <summary>
-    /// Rows written by a DDL statement that also loads data — today only
-    /// <c>CREATE TABLE … AS SELECT</c>. Zero for every other DDL statement, which writes no rows at
-    /// all, and for a CTAS created <c>WITH NO DATA</c> or skipped by <c>IF NOT EXISTS</c>.
+    /// Rows written by a DDL statement that also loads data — <c>CREATE TABLE … AS SELECT</c> and
+    /// <c>CREATE MATERIALIZED VIEW</c>. Zero for every other DDL statement, which writes no rows at
+    /// all, and for either of those created <c>WITH NO DATA</c> or skipped by <c>IF NOT EXISTS</c>.
     /// </summary>
     public int ModifiedRows { get; }
 

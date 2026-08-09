@@ -139,6 +139,7 @@ public sealed class RowUpdater
 
     internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket)
     {
+        MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
 
         UpdateFluxState state = new(

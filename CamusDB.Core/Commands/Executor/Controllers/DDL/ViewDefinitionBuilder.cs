@@ -35,7 +35,8 @@ internal static class ViewDefinitionBuilder
         IReadOnlyList<DerivedColumnSchema> derived,
         NodeAst? columnAliasList,
         CheckOptionKind checkOption,
-        string? owner)
+        string? owner,
+        string? ownerId = null)
     {
         RejectTimeTravelBody(bodyAst);
 
@@ -102,6 +103,7 @@ internal static class ViewDefinitionBuilder
             DependsOnViewIds = viewIds,
             CheckOption = checkOption,
             Owner = owner,
+            OwnerId = ownerId,
         };
     }
 

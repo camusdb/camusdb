@@ -327,6 +327,25 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string RefreshAlreadyInProgress = "CADB0532";
 
+    /// <summary>
+    /// A statement CamusDB parses but has not implemented.
+    ///
+    /// <para>Distinct from a syntax error on purpose: the statement is well-formed and will one day
+    /// do what it says, so the message names the missing capability and, where one exists, the form
+    /// that works today. Silently accepting it as a synonym for a near-enough behavior would be
+    /// worse than refusing — the caller would believe it got what it asked for. Maps to HTTP 501.</para>
+    /// </summary>
+    public const string FeatureNotSupported = "CADB0533";
+
+    /// <summary>
+    /// An operation that derives a new definition from one it read found that definition changed
+    /// underneath it, and refused to publish over the change.
+    ///
+    /// <para>Retryable: the operation lost a race, nothing was applied, and running it again against
+    /// the current definition is the correct response. Maps to HTTP 409.</para>
+    /// </summary>
+    public const string ConcurrentSchemaChange = "CADB0534";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -474,6 +493,8 @@ public static class CamusDBErrorCodes
         ViewAlreadyExists => 409,
         DependentObjectsExist => 409,
         RefreshAlreadyInProgress => 409,
+        FeatureNotSupported => 501,
+        ConcurrentSchemaChange => 409,
         PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

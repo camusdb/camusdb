@@ -38,6 +38,56 @@ public sealed class TableSchema
     public string? Name { get; set; }
 
     /// <summary>
+    /// The key-space this relation's rows and index entries actually live under, when that is not
+    /// <see cref="Id"/>. Null — the case for every ordinary table — means the two are the same.
+    ///
+    /// <para>They come apart for exactly one reason: a materialized-view refresh builds its new
+    /// contents in a fresh key-space and then adopts it. <see cref="Id"/> has to stay put across that,
+    /// because it is the relation's <b>identity</b> — privilege grants, the views that depend on it,
+    /// the result cache and the statistics are all keyed by it, and changing it would silently revoke
+    /// every grant on the materialized view and orphan everything else, as though a refresh had
+    /// dropped and recreated the object. It did not: the object is continuous, only its contents were
+    /// replaced.</para>
+    ///
+    /// <para>So: use <see cref="Id"/> to talk <em>about</em> the relation, and
+    /// <see cref="EffectiveStorageId"/> to read or write its rows.</para>
+    /// </summary>
+    public string? StorageId { get; set; }
+
+    /// <summary>The key-space to read and write this relation's rows and index entries under.</summary>
+    [JsonIgnore]
+    public string EffectiveStorageId => string.IsNullOrEmpty(StorageId) ? Id ?? "" : StorageId;
+
+    /// <summary>
+    /// Advances every time a materialized view's contents are replaced. Zero on an ordinary table.
+    ///
+    /// <para>Identity cannot double as a contents version. <see cref="Id"/> deliberately survives a
+    /// refresh so grants and dependencies survive with it, and <see cref="Version"/> describes the row
+    /// <em>encoding</em>, which a refresh does not change — so after a swap every field a cache or a
+    /// plan would key on looks exactly as it did before, while the rows underneath are entirely
+    /// different ones in a different key-space. This is the field that differs, and it is what lets
+    /// anything holding a result computed from the old contents notice.</para>
+    /// </summary>
+    public long ContentsGeneration { get; set; }
+
+    /// <summary>
+    /// Advances on <b>every</b> replicated change to this relation's metadata — columns, indexes,
+    /// constraints, settings, comment, name, contents.
+    ///
+    /// <para>It exists so an operation that reads a relation's definition, works for a while, and then
+    /// writes a definition derived from what it read can tell whether anything moved underneath it.
+    /// A materialized-view refresh is exactly that shape: it copies the column and index layout when
+    /// it starts staging, rebuilds for as long as that takes, and then publishes. Without a generation
+    /// to compare, an index created during the rebuild is silently erased by the publish — the copy it
+    /// writes back predates the index.</para>
+    ///
+    /// <para>Bumped in one place (the schema-delta dispatcher) rather than in each apply arm, because
+    /// the value of this field is that it cannot be forgotten: an arm that failed to bump it would
+    /// reintroduce precisely the lost-update it exists to prevent.</para>
+    /// </summary>
+    public long MetadataGeneration { get; set; }
+
+    /// <summary>
     /// The list of columns that make up the table
     /// </summary>
     public List<TableColumnSchema>? Columns { get; set; }

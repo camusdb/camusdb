@@ -72,19 +72,38 @@ internal static class ViewDependencyMaintainer
     /// <para>Idempotent: a body that already names <paramref name="newName"/> renders identically and
     /// is skipped, so a replay or a partially-completed rewrite can be re-run safely.</para>
     /// </remarks>
-    public static async Task RewriteAfterRelationRenameAsync(
-        CatalogsManager catalogs,
-        DatabaseDescriptor database,
+    /// <summary>
+    /// Builds the rewritten body of every view that reads <paramref name="relationId"/>, so a rename
+    /// can carry them in its own delta. Returns null when nothing depends on the relation.
+    /// </summary>
+    /// <remarks>
+    /// Computed against one schema snapshot and applied with the rename as a single transition. The
+    /// alternative — rename first, rewrite afterwards — leaves a window in which a stale body names a
+    /// relation that no longer exists; and because the old name is free the moment the rename commits,
+    /// anything that creates a relation under it during that window makes the stale body resolve to
+    /// <em>that</em> relation and return its rows. A wrong answer, not an outage.
+    /// </remarks>
+    public static Dictionary<string, ViewDefinition>? BuildRenameRewrites(
+        Schema schema,
         string relationId,
         string oldName,
         string newName,
         Func<string, NodeAst> parse)
     {
-        List<string> dependents = ViewDependencyGraph.DirectDependentsOfTable(database.Schema, relationId);
+        Dictionary<string, ViewDefinition>? rewrites = null;
+
+        // Both edge kinds. A dependent records the relation it reads in DependsOnTableIds or in
+        // DependsOnViewIds depending on what that relation is, and a rename has to reach the
+        // dependents either way — consulting only one list silently skips every view that reads a
+        // renamed *view*, which is exactly the case the stale body would then resolve wrongly.
+        IEnumerable<string> dependents = ViewDependencyGraph
+            .DirectDependentsOfTable(schema, relationId)
+            .Concat(ViewDependencyGraph.DirectDependentsOfView(schema, relationId))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
 
         foreach (string viewName in dependents)
         {
-            if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? view) || view.Definition is null)
+            if (!schema.Views.TryGetValue(viewName, out ViewSchema? view) || view.Definition is null)
                 continue;
 
             NodeAst body = parse(view.Definition.Sql);
@@ -93,7 +112,8 @@ internal static class ViewDependencyMaintainer
             if (ReferenceEquals(rewritten, body))
                 continue;
 
-            ViewDefinition updated = new()
+            rewrites ??= new(StringComparer.OrdinalIgnoreCase);
+            rewrites[viewName] = new ViewDefinition
             {
                 Sql = ViewBodyRenderer.RenderSelect(rewritten),
                 Columns = view.Definition.Columns,
@@ -101,10 +121,13 @@ internal static class ViewDependencyMaintainer
                 DependsOnViewIds = view.Definition.DependsOnViewIds,
                 CheckOption = view.Definition.CheckOption,
                 Owner = view.Definition.Owner,
+                // Carried explicitly: dropping it would silently strip the view's ownership, and an
+                // owner that no longer resolves fails every read of the view.
+                OwnerId = view.Definition.OwnerId,
             };
-
-            await catalogs.SetViewDefinitionAsync(database, viewName, updated).ConfigureAwait(false);
         }
+
+        return rewrites;
     }
 
     /// <summary>

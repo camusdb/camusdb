@@ -21,13 +21,21 @@ public sealed class Principal
 {
     public string UserName { get; }
 
+    /// <summary>
+    /// The immutable id of the user this principal stands for, or null for a principal built from a
+    /// record that predates user ids. Used where identity must survive a rename or outlive a name —
+    /// notably view ownership, which must not transfer to a re-created username.
+    /// </summary>
+    public string? UserId { get; }
+
     public bool IsSuperuser { get; }
 
     private readonly IReadOnlyList<GrantRecord> grants;
 
-    public Principal(string userName, bool isSuperuser, IReadOnlyList<GrantRecord> grants)
+    public Principal(string userName, bool isSuperuser, IReadOnlyList<GrantRecord> grants, string? userId = null)
     {
         UserName = userName;
+        UserId = userId;
         IsSuperuser = isSuperuser;
         this.grants = grants;
     }

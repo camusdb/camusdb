@@ -199,7 +199,7 @@ public sealed class TestQueryResultCacheSchemaFence : CommandsExecutor.BaseTest
                 Rows: [], ResultFingerprint: freshFingerprint,
                 CachedAt: HLCTimestamp.Zero, Status: QueryCacheStatus.Miss,
                 HintIsStrict: false),
-            new QueryDependencySet([], [], [(currentSchema.Id!, oldVersion)]));
+            new QueryDependencySet([], [], [(currentSchema.Id!, oldVersion, 0L)]));
 
         // Probe: the fingerprint matches — the entry IS found.
         // SchemaDepsCurrent then checks dep version oldVersion ≠ currentVersion → evict →

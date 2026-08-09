@@ -21,9 +21,16 @@ internal sealed class QueryBinder
 {
     private readonly TableOpener tableOpener;
 
-    public QueryBinder(TableOpener tableOpener)
+    /// <summary>
+    /// Resolves a view owner (name plus immutable id) to the principal its body runs as, or null when
+    /// that owner can no longer be established. Null on an engine built without authentication.
+    /// </summary>
+    private readonly Func<string, string, Task<Principal?>>? resolveOwner;
+
+    public QueryBinder(TableOpener tableOpener, Func<string, string, Task<Principal?>>? resolveOwner = null)
     {
         this.tableOpener = tableOpener;
+        this.resolveOwner = resolveOwner;
     }
 
     public async Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query)
@@ -98,6 +105,13 @@ internal sealed class QueryBinder
                 }
 
                 TableDescriptor table = await tableOpener.Open(database, tableSource.TableName).ConfigureAwait(false);
+
+                // Every read resolves its sources here — top-level, join, subquery and semi-join
+                // alike — which is why the unpopulated check belongs at this point rather than at the
+                // table open: opening is also what DESCRIBE, CREATE INDEX and ANALYZE do, and all
+                // three are legitimate on a materialized view that holds no rows yet.
+                MaterializedViewAccessGuard.RequireReadable(table);
+
                 sources.Add(new BoundTableSource(tableSource, table, alias));
                 return;
             }
@@ -110,6 +124,24 @@ internal sealed class QueryBinder
                         CamusDBErrorCodes.InvalidInput,
                         $"Duplicate alias '{derivedSource.Alias}'");
                 }
+
+                // An expanded view's body binds as its OWNER, not as the caller. That is what a view
+                // is for: the caller was already checked on the view itself, and the tables underneath
+                // it are checked against whoever created it — so a view can expose a slice of a table
+                // the caller has no access to, and nothing else.
+                //
+                // The swap is scoped to this subtree rather than to the statement, which is the part
+                // that has to be right. A query may name the same table both through a view and
+                // directly; only the reference that came through the view runs with the owner's
+                // rights, and the direct one is still checked against the caller.
+                // Two steps, and the split is load-bearing. Resolving the owner is asynchronous, but an
+                // AsyncLocal written *inside* an async method is invisible to its caller — the same trap
+                // the request entry points document. So the lookup happens in an awaited call and the
+                // scope is entered by a synchronous constructor here, where the write does flow into the
+                // BindAsync below.
+                Principal? owner = await ResolveOwnerAsync(derivedSource).ConfigureAwait(false);
+
+                using OwnerScope _ = new(owner);
 
                 BoundSelectQuery innerBound = await BindAsync(database, derivedSource.Query).ConfigureAwait(false);
                 IReadOnlyList<DerivedColumnSchema> columns =
@@ -134,6 +166,69 @@ internal sealed class QueryBinder
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported query source: {source.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// Swaps the ambient principal to a view's owner for the duration of binding that view's body.
+    /// Returns a no-op scope for a derived table the user wrote themselves, and on an engine with
+    /// authentication disabled.
+    /// </summary>
+    /// <remarks>
+    /// Fails closed. An owner that no longer resolves — the user was dropped, or the view was created
+    /// before owners were recorded — refuses the read rather than falling back to the caller's own
+    /// rights, because that fallback would silently convert a definer's-rights view into an
+    /// invoker's-rights one and hand out access the view was written to withhold.
+    /// </remarks>
+    private async Task<Principal?> ResolveOwnerAsync(DerivedTableSource derivedSource)
+    {
+        if (resolveOwner is null || derivedSource.OwnerId is not { Length: > 0 } ownerId)
+            return null;
+
+        // Nothing to swap on an unauthenticated flow: there is no principal, and the per-table check
+        // is skipped anyway.
+        if (AuthorizationContext.Current.Principal is null)
+            return null;
+
+        Principal? owner = await resolveOwner(derivedSource.OwnerName ?? "", ownerId).ConfigureAwait(false);
+
+        if (owner is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege,
+                $"The owner of view '{derivedSource.Alias}' no longer exists, so the view cannot be read. " +
+                "Recreate it under a current user, or transfer it with ALTER VIEW ... OWNER TO.");
+
+        return owner;
+    }
+
+    /// <summary>
+    /// Restores the previous authorization scope when disposed, on every path including an exception
+    /// thrown while binding the view's body — a body that throws must not leave the owner's principal
+    /// ambient for the rest of the statement.
+    /// </summary>
+    private readonly struct OwnerScope : IDisposable
+    {
+        private readonly AuthorizationScope previous;
+        private readonly bool entered;
+
+        internal OwnerScope(Principal? owner)
+        {
+            if (owner is null)
+            {
+                previous = default;
+                entered = false;
+                return;
+            }
+
+            previous = AuthorizationContext.Current;
+            entered = true;
+            AuthorizationContext.Current = previous with { Principal = owner };
+        }
+
+        public void Dispose()
+        {
+            if (entered)
+                AuthorizationContext.Current = previous;
         }
     }
 

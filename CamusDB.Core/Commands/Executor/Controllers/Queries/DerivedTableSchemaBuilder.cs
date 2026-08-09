@@ -53,6 +53,12 @@ internal static class DerivedTableSchemaBuilder
         new("create view", ColumnType.String),
     ];
 
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateMaterializedViewSchema =
+    [
+        new("materialized_view", ColumnType.String),
+        new("create materialized view", ColumnType.String),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowColumnsSchema =
     [
         new("Field",   ColumnType.String),

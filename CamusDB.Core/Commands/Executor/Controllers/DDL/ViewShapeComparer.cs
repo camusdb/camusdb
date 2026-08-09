@@ -62,28 +62,66 @@ internal static class ViewShapeComparer
 /// </summary>
 internal static class ViewDependencyGraph
 {
-    /// <summary>Names of the views that read <paramref name="relationId"/>, directly only.</summary>
+    /// <summary>
+    /// Every stored definition in the database, plain views and materialized views alike, as
+    /// (name, definition) pairs.
+    /// </summary>
+    /// <remarks>
+    /// A materialized view is a dependency <b>consumer</b> as much as a plain view is — it stores a
+    /// query and reads whatever that query names — but its definition lives on a
+    /// <see cref="TableSchema"/> in <see cref="Schema.Tables"/> rather than in
+    /// <see cref="Schema.Views"/>. Walking only the view map made every one of those edges invisible:
+    /// a base table could be dropped out from under a materialized view, a rename would leave its
+    /// stored body naming a relation that no longer exists (failing at the next refresh, not at the
+    /// rename), and a cascade would stop at the first materialized view in the chain. Both maps, one
+    /// walk.
+    /// </remarks>
+    private static IEnumerable<(string Name, ViewDefinition Definition)> AllDefinitions(Schema schema)
+    {
+        foreach ((string name, ViewSchema view) in schema.Views)
+        {
+            if (view.Definition is { } definition)
+                yield return (name, definition);
+        }
+
+        foreach ((string name, TableSchema relation) in schema.Tables)
+        {
+            if (relation.IsMaterializedView && relation.ViewDefinition is { } definition)
+                yield return (name, definition);
+        }
+    }
+
+    /// <summary>Resolves a relation or view name to the id its definition is keyed by.</summary>
+    private static string? IdOf(Schema schema, string name)
+    {
+        if (schema.Views.TryGetValue(name, out ViewSchema? view))
+            return view.Id;
+
+        return schema.Tables.TryGetValue(name, out TableSchema? relation) ? relation.Id : null;
+    }
+
+    /// <summary>Names of the views and materialized views that read <paramref name="relationId"/>, directly only.</summary>
     public static List<string> DirectDependentsOfTable(Schema schema, string relationId)
     {
         List<string> dependents = [];
 
-        foreach ((string name, ViewSchema view) in schema.Views)
+        foreach ((string name, ViewDefinition definition) in AllDefinitions(schema))
         {
-            if (view.Definition?.DependsOnTableIds?.Contains(relationId, StringComparer.Ordinal) == true)
+            if (definition.DependsOnTableIds?.Contains(relationId, StringComparer.Ordinal) == true)
                 dependents.Add(name);
         }
 
         return dependents;
     }
 
-    /// <summary>Names of the views that read view <paramref name="viewId"/>, directly only.</summary>
+    /// <summary>Names of the views and materialized views that read view <paramref name="viewId"/>, directly only.</summary>
     public static List<string> DirectDependentsOfView(Schema schema, string viewId)
     {
         List<string> dependents = [];
 
-        foreach ((string name, ViewSchema view) in schema.Views)
+        foreach ((string name, ViewDefinition definition) in AllDefinitions(schema))
         {
-            if (view.Definition?.DependsOnViewIds?.Contains(viewId, StringComparer.Ordinal) == true)
+            if (definition.DependsOnViewIds?.Contains(viewId, StringComparer.Ordinal) == true)
                 dependents.Add(name);
         }
 
@@ -104,13 +142,16 @@ internal static class ViewDependencyGraph
 
         void Visit(string id)
         {
-            foreach (string dependentName in DirectDependentsOfView(schema, id))
+            // Both edge kinds: a materialized view is reached through the table edge (it is a
+            // relation), and whatever reads *it* is reached through the table edge again, so a chain
+            // that alternates between the two kinds only stays connected if both are followed.
+            foreach (string dependentName in DirectDependentsOfView(schema, id).Concat(DirectDependentsOfTable(schema, id)))
             {
                 if (!seen.Add(dependentName))
                     continue;
 
-                if (schema.Views.TryGetValue(dependentName, out ViewSchema? dependent) && dependent.Id is not null)
-                    Visit(dependent.Id);
+                if (IdOf(schema, dependentName) is { } dependentId)
+                    Visit(dependentId);
 
                 // Appended after recursing, so a view is always listed after everything that depends
                 // on it — which is the order a cascading drop has to use.
@@ -145,12 +186,12 @@ internal static class ViewDependencyGraph
             if (!visited.Add(id))
                 continue;
 
-            foreach (ViewSchema candidate in schema.Views.Values)
+            foreach ((string candidateName, ViewDefinition candidate) in AllDefinitions(schema))
             {
-                if (!string.Equals(candidate.Id, id, StringComparison.Ordinal))
+                if (!string.Equals(IdOf(schema, candidateName), id, StringComparison.Ordinal))
                     continue;
 
-                foreach (string next in candidate.Definition?.DependsOnViewIds ?? [])
+                foreach (string next in candidate.DependsOnViewIds ?? [])
                     pending.Push(next);
             }
         }

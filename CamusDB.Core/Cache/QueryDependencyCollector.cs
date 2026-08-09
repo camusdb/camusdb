@@ -60,7 +60,7 @@ internal sealed class QueryDependencyCollector
 
     private readonly HashSet<string> _rangeDeps  = new(StringComparer.Ordinal);
     private readonly HashSet<string> _pointDeps  = new(StringComparer.Ordinal);
-    private readonly List<(string TableId, int SchemaVersion)> _schemaDeps = new();
+    private readonly List<(string TableId, int SchemaVersion, long ContentsGeneration)> _schemaDeps = new();
 
     private bool _capExceeded;
     private bool _pointDepsTruncated;
@@ -145,7 +145,7 @@ internal sealed class QueryDependencyCollector
     /// Records a schema version dependency — the table ID and the schema version the plan was
     /// built against. Duplicate (tableId, version) pairs are collapsed.
     /// </summary>
-    public void RecordSchema(string tableId, int schemaVersion)
+    public void RecordSchema(string tableId, int schemaVersion, long contentsGeneration = 0)
     {
         if (_capExceeded) return;
 
@@ -156,7 +156,7 @@ internal sealed class QueryDependencyCollector
                 return;
         }
 
-        _schemaDeps.Add((tableId, schemaVersion));
+        _schemaDeps.Add((tableId, schemaVersion, contentsGeneration));
         CheckTotalCap();
     }
 

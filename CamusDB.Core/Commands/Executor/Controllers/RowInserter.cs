@@ -169,6 +169,7 @@ internal sealed class RowInserter
 
     public async Task<int> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
+        MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
 
         InsertFluxState state = new(

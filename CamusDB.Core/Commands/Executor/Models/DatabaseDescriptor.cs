@@ -192,6 +192,18 @@ public sealed record DatabaseDescriptor : IDisposable
     /// </summary>
     public IQueryResultCache? Cache { get; internal set; }
 
+    /// <summary>
+    /// Evicts one relation's cached statistics on this node, by relation id. Set by the engine that
+    /// owns the statistics manager.
+    ///
+    /// <para>It exists as a hook because the replicated schema-apply callback — the one path that runs
+    /// on <b>every</b> node — has the descriptor but not the statistics manager. Anything a refresh
+    /// must invalidate cluster-wide has to be reachable from there; invalidating only where the
+    /// statement was issued leaves every other node serving plans costed against contents that no
+    /// longer exist.</para>
+    /// </summary>
+    public Action<string>? EvictTableStatistics { get; internal set; }
+
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
     // -----------------------------------------------------------------------

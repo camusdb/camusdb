@@ -61,16 +61,21 @@ public sealed class QueryDependencySet
     public IReadOnlyList<string> PointDeps { get; }
 
     /// <summary>
-    /// Schema version facts. Each entry is a (tableId, schemaVersion) pair. The plan was
-    /// built and the rows were decoded against this schema version. An increment to any
-    /// of these versions (DDL, online column/index state change) invalidates this entry.
+    /// Schema facts. Each entry is a (tableId, schemaVersion, contentsGeneration) triple. The plan
+    /// was built and the rows decoded against that schema version, and — for a materialized view —
+    /// read from that generation of its contents.
+    ///
+    /// <para>The generation is carried separately because a materialized-view refresh moves neither
+    /// of the other two: it keeps the relation's id so grants and dependencies survive, and leaves the
+    /// schema version alone because the row encoding is unchanged. Without it, an entry computed from
+    /// contents a refresh has since retired matches every field this check compares, and is served.</para>
     /// </summary>
-    public IReadOnlyList<(string TableId, int SchemaVersion)> SchemaDeps { get; }
+    public IReadOnlyList<(string TableId, int SchemaVersion, long ContentsGeneration)> SchemaDeps { get; }
 
     public QueryDependencySet(
         IReadOnlyList<string> rangeDeps,
         IReadOnlyList<string> pointDeps,
-        IReadOnlyList<(string TableId, int SchemaVersion)> schemaDeps)
+        IReadOnlyList<(string TableId, int SchemaVersion, long ContentsGeneration)> schemaDeps)
     {
         RangeDeps  = rangeDeps;
         PointDeps  = pointDeps;

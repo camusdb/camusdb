@@ -22,7 +22,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// </summary>
 internal sealed class SelectRowSource : IAsyncDisposable
 {
-    private readonly Func<Task>? release;
+    private readonly Controllers.SnapshotHoldLease? lease;
     private int disposed;
 
     /// <summary>The source query's output columns, in projection order.</summary>
@@ -43,18 +43,29 @@ internal sealed class SelectRowSource : IAsyncDisposable
     /// the statement's own transaction. Callers use it to report a copy that read nothing, which for
     /// a time-travel source may mean the requested history has already been reclaimed.
     /// </summary>
-    public bool IsTimeTravel => release is not null;
+    public bool IsTimeTravel => lease is not null;
+
+    /// <summary>
+    /// Throws when the snapshot this source was pinned to could not be kept alive for the whole read.
+    /// A caller that publishes what it read must call this first: a lapsed hold lets revision GC
+    /// reclaim past the pinned timestamp mid-scan, which yields a quietly incomplete result rather
+    /// than an error.
+    /// </summary>
+    public void ThrowIfSnapshotLost(string what) => lease?.ThrowIfLost(what);
+
+    /// <summary>Fires if the pinned snapshot is lost, so a long drain can stop instead of finishing wrong.</summary>
+    public CancellationToken SnapshotLost => lease?.Lost ?? CancellationToken.None;
 
     public SelectRowSource(
         IReadOnlyList<DerivedColumnSchema> columns,
         IAsyncEnumerable<QueryResultRow> cursor,
         IReadOnlyList<NodeAst> projections,
-        Func<Task>? release = null)
+        Controllers.SnapshotHoldLease? lease = null)
     {
         Columns = columns;
         Cursor = cursor;
         Projections = projections;
-        this.release = release;
+        this.lease = lease;
     }
 
     /// <summary>
@@ -64,9 +75,9 @@ internal sealed class SelectRowSource : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        if (release is null || Interlocked.Exchange(ref disposed, 1) == 1)
+        if (lease is null || Interlocked.Exchange(ref disposed, 1) == 1)
             return;
 
-        await release().ConfigureAwait(false);
+        await lease.DisposeAsync().ConfigureAwait(false);
     }
 }

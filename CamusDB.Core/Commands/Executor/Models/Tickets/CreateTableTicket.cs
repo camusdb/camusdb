@@ -33,6 +33,21 @@ public readonly struct CreateTableTicket
     /// </summary>
     public string? Comment { get; }
 
+    /// <summary>
+    /// Whether the relation being created is an ordinary table or a materialized view. A materialized
+    /// view is created through this same ticket because it <i>is</i> a relation — columns, rows,
+    /// indexes and statistics all behave identically — so reusing the path is what gives it deferred
+    /// drop, relink, backup and ANALYZE without any new integration surface.
+    /// </summary>
+    public Catalogs.Models.RelationKind Kind { get; }
+
+    /// <summary>
+    /// The query that populates a materialized view. Null for an ordinary table, and required when
+    /// <see cref="Kind"/> is <c>MaterializedView</c> — a materialized view whose definition was lost
+    /// could never be refreshed again.
+    /// </summary>
+    public Catalogs.Models.ViewDefinition? ViewDefinition { get; }
+
     public CreateTableTicket(
         string databaseName,
         string tableName,
@@ -41,7 +56,9 @@ public readonly struct CreateTableTicket
         bool ifNotExists,
         CheckConstraintInfo[]? checkConstraints = null,
         string? comment = null,
-        IReadOnlyDictionary<string, string>? settings = null
+        IReadOnlyDictionary<string, string>? settings = null,
+        Catalogs.Models.RelationKind kind = Catalogs.Models.RelationKind.Table,
+        Catalogs.Models.ViewDefinition? viewDefinition = null
     )
     {
         Comment = comment;
@@ -52,6 +69,8 @@ public readonly struct CreateTableTicket
         Constraints = constraints;
         CheckConstraints = checkConstraints ?? [];
         IfNotExists = ifNotExists;
+        Kind = kind;
+        ViewDefinition = viewDefinition;
     }
 
     /// <summary>

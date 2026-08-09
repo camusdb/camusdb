@@ -79,7 +79,7 @@ public sealed class TestQueryResultCacheIntegration : BaseTest
 
     private async Task<string> PublishSchemaDep(DatabaseDescriptor db, string tableId, int version, string fp)
     {
-        QueryDependencySet deps = new([], [], [(tableId, version)]);
+        QueryDependencySet deps = new([], [], [(tableId, version, 0L)]);
         CacheGenerationToken token = Cache.PublishGate.SnapshotGenerations([]);
         await Cache.TryPublishAsync(MakeResult(db.Id, fp), token, deps);
         return fp;

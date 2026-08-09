@@ -50,6 +50,9 @@ internal sealed class DatabaseOpener
 
     private readonly IQueryResultCache? cache;
 
+    /// <summary>Evicts a relation's cached statistics; supplied by the engine that owns them.</summary>
+    private readonly Action<DatabaseDescriptor, string>? evictTableStatistics;
+
     public DatabaseOpener(
         CommandExecutor commandExecutor,
         DatabaseDescriptors databaseDescriptors,
@@ -59,7 +62,8 @@ internal sealed class DatabaseOpener
         EmbeddedKahuna? sharedNode,
         Task<DatabaseRegistry> registryTask,
         bool isClusterMode = false,
-        IQueryResultCache? cache = null)
+        IQueryResultCache? cache = null,
+        Action<DatabaseDescriptor, string>? evictTableStatistics = null)
     {
         this.commandExecutor = commandExecutor;
         this.options = options;
@@ -84,6 +88,7 @@ internal sealed class DatabaseOpener
         this.isClusterMode = isClusterMode;
         this.registryTask = registryTask;
         this.cache = cache;
+        this.evictTableStatistics = evictTableStatistics;
     }
 
     public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
@@ -97,9 +102,7 @@ internal sealed class DatabaseOpener
         // window where a concurrent drop could evict the entry between the two lookups.
         DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(name).ConfigureAwait(false);
         if (entry is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.DatabaseDoesntExist,
-                $"Database '{name}' does not exist");
+            throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, $"Database '{name}' does not exist");
 
         string id = entry.Id;
         IReadOnlyList<DatabaseBranchAncestor> ancestors = entry.Ancestors;
@@ -122,19 +125,19 @@ internal sealed class DatabaseOpener
         return descriptor;
     }
 
-    private async Task<DatabaseDescriptor> LoadDatabase(
-        string id, string name, IReadOnlyList<DatabaseBranchAncestor> ancestors)
+    private async Task<DatabaseDescriptor> LoadDatabase(string id, string name, IReadOnlyList<DatabaseBranchAncestor> ancestors)
     {
         // Both modes use the single shared node. Opening a database is a pure metadata
         // load — no per-database node is constructed, started, or flushed here.
-        Func<HLCTimestamp?, HLCTimestamp> mintLocalT = (floor) =>
+        HLCTimestamp mintLocalT(HLCTimestamp? floor)
         {
             if (floor.HasValue && !floor.Value.IsNull())
                 return sharedNode.Raft.HybridLogicalClock.ReceiveEvent(sharedNode.Raft.GetLocalNodeId(), floor.Value);
-            return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
-        };
 
-        KvTransactionsManager transactions = new(sharedNode.Kahuna, options, mintLocalT, logger, cache);
+            return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
+        }
+
+        KvTransactionsManager transactions = new(sharedNode.Kahuna, options, (Func<HLCTimestamp?, HLCTimestamp>)mintLocalT, logger, cache);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new(StringComparer.OrdinalIgnoreCase);
 
         DatabaseDescriptor databaseDescriptor = new(
@@ -149,6 +152,10 @@ internal sealed class DatabaseOpener
         {
             Cache = cache,
         };
+
+        // Bound after construction because the callback closes over the descriptor it belongs to.
+        if (evictTableStatistics is not null)
+            databaseDescriptor.EvictTableStatistics = tableId => evictTableStatistics(databaseDescriptor, tableId);
 
         await catalogs.LoadMetaAsync(databaseDescriptor).ConfigureAwait(false);
 

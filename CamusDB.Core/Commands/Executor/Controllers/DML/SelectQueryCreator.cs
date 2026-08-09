@@ -121,7 +121,18 @@ internal sealed class SelectQueryCreator
         }
 
         SelectQuery innerQuery = new SelectQueryCreator().CreateSelectQuery(derivedAst.leftAst);
-        return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext);
+
+        // Only view expansion puts a hint here — there is no syntax for one on a hand-written derived
+        // table — and only a cache hint survives that far; an index hint on a view is refused outright.
+        CacheHintOptions? cacheHint = derivedAst.extendedOne is not null
+            ? ExtractCacheHint(derivedAst.extendedOne)
+            : null;
+
+        // Set only by view expansion; a hand-written derived table has no owner and runs as the caller.
+        string? ownerId = derivedAst.extendedTwo?.yytext;
+        string? ownerName = derivedAst.extendedTwo?.leftAst?.yytext;
+
+        return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext, cacheHint, ownerName, ownerId);
     }
 
     private static string? GetForcedIndex(NodeAst rightAst)
@@ -352,6 +363,8 @@ internal sealed class SelectQueryCreator
                 break;
 
             case DerivedTableSource dts:
+                if (dts.CacheHint is { } derivedHint)
+                    found.Add(derivedHint);
                 CollectCacheHints(dts.Query.Source, found);
                 break;
         }

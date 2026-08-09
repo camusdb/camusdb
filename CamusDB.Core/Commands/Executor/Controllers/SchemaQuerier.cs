@@ -51,6 +51,12 @@ internal sealed class SchemaQuerier
 
         foreach (KeyValuePair<string, TableSchema> table in database.Schema.Tables)
         {
+            // Tables only. A materialized view is stored as a relation but is not one to a user, and
+            // it has SHOW MATERIALIZED VIEWS of its own; a staging relation is engine bookkeeping that
+            // exists for the duration of a refresh and answers to a name no client can even type.
+            if (table.Value.IsMaterializedView || MaterializedViewNaming.IsStagingRelation(table.Key))
+                continue;
+
             if (pattern is not null && !LikeMatch(table.Key, pattern))
                 continue;
 
@@ -69,12 +75,18 @@ internal sealed class SchemaQuerier
     /// LIKE <paramref name="pattern"/>. Materialized views are deliberately excluded — they are
     /// relations and have their own statement — matching how <c>SHOW TABLES</c> lists only tables.
     /// </summary>
-    internal async IAsyncEnumerable<QueryResultRow> ShowViews(DatabaseDescriptor database, string? pattern = null)
+    internal async IAsyncEnumerable<QueryResultRow> ShowViews(
+        DatabaseDescriptor database, string? pattern = null, Principal? principal = null)
     {
         await Task.CompletedTask;
 
         foreach (KeyValuePair<string, ViewSchema> view in database.Schema.Views)
         {
+            // Omitted rather than refused, exactly as SHOW TABLES treats a table the caller cannot
+            // reach: the name itself is the disclosure, so erroring would leak it just as well.
+            if (!ViewAuthorization.IsVisible(database, view.Value, principal))
+                continue;
+
             if (pattern is not null && !LikeMatch(view.Key, pattern))
                 continue;
 
@@ -149,6 +161,35 @@ internal sealed class SchemaQuerier
         {
             { "view", new ColumnValue(ColumnType.String, view.Name ?? viewName) },
             { "create view", new ColumnValue(ColumnType.String, sql.ToString()) }
+        });
+    }
+
+    /// <summary>
+    /// Renders <c>SHOW CREATE MATERIALIZED VIEW</c> from the stored definition.
+    /// </summary>
+    /// <remarks>
+    /// An unpopulated materialized view renders <c>WITH NO DATA</c> — not as decoration, but because
+    /// that is the statement which reproduces it. Re-running the output of this statement has to give
+    /// back the same object, and <c>WITH DATA</c> would give back a populated one.
+    /// </remarks>
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateMaterializedView(TableSchema view)
+    {
+        await Task.CompletedTask;
+
+        ViewDefinition definition = view.ViewDefinition
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt, $"Materialized view '{view.Name}' has no stored definition");
+
+        StringBuilder sql = new();
+        sql.Append("CREATE MATERIALIZED VIEW `").Append(view.Name).Append("` AS ").Append(definition.Sql);
+
+        if (!view.IsPopulated)
+            sql.Append(" WITH NO DATA");
+
+        yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "materialized_view", new ColumnValue(ColumnType.String, view.Name ?? "") },
+            { "create materialized view", new ColumnValue(ColumnType.String, sql.ToString()) }
         });
     }
 

@@ -108,6 +108,15 @@ public enum QueryCacheBypassReason
     Join,
 
     /// <summary>
+    /// The query reads through a view. A view is expanded into a derived table before binding, and
+    /// the result cache fences a single physical table's row keyspace per entry — a derived source
+    /// has no keyspace of its own to fence, and the tables underneath it are exactly the set that
+    /// multi-keyspace fencing does not yet cover. Reported separately from <see cref="Join"/> so a
+    /// caller is not sent looking for a join they did not write.
+    /// </summary>
+    DerivedSource,
+
+    /// <summary>
     /// A <c>{cache=name}</c> hint appeared inside a WHERE-clause subquery but not on the outer
     /// SELECT. SubqueryRewriter executes inner subqueries live and discards inner cache hints;
     /// the outer response carries this bypass reason so the hint is visible rather than silent.

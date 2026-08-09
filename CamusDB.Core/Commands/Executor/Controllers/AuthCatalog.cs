@@ -18,6 +18,7 @@ using Kahuna.Shared.KeyValue;
 using Kahuna.Shared.Sequences;
 using Kommander;
 using Kommander.Time;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -332,6 +333,9 @@ public sealed class AuthCatalog
 
             UserRecord record = new()
             {
+                // Allocated once and never reused, so anything that records "who owns this" survives
+                // the name being dropped and claimed by somebody else.
+                Id = ObjectIdGenerator.Generate().ToString(),
                 Name = name,
                 Credential = credential,
                 CredentialEpoch = 0,
@@ -569,6 +573,7 @@ public sealed class AuthCatalog
 
             UserRecord record = new()
             {
+                Id = ObjectIdGenerator.Generate().ToString(),
                 Name = name,
                 Credential = credential,
                 IsSuperuser = true,

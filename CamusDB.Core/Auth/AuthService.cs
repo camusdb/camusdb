@@ -164,10 +164,43 @@ public sealed class AuthService
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
 
         IReadOnlyList<GrantRecord> grants = await catalog.ListGrantsAsync(session.User).ConfigureAwait(false);
-        Principal principal = new(session.User, user.IsSuperuser, grants);
+        Principal principal = new(session.User, user.IsSuperuser, grants, user.Id);
 
         CachePrincipal(tokenId, principal, session.SecretMac, session.ExpiresAt);
         return principal;
+    }
+
+    /// <summary>Looks up a user record by name, or null when no such user exists.</summary>
+    public async Task<UserRecord?> TryGetUserAsync(string name)
+    {
+        AuthCatalog catalog = await catalogTask.ConfigureAwait(false);
+        return await catalog.TryGetUserAsync(name).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Loads the principal a stored object's <b>owner</b> stands for, or null when that owner can no
+    /// longer be established.
+    /// </summary>
+    /// <remarks>
+    /// Verifies the immutable id as well as the name, which is the whole point: a user can be dropped
+    /// and a new one created under the same name, and resolving by name alone would silently hand the
+    /// old owner's authority to the new account. A mismatch, a missing user, or an owner recorded
+    /// before user ids existed all return null so the caller fails closed rather than falling back to
+    /// something weaker.
+    /// </remarks>
+    public async Task<Principal?> TryLoadOwnerPrincipalAsync(string ownerName, string? ownerId)
+    {
+        if (string.IsNullOrEmpty(ownerName) || string.IsNullOrEmpty(ownerId))
+            return null;
+
+        AuthCatalog catalog = await catalogTask.ConfigureAwait(false);
+
+        UserRecord? user = await catalog.TryGetUserAsync(ownerName).ConfigureAwait(false);
+        if (user is null || !string.Equals(user.Id, ownerId, StringComparison.Ordinal))
+            return null;
+
+        IReadOnlyList<GrantRecord> grants = await catalog.ListGrantsAsync(ownerName).ConfigureAwait(false);
+        return new Principal(user.Name, user.IsSuperuser, grants, user.Id);
     }
 
     /// <summary>
