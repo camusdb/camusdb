@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.CommandsExecutor.Models;
+using Kommander.Time;
 
 namespace CamusDB.Core.Catalogs.Models;
 
@@ -56,6 +57,87 @@ public sealed class SchemaCreateTablePayload
     /// existed (backward-compatible: null ⇒ no comment).
     /// </summary>
     public string? Comment { get; set; }
+
+    /// <summary>
+    /// Whether the relation being created is an ordinary table or a materialized view. Absent in
+    /// entries written before this field existed, which decode to <c>Table</c> — the correct answer
+    /// for every relation that predates materialized views.
+    /// </summary>
+    public RelationKind Kind { get; set; }
+
+    /// <summary>The query that populates a materialized view. Null for an ordinary table.</summary>
+    public ViewDefinition? ViewDefinition { get; set; }
+
+    /// <summary>
+    /// Whether the materialized view is created already populated. Always false at
+    /// <c>CREATE</c> time — even <c>WITH DATA</c> creates the relation empty and then refreshes it,
+    /// so that a refresh failure leaves an unpopulated view rather than a view that claims data it
+    /// does not have.
+    /// </summary>
+    public bool IsPopulated { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.CreateView"/> and <see cref="SchemaOp.ReplaceView"/>: the whole
+/// view, including the id the proposer allocated. The id is carried in the payload rather than
+/// generated during apply so every node assigns the same one — the same rule table ids follow.
+/// </summary>
+public sealed class SchemaViewPayload
+{
+    public string? ViewId { get; set; }
+
+    public string ViewName { get; set; } = "";
+
+    public ViewDefinition? Definition { get; set; }
+
+    /// <summary>The view's comment, carried so a replace does not silently drop it.</summary>
+    public string? Comment { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.DropView"/>. Carries only the name: a view owns no keyspace, so
+/// unlike a table drop there is nothing to detach, retain, or reclaim — the definition is the whole
+/// object.
+/// </summary>
+public sealed class SchemaDropViewPayload
+{
+    public string ViewName { get; set; } = "";
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetViewDefinition"/>: the rewritten body for one dependent view
+/// after a base table or column was renamed.
+/// </summary>
+public sealed class SchemaSetViewDefinitionPayload
+{
+    public string ViewName { get; set; } = "";
+
+    public ViewDefinition? Definition { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetMaterializedViewState"/>.
+/// </summary>
+/// <remarks>
+/// Keyed by <see cref="TableId"/> rather than by name because a refresh can outlive a concurrent
+/// rename: the job that started against <c>mv</c> must still mark the relation it actually built,
+/// not whatever now answers to that name.
+/// </remarks>
+public sealed class SchemaSetMatViewStatePayload
+{
+    public string TableId { get; set; } = "";
+
+    public bool IsPopulated { get; set; }
+
+    /// <summary>The snapshot the refresh read its source at, in HLC form, or null when the state
+    /// change is an invalidation rather than a completion.</summary>
+    public HLCTimestamp? RefreshedAt { get; set; }
+
+    /// <summary>
+    /// The table id of the freshly built relation the live name should now point at, when this state
+    /// change is the swap half of a build-and-swap refresh. Null for a plain flag update.
+    /// </summary>
+    public string? SwapToTableId { get; set; }
 }
 
 public sealed class SchemaAlterColumnPayload
@@ -189,6 +271,11 @@ public enum SchemaRenameKind
     Table,
     Column,
     Index,
+
+    /// <summary>A non-materialized view. <c>TableName</c> carries the view's current name; a
+    /// materialized-view rename is a <see cref="Table"/> rename, because a materialized view is a
+    /// relation.</summary>
+    View,
 }
 
 /// <summary>

@@ -172,6 +172,10 @@ TGrant          (G|g)(R|r)(A|a)(N|n)(T|t)
 TRevoke         (R|r)(E|e)(V|v)(O|o)(K|k)(E|e)
 TPrivileges     (P|p)(R|r)(I|i)(V|v)(I|i)(L|l)(E|e)(G|g)(E|e)(S|s)
 TFor            (F|f)(O|o)(R|r)
+TViews          (V|v)(I|i)(E|e)(W|w)(S|s)
+TView           (V|v)(I|i)(E|e)(W|w)
+TMaterialized   (M|m)(A|a)(T|t)(E|e)(R|r)(I|i)(A|a)(L|l)(I|i)(Z|z)(E|e)(D|d)
+TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 
 %{
 
@@ -464,6 +468,14 @@ TFor            (F|f)(O|o)(R|r)
 {TPrivileges} { return (int)Token.TPRIVILEGES; }
 
 {TFor} { return (int)Token.TFOR; }
+
+{TViews} { return (int)Token.TVIEWS; }
+
+{TView} { return (int)Token.TVIEW; }
+
+{TMaterialized} { return (int)Token.TMATERIALIZED; }
+
+{TRefresh} { return (int)Token.TREFRESH; }
 
 {Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 

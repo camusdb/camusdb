@@ -526,6 +526,25 @@ public class ConfigDefinition
     public int MaxMutationsPerTransaction { get; set; } = 20_000;
 
     /// <summary>
+    /// Max nesting depth for view-over-view expansion; a backstop behind the DDL-time cycle check.
+    /// Default 32. Maps to <c>CamusDBOptions.MaxViewExpansionDepth</c>.
+    /// </summary>
+    public int MaxViewExpansionDepth { get; set; } = 32;
+
+    /// <summary>
+    /// Rows written per transaction while a materialized view is refreshed. Must stay well below
+    /// <see cref="MaxMutationsPerTransaction"/>. Default 10 000. Maps to
+    /// <c>CamusDBOptions.MaterializedViewRefreshChunkRows</c>.
+    /// </summary>
+    public int MaterializedViewRefreshChunkRows { get; set; } = 10_000;
+
+    /// <summary>
+    /// Whether this node may execute materialized-view refresh work. Default true. Maps to
+    /// <c>CamusDBOptions.MaterializedViewRefreshEnabled</c>.
+    /// </summary>
+    public bool MaterializedViewRefreshEnabled { get; set; } = true;
+
+    /// <summary>
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
     /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
     /// &gt; 0. Default 300 000 (5 min). Maps to <c>CamusDBOptions.BranchSnapshotHoldLeaseMs</c>.

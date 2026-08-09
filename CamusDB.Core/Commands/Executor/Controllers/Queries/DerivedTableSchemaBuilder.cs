@@ -30,6 +30,29 @@ internal static class DerivedTableSchemaBuilder
         new("tables", ColumnType.String),
     ];
 
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowViewsSchema =
+    [
+        new("views", ColumnType.String),
+    ];
+
+    /// <summary>
+    /// Materialized views report more than their name because the two things a reader needs to know
+    /// about one — whether it holds data at all, and how stale that data is — are invisible from a
+    /// plain listing and are not answerable by querying it.
+    /// </summary>
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowMaterializedViewsSchema =
+    [
+        new("materialized_views", ColumnType.String),
+        new("populated", ColumnType.Bool),
+        new("refreshed_at", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateViewSchema =
+    [
+        new("view", ColumnType.String),
+        new("create view", ColumnType.String),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowColumnsSchema =
     [
         new("Field",   ColumnType.String),

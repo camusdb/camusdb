@@ -30,6 +30,18 @@ public sealed class Schema : IDisposable
     public Dictionary<string, TableSchema> Tables { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Live non-materialized views keyed by name, with the same case-insensitive comparer and the
+    /// same rename-swaps-the-key rule as <see cref="Tables"/>.
+    ///
+    /// <para>Materialized views are deliberately <b>not</b> here — they are real relations and live
+    /// in <see cref="Tables"/> with <c>Kind == RelationKind.MaterializedView</c>. Consequently this
+    /// map alone never answers "does this name exist"; use
+    /// <see cref="RequireRelationNameAvailable"/> or <see cref="TryResolveRelation"/>, which consult
+    /// both.</para>
+    /// </summary>
+    public Dictionary<string, ViewSchema> Views { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Serializes schema validation and apply so deltas are applied one at a time.
     /// Acquire via <see cref="AcquireLockAsync"/> and release via <see cref="ReleaseLock"/>
     /// so the depth counter stays in sync for the lock-depth assertions.
@@ -67,6 +79,58 @@ public sealed class Schema : IDisposable
     {
         Interlocked.Decrement(ref _lockDepth);
         Semaphore.Release();
+    }
+
+    /// <summary>
+    /// What a relation name currently resolves to, if anything. Tables, materialized views and
+    /// views share one namespace, so a single lookup that consults only one map is always a latent
+    /// bug — this is the one place that knows all three live together.
+    /// </summary>
+    public bool TryResolveRelation(string name, out TableSchema? table, out ViewSchema? view)
+    {
+        if (Tables.TryGetValue(name, out TableSchema? foundTable))
+        {
+            table = foundTable;
+            view = null;
+            return true;
+        }
+
+        if (Views.TryGetValue(name, out ViewSchema? foundView))
+        {
+            table = null;
+            view = foundView;
+            return true;
+        }
+
+        table = null;
+        view = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Throws if <paramref name="name"/> is already taken by a table, a materialized view, or a
+    /// view. Tables, materialized views and views share one namespace — PostgreSQL's <c>pg_class</c>
+    /// rule — so <b>every</b> relation-creating DDL path must call this; checking only the map you
+    /// are about to insert into lets a view shadow a table (or the reverse), after which name
+    /// resolution silently prefers whichever map is consulted first.
+    /// </summary>
+    /// <remarks>
+    /// This is a check-then-act: the act — inserting into <see cref="Tables"/> or
+    /// <see cref="Views"/> — happens in the schema delta that follows. The caller must therefore
+    /// hold <see cref="Semaphore"/> across both, or two concurrent creations of the same name both
+    /// pass the check and the second silently overwrites the first.
+    /// </remarks>
+    public void RequireRelationNameAvailable(string name)
+    {
+        if (Tables.TryGetValue(name, out TableSchema? existingTable))
+            throw new CamusDBException(
+                existingTable.IsMaterializedView ? CamusDBErrorCodes.ViewAlreadyExists : CamusDBErrorCodes.TableAlreadyExists,
+                $"Relation '{name}' already exists");
+
+        if (Views.ContainsKey(name))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ViewAlreadyExists,
+                $"Relation '{name}' already exists");
     }
 
     public void Dispose()

@@ -426,4 +426,78 @@ public enum NodeType
     /// database is opened.</para>
     /// </summary>
     ShowVariables,
+
+    /// <summary>
+    /// <c>CREATE VIEW name [(cols)] AS query [WITH [LOCAL|CASCADED] CHECK OPTION]</c>.
+    /// <c>leftAst</c> = view name, <c>rightAst</c> = the body SELECT, <c>extendedOne</c> = the
+    /// optional column-alias list, <c>yytext</c> = <c>"local"</c>/<c>"cascaded"</c> or null.
+    /// </summary>
+    CreateView,
+
+    /// <summary>
+    /// <c>CREATE OR REPLACE VIEW …</c>. Same node shape as <see cref="CreateView"/>. Kept a distinct
+    /// node type because replacing is not the same operation as creating: it must additionally check
+    /// that the new body keeps the existing column names, types and order (columns may only be
+    /// appended), so a dependent view or a cached plan cannot silently change meaning.
+    /// </summary>
+    CreateOrReplaceView,
+
+    /// <summary>
+    /// <c>DROP VIEW name[, …] [CASCADE|RESTRICT]</c>. <c>leftAst</c> = one identifier or an
+    /// <see cref="IdentifierList"/>, <c>yytext</c> = <c>"cascade"</c>/<c>"restrict"</c> or null
+    /// (which means RESTRICT).
+    /// </summary>
+    DropView,
+
+    /// <summary><c>DROP VIEW IF EXISTS …</c>. Same shape as <see cref="DropView"/>.</summary>
+    DropViewIfExists,
+
+    /// <summary><c>ALTER VIEW name RENAME TO newname</c>. Metadata-only.</summary>
+    AlterViewRenameTo,
+
+    /// <summary>
+    /// <c>ALTER VIEW name OWNER TO user</c>. Changes which principal's privileges are used when the
+    /// view's body reads its base relations, so it changes what every query through the view may
+    /// read — not merely a bookkeeping field.
+    /// </summary>
+    AlterViewOwnerTo,
+
+    /// <summary>
+    /// <c>CREATE MATERIALIZED VIEW name [(cols)] AS query [WITH [NO] DATA]</c>.
+    /// <c>leftAst</c> = name, <c>rightAst</c> = body SELECT, <c>extendedOne</c> = optional
+    /// column-alias list, <c>yytext</c> = <c>"data"</c>/<c>"nodata"</c> (absent means WITH DATA).
+    /// </summary>
+    CreateMaterializedView,
+
+    /// <summary><c>CREATE MATERIALIZED VIEW IF NOT EXISTS …</c>. Same shape.</summary>
+    CreateMaterializedViewIfNotExists,
+
+    /// <summary>
+    /// <c>REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]</c>. <c>leftAst</c> = name;
+    /// <c>yytext</c> is a comma-separated set of the modifiers actually written
+    /// (<c>"concurrently"</c>, <c>"data"</c>, <c>"nodata"</c>). Not DDL — it writes rows — so it
+    /// routes through the non-query path and reports a row count.
+    /// </summary>
+    RefreshMaterializedView,
+
+    /// <summary><c>DROP MATERIALIZED VIEW name[, …] [CASCADE|RESTRICT]</c>.</summary>
+    DropMaterializedView,
+
+    /// <summary><c>DROP MATERIALIZED VIEW IF EXISTS …</c>.</summary>
+    DropMaterializedViewIfExists,
+
+    /// <summary><c>ALTER MATERIALIZED VIEW name RENAME TO newname</c>. Metadata-only.</summary>
+    AlterMaterializedViewRenameTo,
+
+    /// <summary><c>SHOW VIEWS [LIKE 'pattern']</c>. <c>leftAst</c> = LIKE pattern or null.</summary>
+    ShowViews,
+
+    /// <summary><c>SHOW MATERIALIZED VIEWS [LIKE 'pattern']</c>. <c>leftAst</c> = LIKE pattern or null.</summary>
+    ShowMaterializedViews,
+
+    /// <summary><c>SHOW CREATE VIEW name</c>. Prints the normalized stored definition.</summary>
+    ShowCreateView,
+
+    /// <summary><c>SHOW CREATE MATERIALIZED VIEW name</c>.</summary>
+    ShowCreateMaterializedView,
 }

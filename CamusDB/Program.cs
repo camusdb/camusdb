@@ -18,6 +18,7 @@ using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.App.Services;
 using CommandLine;
+using CommandLine.Text;
 using Kahuna;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Server.Configuration;
@@ -35,16 +36,43 @@ using OpenTelemetry.Trace;
 if (InitCommand.Matches(args))
     return InitCommand.Run(args);
 
+// Parse CLI flags before anything is printed or created. `--help` and `--version` are requests for
+// text, not for a node: CommandLineParser reports them as parse "errors" after writing the text
+// itself, so without this the process would go on to start a server the user never asked for. Any
+// other parse failure (an unknown or malformed flag) exits non-zero as well — starting on defaults
+// would silently ignore what the operator asked for, which is worse than refusing.
+// The help text is written here rather than by the parser so an explicit `--help` lands on stdout
+// (where a pager or a redirect can see it) while a genuine usage error still goes to stderr.
+Parser parser = new(settings => settings.HelpWriter = null);
+ParserResult<CamusCommandLineOptions> optsResult = parser.ParseArguments<CamusCommandLineOptions>(args);
+
+if (optsResult is NotParsed<CamusCommandLineOptions> notParsed)
+{
+    bool textOnlyRequest = notParsed.Errors.All(
+        error => error.Tag is ErrorType.HelpRequestedError or ErrorType.HelpVerbRequestedError or ErrorType.VersionRequestedError);
+
+    HelpText helpText = HelpText.AutoBuild(
+        optsResult,
+        help =>
+        {
+            help.AddPostOptionsLine("Run 'camusdb' with no arguments to start a node, or 'camusdb init' to write");
+            help.AddPostOptionsLine("a starter configuration file.");
+            return HelpText.DefaultParsingErrorsHandler(optsResult, help);
+        },
+        example => example);
+
+    (textOnlyRequest ? Console.Out : Console.Error).WriteLine(helpText);
+    return textOnlyRequest ? 0 : 1;
+}
+
+CamusCommandLineOptions opts = optsResult.Value;
+
 Console.WriteLine("   ____                          ____  ____  ");
 Console.WriteLine("  / ___|__ _ _ __ ___  _   _ ___|  _ \\| __ ) ");
 Console.WriteLine(" | |   / _` | '_ ` _ \\| | | / __| | | |  _ \\ ");
 Console.WriteLine(" | |__| (_| | | | | | | |_| \\__ \\ |_| | |_) |");
 Console.WriteLine("  \\____\\__,_|_| |_| |_|\\__,_|___/____/|____/ ");
 Console.WriteLine();
-
-// Parse CLI flags; fall back to defaults on parse failure so the server still starts.
-ParserResult<CamusCommandLineOptions> optsResult = Parser.Default.ParseArguments<CamusCommandLineOptions>(args);
-CamusCommandLineOptions opts = optsResult.Value ?? new();
 
 // Read and merge config before building the host so cluster-mode detection can gate DI service
 // registration. The lookup is ordered and first-hit-wins (--config, CAMUS_CONFIG_PATH, the working

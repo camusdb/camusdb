@@ -894,6 +894,13 @@ public sealed class CatalogsManager
             ? ResolveTableId(database, DecodePayload<SchemaDropTablePayload>(entry).TableName)
             : null;
 
+        // Same reason as droppedTableId: apply removes the view from the in-memory map, and the
+        // checkpoint still has to delete its meta key by id afterwards.
+        string? droppedViewId = entry.Op == SchemaOp.DropView
+            && database.Schema.Views.TryGetValue(DecodePayload<SchemaDropViewPayload>(entry).ViewName, out ViewSchema? viewBeingDropped)
+                ? viewBeingDropped.Id
+                : null;
+
         byte[] bytes = Serializator.Serialize(entry);
         SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Id, bytes, CancellationToken.None).ConfigureAwait(false);
 
@@ -923,7 +930,7 @@ public sealed class CatalogsManager
         // deadlock when its KV writes re-enter the same partition. The committed schema log is
         // already the source of truth; the checkpoint is a load-time optimization, so on a
         // persist failure we retry and then surface a typed error.
-        await PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId).ConfigureAwait(false);
+        await PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId, droppedViewId).ConfigureAwait(false);
 
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
             database.Id,
@@ -1006,6 +1013,205 @@ public sealed class CatalogsManager
     /// <para><paramref name="comment"/> is null to remove the comment; the empty string stores a
     /// present-but-empty one.</para>
     /// </summary>
+    /// <summary>Whether a non-materialized view with this name currently exists.</summary>
+    public static bool ViewExists(DatabaseDescriptor database, string viewName)
+        => database.Schema.Views.ContainsKey(viewName);
+
+    /// <summary>
+    /// Proposes a <see cref="SchemaOp.CreateView"/> (or <see cref="SchemaOp.ReplaceView"/>) delta and
+    /// waits for it to apply locally. The view id is allocated by the caller and carried in the
+    /// payload so every node assigns the same one.
+    /// </summary>
+    /// <remarks>
+    /// The name-availability check runs <b>under the schema lock, here</b>, in the same critical
+    /// section that builds the delta — not in the caller. Checking outside the lock would be a
+    /// check-then-act that two concurrent creations both pass.
+    /// </remarks>
+    public async Task CreateViewAsync(
+        DatabaseDescriptor database,
+        string viewId,
+        string viewName,
+        ViewDefinition definition,
+        string? comment,
+        bool replace)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (replace)
+            {
+                if (!database.Schema.Views.ContainsKey(viewName))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.ViewDoesntExist,
+                        $"View '{viewName}' does not exist");
+            }
+            else
+            {
+                database.Schema.RequireRelationNameAvailable(viewName);
+            }
+
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = replace ? SchemaOp.ReplaceView : SchemaOp.CreateView,
+                Payload = Serializator.Serialize(new SchemaViewPayload
+                {
+                    ViewId = viewId,
+                    ViewName = viewName,
+                    Definition = definition,
+                    Comment = comment
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>Proposes a <see cref="SchemaOp.DropView"/> delta and waits for it to apply locally.</summary>
+    public async Task DropViewAsync(DatabaseDescriptor database, string viewName)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Views.ContainsKey(viewName))
+                throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
+
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.DropView,
+                Payload = Serializator.Serialize(new SchemaDropViewPayload { ViewName = viewName })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>Proposes a <see cref="SchemaOp.RenameView"/> delta and waits for it to apply locally.</summary>
+    public async Task RenameViewAsync(DatabaseDescriptor database, string viewName, string newName)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Views.ContainsKey(viewName))
+                throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
+
+            database.Schema.RequireRelationNameAvailable(newName);
+
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.RenameView,
+                Payload = Serializator.Serialize(new SchemaRenamePayload
+                {
+                    TableName = viewName,
+                    Kind = SchemaRenameKind.View,
+                    NewName = newName
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes a <see cref="SchemaOp.SetViewDefinition"/> delta: overwrites one view's stored body
+    /// without the user having issued a <c>CREATE OR REPLACE</c>. Used by the dependent-view rewrite
+    /// that follows a base table or column rename.
+    /// </summary>
+    public async Task SetViewDefinitionAsync(DatabaseDescriptor database, string viewName, ViewDefinition definition)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.SetViewDefinition,
+                Payload = Serializator.Serialize(new SchemaSetViewDefinitionPayload
+                {
+                    ViewName = viewName,
+                    Definition = definition
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes a <see cref="SchemaOp.SetMaterializedViewState"/> delta recording a refresh outcome.
+    /// </summary>
+    public async Task SetMaterializedViewStateAsync(
+        DatabaseDescriptor database,
+        string tableId,
+        bool isPopulated,
+        HLCTimestamp? refreshedAt)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.SetMaterializedViewState,
+                Payload = Serializator.Serialize(new SchemaSetMatViewStatePayload
+                {
+                    TableId = tableId,
+                    IsPopulated = isPopulated,
+                    RefreshedAt = refreshedAt
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
     public async Task ReplicateSetCommentAsync(
         DatabaseDescriptor database,
         string tableName,
@@ -1129,7 +1335,8 @@ public sealed class CatalogsManager
     private async Task PersistSchemaCheckpointWithRetryAsync(
         DatabaseDescriptor database,
         SchemaChangeLogEntry entry,
-        string? droppedTableId
+        string? droppedTableId,
+        string? droppedViewId
     )
     {
         const int maxAttempts = 3;
@@ -1138,7 +1345,7 @@ public sealed class CatalogsManager
         {
             try
             {
-                await PersistSchemaCheckpointAsync(database, entry, droppedTableId).ConfigureAwait(false);
+                await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (attempt < maxAttempts)
@@ -1183,7 +1390,8 @@ public sealed class CatalogsManager
     private async Task PersistSchemaCheckpointAsync(
         DatabaseDescriptor database,
         SchemaChangeLogEntry entry,
-        string? droppedTableId
+        string? droppedTableId,
+        string? droppedViewId
     )
     {
         if (TestPersistCheckpointException is { } fault)
@@ -1200,7 +1408,37 @@ public sealed class CatalogsManager
 
         try
         {
-            if (entry.Op == SchemaOp.DropTable)
+            // View ops write the view meta key family, not a table blob. They are checked first
+            // because GetEntryTableName below has no answer for them — a view is not a table, and
+            // asking it for one would throw on every view DDL.
+            if (entry.Op is SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.RenameView or SchemaOp.SetViewDefinition)
+            {
+                string viewName = GetEntryViewName(entry);
+                if (database.Schema.Views.TryGetValue(viewName, out ViewSchema? viewSchema))
+                    await PersistSchemaViewAsync(database, viewSchema, tx).ConfigureAwait(false);
+            }
+            else if (entry.Op == SchemaOp.DropView)
+            {
+                // Null means the view was already gone when this entry was applied — an idempotent
+                // re-delivery. There is no key left to delete, so only the version advances.
+                if (droppedViewId is not null)
+                    await DeleteSchemaViewAsync(database, droppedViewId, tx).ConfigureAwait(false);
+            }
+            else if (entry.Op == SchemaOp.SetMaterializedViewState)
+            {
+                // Keyed by table id, so resolve the relation the same way apply did rather than by
+                // name — a concurrent rename must not send this checkpoint to the wrong relation.
+                string tableId = DecodePayload<SchemaSetMatViewStatePayload>(entry).TableId;
+                foreach (TableSchema candidate in database.Schema.Tables.Values)
+                {
+                    if (!string.Equals(candidate.Id, tableId, StringComparison.Ordinal))
+                        continue;
+
+                    await PersistSchemaTableAsync(database, candidate, entry.ToVersion, tx).ConfigureAwait(false);
+                    break;
+                }
+            }
+            else if (entry.Op == SchemaOp.DropTable)
             {
                 if (droppedTableId is not null)
                 {
@@ -1231,6 +1469,21 @@ public sealed class CatalogsManager
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// The name the view lives under <b>after</b> the entry has been applied — which for a rename is
+    /// the new name, since the checkpoint has to find the view in the map to persist it.
+    /// </summary>
+    private static string GetEntryViewName(SchemaChangeLogEntry entry) => entry.Op switch
+    {
+        SchemaOp.CreateView or SchemaOp.ReplaceView => DecodePayload<SchemaViewPayload>(entry).ViewName,
+        SchemaOp.RenameView => DecodePayload<SchemaRenamePayload>(entry).NewName,
+        SchemaOp.SetViewDefinition => DecodePayload<SchemaSetViewDefinitionPayload>(entry).ViewName,
+        _ => throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Cannot resolve view name for schema operation '{entry.Op}'"
+        )
+    };
 
     private static string GetEntryTableName(SchemaChangeLogEntry entry) => entry.Op switch
     {
@@ -1298,6 +1551,11 @@ public sealed class CatalogsManager
             SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.RenameTable or SchemaOp.RenameColumn or SchemaOp.RenameIndex => WasRenamed(schema, DecodePayload<SchemaRenamePayload>(entry)),
+            // View ops check the view map, not the table map — WasRenamed above would look in the
+            // wrong place for a RenameView and report "not applied" forever.
+            SchemaOp.CreateView or SchemaOp.ReplaceView => schema.Views.ContainsKey(DecodePayload<SchemaViewPayload>(entry).ViewName),
+            SchemaOp.DropView => !schema.Views.ContainsKey(DecodePayload<SchemaDropViewPayload>(entry).ViewName),
+            SchemaOp.RenameView => schema.Views.ContainsKey(DecodePayload<SchemaRenamePayload>(entry).NewName),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -1398,6 +1656,12 @@ public sealed class CatalogsManager
             SchemaOp.SetColumnNotNull => ApplySetColumnNotNull(schema, DecodePayload<SchemaSetColumnNotNullPayload>(entry)),
             SchemaOp.SetTableSettings => ApplySetTableSettings(schema, DecodePayload<SchemaSetTableSettingsPayload>(entry)),
             SchemaOp.SetComment => ApplySetComment(schema, DecodePayload<SchemaSetCommentPayload>(entry)),
+            SchemaOp.CreateView => ApplyCreateView(schema, DecodePayload<SchemaViewPayload>(entry), replacing: false),
+            SchemaOp.ReplaceView => ApplyCreateView(schema, DecodePayload<SchemaViewPayload>(entry), replacing: true),
+            SchemaOp.DropView => ApplyDropView(schema, DecodePayload<SchemaDropViewPayload>(entry)),
+            SchemaOp.RenameView => ApplyRenameView(schema, DecodePayload<SchemaRenamePayload>(entry)),
+            SchemaOp.SetViewDefinition => ApplySetViewDefinition(schema, DecodePayload<SchemaSetViewDefinitionPayload>(entry)),
+            SchemaOp.SetMaterializedViewState => ApplySetMaterializedViewState(schema, DecodePayload<SchemaSetMatViewStatePayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -1436,6 +1700,12 @@ public sealed class CatalogsManager
             Settings = payload.Settings is null
                 ? null
                 : new Dictionary<string, string>(payload.Settings, StringComparer.Ordinal),
+            // A materialized view is created through this same op — it is a relation — and carries
+            // its defining query with it so every node can render SHOW CREATE and refuse DML on it
+            // without a second round of replication.
+            Kind = payload.Kind,
+            ViewDefinition = payload.ViewDefinition,
+            IsPopulated = payload.IsPopulated,
             SchemaHistory = []
         };
 
@@ -1720,6 +1990,133 @@ public sealed class CatalogsManager
         }
 
         return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a CreateView or ReplaceView delta. Returns null because a view is not a relation and
+    /// there is no <see cref="TableSchema"/> checkpoint to persist from this apply — the proposer
+    /// persists the view's own meta key afterward.
+    /// </summary>
+    /// <remarks>
+    /// The two ops differ only in how they treat an existing name, and that difference is the whole
+    /// reason they are separate ops: a create must refuse a taken name, while a replace must
+    /// overwrite it while <b>preserving the existing view's id</b>. Minting a fresh id on replace
+    /// would silently break every dependent that recorded the old one, and every dependency check
+    /// that scans for it.
+    /// </remarks>
+    private static TableSchema? ApplyCreateView(Schema schema, SchemaViewPayload payload, bool replacing)
+    {
+        schema.Views.TryGetValue(payload.ViewName, out ViewSchema? existing);
+
+        if (existing is null)
+        {
+            // A name held by a table (or a materialized view) is not ours to take, on either op.
+            if (schema.Tables.ContainsKey(payload.ViewName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TableAlreadyExists,
+                    $"Relation '{payload.ViewName}' already exists");
+        }
+        else if (!replacing)
+        {
+            // Idempotent replay of a create: the same id landing twice is a re-delivery, not a
+            // conflict, and must not wedge the apply pipeline.
+            if (string.Equals(existing.Id, payload.ViewId, StringComparison.Ordinal))
+                return null;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.ViewAlreadyExists,
+                $"Relation '{payload.ViewName}' already exists");
+        }
+
+        schema.Views[payload.ViewName] = new ViewSchema
+        {
+            Id = existing?.Id ?? payload.ViewId,
+            Name = payload.ViewName,
+            Definition = payload.Definition,
+            Comment = payload.Comment ?? existing?.Comment,
+        };
+
+        return null;
+    }
+
+    /// <summary>
+    /// Applies a DropView delta. Idempotent: a view that is already gone is a no-op rather than a
+    /// failure, so a re-delivered entry — or one that arrives after the view was dropped by a later,
+    /// already-applied entry — cannot wedge the apply pipeline.
+    /// </summary>
+    private static TableSchema? ApplyDropView(Schema schema, SchemaDropViewPayload payload)
+    {
+        schema.Views.Remove(payload.ViewName);
+        return null;
+    }
+
+    /// <summary>
+    /// Applies a RenameView delta by swapping the map key. The view's id is deliberately unchanged,
+    /// so dependents that recorded it keep resolving across the rename.
+    /// </summary>
+    private static TableSchema? ApplyRenameView(Schema schema, SchemaRenamePayload payload)
+    {
+        if (!schema.Views.TryGetValue(payload.TableName, out ViewSchema? view))
+        {
+            // Already renamed by an earlier delivery of this same entry.
+            if (schema.Views.ContainsKey(payload.NewName))
+                return null;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.ViewDoesntExist,
+                $"View '{payload.TableName}' does not exist");
+        }
+
+        if (schema.Tables.ContainsKey(payload.NewName) || schema.Views.ContainsKey(payload.NewName))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ViewAlreadyExists,
+                $"Relation '{payload.NewName}' already exists");
+
+        schema.Views.Remove(payload.TableName);
+        view.Name = payload.NewName;
+        schema.Views[payload.NewName] = view;
+
+        return null;
+    }
+
+    /// <summary>
+    /// Applies a SetViewDefinition delta — the dependent-view rewrite that rides along with a base
+    /// table or column rename. Idempotent: replaying it simply writes the same body again, and a
+    /// view that no longer exists is a no-op rather than a failure, so a rename entry re-delivered
+    /// after a later DROP VIEW cannot wedge apply.
+    /// </summary>
+    private static TableSchema? ApplySetViewDefinition(Schema schema, SchemaSetViewDefinitionPayload payload)
+    {
+        if (schema.Views.TryGetValue(payload.ViewName, out ViewSchema? view))
+            view.Definition = payload.Definition;
+
+        return null;
+    }
+
+    /// <summary>
+    /// Applies a SetMaterializedViewState delta: the populated flag, the snapshot the contents are
+    /// consistent as of, and — for the swap half of a build-and-swap refresh — the id of the freshly
+    /// built relation the live name should now point at.
+    /// </summary>
+    /// <remarks>
+    /// Keyed by table id, not name, so a refresh that raced a rename still marks the relation it
+    /// actually built. Returns the affected <see cref="TableSchema"/> so the proposer persists the
+    /// updated checkpoint; a relation whose id is not found is a no-op (it was dropped) rather than
+    /// a failure.
+    /// </remarks>
+    private static TableSchema? ApplySetMaterializedViewState(Schema schema, SchemaSetMatViewStatePayload payload)
+    {
+        foreach (TableSchema candidate in schema.Tables.Values)
+        {
+            if (!string.Equals(candidate.Id, payload.TableId, StringComparison.Ordinal))
+                continue;
+
+            candidate.IsPopulated = payload.IsPopulated;
+            candidate.RefreshedAt = payload.RefreshedAt;
+            return candidate;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -2270,6 +2667,11 @@ public sealed class CatalogsManager
     private static string TableKey(string dbId, string tableId) => $"{TableKeyPrefix(dbId)}{tableId}";
     private static string HistoryKeyPrefix(string dbId, string tableId) => $"{dbId}/meta/history:{tableId}:";
     private static string HistoryKey(string dbId, string tableId, int version) => $"{HistoryKeyPrefix(dbId, tableId)}{version}";
+    // Views get their own key family, and — like table/history/coordinator — separate their
+    // sub-field with ':' rather than '/' so every view key stays inside the one "{dbId}/meta"
+    // routing bucket that LoadMetaAsync scans and DatabaseDropper purges.
+    private static string ViewKeyPrefix(string dbId) => $"{dbId}/meta/view:";
+    private static string ViewKey(string dbId, string viewId) => $"{ViewKeyPrefix(dbId)}{viewId}";
     private static string CoordinatorKeyPrefix(string dbId) => $"{dbId}/meta/coordinator:";
     // Key embeds the immutable table id, not the mutable table name.
     private static string CoordinatorKey(string dbId, string tableId, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableId}~{elementName}";
@@ -2312,6 +2714,55 @@ public sealed class CatalogsManager
         byte[] systemBytes = MetaJsonSerializer.Serialize(database.SystemSchema, MetaJsonContext.Default.SystemSchema);
 
         await WriteMetaKey(kahuna, tx, SystemKey(database.Id), systemBytes).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Persists one view's meta blob plus the database schema-version counter, in the caller's
+    /// transaction so the two commit together.
+    ///
+    /// <para>The version write is not incidental: a view definition that landed without its version
+    /// bump would be invisible to the expansion cache, which keys on the schema version to decide
+    /// whether its parsed body is stale. Both keys must move as one.</para>
+    /// </summary>
+    public async Task PersistSchemaViewAsync(DatabaseDescriptor database, ViewSchema viewSchema, KvTransaction tx)
+    {
+        // Same invariant as PersistSchemaTableAsync: a replicated KV write must never be issued while
+        // the schema lock is held, or the schema-log partition can deadlock behind it.
+        System.Diagnostics.Debug.Assert(
+            database.Schema.LockDepth == 0,
+            $"PersistSchemaViewAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
+        );
+
+        if (string.IsNullOrWhiteSpace(viewSchema.Id))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"View '{viewSchema.Name}' has no view id");
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
+        byte[] viewBytes = MetaJsonSerializer.Serialize(viewSchema, MetaJsonContext.Default.ViewSchema);
+
+        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+        await WriteMetaKey(kahuna, tx, ViewKey(database.Id, viewSchema.Id), viewBytes).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Removes a dropped view's meta blob and advances the persisted schema version, in the caller's
+    /// transaction. A view owns no rows and no index keyspace, so unlike a table drop there is
+    /// nothing to detach or retain for recovery — deleting the definition removes the whole object.
+    /// </summary>
+    public async Task DeleteSchemaViewAsync(DatabaseDescriptor database, string viewId, KvTransaction tx)
+    {
+        System.Diagnostics.Debug.Assert(
+            database.Schema.LockDepth == 0,
+            $"DeleteSchemaViewAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
+        );
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
+
+        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+        await DeleteMetaKey(kahuna, tx, ViewKey(database.Id, viewId)).ConfigureAwait(false);
     }
 
     public async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, KvTransaction tx)
@@ -2912,6 +3363,11 @@ public sealed class CatalogsManager
             {
                 database.Schema.SchemaVersion = MetaJsonSerializer.DeserializeCompat(schemaEntry.Value, MetaJsonContext.Default.Int64);
                 database.Schema.Tables = await LoadTablesAsync(database, tx).ConfigureAwait(false);
+
+                // Views load after tables so a view's recorded dependency ids can be checked against
+                // relations that are already in the map; a view is only ever a consumer of tables and
+                // of earlier views, never the reverse, so this one ordering is sufficient.
+                database.Schema.Views = await LoadViewsAsync(database, tx).ConfigureAwait(false);
             }
 
             // Seed the Raft schema fence from the on-disk version so HeadSchemaVersion ≥
@@ -2990,6 +3446,47 @@ public sealed class CatalogsManager
             if (migrated is not null)
                 table.Indexes = migrated;
         }
+    }
+
+    /// <summary>
+    /// Loads every persisted <see cref="ViewSchema"/> for the database, keyed by name.
+    /// </summary>
+    /// <remarks>
+    /// Shares the single <c>{dbId}/meta</c> bucket scan pattern with <see cref="LoadTablesAsync"/>
+    /// and filters on the view key prefix, which is why view keys must use ':' rather than '/' as
+    /// their sub-field separator — a '/' would scatter them into per-view buckets this scan cannot
+    /// reach.
+    /// </remarks>
+    private static async Task<Dictionary<string, ViewSchema>> LoadViewsAsync(DatabaseDescriptor database, KvTransaction tx)
+    {
+        Dictionary<string, ViewSchema> views = new(StringComparer.OrdinalIgnoreCase);
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string viewKeyPrefix = ViewKeyPrefix(database.Id);
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            MetaBucketPrefix(database.Id),
+            null, true,
+            null, true,
+            512,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None).ConfigureAwait(false))
+        {
+            if (!key.StartsWith(viewKeyPrefix, StringComparison.Ordinal) || entry.Value is null)
+                continue;
+
+            ViewSchema view = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.ViewSchema);
+
+            if (string.IsNullOrWhiteSpace(view.Name) || string.IsNullOrWhiteSpace(view.Id))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SystemSpaceCorrupt,
+                    $"View meta key '{key}' decoded without a name or id");
+
+            views[view.Name!] = view;
+        }
+
+        return views;
     }
 
     private async Task<Dictionary<string, TableSchema>> LoadTablesAsync(DatabaseDescriptor database, KvTransaction tx)

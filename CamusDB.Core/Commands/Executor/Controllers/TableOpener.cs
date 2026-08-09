@@ -60,6 +60,16 @@ internal sealed class TableOpener
             );
         }
 
+        // A name that resolves to a view reaches here only on a path that needs a physical relation —
+        // that is, a write. Reads never do: view references are rewritten into derived tables before
+        // binding. Saying so beats "table does not exist" about an object the user can plainly see in
+        // SHOW VIEWS.
+        if (database.Schema.Views.ContainsKey(tableName))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ViewNotUpdatable,
+                $"'{tableName}' is a view and cannot be written to: CamusDB has no updatable views yet, " +
+                "so writes must target the underlying table");
+
         TableSchema tableSchema = catalogs.GetTableSchema(database, tableName);
 
         // Per-table privilege enforcement. This is the universal chokepoint for a table access — every

@@ -43,6 +43,11 @@
 %token TCOMMENT
 %token TUSER TIDENTIFIED TWITH TGRANT TGRANTS TREVOKE TPRIVILEGES TFOR
 %token TRESET
+/* VIEW/VIEWS/MATERIALIZED/REFRESH are the only new reserved words for views. Every other word the
+   view statements need — REPLACE, CASCADE, RESTRICT, CASCADED, LOCAL, OPTION, OWNER, CONCURRENTLY —
+   is matched as a plain identifier and validated in the parse action, so each stays usable as a
+   table or column name. "owner" in particular is already a column name in the test corpus. */
+%token TVIEW TVIEWS TMATERIALIZED TREFRESH
 
 %%
 
@@ -74,6 +79,13 @@ stat    : select_stmt { $$.n = $1.n; }
         | drop_user_stmt { $$.n = $1.n; }
         | grant_stmt { $$.n = $1.n; }
         | revoke_stmt { $$.n = $1.n; }
+        | create_view_stmt { $$.n = $1.n; }
+        | drop_view_stmt { $$.n = $1.n; }
+        | alter_view_stmt { $$.n = $1.n; }
+        | create_matview_stmt { $$.n = $1.n; }
+        | refresh_matview_stmt { $$.n = $1.n; }
+        | drop_matview_stmt { $$.n = $1.n; }
+        | alter_matview_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -349,6 +361,127 @@ drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $
                 | TDROP TTABLE TIF TEXISTS any_identifier TFORCE { $$.n = new(NodeType.DropTableIfExists, $5.n, null, null, null, null, null, null, "force"); }
                 ;
 
+/* ---------------------------------------------------------------------------------------------
+   Views and materialized views.
+
+   A non-materialized view carries: leftAst = name, rightAst = the body SELECT,
+   extendedOne = the optional column-alias list, yytext = the WITH CHECK OPTION kind
+   ("local"/"cascaded") or null.
+
+   A materialized view carries: leftAst = name, rightAst = the body SELECT,
+   extendedOne = the optional column-alias list, yytext = "data" or "nodata".
+   --------------------------------------------------------------------------------------------- */
+
+create_view_stmt : TCREATE TVIEW any_identifier opt_view_column_list TAS select_stmt opt_check_option
+                   { $$.n = new(NodeType.CreateView, $3.n, $6.n, $4.n, null, null, null, null, $7.s); }
+                 | TCREATE TOR TIDENTIFIER TVIEW any_identifier opt_view_column_list TAS select_stmt opt_check_option
+                   {
+                     if (!string.Equals($3.s, "replace", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: CREATE OR REPLACE VIEW, got 'CREATE OR " + $3.s + "'");
+                     $$.n = new(NodeType.CreateOrReplaceView, $5.n, $8.n, $6.n, null, null, null, null, $9.s);
+                   }
+                 ;
+
+opt_view_column_list : LPAREN view_column_list RPAREN { $$.n = $2.n; }
+                     | { $$.n = null; }
+                     ;
+
+view_column_list : view_column_list TCOMMA any_identifier { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+                 | any_identifier { $$.n = $1.n; $$.s = $1.s; }
+                 ;
+
+/* WITH [LOCAL | CASCADED] CHECK OPTION. CASCADED is the default when neither word is given,
+   matching PostgreSQL. OPTION/LOCAL/CASCADED are plain identifiers validated here. */
+opt_check_option : TWITH TCHECK TIDENTIFIER
+                   {
+                     if (!string.Equals($3.s, "option", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: WITH [LOCAL | CASCADED] CHECK OPTION, got 'WITH CHECK " + $3.s + "'");
+                     $$.s = "cascaded";
+                   }
+                 | TWITH TIDENTIFIER TCHECK TIDENTIFIER
+                   {
+                     if (!string.Equals($4.s, "option", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: WITH [LOCAL | CASCADED] CHECK OPTION, got 'WITH " + $2.s + " CHECK " + $4.s + "'");
+                     if (string.Equals($2.s, "local", System.StringComparison.OrdinalIgnoreCase))
+                         $$.s = "local";
+                     else if (string.Equals($2.s, "cascaded", System.StringComparison.OrdinalIgnoreCase))
+                         $$.s = "cascaded";
+                     else
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: WITH [LOCAL | CASCADED] CHECK OPTION, got 'WITH " + $2.s + " CHECK OPTION'");
+                   }
+                 | { $$.s = null; }
+                 ;
+
+/* CASCADE / RESTRICT. RESTRICT is the default: a drop that would orphan a dependent view is
+   refused unless the user asks for the cascade explicitly. */
+opt_drop_behavior : TIDENTIFIER
+                    {
+                      if (string.Equals($1.s, "cascade", System.StringComparison.OrdinalIgnoreCase))
+                          $$.s = "cascade";
+                      else if (string.Equals($1.s, "restrict", System.StringComparison.OrdinalIgnoreCase))
+                          $$.s = "restrict";
+                      else
+                          throw new CamusDB.Core.CamusDBException(
+                              CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                              "Expected CASCADE or RESTRICT, got '" + $1.s + "'");
+                    }
+                  | { $$.s = null; }
+                  ;
+
+drop_view_stmt : TDROP TVIEW view_name_list opt_drop_behavior { $$.n = new(NodeType.DropView, $3.n, null, null, null, null, null, null, $4.s); }
+               | TDROP TVIEW TIF TEXISTS view_name_list opt_drop_behavior { $$.n = new(NodeType.DropViewIfExists, $5.n, null, null, null, null, null, null, $6.s); }
+               ;
+
+view_name_list : view_name_list TCOMMA any_identifier { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+               | any_identifier { $$.n = $1.n; $$.s = $1.s; }
+               ;
+
+alter_view_stmt : TALTER TVIEW any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterViewRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
+                | TALTER TVIEW any_identifier TIDENTIFIER TTO any_identifier
+                  {
+                    if (!string.Equals($4.s, "owner", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Expected: ALTER VIEW <name> OWNER TO <user>, got '" + $4.s + " TO'");
+                    $$.n = new(NodeType.AlterViewOwnerTo, $3.n, $6.n, null, null, null, null, null, null);
+                  }
+                ;
+
+create_matview_stmt : TCREATE TMATERIALIZED TVIEW any_identifier opt_view_column_list TAS select_stmt opt_with_data
+                      { $$.n = new(NodeType.CreateMaterializedView, $4.n, $7.n, $5.n, null, null, null, null, $8.s); }
+                    | TCREATE TMATERIALIZED TVIEW TIF TNOT TEXISTS any_identifier opt_view_column_list TAS select_stmt opt_with_data
+                      { $$.n = new(NodeType.CreateMaterializedViewIfNotExists, $7.n, $10.n, $8.n, null, null, null, null, $11.s); }
+                    ;
+
+/* REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]. CONCURRENTLY parses but is
+   refused at execution rather than silently treated as a synonym for the plain form. */
+refresh_matview_stmt : TREFRESH TMATERIALIZED TVIEW any_identifier opt_with_data
+                       { $$.n = new(NodeType.RefreshMaterializedView, $4.n, null, null, null, null, null, null, $5.s); }
+                     | TREFRESH TMATERIALIZED TVIEW TIDENTIFIER any_identifier opt_with_data
+                       {
+                         if (!string.Equals($4.s, "concurrently", System.StringComparison.OrdinalIgnoreCase))
+                             throw new CamusDB.Core.CamusDBException(
+                                 CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                 "Expected: REFRESH MATERIALIZED VIEW [CONCURRENTLY] <name>, got '" + $4.s + "'");
+                         $$.n = new(NodeType.RefreshMaterializedView, $5.n, null, null, null, null, null, null, $6.s == null ? "concurrently" : "concurrently," + $6.s);
+                       }
+                     ;
+
+drop_matview_stmt : TDROP TMATERIALIZED TVIEW view_name_list opt_drop_behavior { $$.n = new(NodeType.DropMaterializedView, $4.n, null, null, null, null, null, null, $5.s); }
+                  | TDROP TMATERIALIZED TVIEW TIF TEXISTS view_name_list opt_drop_behavior { $$.n = new(NodeType.DropMaterializedViewIfExists, $6.n, null, null, null, null, null, null, $7.s); }
+                  ;
+
+alter_matview_stmt : TALTER TMATERIALIZED TVIEW any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterMaterializedViewRenameTo, $4.n, $7.n, null, null, null, null, null, null); }
+                   ;
+
 create_database_stmt : TCREATE TDATABASE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateDatabaseRelink, $3.n, $6.n, null, null, null, null, null, null); }
                      | TCREATE TDATABASE any_identifier { $$.n = new(NodeType.CreateDatabase, $3.n, null, null, null, null, null, null, null); }
                      | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier { $$.n = new(NodeType.CreateDatabaseIfNotExists, $6.n, null, null, null, null, null, null, null); }
@@ -507,6 +640,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TVIEWS { $$.n = new(NodeType.ShowViews, null, null, null, null, null, null, null, null); }
+          | TSHOW TVIEWS TLIKE string { $$.n = new(NodeType.ShowViews, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TMATERIALIZED TVIEWS { $$.n = new(NodeType.ShowMaterializedViews, null, null, null, null, null, null, null, null); }
+          | TSHOW TMATERIALIZED TVIEWS TLIKE string { $$.n = new(NodeType.ShowMaterializedViews, $5.n, null, null, null, null, null, null, null); }
+          | TSHOW TCREATE TVIEW any_identifier { $$.n = new(NodeType.ShowCreateView, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TCREATE TMATERIALIZED TVIEW any_identifier { $$.n = new(NodeType.ShowCreateMaterializedView, $5.n, null, null, null, null, null, null, null); }
           | TSHOW TDATABASE { $$.n = NodeAst.ShowDatabase; }
           | TSHOW TDATABASES { $$.n = NodeAst.ShowDatabases; }
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }

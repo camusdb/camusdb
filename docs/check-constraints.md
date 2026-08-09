@@ -400,7 +400,7 @@ path that populates `CheckConstraints` without parsing would silently disable en
 
 ## Part V — Limitations & non-goals
 
-- **No `FOREIGN KEY`** — a separate constraint, separate spec.
+- **No `FOREIGN KEY`** — a separate constraint, and not part of this feature.
 - **No `NOT VALID` / deferred / `NOT ENFORCED`** checks — ADD always full-scans existing rows.
 - **No cross-row / subquery / aggregate / non-deterministic** conditions — a check is a pure function
   of one row.
@@ -415,7 +415,7 @@ path that populates `CheckConstraints` without parsing would silently disable en
 
 | Area | Tests |
 | ---- | ----- |
-| Parse (all forms + spec examples) | `SQLParser/TestSQLParserCheckConstraints.cs` |
+| Parse (all declaration forms) | `SQLParser/TestSQLParserCheckConstraints.cs` |
 | Model / desugaring / DDL validation | `CommandsExecutor/TestCheckConstraintsDDL.cs` |
 | Three-valued evaluation + INSERT/UPDATE enforcement | `CommandsExecutor/TestCheckConstraintsEnforcement.cs` |
 | Persistence, reopen, render→parse round-trip | `CommandsExecutor/TestCheckConstraintsPersistence.cs` |

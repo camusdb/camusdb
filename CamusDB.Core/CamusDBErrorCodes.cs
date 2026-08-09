@@ -250,6 +250,83 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string AnalyzeRequiresNoPendingWrites = "CADB0522";
 
+    /// <summary>The named view or materialized view does not exist. Maps to HTTP 404.</summary>
+    public const string ViewDoesntExist = "CADB0523";
+
+    /// <summary>
+    /// The name is already taken by a view or a materialized view. A name taken by an ordinary table
+    /// still raises <see cref="TableAlreadyExists"/>, so the error names the kind of object actually
+    /// in the way. Maps to HTTP 409.
+    /// </summary>
+    public const string ViewAlreadyExists = "CADB0524";
+
+    /// <summary>
+    /// DML was issued against a view that is not auto-updatable, or against a materialized view.
+    ///
+    /// <para>CamusDB has neither rules nor <c>INSTEAD OF</c> triggers, so unlike PostgreSQL there is
+    /// no escape hatch that makes such a view writable — the refusal is final rather than an
+    /// invitation to define one. The message therefore names the specific rule that was violated
+    /// (aggregates, GROUP BY, a join, …), because that is the only actionable part. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string ViewNotUpdatable = "CADB0525";
+
+    /// <summary>
+    /// An <c>UPDATE</c> or <c>INSERT</c> through an otherwise-updatable view targeted a column that
+    /// is computed rather than a direct base-column reference, so there is no base column to write.
+    /// Maps to HTTP 400.
+    /// </summary>
+    public const string ViewColumnNotUpdatable = "CADB0526";
+
+    /// <summary>
+    /// A row written through a view with <c>WITH CHECK OPTION</c> does not satisfy the view's
+    /// predicate — the write would have produced a row the view itself cannot see. Evaluated with
+    /// the same three-valued logic as a CHECK constraint, so a predicate returning NULL passes.
+    /// Maps to HTTP 400.
+    /// </summary>
+    public const string ViewCheckOptionViolated = "CADB0527";
+
+    /// <summary>
+    /// A view's dependencies form a cycle. Detected at DDL time by walking the stored dependency
+    /// ids, which is why the runtime expansion-depth cap is a backstop rather than the defense.
+    /// Maps to HTTP 400.
+    /// </summary>
+    public const string ViewRecursionDetected = "CADB0528";
+
+    /// <summary>
+    /// <c>CREATE OR REPLACE VIEW</c> tried to change the view's existing column names, types, or
+    /// order. Only appending columns is allowed.
+    ///
+    /// <para>This is not pedantry: a dependent view, a cached plan, or a client's positional column
+    /// mapping all bind to the view's shape, and silently changing it would change their meaning
+    /// with no statement having been issued against them. Drop and recreate to change the shape.
+    /// Maps to HTTP 400.</para>
+    /// </summary>
+    public const string CannotChangeViewShape = "CADB0529";
+
+    /// <summary>
+    /// A <c>DROP</c> would have orphaned an object that depends on the target, and the statement did
+    /// not say <c>CASCADE</c>. The message lists the dependents. Maps to HTTP 409.
+    /// </summary>
+    public const string DependentObjectsExist = "CADB0530";
+
+    /// <summary>
+    /// A materialized view created <c>WITH NO DATA</c> (and never refreshed) was read.
+    ///
+    /// <para>Deliberately an error rather than an empty result: an empty result would make a
+    /// forgotten <c>REFRESH</c> indistinguishable from a correct empty answer. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string MaterializedViewNotPopulated = "CADB0531";
+
+    /// <summary>
+    /// A <c>REFRESH</c> of this materialized view is already running.
+    ///
+    /// <para>Refused rather than queued: refresh builds a new relation and swaps it in, so two
+    /// concurrent refreshes would both succeed and the later swap would silently discard the
+    /// earlier one's work — including, if the two read at different snapshots, the newer data.
+    /// Maps to HTTP 409.</para>
+    /// </summary>
+    public const string RefreshAlreadyInProgress = "CADB0532";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -387,6 +464,16 @@ public static class CamusDBErrorCodes
         OrphanNotFound => 404,
         UserDoesNotExist => 404,
         UnknownPreparedStatement => 404,
+        ViewDoesntExist => 404,
+        ViewNotUpdatable => 400,
+        ViewColumnNotUpdatable => 400,
+        ViewCheckOptionViolated => 400,
+        ViewRecursionDetected => 400,
+        CannotChangeViewShape => 400,
+        MaterializedViewNotPopulated => 400,
+        ViewAlreadyExists => 409,
+        DependentObjectsExist => 409,
+        RefreshAlreadyInProgress => 409,
         PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

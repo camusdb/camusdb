@@ -93,6 +93,43 @@ public sealed class TableSchema
     public string? Comment { get; set; }
 
     /// <summary>
+    /// Whether this relation is an ordinary table or a materialized view. Absent/<c>Table</c> for
+    /// every relation created before this field existed. Like <c>Indexes</c> / <c>CheckConstraints</c>
+    /// / <c>Settings</c> / <c>Comment</c> it rides the table blob and does <b>not</b> bump
+    /// <see cref="Version"/>: what a relation is called does not change how its rows are encoded.
+    /// </summary>
+    public RelationKind Kind { get; set; }
+
+    /// <summary>
+    /// The query that populates this relation, for a materialized view; null for an ordinary table.
+    /// Does not bump <see cref="Version"/>, for the same reason as <see cref="Kind"/>.
+    /// </summary>
+    public ViewDefinition? ViewDefinition { get; set; }
+
+    /// <summary>
+    /// Whether a materialized view holds data. False for one created <c>WITH NO DATA</c> and never
+    /// refreshed. Always true (and meaningless) for an ordinary table.
+    ///
+    /// <para>Reading an unpopulated materialized view is an <i>error</i>, not an empty result. An
+    /// empty result would make a forgotten <c>REFRESH</c> indistinguishable from a correct empty
+    /// answer, which is precisely the failure PostgreSQL added its own error for.</para>
+    /// </summary>
+    public bool IsPopulated { get; set; }
+
+    /// <summary>
+    /// HLC of the snapshot the last successful <c>REFRESH</c> read its source at — not the wall time
+    /// the refresh finished. This is the timestamp the contents are consistent as of, so it is the
+    /// only value that answers "how stale is this materialized view", and it is reported by
+    /// <c>SHOW MATERIALIZED VIEWS</c>. Null when never refreshed.
+    /// </summary>
+    public HLCTimestamp? RefreshedAt { get; set; }
+
+    /// <summary>Convenience predicate for the many call sites that only care whether DML and
+    /// <c>REFRESH</c> apply.</summary>
+    [JsonIgnore]
+    public bool IsMaterializedView => Kind == RelationKind.MaterializedView;
+
+    /// <summary>
     /// A list of all the previous versions of the table schema.
     /// </summary>
     public List<TableSchemaHistory>? SchemaHistory { get; set; }

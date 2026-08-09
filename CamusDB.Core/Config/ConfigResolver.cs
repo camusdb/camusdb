@@ -258,6 +258,9 @@ public static class ConfigResolver
         MaxIndexColumns = config.MaxIndexColumns,
         MaxIndexIncludeTupleBytes = config.MaxIndexIncludeTupleBytes,
         MaxMutationsPerTransaction = config.MaxMutationsPerTransaction,
+        MaxViewExpansionDepth = config.MaxViewExpansionDepth,
+        MaterializedViewRefreshChunkRows = config.MaterializedViewRefreshChunkRows,
+        MaterializedViewRefreshEnabled = config.MaterializedViewRefreshEnabled,
         BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs,
 
             // Mirror the effective Kahuna PITR retention window (seconds) into the process-wide config so

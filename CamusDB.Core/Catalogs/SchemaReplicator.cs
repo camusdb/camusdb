@@ -443,14 +443,37 @@ public sealed class SchemaReplicator
         Schema clone = new()
         {
             SchemaVersion = schema.SchemaVersion,
-            Tables = new Dictionary<string, TableSchema>(schema.Tables.Count, schema.Tables.Comparer)
+            Tables = new Dictionary<string, TableSchema>(schema.Tables.Count, schema.Tables.Comparer),
+            Views = new Dictionary<string, ViewSchema>(schema.Views.Count, schema.Views.Comparer)
         };
 
         foreach ((string tableName, TableSchema table) in schema.Tables)
             clone.Tables[tableName] = CloneTable(table);
 
+        // Views must be cloned, not skipped. This clone is what ValidateSchemaDelta dry-runs against,
+        // so an empty view map would make every view delta validate against a database that appears
+        // to have no views — a CREATE VIEW over a taken name would pass, and a DROP/RENAME of a view
+        // that does exist would fail. The clone must be a copy rather than a share for the same
+        // reason the table clone is: apply mutates it.
+        foreach ((string viewName, ViewSchema view) in schema.Views)
+            clone.Views[viewName] = CloneView(view);
+
         return clone;
     }
+
+    /// <summary>
+    /// Copies a view deeply enough that applying a delta to the clone cannot be observed through the
+    /// live schema. <see cref="ViewDefinition"/> is shared by reference: every path that changes a
+    /// definition replaces the whole instance rather than mutating it in place, so sharing is safe
+    /// and copying it would only cost.
+    /// </summary>
+    private static ViewSchema CloneView(ViewSchema view) => new()
+    {
+        Id = view.Id,
+        Name = view.Name,
+        Definition = view.Definition,
+        Comment = view.Comment
+    };
 
     private static TableSchema CloneTable(TableSchema table)
     {

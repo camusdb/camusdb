@@ -104,5 +104,52 @@ public enum SchemaOp
     /// a re-delivered entry cannot wedge apply after a later DROP COLUMN. Does not bump
     /// <c>TableSchema.Version</c>: comments do not affect row encoding.
     /// </summary>
-    SetComment = 15
+    SetComment = 15,
+
+    /// <summary>
+    /// Create a non-materialized view (payload: <c>SchemaViewPayload</c>). Materialized views do
+    /// <b>not</b> use this op — they are relations and ride <see cref="CreateTable"/> with
+    /// <c>Kind = MaterializedView</c>, which is what gives them deferred drop, relink and orphan
+    /// reclaim for free.
+    /// </summary>
+    CreateView = 16,
+
+    /// <summary>
+    /// Replace an existing view's definition in place (payload: <c>SchemaViewPayload</c>), preserving
+    /// its id so dependents keep resolving. Distinct from <see cref="CreateView"/> because apply must
+    /// overwrite rather than reject an existing name.
+    /// </summary>
+    ReplaceView = 17,
+
+    /// <summary>
+    /// Remove a view (payload: <c>SchemaDropViewPayload</c>). Idempotent on apply — a view that is
+    /// already gone is a no-op, so a re-delivered entry cannot wedge the apply pipeline.
+    /// </summary>
+    DropView = 18,
+
+    /// <summary>Rename a view (payload: <c>SchemaRenamePayload</c> with
+    /// <c>Kind = SchemaRenameKind.View</c>). Metadata-only; the view's id is unchanged.</summary>
+    RenameView = 19,
+
+    /// <summary>
+    /// Overwrite a view's stored definition without the user having issued a
+    /// <c>CREATE OR REPLACE</c> (payload: <c>SchemaSetViewDefinitionPayload</c>).
+    ///
+    /// <para>This exists because renaming a base table or column must rewrite every dependent view's
+    /// body — CamusDB stores a view as text, so unlike PostgreSQL's OID-keyed parse tree the text
+    /// would otherwise go stale and the view would stop resolving. Keeping the rewrite a distinct op
+    /// makes it visible in the replicated log and idempotent on replay, rather than hiding it inside
+    /// the rename's apply.</para>
+    /// </summary>
+    SetViewDefinition = 20,
+
+    /// <summary>
+    /// Record the outcome of a materialized-view <c>REFRESH</c>: its populated flag and the snapshot
+    /// its contents are consistent as of (payload: <c>SchemaSetMatViewStatePayload</c>).
+    ///
+    /// <para>Must be idempotent on apply. Raft re-delivers, and a replayed completion that flipped a
+    /// since-invalidated flag back to populated would leave the cluster claiming data that is not
+    /// there. Does not bump <c>TableSchema.Version</c> — neither flag affects row encoding.</para>
+    /// </summary>
+    SetMaterializedViewState = 21
 }

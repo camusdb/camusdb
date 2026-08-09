@@ -155,7 +155,7 @@ while using little CPU, and overlapping stage durations are not additive.
 
 `scripts/diagnostics-overhead.sh <output-dir> [--runs 5 --duration 60s]` alternates
 diagnostics-disabled and diagnostics-enabled Release workload runs and reports the median completed
-ops/s of each plus the enabled-vs-disabled delta. Targets (from the spec): enabled overhead below **5%**
+ops/s of each plus the enabled-vs-disabled delta. Target: enabled overhead below **5%**
 median throughput regression at the default 1% trace sample ratio. Measuring the *disabled* overhead
 against a pre-instrumentation build (target **< 2%**) requires building from a commit before this
 change; the harness prints that caveat. Overhead is environment-specific — record the raw runs, and do

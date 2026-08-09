@@ -105,6 +105,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly RowInsertSelector rowInsertSelector = new();
 
+    private readonly Controllers.DDL.ViewCreator viewCreator = new();
+
     private readonly RowUpdater rowUpdater;
 
     private readonly RowDeleter rowDeleter;
@@ -3130,7 +3132,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         // be a per-table grant target, and the check must happen before the table is created (not at
         // the post-create re-open). A db.* / global CreateTable grant (or superuser) passes.
         if (ast.nodeType is NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink
-            or NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists)
+            or NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists
+            // A view and a materialized view are relations too, and are equally unable to be a
+            // per-table grant target before they exist.
+            or NodeType.CreateView or NodeType.CreateOrReplaceView
+            or NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists)
         {
             DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
             if (registry.TryResolveId(ticket.DatabaseName, out string createDbId)
@@ -3196,6 +3202,27 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Replaces every non-materialized view reference in <paramref name="ast"/> with a derived table
+    /// over the view's stored body, so the rest of the pipeline never has to know views exist.
+    ///
+    /// <para>Must run <b>after</b> the database is opened (the schema is what resolves a name to a
+    /// view) and <b>before</b> the statement is bound (binding resolves relation names against the
+    /// table map, where a view is not). Returns the same AST instance when the statement references
+    /// no view, which is both the common case and the only safe treatment of an AST shared from the
+    /// parser cache.</para>
+    ///
+    /// <para>The view body is re-parsed through that same cache. Keying on the body's SQL text needs
+    /// no explicit invalidation: <c>CREATE OR REPLACE VIEW</c> stores different normalized text, so
+    /// the next expansion is simply a different cache key.</para>
+    /// </summary>
+    private NodeAst ExpandViews(DatabaseDescriptor database, NodeAst ast)
+        => Controllers.Queries.ViewExpander.Expand(
+            database.Schema,
+            ast,
+            options.MaxViewExpansionDepth,
+            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
     private static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
     {
@@ -3221,6 +3248,19 @@ public sealed class CommandExecutor : IAsyncDisposable
             or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,
         NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
             or NodeType.ShowDatabase or NodeType.ShowOrphanTables => Privilege.Select,
+        // Creating a view or materialized view creates a relation, so it needs the same privilege
+        // creating a table does — and is checked at database scope for the same reason: the object
+        // does not exist yet, so it cannot be a per-table grant target.
+        NodeType.CreateView or NodeType.CreateOrReplaceView
+            or NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists => Privilege.CreateTable,
+        NodeType.DropView or NodeType.DropViewIfExists
+            or NodeType.DropMaterializedView or NodeType.DropMaterializedViewIfExists => Privilege.Drop,
+        NodeType.AlterViewRenameTo or NodeType.AlterViewOwnerTo
+            or NodeType.AlterMaterializedViewRenameTo => Privilege.Alter,
+        // REFRESH replaces the relation's contents, so it is a write, not a read.
+        NodeType.RefreshMaterializedView => Privilege.Insert,
+        NodeType.ShowViews or NodeType.ShowMaterializedViews
+            or NodeType.ShowCreateView or NodeType.ShowCreateMaterializedView => Privilege.Select,
         _ => null,
     };
 
@@ -3610,6 +3650,32 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return await Comment(database, commentTicket).ConfigureAwait(false);
                 }
 
+            case NodeType.CreateView:
+            case NodeType.CreateOrReplaceView:
+                {
+                    bool createdView = await viewCreator.CreateAsync(
+                        this, catalogs, registryTask, database, ast, ticket,
+                        replace: ast.nodeType == NodeType.CreateOrReplaceView).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, createdView);
+                }
+
+            case NodeType.DropView:
+            case NodeType.DropViewIfExists:
+                {
+                    bool droppedView = await viewCreator.DropAsync(
+                        catalogs, database, ast,
+                        ifExists: ast.nodeType == NodeType.DropViewIfExists).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, droppedView);
+                }
+
+            case NodeType.AlterViewRenameTo:
+                {
+                    await catalogs.RenameViewAsync(database, ast.leftAst!.yytext!, ast.rightAst!.yytext!).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
             case NodeType.CreateTable:
             case NodeType.CreateTableIfNotExists:
                 {
@@ -3801,13 +3867,22 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor renameTableDesc = await tableOpener.Open(database, oldTableName).ConfigureAwait(false);
 
-                    return await ExecuteDdlInTransaction(database, async tx =>
+                    ExecuteDDLSQLResult renameResult = await ExecuteDdlInTransaction(database, async tx =>
                     {
                         bool ok = await catalogs.RenameTable(database, renameTableTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     },
                     postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTableDesc.Id)
                     ).ConfigureAwait(false);
+
+                    // A view stores its body as text, so a rename leaves every dependent view naming a
+                    // relation that no longer exists. Rewriting them here is what reproduces
+                    // PostgreSQL's rename-is-transparent-to-views behavior.
+                    await Controllers.DDL.ViewDependencyMaintainer.RewriteAfterRelationRenameAsync(
+                        catalogs, database, renameTableDesc.Id, oldTableName, newTableName,
+                        sql => SQLParserProcessor.Parse(sql, sqlParserCache)).ConfigureAwait(false);
+
+                    return renameResult;
                 }
 
             case NodeType.DropTable:
@@ -3824,6 +3899,12 @@ public sealed class CommandExecutor : IAsyncDisposable
                         return new(database, false);
 
                     TableDescriptor table = await tableOpener.Open(database, dropTableTicket.TableName).ConfigureAwait(false);
+
+                    // Dropping a table a view reads would turn that view into a delayed error for
+                    // whoever reads it next. Refuse instead, as PostgreSQL does. DROP TABLE has no
+                    // CASCADE form yet, so there is deliberately no way to force it past this.
+                    Controllers.DDL.ViewDependencyMaintainer.RequireNoDependentViews(
+                        database.Schema, dropTableTicket.TableName, table.Id, cascade: false);
 
                     return await ExecuteDdlInTransaction(database, async tx =>
                     {
@@ -4507,6 +4588,22 @@ public sealed class CommandExecutor : IAsyncDisposable
         return warning;
     }
 
+    /// <summary>
+    /// Binds a view body and returns its output schema and projections without reading any rows.
+    ///
+    /// <para>Exists so <c>CREATE VIEW</c> derives a view's columns through exactly the same path that
+    /// produces a query's client-facing column metadata and a CTAS target's schema. A view column
+    /// therefore always has the type a plain <c>SELECT</c> of that expression would report — a second
+    /// derivation would be free to drift from the first, and the drift would only surface as a wrong
+    /// type in somebody's client.</para>
+    ///
+    /// <para>The returned source's cursor is never opened by the caller; disposing it releases the
+    /// binding without having scanned anything.</para>
+    /// </summary>
+    internal Task<SelectRowSource> BuildViewSourceAsync(
+        DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
+        => BuildSelectSourceAsync(database, ExpandViews(database, bodyAst), ticket, "CREATE VIEW");
+
     private async Task<SelectRowSource> BuildSelectSourceAsync(
         DatabaseDescriptor database,
         NodeAst sourceAst,
@@ -4766,6 +4863,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 
+        ast = ExpandViews(database, ast);
+
         // Mark the transaction as having executed a statement for every statement type except the
         // SET TRANSACTION family — those must be the first statement per standard SQL semantics.
         if (!IsSetTransactionStatement(ast.nodeType))
@@ -4823,6 +4922,35 @@ public sealed class CommandExecutor : IAsyncDisposable
                     return (database, schemaQuerier.ShowTables(database, tablePattern, VisibilityPrincipal(ticket)));
                 }
 
+            case NodeType.ShowViews:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowViewsSchema;
+                    return (database, schemaQuerier.ShowViews(database, UnquoteLikePattern(ast.leftAst?.yytext)));
+                }
+
+            case NodeType.ShowMaterializedViews:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowMaterializedViewsSchema;
+                    return (database, schemaQuerier.ShowMaterializedViews(
+                        database, UnquoteLikePattern(ast.leftAst?.yytext), VisibilityPrincipal(ticket)));
+                }
+
+            case NodeType.ShowCreateView:
+                {
+                    string showViewName = ast.leftAst!.yytext!;
+
+                    if (!database.Schema.Views.TryGetValue(showViewName, out Catalogs.Models.ViewSchema? shownView))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ViewDoesntExist, $"View '{showViewName}' does not exist");
+
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateViewSchema;
+
+                    return (database, schemaQuerier.ShowCreateView(showViewName, shownView));
+                }
+
             case NodeType.ShowOrphanTables:
                 {
                     if (schemaOut is not null)
@@ -4834,7 +4962,15 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowColumnsSchema;
-                    TableDescriptor table = await tableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+
+                    string describedName = ast.leftAst!.yytext!;
+
+                    // Checked before the table open, which resolves physical relations only and would
+                    // otherwise refuse a view. DESCRIBE is a read, so it must work on a view.
+                    if (database.Schema.Views.TryGetValue(describedName, out Catalogs.Models.ViewSchema? describedView))
+                        return (database, schemaQuerier.ShowViewColumns(describedView));
+
+                    TableDescriptor table = await tableOpener.Open(database, describedName).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);
 
                     return (database, schemaQuerier.ShowColumns(table));

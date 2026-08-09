@@ -66,8 +66,7 @@ material, and are shown in full: an operator debugging a misconfigured deploymen
 **Deployment and topology keys are not yet listed.** `mode`, `node_name`, the Raft and HTTP ports,
 `peers`, `http_peers`, the certificate paths, and the whole `diagnostics:` section live on a
 different configuration object than the engine's own settings and do not currently appear. To check
-which port a node listens on, read the configuration file or the startup banner. Closing this gap is
-planned; see `specs/show-variables-spec.md`.
+which port a node listens on, read the configuration file or the startup banner.
 
 **Computed properties are not listed.** A value derived from other settings — the effective spill
 threshold, for instance — is a view of the configuration rather than part of it, and reporting it

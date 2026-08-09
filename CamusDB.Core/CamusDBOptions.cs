@@ -718,6 +718,40 @@ public sealed record CamusDBOptions
     public int MaxMutationsPerTransaction { get; init; } = 20_000;
 
     /// <summary>
+    /// Maximum nesting depth for view-over-view expansion.
+    ///
+    /// <para>A backstop, not the defense: a cycle is rejected at DDL time by walking the stored
+    /// dependency ids, and the expansion stack rejects a cycle again at read time. This cap only
+    /// bounds a legitimately-but-absurdly deep chain, so the failure it produces is a clear error
+    /// rather than a stack overflow.</para>
+    ///
+    /// Default: <c>32</c>.
+    /// </summary>
+    public int MaxViewExpansionDepth { get; init; } = 32;
+
+    /// <summary>
+    /// Rows written per transaction while a materialized-view <c>REFRESH</c> populates its new
+    /// contents.
+    ///
+    /// <para>Must stay below <see cref="MaxMutationsPerTransaction"/>, and by a margin: each row
+    /// costs <c>1 + K</c> mutations for a relation with K indexes, so a chunk size close to the
+    /// mutation cap would fail on any indexed materialized view. Refresh chunks precisely because a
+    /// single-transaction rebuild cannot work for a relation of any real size.</para>
+    ///
+    /// Default: <c>10_000</c>.
+    /// </summary>
+    public int MaterializedViewRefreshChunkRows { get; init; } = 10_000;
+
+    /// <summary>
+    /// Whether this node may run materialized-view refresh work. Turning it off does not disable
+    /// materialized views — reads and DDL keep working — it only stops this node from executing a
+    /// refresh, for a node that should not carry background work.
+    ///
+    /// Default: <c>true</c>.
+    /// </summary>
+    public bool MaterializedViewRefreshEnabled { get; init; } = true;
+
+    /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
     /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
     /// Default: 500 ms.

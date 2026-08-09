@@ -906,19 +906,42 @@ internal sealed class JoinQueryPlanner
         return null;
     }
 
+    /// <summary>
+    /// Picks a representative real table for the plan's metadata.
+    /// </summary>
+    /// <remarks>
+    /// The descent is recursive because derived tables nest: a query whose only source is a derived
+    /// table over another derived table has no real table at either of the top two levels, and the
+    /// real one may sit arbitrarily deep. That shape is ordinary SQL
+    /// (<c>FROM (SELECT … FROM (SELECT … FROM t) a) b</c>) and it is also exactly what a view over a
+    /// view expands to, so stopping at one level rejected valid queries. Recursing changes nothing
+    /// for the shallow cases — the first real table found is the same one — it only stops giving up
+    /// early on the deep ones.
+    /// </remarks>
     private static TableDescriptor ResolvePlanTable(BoundSelectQuery bound)
+    {
+        TableDescriptor? found = TryResolvePlanTable(bound);
+
+        if (found is not null)
+            return found;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "Could not resolve plan table metadata for derived-only query");
+    }
+
+    private static TableDescriptor? TryResolvePlanTable(BoundSelectQuery bound)
     {
         if (bound.Sources.Count > 0)
             return bound.Sources[0].Table;
 
         foreach (BoundDerivedTableSource derived in bound.DerivedSources)
         {
-            if (derived.InnerBound.Sources.Count > 0)
-                return derived.InnerBound.Sources[0].Table;
+            TableDescriptor? nested = TryResolvePlanTable(derived.InnerBound);
+            if (nested is not null)
+                return nested;
         }
 
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            "Could not resolve plan table metadata for derived-only query");
+        return null;
     }
 }

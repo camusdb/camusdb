@@ -64,6 +64,126 @@ internal sealed class SchemaQuerier
         }
     }
 
+    /// <summary>
+    /// Lists the non-materialized views of <paramref name="database"/>, optionally narrowed by a
+    /// LIKE <paramref name="pattern"/>. Materialized views are deliberately excluded — they are
+    /// relations and have their own statement — matching how <c>SHOW TABLES</c> lists only tables.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowViews(DatabaseDescriptor database, string? pattern = null)
+    {
+        await Task.CompletedTask;
+
+        foreach (KeyValuePair<string, ViewSchema> view in database.Schema.Views)
+        {
+            if (pattern is not null && !LikeMatch(view.Key, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "views", new ColumnValue(ColumnType.String, view.Key) }
+            });
+        }
+    }
+
+    /// <summary>
+    /// Lists the materialized views, with the populated flag and the snapshot each one's contents are
+    /// consistent as of. The timestamp is the refresh's <em>source read</em> HLC, not the wall time
+    /// the refresh finished, because that is the value that answers "how stale is this".
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowMaterializedViews(
+        DatabaseDescriptor database, string? pattern = null, Principal? principal = null)
+    {
+        await Task.CompletedTask;
+
+        foreach (KeyValuePair<string, TableSchema> relation in database.Schema.Tables)
+        {
+            if (!relation.Value.IsMaterializedView)
+                continue;
+
+            if (pattern is not null && !LikeMatch(relation.Key, pattern))
+                continue;
+
+            if (principal is not null && !principal.HasAnyPrivilege(database.Id, relation.Value.Id))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "materialized_views", new ColumnValue(ColumnType.String, relation.Key) },
+                { "populated", new ColumnValue(ColumnType.Bool, relation.Value.IsPopulated) },
+                {
+                    "refreshed_at",
+                    new ColumnValue(ColumnType.String, relation.Value.RefreshedAt?.ToString() ?? "")
+                }
+            });
+        }
+    }
+
+    /// <summary>
+    /// Renders <c>SHOW CREATE VIEW</c> from the stored normalized definition.
+    /// </summary>
+    /// <remarks>
+    /// The output is the normalized body, not the text the user typed — a view is stored re-rendered
+    /// so renames can rewrite it as a targeted AST edit. PostgreSQL's <c>pg_get_viewdef</c> behaves
+    /// the same way for the same reason, so normalized output is expected rather than surprising.
+    /// </remarks>
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateView(string viewName, ViewSchema view)
+    {
+        await Task.CompletedTask;
+
+        ViewDefinition definition = view.Definition
+            ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"View '{viewName}' has no stored definition");
+
+        StringBuilder sql = new();
+        sql.Append("CREATE VIEW `").Append(view.Name).Append('`');
+
+        // The column list is emitted only when it renames something the body does not already
+        // produce; echoing it unconditionally would add noise to every ordinary view.
+        sql.Append(" AS ").Append(definition.Sql);
+
+        if (definition.CheckOption == CheckOptionKind.Local)
+            sql.Append(" WITH LOCAL CHECK OPTION");
+        else if (definition.CheckOption == CheckOptionKind.Cascaded)
+            sql.Append(" WITH CASCADED CHECK OPTION");
+
+        yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "view", new ColumnValue(ColumnType.String, view.Name ?? viewName) },
+            { "create view", new ColumnValue(ColumnType.String, sql.ToString()) }
+        });
+    }
+
+    /// <summary>
+    /// <c>SHOW COLUMNS FROM &lt;view&gt;</c>, answered from the view's frozen column list.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the stored list rather than a re-derivation of the body: the stored list is what
+    /// the view actually publishes, and re-deriving would report a shape that a base-table column add
+    /// had since widened — the exact drift freezing the shape exists to prevent.
+    ///
+    /// <para>The same six columns as the table form, so a client can consume either without
+    /// branching. <c>Null</c>, <c>Key</c>, <c>Default</c> and <c>Extra</c> are blank because a view
+    /// column has none of them: nullability, keys and defaults belong to the base table, and
+    /// reporting the base table's would describe a constraint that does not apply to reads through
+    /// the view.</para>
+    /// </remarks>
+    internal async IAsyncEnumerable<QueryResultRow> ShowViewColumns(ViewSchema view)
+    {
+        await Task.CompletedTask;
+
+        foreach (ViewColumnSchema column in view.Definition?.Columns ?? [])
+        {
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Field", new ColumnValue(ColumnType.String, column.Name) },
+                { "Type", new ColumnValue(ColumnType.String, column.Type.ToString().ToLowerInvariant()) },
+                { "Null", new ColumnValue(ColumnType.String, "") },
+                { "Key", new ColumnValue(ColumnType.String, "") },
+                { "Default", new ColumnValue(ColumnType.String, "") },
+                { "Extra", new ColumnValue(ColumnType.String, "") },
+            });
+        }
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ShowColumns(TableDescriptor table)
     {
         await Task.CompletedTask;
