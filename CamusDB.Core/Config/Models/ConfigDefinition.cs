@@ -419,6 +419,16 @@ public class ConfigDefinition
     public string DefaultTransactionPriority { get; set; } = "normal";
 
     /// <summary>
+    /// Milliseconds a transaction queues at the node's admission gate before being refused with a
+    /// retryable error. <c>0</c> (the default) leaves the node's own default budget in force.
+    ///
+    /// <para>Distinct from <c>max_serializable_transaction_lifetime_ms</c>, which bounds how long an
+    /// admitted transaction may live. Inert while <c>kahuna.max_concurrent_sessions</c> is zero, and
+    /// clamped by the node to <c>kahuna.max_admission_wait_ms</c>.</para>
+    /// </summary>
+    public int TransactionAdmissionWaitMs { get; set; }
+
+    /// <summary>
     /// Initial range-lock TTL in milliseconds. The coordinator renews a live session's range locks on
     /// its collection-interval tick, so this must exceed that interval (60 s by default) or a lock
     /// lapses before the first renewal. &lt;= 0 disables expiry. Default 150 000.
@@ -784,6 +794,11 @@ public class ConfigDefinition
             throw Invalid(
                 "'default_transaction_priority' must be one of 'background', 'low', 'normal', 'high', " +
                 "'critical', got '" + DefaultTransactionPriority + "'");
+
+        if (TransactionAdmissionWaitMs < 0)
+            throw Invalid(
+                "'transaction_admission_wait_ms' must be >= 0 (0 leaves the node default in force), got " +
+                TransactionAdmissionWaitMs);
 
         if (LockEscalationThreshold <= 0)
             throw Invalid($"'lock_escalation_threshold' must be > 0, got {LockEscalationThreshold}");

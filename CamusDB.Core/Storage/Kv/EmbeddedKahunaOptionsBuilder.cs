@@ -161,6 +161,12 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.MaxConcurrentSessions is int maxSessions)
             baseline.MaxConcurrentSessions = maxSessions;
 
+        if (kahuna.DefaultAdmissionWaitMs is int defaultAdmissionWait)
+            baseline.DefaultAdmissionWaitMs = defaultAdmissionWait;
+
+        if (kahuna.MaxAdmissionWaitMs is int maxAdmissionWait)
+            baseline.MaxAdmissionWaitMs = maxAdmissionWait;
+
         if (kahuna.TransactionPriorityReservedSlots is int reservedSlots)
             baseline.TransactionPriorityReservedSlots = reservedSlots;
 

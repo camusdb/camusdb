@@ -909,14 +909,36 @@ expr       : equals_expr { $$.n = $1.n; }
            | scalar_subquery_expr { $$.n = $1.n; }
            ;
 
-/* between_expr is declared before and_expr on purpose. `x BETWEEN a AND b AND c` has an inherent
-   reduce/reduce conflict on the trailing AND/OR between finishing the BETWEEN and reducing an inner
-   `condition AND condition`. gppg breaks a reduce/reduce tie in favour of the rule declared first, so
-   putting between_expr first makes BETWEEN win — grouping as `(x BETWEEN a AND b) AND c`, matching SQL's
-   rule that BETWEEN binds tighter than AND. (Precedence can't resolve a reduce/reduce conflict, so the
-   two warnings remain; only their resolution is fixed here.) */
-between_expr : condition TBETWEEN condition TAND condition { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
+/* The bounds are `between_bound`, not the general `condition`, and that restriction is what keeps the
+   grammar conflict-free. If a bound could be any condition it could itself be an `x AND y`, so after
+   `x BETWEEN a AND b` with another AND/OR ahead the parser could not decide whether to finish the
+   BETWEEN or fold `b AND c` into the upper bound — an ambiguity precedence cannot resolve, because it
+   is a reduce/reduce tie between two complete rules rather than a shift-versus-reduce choice.
+   Excluding the boolean operators from a bound removes the choice entirely: `x BETWEEN a AND b AND c`
+   can only be `(x BETWEEN a AND b) AND c`, which is also SQL's rule that BETWEEN binds tighter than
+   AND. A bound is therefore an arithmetic-level expression — literal, identifier, function call, CAST,
+   CASE, scalar subquery, parenthesised expression, or those combined with + - * / — matching the
+   standard's "row value predicand". Anything boolean still works inside parentheses: the LPAREN
+   delimits it, so `x BETWEEN (a AND b) AND c` parses. */
+between_expr : condition TBETWEEN between_bound TAND between_bound { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
              ;
+
+/* Arithmetic-level operand used only for BETWEEN bounds; see between_expr for why it exists. The
+   arithmetic operators are duplicated here rather than shared with add_expr/sub_expr/mult_expr/div_expr
+   because those take `condition` operands, which would re-admit the boolean forms this level exists to
+   exclude. Operator precedence and associativity come from the same %left declarations, so a bound
+   groups exactly as the equivalent expression would elsewhere. */
+between_bound : simple_expr { $$.n = $1.n; }
+              | group_paren_expr { $$.n = $1.n; }
+              | fcall_expr { $$.n = $1.n; }
+              | cast_expr { $$.n = $1.n; }
+              | case_expr { $$.n = $1.n; }
+              | scalar_subquery_expr { $$.n = $1.n; }
+              | between_bound TADD between_bound { $$.n = new(NodeType.ExprAdd, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TMINUS between_bound { $$.n = new(NodeType.ExprSub, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TMULT between_bound { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TDIV between_bound { $$.n = new(NodeType.ExprDiv, $1.n, $3.n, null, null, null, null, null, null); }
+              ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null, null); }
           ;

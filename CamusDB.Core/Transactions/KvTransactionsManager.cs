@@ -335,6 +335,12 @@ public sealed class KvTransactionsManager : IDisposable
                     // Consulted by the node's admission gate to decide which queued transaction starts
                     // next. Inert unless a concurrency ceiling is configured on the node.
                     Priority          = priority,
+                    // How long this start will queue at the gate before being refused, deliberately
+                    // not the session Timeout below. Those measure unrelated things: Timeout is how
+                    // long an admitted transaction may live, this is how long an unadmitted one waits
+                    // to begin — and a transaction meant to run for an hour is not thereby willing to
+                    // wait an hour at the door. Non-positive leaves the node's own default budget.
+                    AdmissionWaitMs   = options.TransactionAdmissionWaitMs,
                     // Bound an abandoned session server-side: the Kahuna reaper reclaims a session that
                     // is never finalized after this window plus its grace period, releasing its range
                     // locks. Non-positive leaves the server default. This replaces the client-side

@@ -15,9 +15,9 @@ namespace CamusDB.Tests.SQLParser;
 /// <summary>
 /// BETWEEN binds tighter than AND/OR, so a trailing boolean operator must group outside the BETWEEN:
 /// <c>x BETWEEN a AND b AND c</c> is <c>(x BETWEEN a AND b) AND c</c>, not
-/// <c>x BETWEEN (a AND b) AND c</c>. The grammar has an inherent reduce/reduce conflict on that
-/// trailing AND/OR; declaring <c>between_expr</c> before <c>and_expr</c> makes gppg resolve it toward
-/// BETWEEN. These tests pin that resolution.
+/// <c>x BETWEEN (a AND b) AND c</c>. The grammar gets that grouping by construction: a bound is an
+/// arithmetic-level expression that cannot contain a bare AND/OR, so no other reading exists. These
+/// tests pin the grouping and the shape of what a bound may contain.
 /// </summary>
 public sealed class TestSQLParserBetweenPrecedence
 {
@@ -66,5 +66,40 @@ public sealed class TestSQLParserBetweenPrecedence
         Assert.AreEqual(NodeType.ExprAnd, where.nodeType);
         Assert.AreEqual("a", where.leftAst!.yytext);
         Assert.AreEqual(NodeType.ExprBetween, where.rightAst!.nodeType);
+    }
+
+    [Test]
+    public void Bounds_AcceptArithmetic()
+    {
+        NodeAst where = Where("SELECT x FROM t WHERE x BETWEEN a + 1 AND b * 2");
+
+        Assert.AreEqual(NodeType.ExprBetween, where.nodeType);
+        Assert.AreEqual(NodeType.ExprAdd, where.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprMult, where.extendedTwo!.nodeType);
+    }
+
+    [Test]
+    public void Bounds_AcceptNegativeLiteralsFunctionsAndSubqueries()
+    {
+        NodeAst where = Where("SELECT x FROM t WHERE x BETWEEN -5 AND abs(y)");
+        Assert.AreEqual(NodeType.ExprBetween, where.nodeType);
+        Assert.AreEqual(NodeType.Integer, where.extendedOne!.nodeType);
+        Assert.AreEqual(NodeType.ExprFuncCall, where.extendedTwo!.nodeType);
+
+        where = Where("SELECT x FROM t WHERE x BETWEEN (SELECT MIN(v) FROM u) AND 10");
+        Assert.AreEqual(NodeType.ExprBetween, where.nodeType);
+        Assert.AreEqual(NodeType.ExprScalarSubquery, where.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void Bounds_AcceptBooleanExpressionOnlyWhenParenthesised()
+    {
+        // A bare AND inside a bound is not a bound at all — it closes the BETWEEN. Parentheses
+        // delimit the boolean expression, so this form still reaches the lower bound.
+        NodeAst where = Where("SELECT x FROM t WHERE x BETWEEN (a AND b) AND c");
+
+        Assert.AreEqual(NodeType.ExprBetween, where.nodeType);
+        Assert.AreEqual(NodeType.ExprAnd, where.extendedOne!.nodeType);
+        Assert.AreEqual("c", where.extendedTwo!.yytext);
     }
 }

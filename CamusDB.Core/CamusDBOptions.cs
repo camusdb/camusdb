@@ -488,6 +488,24 @@ public sealed record CamusDBOptions
     public global::Kahuna.Shared.KeyValue.TransactionPriority DefaultTransactionPriority { get; init; } = global::Kahuna.Shared.KeyValue.TransactionPriority.Normal;
 
     /// <summary>
+    /// Milliseconds a transaction will queue at the node's admission gate before it is refused and the
+    /// caller told to retry. <c>0</c> — the default — leaves the node's own default budget in force.
+    ///
+    /// <para><b>This is the door-wait, not the transaction lifetime.</b> The two are deliberately
+    /// separate: <see cref="MaxSerializableTransactionLifetimeMs"/> is how long an admitted transaction
+    /// may live (and doubles as the abandoned-session reaper window), whereas this bounds how long an
+    /// unadmitted one waits to begin. A transaction that intends to run for an hour is not thereby
+    /// willing to wait an hour to start, so passing the lifetime here would make a saturated node hold
+    /// requests open instead of shedding them.</para>
+    ///
+    /// <para>Like every other knob in the admission family this is inert while
+    /// <c>kahuna.max_concurrent_sessions</c> is zero: with no ceiling admission completes synchronously
+    /// and nothing ever queues. The node clamps whatever is asked for here to its own
+    /// <c>kahuna.max_admission_wait_ms</c>, so an operator's ceiling always wins.</para>
+    /// </summary>
+    public int TransactionAdmissionWaitMs { get; init; }
+
+    /// <summary>
     /// Default read-set validation policy applied when a transaction is begun without an explicit
     /// value. <see cref="Kahuna.Shared.KeyValue.ReadValidation.None"/> keeps the historical behavior:
     /// pessimistic transactions rely on their locks alone and do not fold read observations. A

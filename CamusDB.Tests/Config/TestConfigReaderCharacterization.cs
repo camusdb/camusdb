@@ -107,6 +107,54 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void AcceptsAdmissionWaitBudgets()
+    {
+        ConfigDefinition config = new ConfigReader().Read(
+            "transaction_admission_wait_ms: 2000\n" +
+            "kahuna:\n  default_admission_wait_ms: 3000\n  max_admission_wait_ms: 20000");
+
+        Assert.That(config.TransactionAdmissionWaitMs, Is.EqualTo(2_000));
+        Assert.That(config.Kahuna.DefaultAdmissionWaitMs, Is.EqualTo(3_000));
+        Assert.That(config.Kahuna.MaxAdmissionWaitMs, Is.EqualTo(20_000));
+    }
+
+    [Test]
+    public void RejectsNegativeTransactionAdmissionWait()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("transaction_admission_wait_ms: -1"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("transaction_admission_wait_ms"));
+    }
+
+    [Test]
+    public void RejectsAdmissionWaitMaximumBelowTheDefault()
+    {
+        // The maximum clamps every caller, including one that supplied nothing and received the
+        // default — so a maximum below the default silently truncates the default it is paired with.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read(
+                "kahuna:\n  default_admission_wait_ms: 10000\n  max_admission_wait_ms: 5000"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("max_admission_wait_ms"));
+    }
+
+    [Test]
+    public void RejectsNonPositiveDefaultAdmissionWait()
+    {
+        // Zero here is not "use the node default" — it is a budget of zero, which refuses admission
+        // before a caller can ever be queued. Kahuna rejects it at startup; catch it at config load,
+        // where the offending key can be named.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("kahuna:\n  default_admission_wait_ms: 0"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("default_admission_wait_ms"));
+    }
+
+    [Test]
     public void RejectsUnknownKahunaStorageBackend()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(

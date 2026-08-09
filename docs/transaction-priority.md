@@ -120,16 +120,29 @@ Raise the threshold (tens of seconds) to make background work genuinely patient.
 global rate, so raising it also lengthens the worst-case wait for a genuinely starved ordinary
 transaction. Setting it to `0` disables aging and permits indefinite starvation.
 
-### Known limitation: a queued transaction can wait a long time before giving up
+### How long a transaction waits at the door
 
-The upstream admission gate bounds a queued transaction's wait by the transaction's own timeout,
-which CamusDB sets from `max_serializable_transaction_lifetime_ms` — **one hour** by default. With a
-binding ceiling, a transaction that cannot be admitted may park for that long before being told to
-retry. There is no CamusDB-side setting that shortens the admission wait without also shortening the
-abandoned-session reaper window.
+A transaction that cannot be admitted queues for the **admission wait budget**, then fails with the
+retryable `CADB0504` — nothing was started, so retrying is always safe, but the node is shedding load
+and the retry should follow a back-off.
 
-**Until this is fixed upstream, leave `max_concurrent_sessions` at `0` in production.** Everything
-else in this document works and is safe with the gate off; only the deferral behaviour is affected.
+```yml
+transaction_admission_wait_ms: 0          # 0 = leave the node's own budget in force
+
+kahuna:
+  default_admission_wait_ms: 5000         # node-side default when a caller asks for nothing
+  max_admission_wait_ms: 30000            # hard clamp on any caller-supplied budget
+```
+
+This is deliberately **not** the transaction lifetime. `max_serializable_transaction_lifetime_ms`
+(one hour by default) bounds how long an *admitted* transaction may live and doubles as the
+abandoned-session reaper window; the budget above bounds how long an *unadmitted* one waits to begin.
+A transaction meant to run for an hour is not thereby willing to wait an hour to start, and a long
+door-wait makes a saturated node hold requests open instead of shedding them.
+
+Keep the budget short — seconds. Lengthening it does not increase throughput; it only converts a
+prompt, retryable refusal into a slow one, and every waiting transaction occupies a queue slot that
+`transaction_priority_max_queued` would otherwise give to someone else.
 
 ## 5. What actually makes background work cheap
 

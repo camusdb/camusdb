@@ -103,6 +103,26 @@ public sealed class TestConfigResolver
     }
 
     [Test]
+    public void Resolve_SetsTransactionAdmissionWaitFromYaml()
+    {
+        ConfigDefinition config = new ConfigReader().Read("transaction_admission_wait_ms: 1500");
+        CamusDBOptions resolved = ConfigResolver.Resolve(config);
+
+        Assert.That(resolved.TransactionAdmissionWaitMs, Is.EqualTo(1_500));
+    }
+
+    [Test]
+    public void TransactionAdmissionWait_DefaultsToZeroWhenKeyAbsent()
+    {
+        // Zero means "leave the node's own budget in force" — the engine imposes no door-wait of its
+        // own unless an operator asks for one.
+        ConfigDefinition config = new ConfigReader().Read("default_isolation_level: serializable");
+        CamusDBOptions resolved = ConfigResolver.Resolve(config);
+
+        Assert.That(resolved.TransactionAdmissionWaitMs, Is.Zero);
+    }
+
+    [Test]
     public void DefaultTransactionPriority_DefaultsToNormalWhenKeyAbsent()
     {
         ConfigDefinition config = new ConfigReader().Read("default_isolation_level: serializable");

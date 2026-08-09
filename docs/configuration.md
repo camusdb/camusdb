@@ -39,6 +39,9 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `raft_certificate` | `--raft-certificate` | `""` |
 | `require_tls_when_auth_enabled` | `--require-tls-when-auth-enabled` | `true` |
 | `default_isolation_level` | — | `serializable` |
+| `default_transaction_locking` | — | `pessimistic` |
+| `default_transaction_priority` | — | `normal` |
+| `transaction_admission_wait_ms` | — | `0` (node default) |
 | `range_lock_expires_ms` | — | `30000` |
 | `range_lock_heartbeat_interval_ms` | — | `10000` |
 | `max_serializable_transaction_lifetime_ms` | — | `3600000` |

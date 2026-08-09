@@ -31,6 +31,8 @@ public sealed class KahunaOptionsConfig
         "default_transaction_timeout_ms",
         "max_transaction_timeout_ms",
         "max_concurrent_sessions",
+        "default_admission_wait_ms",
+        "max_admission_wait_ms",
         "transaction_priority_reserved_slots",
         "transaction_priority_aging_threshold",
         "transaction_priority_max_queued",
@@ -141,11 +143,31 @@ public sealed class KahunaOptionsConfig
     /// in. (Kahuna's own guide describes this knob for clients that hold one session per user session,
     /// where it bounds connections; that advice does not transfer.)</para>
     ///
-    /// <para>Note a queued transaction currently waits up to the session timeout before being told to
-    /// retry, because Kahuna bounds admission by the transaction's own timeout. Until that is fixed
-    /// upstream, prefer leaving this at <c>0</c>.</para>
+    /// <para>A transaction that cannot be admitted queues for at most the admission wait budget
+    /// (<see cref="DefaultAdmissionWaitMs"/>, or the engine's <c>transaction_admission_wait_ms</c>)
+    /// and is then refused with a retryable error — seconds, not the session lifetime.</para>
     /// </summary>
     public int? MaxConcurrentSessions { get; set; }
+
+    /// <summary>
+    /// Milliseconds a transaction that did not request its own budget queues at the gate before being
+    /// refused. This is the node-side default behind the engine's <c>transaction_admission_wait_ms</c>;
+    /// the Kahuna default is 5 000.
+    ///
+    /// <para>Keep it well below the session lifetime. It bounds the <i>door-wait</i>, not the
+    /// transaction, and a long door-wait makes a saturated node hold requests open instead of shedding
+    /// them — which is the opposite of what the gate is for.</para>
+    /// </summary>
+    public int? DefaultAdmissionWaitMs { get; set; }
+
+    /// <summary>
+    /// Hard upper bound (milliseconds) on any admission wait; a caller-supplied budget is clamped to
+    /// it, so no client can occupy a queue slot for longer than the operator allows. The Kahuna default
+    /// is 30 000. Bounds queue <i>duration</i>, where <see cref="TransactionPriorityMaxQueued"/> bounds
+    /// queue <i>depth</i> — a node needs both, since one patient caller can otherwise hold a slot while
+    /// everyone else is refused.
+    /// </summary>
+    public int? MaxAdmissionWaitMs { get; set; }
 
     /// <summary>
     /// Session slots only <c>High</c>/<c>Critical</c> transactions may occupy, reserved out of
@@ -366,6 +388,24 @@ public sealed class KahunaOptionsConfig
 
         if (MaxConcurrentSessions is < 0)
             throw InvalidConfig($"'kahuna.max_concurrent_sessions' must be >= 0, got {MaxConcurrentSessions}");
+
+        // Kahuna rejects a non-positive budget at startup — it would resolve every unconstrained
+        // request to zero and refuse admission before a caller could ever be queued. Fail here, where
+        // the offending key is named, rather than letting the node throw on boot.
+        if (DefaultAdmissionWaitMs is <= 0)
+            throw InvalidConfig(
+                $"'kahuna.default_admission_wait_ms' must be > 0, got {DefaultAdmissionWaitMs}; " +
+                "a non-positive budget refuses admission before a caller can be queued");
+
+        if (MaxAdmissionWaitMs is <= 0)
+            throw InvalidConfig($"'kahuna.max_admission_wait_ms' must be > 0, got {MaxAdmissionWaitMs}");
+
+        // The maximum clamps every caller, including one that asked for nothing and got the default,
+        // so a maximum below the default silently truncates the default it is paired with.
+        if (DefaultAdmissionWaitMs is int defaultWait && MaxAdmissionWaitMs is int maxWait && defaultWait > maxWait)
+            throw InvalidConfig(
+                $"'kahuna.default_admission_wait_ms' ({defaultWait}) must be <= " +
+                $"'kahuna.max_admission_wait_ms' ({maxWait})");
 
         if (TransactionPriorityReservedSlots is < 0)
             throw InvalidConfig(

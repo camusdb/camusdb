@@ -315,6 +315,80 @@ public sealed class TestTransactionPriority
     }
 
     /// <summary>
+    /// A transaction that cannot be admitted waits on the <b>admission</b> clock, not on its own
+    /// lifetime. The engine asks for an hour-long session (the default serializable lifetime) and a
+    /// one-second door-wait; the refusal must arrive on the latter. Were the two still one quantity,
+    /// this would park for an hour — the reason the gate could not be turned on at all.
+    ///
+    /// <para>The node's own default budget is raised well above the engine's here on purpose: a
+    /// refusal near one second can then only mean the caller's budget crossed the wire, not that the
+    /// server fell back to a default that happened to be short.</para>
+    /// </summary>
+    [Test]
+    public async Task WithCeiling_RefusalArrivesOnTheAdmissionClock_NotTheSessionLifetime()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync(
+            "prio-gate-wait",
+            options: BaseOptions with { TransactionAdmissionWaitMs = 1_000 },
+            nodeOptions: new EmbeddedKahunaOptions
+            {
+                MaxConcurrentSessions = 1,
+                DefaultAdmissionWaitMs = 25_000,
+                MaxAdmissionWaitMs = 30_000,
+            });
+        await using EmbeddedKahuna _ = node;
+
+        KvTransaction held = await mgr.BeginAsync();
+
+        Stopwatch sw = Stopwatch.StartNew();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () => await mgr.BeginAsync())!;
+        sw.Stop();
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+            "an admission refusal is retryable — nothing was started");
+
+        // Generously bounded: the point is that it returned on the one-second budget rather than on
+        // the node's 25 s default or the hour-long session lifetime.
+        Assert.That(sw.Elapsed, Is.LessThan(TimeSpan.FromSeconds(15)),
+            $"expected the refusal on the caller's admission budget, waited {sw.Elapsed.TotalSeconds:F1}s");
+
+        await mgr.RollbackAsync(held);
+    }
+
+    /// <summary>
+    /// With no engine-side budget configured the node's own default applies, and it still bounds the
+    /// wait to seconds. This is what makes a ceiling safe to enable without also tuning the budget:
+    /// the hour-long session lifetime is never what a queued transaction waits on.
+    /// </summary>
+    [Test]
+    public async Task WithCeiling_NoConfiguredBudget_StillRefusesOnTheNodeDefault()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync(
+            "prio-gate-wait-default",
+            nodeOptions: new EmbeddedKahunaOptions
+            {
+                MaxConcurrentSessions = 1,
+                DefaultAdmissionWaitMs = 1_000,
+            });
+        await using EmbeddedKahuna _ = node;
+
+        Assert.That(BaseOptions.TransactionAdmissionWaitMs, Is.Zero,
+            "this test is only meaningful while the engine asks for no budget of its own");
+
+        KvTransaction held = await mgr.BeginAsync();
+
+        Stopwatch sw = Stopwatch.StartNew();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () => await mgr.BeginAsync())!;
+        sw.Stop();
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(sw.Elapsed, Is.LessThan(TimeSpan.FromSeconds(15)),
+            $"expected the refusal on the node's default budget, waited {sw.Elapsed.TotalSeconds:F1}s");
+
+        await mgr.RollbackAsync(held);
+    }
+
+    /// <summary>
     /// The default configuration must be completely transparent: with no ceiling, a Background
     /// transaction starts as promptly as any other. This is the guarantee that lets the whole
     /// feature ship dark.

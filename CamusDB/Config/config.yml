@@ -90,6 +90,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # ── Isolation and locking ─────────────────────────────────────────────────────
 # default_isolation_level: serializable       # serializable | read_committed
 # default_transaction_locking: pessimistic    # pessimistic | optimistic
+# default_transaction_priority: normal        # background | low | normal | high | critical; consulted only when kahuna.max_concurrent_sessions sets a ceiling
+# transaction_admission_wait_ms: 0            # how long a transaction queues at the admission gate before a retryable refusal; 0 = use kahuna.default_admission_wait_ms. NOT the transaction lifetime
 # range_lock_expires_ms: 150000           # initial range-lock TTL; must be >= 2x the effective kahuna.collection_interval_ms (60s default) or startup is rejected; <= 0 = no expiry
 # max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables absolute cap; also the Kahuna session timeout (the node's kahuna.max_transaction_timeout_ms is derived from this unless pinned larger)
 # lock_escalation_threshold: 50           # shared-point locks before bucket escalation (> 0)
@@ -318,6 +320,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   wal_single_fsync_commit: false
 #   default_transaction_timeout_ms: 5000
 #   max_transaction_timeout_ms: 3600000  # hard cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset => derived from that lifetime so a long serializable txn is not clamped/reaped early
+#   max_concurrent_sessions: 0           # 0 = no admission gate. For CamusDB this is a ceiling on concurrent WORK (a session per transaction), not on connections — see docs/transaction-priority.md
+#   transaction_priority_reserved_slots: 0   # slots only High/Critical may occupy; effectively mandatory (>= 1) whenever a ceiling is set, or engine-internal work queues behind user traffic
+#   transaction_priority_aging_threshold: 1000  # ms a waiter takes to gain one effective level; 0 disables aging and permits indefinite starvation
+#   transaction_priority_max_queued: 4096    # queue DEPTH bound; beyond it, transactions are refused outright (retryable)
+#   default_admission_wait_ms: 5000      # queue DURATION bound: how long a caller that asked for nothing waits at the door. Keep it short — this is not the session lifetime
+#   max_admission_wait_ms: 30000         # hard clamp on any caller-supplied admission budget
 #   locks_workers: 8
 #   key_value_workers: 8
 #   background_writer_workers: 1
