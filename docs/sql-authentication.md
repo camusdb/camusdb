@@ -211,6 +211,32 @@ With auth enabled, every statement is checked before it runs:
   `SHOW CREATE TABLE` still require `SELECT` on the specific table).
 - Delegated administration (`GRANT OPTION`-style) is not implemented — administration is superuser-only.
 
+### Reporting the session in SQL
+
+These functions report the session the statement runs in rather than anything about the rows:
+
+| Function | Returns |
+| --- | --- |
+| `current_database()` | The database the statement runs against, or `NULL` for a server-level statement that has none (`CREATE DATABASE`, `CREATE USER`, …). |
+| `current_user()` | The authenticated user name, or `NULL` when authentication is disabled — there is no identity the server verified. |
+| `current_role()` | The same value as `current_user()`. Privileges are granted directly to users, so a session has no role identity of its own; the function exists so SQL written for engines that separate the two still runs. |
+| `is_superuser()` | `true`/`false` for the **calling** session, or `NULL` when authentication is disabled. It reports no one else's status, and needs no privilege: a caller can already learn the same bit by running a superuser-only statement and seeing whether it is refused. |
+
+```sql
+SELECT current_database(), current_user();          -- no FROM needed
+SELECT name FROM audit WHERE actor = current_user();
+INSERT INTO audit (id, actor) VALUES (gen_id(), current_user());
+```
+
+They may be used anywhere an expression may: projections, `WHERE`, `INSERT … VALUES`, `UPDATE … SET`,
+and view bodies (a view reports the session querying it, not the one that created it). They may **not**
+back a column `DEFAULT` or appear in a `CHECK` condition — both are stored and replayed by later
+inserts, which carry no session, so the DDL rejects them rather than accept a schema element that could
+only fail later.
+
+A query naming one of them bypasses the query result cache: the cache is per node and shared between
+callers, so a cached `SELECT current_user()` would otherwise answer one caller with another's identity.
+
 ## 6. Configuration knobs
 
 Beyond the environment variables in §1, these tune the security/performance trade-off (defaults shown):

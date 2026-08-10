@@ -106,7 +106,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -164,7 +164,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -224,7 +224,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -312,7 +312,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -369,7 +369,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -425,7 +425,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -485,7 +485,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
@@ -544,7 +544,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         catch (CamusDBException e)
         {
             opCache?.FaultAndRelease(req.OperationId, e);
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
             return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)

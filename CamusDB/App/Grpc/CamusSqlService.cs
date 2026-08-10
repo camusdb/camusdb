@@ -719,7 +719,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         catch (CamusDBException ex)
         {
             outcome = ClassifyOutcome(ex.Code);
-            logger.LogError("{Name}: {Message}", ex.GetType().Name, ex.Message);
+            CommandFailureLog.LogFailure(logger, ex);
             await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
             {
                 RequestId = req.RequestId,
@@ -1103,7 +1103,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         catch (CamusDBException ex)
         {
-            logger.LogError("{Name}: {Message}", ex.GetType().Name, ex.Message);
+            CommandFailureLog.LogFailure(logger, ex);
             throw GrpcErrorMapper.ToRpcException(ex);
         }
         catch (Exception ex)

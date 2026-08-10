@@ -217,7 +217,7 @@ internal static class DerivedTableSchemaBuilder
 
             if (target.nodeType == NodeType.ExprAllFields)
             {
-                ExpandAllFields(innerBound, columns);
+                ExpandAllFields(innerBound, innerResolver, columns);
                 continue;
             }
 
@@ -234,21 +234,28 @@ internal static class DerivedTableSchemaBuilder
     /// exact keys the row cursor produces so positional encoding can look each value up by name.
     /// <para>
     /// A single-source query streams rows keyed by bare column name, so columns stay bare. A
-    /// multi-source query (any join, extra table, or derived/subquery source) is emitted by the
-    /// join executor, which qualifies every column as <c>{alias}.{column}</c> via
+    /// multi-source query (any join, or extra table alongside a derived/subquery source) is emitted by
+    /// the join executor, which qualifies every column as <c>{alias}.{column}</c> via
     /// <see cref="QueryRowNameResolver.FormatQualifiedKey"/>; the schema must qualify identically or
-    /// a by-name lookup against the qualified row keys would silently miss and encode null. The
-    /// discriminator is <see cref="BoundSelectQuery.IsMultiSource"/> — the same flag that routes
-    /// execution to the join path. Derived (subquery) sources are included so their columns are not
-    /// dropped from a join's output schema.
+    /// a by-name lookup against the qualified row keys would silently miss and encode null.
+    /// </para>
+    /// <para>
+    /// The discriminator is <see cref="QueryRowNameResolver.UsesQualifiedRowKeys"/> — the convention the
+    /// rows are actually keyed by — and deliberately not <see cref="BoundSelectQuery.IsMultiSource"/>,
+    /// which routes execution to the join path but is also true for the single-derived-source shape a
+    /// view expands into. That shape keys its rows bare, so qualifying its schema named columns no row
+    /// had and sent every cell of <c>SELECT * FROM a_view</c> as null over the wire while the in-process
+    /// cursor was correct. Derived sources are included either way so their columns are not dropped
+    /// from a join's output schema.
     /// </para>
     /// Column order follows source declaration order (table sources first, then derived sources),
     /// which matches the left-to-right merge order of a left-deep join; value correctness does not
     /// depend on this order because encoding resolves each column by name.
     /// </summary>
-    private static void ExpandAllFields(BoundSelectQuery innerBound, List<DerivedColumnSchema> columns)
+    private static void ExpandAllFields(
+        BoundSelectQuery innerBound, QueryRowNameResolver resolver, List<DerivedColumnSchema> columns)
     {
-        bool qualify = innerBound.IsMultiSource;
+        bool qualify = resolver.UsesQualifiedRowKeys();
 
         foreach (BoundTableSource source in innerBound.Sources)
         {

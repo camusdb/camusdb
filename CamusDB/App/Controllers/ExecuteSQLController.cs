@@ -281,7 +281,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+            LogCommandFailure(e);
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
@@ -625,7 +625,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+            LogCommandFailure(e);
 
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
@@ -710,7 +710,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
+            LogCommandFailure(e);
 
             return new JsonResult(new ExecuteDDLSQLResponse("failed", e.Code, e.Message))
             {

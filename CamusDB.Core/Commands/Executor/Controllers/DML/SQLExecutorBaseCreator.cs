@@ -718,6 +718,17 @@ internal abstract class SQLExecutorBaseCreator
             // constant. Non-volatile defaults (literals, deterministic calls) stay pre-evaluated.
             if (ScalarFunctionEvaluator.ContainsVolatileFunction(defaultExpr))
             {
+                // A session function (current_user() and friends) is volatile too, but it reports the
+                // session that runs the statement — there is none when the insert path applies the
+                // stored default, so say that rather than let it fall into the generic message below.
+                if (defaultExpr.nodeType == NodeType.ExprFuncCall
+                    && defaultExpr.leftAst?.yytext is string sessionFunctionName
+                    && ScalarFunctionEvaluator.IsSessionScopedFunction(sessionFunctionName.ToLowerInvariant()))
+                {
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"Function '{sessionFunctionName.ToLowerInvariant()}' cannot be used as a column default");
+                }
+
                 if (defaultExpr.nodeType == NodeType.ExprFuncCall
                     && defaultExpr.rightAst is null
                     && defaultExpr.leftAst?.yytext is string functionName

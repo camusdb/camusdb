@@ -16,6 +16,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
@@ -53,11 +54,12 @@ public sealed class TestViews : SharedNodeBaseTest
     }
 
     private static async Task<List<QueryResultRow>> ExecQuery(
-        DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
+        DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql,
+        QuerySchemaHolder? schemaOut = null)
     {
         KvTransaction tx = await database.Transactions.BeginAsync();
         ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: null);
-        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, null, schemaOut);
         List<QueryResultRow> rows = await cursor.ToListAsync();
         await database.Transactions.CommitAsync(tx);
         return rows;
@@ -608,6 +610,74 @@ public sealed class TestViews : SharedNodeBaseTest
 
         // DESCRIBE is the same statement and must behave identically on a view.
         Assert.AreEqual(2, (await ExecQuery(database, executor, dbname, "DESCRIBE v")).Count);
+    }
+
+    /// <summary>
+    /// The output schema a client is sent must name the columns the rows are actually keyed by. A view
+    /// expands into a single derived source, which keys its rows bare — qualifying the schema as
+    /// <c>view.column</c> there resolved nothing per row and shipped an all-null result set to every
+    /// network client while the in-process cursor was correct.
+    /// </summary>
+    [Test]
+    public async Task StarThroughAViewEmitsASchemaThatResolvesAgainstTheRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW open_orders AS SELECT * FROM orders WHERE status = 'open'");
+
+        QuerySchemaHolder schema = new();
+        List<QueryResultRow> rows = await ExecQuery(
+            database, executor, dbname, "SELECT * FROM open_orders", schema);
+
+        Assert.AreEqual(3, rows.Count);
+        Assert.AreEqual(4, schema.Schema.Count);
+
+        foreach (QueryResultRow row in rows)
+        {
+            foreach (DerivedColumnSchema column in schema.Schema)
+            {
+                Assert.IsTrue(
+                    row.Row.ContainsKey(column.Name),
+                    $"output column '{column.Name}' does not exist in the row, so it encodes as null on the wire");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The counterpart to the test above: a real join does key its rows <c>alias.column</c>, so the
+    /// schema must keep qualifying there. Both shapes reach this code through <c>IsMultiSource</c>.
+    /// </summary>
+    [Test]
+    public async Task StarOverAJoinedViewKeepsQualifiedColumnNames()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE TABLE customers (name string(64) PRIMARY KEY, region string(16))");
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO customers (name, region) VALUES ('acme', 'eu'), ('globex', 'us'), ('initech', 'us')");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW open_orders AS SELECT id, customer FROM orders WHERE status = 'open'");
+
+        QuerySchemaHolder schema = new();
+        List<QueryResultRow> rows = await ExecQuery(
+            database, executor, dbname,
+            "SELECT * FROM open_orders v INNER JOIN customers c ON v.customer = c.name",
+            schema);
+
+        Assert.AreEqual(3, rows.Count);
+        CollectionAssert.AreEquivalent(
+            new[] { "c.name", "c.region", "v.id", "v.customer" },
+            schema.Schema.Select(c => c.Name).ToList());
+
+        foreach (QueryResultRow row in rows)
+        {
+            foreach (DerivedColumnSchema column in schema.Schema)
+                Assert.IsTrue(row.Row.ContainsKey(column.Name), $"output column '{column.Name}' is missing from the row");
+        }
     }
 
     [Test]

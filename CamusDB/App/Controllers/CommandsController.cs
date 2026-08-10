@@ -74,6 +74,13 @@ public abstract class CommandsController : ControllerBase
             "Authentication is enabled and requires a TLS (HTTPS) connection");
     }
 
+    /// <summary>
+    /// Logs a failed command at a level that matches who caused it — see
+    /// <see cref="CommandFailureLog"/> for the classification and why client mistakes must not land
+    /// in the operator's error stream.
+    /// </summary>
+    protected void LogCommandFailure(CamusDBException e) => CommandFailureLog.LogFailure(logger, e);
+
     protected async Task<Principal?> ResolveRequestPrincipalAsync()
     {
         if (!options.AuthenticationEnabled)

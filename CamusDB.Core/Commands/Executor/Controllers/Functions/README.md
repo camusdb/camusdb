@@ -14,6 +14,9 @@ Built-in function groups:
 | `CastScalarFunctions` | `CAST(x AS type)` — converts between column value types |
 | `IdScalarFunctions` | `GEN_ID()` — generates a new ObjectId |
 | `JsonScalarFunctions` | `JSON_EXTRACT`, `JSON_SET`, `JSON_REMOVE` — JSON field access and mutation |
+| `SessionScalarFunctions` | `CURRENT_DATABASE()`, `CURRENT_USER()`, `CURRENT_ROLE()`, `IS_SUPERUSER()` — the session the statement runs in |
 
 `ScalarFunctionDescriptor` carries the function name(s), arity constraints, and the delegate that implements the function.
 `ScalarFunctionArguments` is the helper that evaluates argument expressions before passing them to the function delegate.
+
+A function whose result comes from the session rather than from its arguments sets `SessionEvaluator` instead of relying on `Evaluator`, and reads the session snapshot the SQL entry points place in the statement's parameters. Such a function is also marked volatile so a query naming it bypasses the shared result cache, and `IsSessionScoped` keeps it from being accepted where a value must be replayed without a session (a column `DEFAULT`, a stored `CHECK`).

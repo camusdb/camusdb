@@ -47,7 +47,7 @@ public sealed class CloseDatabaseController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
+            LogCommandFailure(e);
 
             return new JsonResult(new CloseDatabaseResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
         }

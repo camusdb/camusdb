@@ -21,6 +21,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.Ttl;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
@@ -3737,6 +3738,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         SetAuthorizationScope(ticket, ast);
+        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
         await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(
@@ -4318,6 +4320,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         executeSpan?.SetTag("statement", MapStatementFamily(ast.nodeType));
 
         SetAuthorizationScope(ticket, ast);
+        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
         await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         // DROP/RENAME DATABASE do not require an open database context — dispatch before Open so
@@ -5051,6 +5054,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         string statementName,
         HLCTimestamp? explicitSnapshot = null)
     {
+        // The source AST is a view/CTAS/INSERT…SELECT body that reached here already expanded, so it
+        // may call a session function the outer statement never named.
+        ticket = SessionScalarFunctions.AttachSessionValues(ticket, sourceAst);
+
         // A time-travel source reads through its OWN read-only snapshot transaction while the writes
         // keep using the caller's; see PrepareTimeTravelSourceAsync for why that is both possible and
         // safer than the live path. Null when the source carries no AS OF SYSTEM TIME clause.
@@ -5200,6 +5207,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         SetAuthorizationScope(ticket, ast);
+        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
         await EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         // SHOW DATABASES does not require a database context — resolve the registry and return.
@@ -5297,6 +5305,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName);
 
         ast = ExpandViews(database, ast);
+
+        // Expansion can pull a session call (current_user() and friends) in from a view body that the
+        // statement itself never names, so the snapshot is reconsidered against the expanded tree.
+        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
 
         // Mark the transaction as having executed a statement for every statement type except the
         // SET TRANSACTION family — those must be the first statement per standard SQL semantics.

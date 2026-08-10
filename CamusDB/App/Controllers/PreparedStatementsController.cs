@@ -79,7 +79,7 @@ public sealed class PreparedStatementsController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
 
             return new JsonResult(new PrepareStatementResponse("failed", e.Code, e.Message)
             {
@@ -125,7 +125,7 @@ public sealed class PreparedStatementsController : CommandsController
         }
         catch (CamusDBException e)
         {
-            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            LogCommandFailure(e);
 
             return new JsonResult(new CloseStatementResponse("failed", e.Code, e.Message))
             { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };

@@ -46,12 +46,54 @@ internal static class ScalarFunctionEvaluator
             descriptor.MaxArity,
             arguments.Count);
 
+        if (descriptor.SessionEvaluator is not null)
+            return descriptor.SessionEvaluator(functionName, parameters);
+
         return descriptor.Evaluator(functionName, arguments);
     }
 
     public static bool IsRegisteredScalarFunction(string functionName)
     {
         return Registry.IsRegisteredScalarFunction(functionName);
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="ast"/> or any descendant calls a function that reports
+    /// the session (<c>current_database</c>, <c>current_user</c>, <c>current_role</c>). The SQL entry
+    /// points use it to decide whether a statement needs the session snapshot attached to its
+    /// parameters, so it must be answered against the AST actually executed — notably the
+    /// <b>view-expanded</b> one, since a session call can arrive from a view body the outer statement
+    /// never mentions.
+    /// </summary>
+    internal static bool ContainsSessionScopedFunction(NodeAst? ast)
+    {
+        if (ast is null)
+            return false;
+
+        if (ast.nodeType == NodeType.ExprFuncCall)
+        {
+            string name = ast.leftAst?.yytext?.ToLowerInvariant() ?? string.Empty;
+            if (Registry.TryGet(name, out ScalarFunctionDescriptor? descriptor) && descriptor.IsSessionScoped)
+                return true;
+        }
+
+        return ContainsSessionScopedFunction(ast.leftAst)
+            || ContainsSessionScopedFunction(ast.rightAst)
+            || ContainsSessionScopedFunction(ast.extendedOne)
+            || ContainsSessionScopedFunction(ast.extendedTwo)
+            || ContainsSessionScopedFunction(ast.extendedThree)
+            || ContainsSessionScopedFunction(ast.extendedFour)
+            || ContainsSessionScopedFunction(ast.extendedFive);
+    }
+
+    /// <summary>
+    /// True when <paramref name="functionName"/> reports the session it runs in
+    /// (<c>current_database</c>, <c>current_user</c>, <c>current_role</c>). Used by DDL to explain why
+    /// such a call cannot be frozen into a schema element such as a column default.
+    /// </summary>
+    internal static bool IsSessionScopedFunction(string functionName)
+    {
+        return Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor) && descriptor.IsSessionScoped;
     }
 
     public static ColumnType InferReturnType(string functionName, IReadOnlyList<ColumnType> argumentTypes)
@@ -108,6 +150,11 @@ internal static class ScalarFunctionEvaluator
             return false;
 
         if (!descriptor.IsVolatile || descriptor.MinArity != 0 || descriptor.MaxArity != 0)
+            return false;
+
+        // A session function is volatile only so queries naming it bypass the result cache. It cannot
+        // back a default: the insert path replays the default with no session to report.
+        if (descriptor.IsSessionScoped)
             return false;
 
         returnType = descriptor.InferReturnType([]);
