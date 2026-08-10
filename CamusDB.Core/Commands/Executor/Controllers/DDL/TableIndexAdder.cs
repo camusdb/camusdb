@@ -305,6 +305,15 @@ internal sealed class TableIndexAdder
             ? null
             : ObjectId.ToValue(schemaIndex.StartOffset!);
 
+        // The backfill only reads the index's key and INCLUDE columns, so narrow the per-row decode
+        // to them — values for those columns are identical to a full decode, and the scanned rows are
+        // never re-encoded, only turned into index entries.
+        HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase);
+        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
+            requiredColumns.Add(columnIndex.Name);
+        foreach (string includeColumn in ticket.IncludeColumns)
+            requiredColumns.Add(includeColumn);
+
         int totalRows = 0;
 
         while (true)
@@ -322,6 +331,10 @@ internal sealed class TableIndexAdder
             int batchRows = 0;
             ObjectIdValue lastRowId = default;
 
+            // Per-batch decode-plan cache; scoped to the batch transaction because the visibility
+            // version is re-read from the live schema each batch.
+            RowEncoder.DictionaryDecodeState decodeState = new();
+
             try
             {
                 // The backfill writes one index entry per row it reads, so the rows it observed are a
@@ -336,7 +349,9 @@ internal sealed class TableIndexAdder
                         tx.TransactionId,
                         rowId,
                         data,
-                        visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+                        requiredColumns: requiredColumns,
+                        visibilitySchemaVersion: table.Schema.Version,
+                        decodeState: decodeState).ConfigureAwait(false);
 
                     int i = 0;
                     ColumnValue[] columnValues = unique

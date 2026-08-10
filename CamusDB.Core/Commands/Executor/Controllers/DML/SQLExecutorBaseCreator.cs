@@ -28,6 +28,27 @@ internal abstract class SQLExecutorBaseCreator
     /// </summary>
     private static readonly ConditionalWeakTable<NodeAst, byte[]> Utf8LiteralCache = new();
 
+    /// <summary>
+    /// Per-literal-node cache of the evaluated <see cref="ColumnValue"/>, so a literal in a WHERE or
+    /// projection expression is parsed and allocated once per query instead of once per scanned row —
+    /// a filter like <c>status = 'active' AND age &gt; 30</c> would otherwise decode a string and
+    /// allocate two <see cref="ColumnValue"/>s for every row. Safe because literal AST nodes are
+    /// immutable and their value is a pure function of <c>yytext</c>, and <see cref="ColumnValue"/> is
+    /// immutable so one instance can back every row. Keyed weakly like <see cref="Utf8LiteralCache"/>
+    /// so a parsed query being GC'd drops its cached values. Only successful evaluations are cached —
+    /// a malformed literal keeps throwing on every evaluation, unchanged. Array literals are excluded:
+    /// their elements may reference row columns.
+    /// </summary>
+    private static readonly ConditionalWeakTable<NodeAst, ColumnValue> LiteralValueCache = new();
+
+    private static ColumnValue CacheLiteralValue(NodeAst expr, ColumnValue value)
+    {
+        // Thread-safe under concurrent executions of a shared cached AST; a benign race stores
+        // whichever identical instance wins last.
+        LiteralValueCache.AddOrUpdate(expr, value);
+        return value;
+    }
+
     protected static void GetIdentifierList(NodeAst orderByAst, List<string> identifierList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
@@ -285,22 +306,36 @@ internal abstract class SQLExecutorBaseCreator
         switch (expr.nodeType)
         {
             case NodeType.Integer:
+                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedInteger))
+                    return cachedInteger;
+
                 if (!long.TryParse(expr.yytext!, NumberStyles.Integer, CultureInfo.InvariantCulture, out long longValue))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
 
-                return new ColumnValue(ColumnType.Integer64, longValue);
+                return CacheLiteralValue(expr, new ColumnValue(ColumnType.Integer64, longValue));
 
             case NodeType.Float:
+                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedFloat))
+                    return cachedFloat;
+
                 if (!double.TryParse(expr.yytext!, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
 
-                return new ColumnValue(ColumnType.Float64, doubleValue);
+                return CacheLiteralValue(expr, new ColumnValue(ColumnType.Float64, doubleValue));
 
             case NodeType.String:
-                return new ColumnValue(ColumnType.String, UnquoteStringLiteral(expr.yytext!));
+                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedString))
+                    return cachedString;
+
+                return CacheLiteralValue(expr, new ColumnValue(ColumnType.String, UnquoteStringLiteral(expr.yytext!)));
 
             case NodeType.BytesLiteral:
-                return new ColumnValue(SqlStringLiteral.DecodeBytes(expr.yytext!));
+                // The cached instance's byte[] is shared across rows; consumers treat ColumnValue
+                // payloads as read-only (encode paths copy bytes out), same as the string case.
+                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedBytes))
+                    return cachedBytes;
+
+                return CacheLiteralValue(expr, new ColumnValue(SqlStringLiteral.DecodeBytes(expr.yytext!)));
 
             case NodeType.ArrayLiteral:
                 return EvalArrayLiteral(expr, row, parameters);
@@ -315,10 +350,13 @@ internal abstract class SQLExecutorBaseCreator
                 return ColumnValue.Null;
 
             case NodeType.ObjectIdLiteral:
+                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedId))
+                    return cachedId;
+
                 if (string.IsNullOrEmpty(expr.yytext))
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid ObjectId literal");
 
-                return new ColumnValue(ColumnType.Id, expr.yytext);
+                return CacheLiteralValue(expr, new ColumnValue(ColumnType.Id, expr.yytext));
 
             case NodeType.Identifier:
                 {

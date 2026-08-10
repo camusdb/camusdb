@@ -194,6 +194,10 @@ internal sealed class RowInserter
         CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
         List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
 
+        // Index writability is fixed for the statement (the transaction pins the schema version),
+        // so filter once here instead of re-evaluating per index per row.
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+
         // Process rows in bounded chunks so a large VALUES list does not retain all serialized
         // row bytes on the heap before the first KV write. Chunk size is tied to
         // SpillEffectiveThreshold so tests that set ForceSpillThresholdRows drive both spill
@@ -210,12 +214,8 @@ internal sealed class RowInserter
             // Built only once the first index entry exists, so a no-index table allocates no per-row list.
             List<KvTableStore.IndexWrite>? indexEntries = null;
 
-            foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+            foreach (TableIndexSchema index in writableIndexes)
             {
-                TableIndexSchema index = kv.Value;
-                if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
-                    continue;
-
                 if (index.Type == IndexType.Unique)
                 {
                     // NULLs are distinct: a row with a NULL (or absent) value in any indexed column is

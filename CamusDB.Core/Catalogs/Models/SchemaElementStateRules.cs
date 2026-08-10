@@ -37,9 +37,30 @@ public static class SchemaElementStateRules
         if (!IsReadable(index))
             return false;
 
-        return index.Columns.All(columnName =>
-            table.Columns?.Any(column => string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsReadable(column)) == true
-        );
+        List<TableColumnSchema>? columns = table.Columns;
+        if (columns is null)
+            return false;
+
+        // Plain loops (no LINQ): this runs inside planner and DML loops, so it must not allocate
+        // closures or enumerators per call.
+        foreach (string columnName in index.Columns)
+        {
+            bool readable = false;
+            for (int i = 0; i < columns.Count; i++)
+            {
+                TableColumnSchema column = columns[i];
+                if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsReadable(column))
+                {
+                    readable = true;
+                    break;
+                }
+            }
+
+            if (!readable)
+                return false;
+        }
+
+        return true;
     }
 
     /// <summary>True when the index and <i>every</i> column it covers are writable.</summary>
@@ -48,8 +69,50 @@ public static class SchemaElementStateRules
         if (!IsWritable(index))
             return false;
 
-        return index.Columns.All(columnName =>
-            table.Columns?.Any(column => string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsWritable(column)) == true
-        );
+        List<TableColumnSchema>? columns = table.Columns;
+        if (columns is null)
+            return false;
+
+        // Plain loops (no LINQ): this runs inside DML per-row loops, so it must not allocate
+        // closures or enumerators per call.
+        foreach (string columnName in index.Columns)
+        {
+            bool writable = false;
+            for (int i = 0; i < columns.Count; i++)
+            {
+                TableColumnSchema column = columns[i];
+                if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsWritable(column))
+                {
+                    writable = true;
+                    break;
+                }
+            }
+
+            if (!writable)
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Materializes the subset of <paramref name="indexes"/> that DML must maintain (per
+    /// <see cref="IsWritableIndex"/>) so per-row loops iterate a precomputed list instead of
+    /// re-evaluating writability for every index of every row. Writability is a pure function of
+    /// the schema's element states, which are fixed for the duration of a statement (the
+    /// transaction pins the schema version) — but the result must not be cached across
+    /// statements: compute it once per statement or chunk.
+    /// </summary>
+    public static List<TableIndexSchema> CollectWritableIndexes(TableSchema table, Dictionary<string, TableIndexSchema> indexes)
+    {
+        List<TableIndexSchema> result = new(indexes.Count);
+
+        foreach (KeyValuePair<string, TableIndexSchema> kv in indexes)
+        {
+            if (IsWritableIndex(table, kv.Value))
+                result.Add(kv.Value);
+        }
+
+        return result;
     }
 }

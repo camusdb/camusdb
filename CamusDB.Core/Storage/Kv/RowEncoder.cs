@@ -154,6 +154,51 @@ public static class RowEncoder
     }
 
     /// <summary>
+    /// The fully-resolved plan for decoding every row that shares one stored schema version into a
+    /// name-keyed dictionary (the <see cref="DecodeWritableAsync"/> output shape). Built once per
+    /// (state, stored version) — the build may await lazy schema-history loading and performs all the
+    /// per-column visibility resolution (<c>FindCurrentColumn</c> scans), required-column filtering,
+    /// and injected-default selection. Executing the plan is fully synchronous and touches no schema
+    /// metadata: it reads each retained stored ordinal and adds the injected defaults.
+    /// Output is value-identical to the plan-less decode for the same inputs.
+    /// </summary>
+    internal sealed class DictionaryDecodePlan
+    {
+        /// <summary>Positional codec for the stored schema version these rows were written under.</summary>
+        public required CompiledRowCodec Codec { get; init; }
+
+        /// <summary>
+        /// Per stored ordinal: the output dictionary key to decode this column under, or
+        /// <see langword="null"/> to skip it (not visible, or projected out by the required-column set).
+        /// </summary>
+        public required string?[] DecodeNames { get; init; }
+
+        /// <summary>
+        /// Columns visible in the current schema but absent from this stored version's byte stream:
+        /// each is added under its name with its default value (or a typed null). Names here never
+        /// collide with a retained <see cref="DecodeNames"/> entry — that exclusion is baked in at
+        /// build time, mirroring the plan-less decode's contains-check.
+        /// </summary>
+        public required (string Name, ColumnValue Value)[] InjectedDefaults { get; init; }
+
+        /// <summary>Exact output entry count, so the dictionary never resizes.</summary>
+        public required int OutputCapacity { get; init; }
+    }
+
+    /// <summary>
+    /// Per-loop memoisation of <see cref="DictionaryDecodePlan"/> keyed by the stored schema version
+    /// embedded in each row, for the mutation-side dictionary decode (<see cref="DecodeWritableAsync"/>).
+    /// A mutation chunk fixes the required-column set and visibility version, so every row at the same
+    /// stored version shares one plan (usually a single entry). Create one instance per chunk/scan loop
+    /// and pass it to <see cref="DecodeWritableAsync"/>; never share it across loops that differ in
+    /// those inputs, and never treat it as global transaction state.
+    /// </summary>
+    public sealed class DictionaryDecodeState
+    {
+        internal readonly Dictionary<int, DictionaryDecodePlan> Plans = new();
+    }
+
+    /// <summary>
     /// Serializes a row into a bare, un-enveloped byte buffer (no <see cref="BranchKvKind"/> marker).
     /// Prefer <see cref="EncodeStorageValue"/> for anything written to Kahuna; this bare form is for
     /// callers/tests that genuinely need the payload without the storage envelope.
@@ -369,17 +414,46 @@ public static class RowEncoder
             injectMissingCurrentColumns: visibilitySchemaVersion is not null);
     }
 
+    /// <summary>
+    /// Decodes a stored row into a name-keyed dictionary using <b>writable</b> column visibility —
+    /// the shape mutation paths (UPDATE/DELETE, TTL, DDL backfills) consume.
+    ///
+    /// <para>
+    /// <paramref name="decodeState"/> is a per-chunk memoisation of the resolved decode plan keyed by
+    /// the stored schema version embedded in each row's bytes. Because
+    /// <paramref name="requiredColumns"/> and <paramref name="visibilitySchemaVersion"/> are constant
+    /// for one mutation chunk/scan loop, every row written under the same stored version shares one
+    /// plan; without it, each row pays the schema-history lookups and per-column visibility resolution
+    /// again. Pass <see langword="null"/> for one-off decodes outside a loop. Output is value-identical
+    /// with and without a state.
+    /// </para>
+    /// </summary>
     public static async ValueTask<Dictionary<string, ColumnValue>> DecodeWritableAsync(
         TableSchema schema,
         HLCTimestamp txId,
         ObjectIdValue rowId,
         ReadOnlyMemory<byte> data,
         IReadOnlySet<string>? requiredColumns = null,
-        long? visibilitySchemaVersion = null)
+        long? visibilitySchemaVersion = null,
+        DictionaryDecodeState? decodeState = null)
     {
         ArgumentNullException.ThrowIfNull(schema);
 
         int schemaVersion = ReadRowHeader(data.Span);
+
+        if (decodeState is not null)
+        {
+            // Plan BUILDING may await lazy schema-history loading; plan EXECUTION below is fully
+            // synchronous and span-based, so no span crosses an await.
+            if (!decodeState.Plans.TryGetValue(schemaVersion, out DictionaryDecodePlan? plan))
+            {
+                plan = await BuildDictionaryDecodePlanAsync(
+                    schema, txId, schemaVersion, requiredColumns, visibilitySchemaVersion).ConfigureAwait(false);
+                decodeState.Plans.Add(schemaVersion, plan);
+            }
+
+            return ExecuteDictionaryDecodePlan(plan, data.Span);
+        }
 
         List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
         List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
@@ -394,6 +468,113 @@ public static class RowEncoder
             requiredColumns,
             ColumnVisibility.Writable,
             injectMissingCurrentColumns: visibilitySchemaVersion is not null);
+    }
+
+    /// <summary>
+    /// Resolves the <see cref="DictionaryDecodePlan"/> for one stored schema version under writable
+    /// visibility, baking in every decision <see cref="DecodeColumns"/> makes per row: which stored
+    /// ordinals are retained (visibility × required-column filter), and which current-schema columns
+    /// get an injected default (only when a visibility version is supplied — same rule as the
+    /// <c>injectMissingCurrentColumns</c> flag on the plan-less path).
+    /// </summary>
+    private static async ValueTask<DictionaryDecodePlan> BuildDictionaryDecodePlanAsync(
+        TableSchema schema,
+        HLCTimestamp txId,
+        int schemaVersion,
+        IReadOnlySet<string>? requiredColumns,
+        long? visibilitySchemaVersion)
+    {
+        List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
+        List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
+            ? columns
+            : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
+        CompiledRowCodec codec = GetCodec(schema, schemaVersion, columns);
+
+        bool decodeAll = requiredColumns is null;
+        string?[] decodeNames = new string?[columns.Count];
+        int outputCount = 0;
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+
+            if (!IsVisible(column, visibilityColumns, ColumnVisibility.Writable))
+                continue;
+
+            if (decodeAll || requiredColumns!.Contains(column.Name))
+            {
+                decodeNames[i] = column.Name;
+                outputCount++;
+            }
+        }
+
+        (string, ColumnValue)[] injectedDefaults = [];
+
+        if (visibilitySchemaVersion is not null && visibilityColumns is not null)
+        {
+            List<(string, ColumnValue)>? injected = null;
+            HashSet<string>? retainedNames = null;
+
+            foreach (TableColumnSchema current in visibilityColumns)
+            {
+                if (retainedNames is null)
+                {
+                    // Same comparer as the output dictionary, mirroring the plan-less path's
+                    // result.ContainsKey guard against a name already claimed by a decoded column.
+                    retainedNames = new(outputCount, StringComparer.OrdinalIgnoreCase);
+                    foreach (string? name in decodeNames)
+                    {
+                        if (name is not null)
+                            retainedNames.Add(name);
+                    }
+                }
+
+                if (retainedNames.Contains(current.Name))
+                    continue;
+
+                if (FindCurrentColumn(current, columns) is not null)
+                    continue; // present in row schema — was filtered by visibility or requiredColumns, not a new column
+
+                if (!SchemaElementStateRules.IsWritable(current))
+                    continue;
+
+                if (!decodeAll && !requiredColumns!.Contains(current.Name))
+                    continue;
+
+                (injected ??= new()).Add((current.Name, current.DefaultValue ?? ColumnValue.Null));
+            }
+
+            if (injected is not null)
+                injectedDefaults = injected.ToArray();
+        }
+
+        return new DictionaryDecodePlan
+        {
+            Codec = codec,
+            DecodeNames = decodeNames,
+            InjectedDefaults = injectedDefaults,
+            OutputCapacity = outputCount + injectedDefaults.Length,
+        };
+    }
+
+    private static Dictionary<string, ColumnValue> ExecuteDictionaryDecodePlan(DictionaryDecodePlan plan, ReadOnlySpan<byte> data)
+    {
+        CompiledRowCodec codec = plan.Codec;
+        codec.ValidateFrame(data);
+
+        Dictionary<string, ColumnValue> result = new(plan.OutputCapacity, StringComparer.OrdinalIgnoreCase);
+
+        string?[] decodeNames = plan.DecodeNames;
+        for (int i = 0; i < decodeNames.Length; i++)
+        {
+            if (decodeNames[i] is string name)
+                result.Add(name, codec.GetSlot(data, i).ToColumnValue());
+        }
+
+        foreach ((string name, ColumnValue value) in plan.InjectedDefaults)
+            result[name] = value;
+
+        return result;
     }
 
     /// <summary>

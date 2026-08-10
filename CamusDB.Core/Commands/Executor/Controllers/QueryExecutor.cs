@@ -669,16 +669,27 @@ internal sealed class QueryExecutor
         ObjectIdValue resolvedRowId = rowId.Value;
         deps?.RecordPoint(table.Store.RowPointKey(resolvedRowId));
 
-        Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+        // Layout-backed decode (same policy as QueryScanner's scans): the filterer takes the
+        // ordinal fast path over a QueryRow, and slot/borrowed backing avoids materializing
+        // cells the filter rejects or the projection never reads.
+        RowEncoder.RowDecodeState decodeState = new()
+        {
+            SlotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null,
+            BorrowedDecode = QueryScanner.ShouldUseBorrowedDecode(plan),
+        };
+
+        QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
             table.Schema,
             txId,
             resolvedRowId,
             data.Value,
+            options,
             plan.ScanRequiredColumns,
-            plan.TableSchemaVersion).ConfigureAwait(false);
+            plan.TableSchemaVersion,
+            decodeState).ConfigureAwait(false);
 
-            if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
-                yield return new(resolvedRowId, row);
+        if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+            yield return new(resolvedRowId, row);
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingRangeIndex(
@@ -756,6 +767,15 @@ internal sealed class QueryExecutor
         // Index order is preserved: the page is filled in scan order and batch results are
         // indexed positionally, so rows are decoded and yielded in scan order. A missing row
         // (null from the batch) is silently skipped — the same contract as the per-entry path.
+        // Layout-backed decode with a per-scan plan cache (same policy as QueryScanner's scans):
+        // every row at the same stored schema version shares one decode plan, the filterer takes
+        // the ordinal fast path over a QueryRow, and slot/borrowed backing avoids materializing
+        // cells the filter rejects or the projection never reads.
+        RowEncoder.RowDecodeState decodeState = new()
+        {
+            SlotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null,
+            BorrowedDecode = QueryScanner.ShouldUseBorrowedDecode(plan),
+        };
         int batchSize = options.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
 
@@ -771,9 +791,10 @@ internal sealed class QueryExecutor
                     continue;
                 deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
                 if (scanStats is not null) scanStats.RowsRead++;
-                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,
-                    plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
+                    options,
+                    plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
                 if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                     yield return new(batchRowId, row);
             }
@@ -834,6 +855,16 @@ internal sealed class QueryExecutor
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
 
+        // Layout-backed decode with a per-scan plan cache shared by every seek in the IN list
+        // (same policy as QueryScanner's scans): rows at the same stored schema version share one
+        // decode plan, the filterer takes the ordinal fast path over a QueryRow, and slot/borrowed
+        // backing avoids materializing cells the filter rejects or the projection never reads.
+        RowEncoder.RowDecodeState decodeState = new()
+        {
+            SlotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null,
+            BorrowedDecode = QueryScanner.ShouldUseBorrowedDecode(plan),
+        };
+
         // For a non-unique IN-list scan, acquire a range lock covering [min, max] of the IN values.
         // Shared for SELECT; Exclusive for UPDATE/DELETE. Unique IN-list uses per-key point
         // lookups (LookupUnique), so no range lock is needed.
@@ -875,9 +906,10 @@ internal sealed class QueryExecutor
                 if (scanStats is not null)
                     scanStats.RowsRead++;
 
-                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, rowId.Value, data.Value,
-                    plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
+                    options,
+                    plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
 
                 if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                     yield return new(rowId.Value, row);
@@ -915,9 +947,10 @@ internal sealed class QueryExecutor
                     if (scanStats is not null)
                         scanStats.RowsRead++;
 
-                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeAsync(
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                         table.Schema, txId, rowId, data.Value,
-                        plan.ScanRequiredColumns, plan.TableSchemaVersion).ConfigureAwait(false);
+                        options,
+                        plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
 
                     if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                         yield return new(rowId, row);

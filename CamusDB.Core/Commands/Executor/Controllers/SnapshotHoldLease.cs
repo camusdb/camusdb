@@ -192,7 +192,8 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
                         return;
                     }
 
-                    logger.LogDebug(ex, "Transient failure renewing snapshot hold {HoldId}; will retry", holdId);
+                    if (logger.IsEnabled(LogLevel.Debug))
+                        logger.LogDebug(ex, "Transient failure renewing snapshot hold {HoldId}; will retry", holdId);
                 }
             }
         }
@@ -234,7 +235,8 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                logger.LogDebug(ex, "Snapshot hold renew loop for {HoldId} ended with an error", holdId);
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug(ex, "Snapshot hold renew loop for {HoldId} ended with an error", holdId);
             }
         }
 

@@ -328,10 +328,9 @@ public sealed class RowUpdater
         // Keyed case-insensitively so a SET clause written in a different case than the schema
         // (SET UserName = ... for a column stored as "username") overwrites the existing slot
         // rather than adding a second, case-variant key that the re-encode would ignore.
-        Dictionary<string, ColumnValue> rowValues = new(currentRow.Count, StringComparer.OrdinalIgnoreCase);
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in currentRow)
-            rowValues[keyValue.Key] = keyValue.Value;
+        // The copy constructor takes the BCL's bulk-copy path when the source dictionary uses the
+        // same comparer (which the decode paths guarantee), skipping a per-column rehash per row.
+        Dictionary<string, ColumnValue> rowValues = new(currentRow, StringComparer.OrdinalIgnoreCase);
 
         if (ticket.PlainValues is not null)
         {
@@ -407,7 +406,15 @@ public sealed class RowUpdater
         CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
         List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
 
+        // Index writability is fixed for the statement (the transaction pins the schema version),
+        // so filter once per chunk instead of re-evaluating per index per row.
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
+
+        // Per-chunk decode-plan cache: every row at the same stored schema version shares one resolved
+        // plan instead of re-running schema-history lookups and visibility resolution per row.
+        RowEncoder.DictionaryDecodeState decodeState = new();
 
         for (int i = 0; i < chunkRows.Count; i++)
         {
@@ -420,7 +427,8 @@ public sealed class RowUpdater
 
             Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, rawData.Value,
-                visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+                visibilitySchemaVersion: table.Schema.Version,
+                decodeState: decodeState).ConfigureAwait(false);
 
             Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, queryRow, ticket);
 
@@ -432,7 +440,7 @@ public sealed class RowUpdater
 
             (IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries,
              IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
-                CollectIndexUpdates(table, rowId, oldRow, newRow, state.Database.Options);
+                CollectIndexUpdates(writableIndexes, rowId, oldRow, newRow, state.Database.Options);
 
             batch.Add(new KvTableStore.RowUpdate
             {
@@ -459,7 +467,7 @@ public sealed class RowUpdater
     /// </summary>
     private static (IReadOnlyList<KvTableStore.IndexDelete>? Old, IReadOnlyList<KvTableStore.IndexWrite>? New)
         CollectIndexUpdates(
-            TableDescriptor table,
+            IReadOnlyList<TableIndexSchema> writableIndexes,
             ObjectIdValue rowId,
             Dictionary<string, ColumnValue> oldRow,
             Dictionary<string, ColumnValue> newRow,
@@ -468,12 +476,9 @@ public sealed class RowUpdater
         List<KvTableStore.IndexDelete>? oldEntries = null;
         List<KvTableStore.IndexWrite>? newEntries = null;
 
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        for (int idx = 0; idx < writableIndexes.Count; idx++)
         {
-            TableIndexSchema index = kv.Value;
-
-            if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
-                continue;
+            TableIndexSchema index = writableIndexes[idx];
 
             // Stored/payload (INCLUDE) columns live in the entry value, not the key. So an update that
             // leaves the key identical but changes an included value must still rewrite the entry value

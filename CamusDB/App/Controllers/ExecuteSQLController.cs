@@ -71,7 +71,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             string sql = request.Sql ?? "";
             return new ResolvedSql(
-                request.DatabaseName ?? "", sql, request.Parameters, SQLParserProcessor.Parse(sql).nodeType);
+                request.DatabaseName ?? "", sql, request.Parameters, executor.ParseSql(sql).nodeType);
         }
 
         PreparedStatementBinder.ValidateNoInlineFields(

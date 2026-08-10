@@ -126,7 +126,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             RejectStatementId(request, "ExecuteQuery");
             Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             string sql = request.Sql ?? "";
-            NodeAst ast = SQLParserProcessor.Parse(sql);
+            NodeAst ast = executor.ParseSql(sql);
             QueryStreamSink sink = new(responseStream);
 
             // SHOW DATABASES / BRANCHES / ANCESTORS need no db context or transaction.
@@ -300,7 +300,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             // Mirrors the REST non-query path: a database-scoped statement returns no descriptor, so
             // it must bypass both the transaction and the commit rather than be handed a null.
-            if (StatementScope.IsDatabaseScopedMutation(SQLParserProcessor.Parse(request.Sql ?? "").nodeType))
+            if (StatementScope.IsDatabaseScopedMutation(executor.ParseSql(request.Sql ?? "").nodeType))
             {
                 ExecuteSQLTicket dbScopedTicket = new(
                     txnState: null!,
@@ -397,7 +397,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             RejectStatementId(request, "ExecuteDdl");
             Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
             string sql = request.Sql ?? "";
-            NodeAst ast = SQLParserProcessor.Parse(sql);
+            NodeAst ast = executor.ParseSql(sql);
 
             bool isDbManagement = StatementScope.IsDatabaseScopedMutation(ast.nodeType);
 
@@ -1335,7 +1335,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// Past this method the two are indistinguishable, and everything downstream (tickets, txn
     /// handling, cache hints, retry taxonomy) is untouched.</para>
     /// </summary>
-    private static ResolvedStatement ResolveStatement(SqlRequest request, StreamPreparedStatements prepared)
+    private ResolvedStatement ResolveStatement(SqlRequest request, StreamPreparedStatements prepared)
     {
         if (request.StatementId == 0)
         {
@@ -1346,7 +1346,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             string sql = request.Sql ?? "";
             return new ResolvedStatement(
-                request.Database, sql, ToColumnValueMap(request.Parameters), SQLParserProcessor.Parse(sql).nodeType);
+                request.Database, sql, ToColumnValueMap(request.Parameters), executor.ParseSql(sql).nodeType);
         }
 
         PreparedStatementBinder.ValidateNoInlineFields(

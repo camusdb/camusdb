@@ -94,15 +94,23 @@ internal sealed class RowDeleter
         if (rowIds.Count == 0)
             return (0, 0);
 
-        List<ObjectIdValue> chunk = [.. rowIds];
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, chunk, cancellationToken).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken).ConfigureAwait(false);
 
-        List<KvTableStore.RowDelete> batch = new(chunk.Count);
+        // Index writability is fixed for the statement, so filter once here instead of per row; the
+        // decode below is narrowed to the columns this method actually consumes — the index key
+        // columns (for CollectIndexDeletes) plus the expiry column (for the re-check). Values for
+        // those columns are identical to a full decode; other columns are simply never materialized.
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+        HashSet<string> requiredColumns = CollectIndexKeyColumns(writableIndexes);
+        requiredColumns.Add(expirationColumn);
+        RowEncoder.DictionaryDecodeState decodeState = new();
+
+        List<KvTableStore.RowDelete> batch = new(rowIds.Count);
         int skipped = 0;
 
-        for (int i = 0; i < chunk.Count; i++)
+        for (int i = 0; i < rowIds.Count; i++)
         {
-            ObjectIdValue rowId = chunk[i];
+            ObjectIdValue rowId = rowIds[i];
             ReadOnlyMemory<byte>? data = rawRows[i];
 
             // Unlike the user-facing delete path, a row that vanished is not an error here: a
@@ -113,7 +121,9 @@ internal sealed class RowDeleter
 
             Dictionary<string, ColumnValue> writableRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, data.Value,
-                visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+                requiredColumns: requiredColumns,
+                visibilitySchemaVersion: table.Schema.Version,
+                decodeState: decodeState).ConfigureAwait(false);
 
             if (!TtlExpiryPredicate.IsExpired(writableRow, expirationColumn, cutoffEpochMs))
             {
@@ -124,7 +134,7 @@ internal sealed class RowDeleter
             batch.Add(new KvTableStore.RowDelete
             {
                 RowId = rowId,
-                IndexEntries = CollectIndexDeletes(table, rowId, writableRow),
+                IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
             });
         }
 
@@ -163,6 +173,25 @@ internal sealed class RowDeleter
             columnValues[^1] = extraUniqueValue;
 
         return new CompositeColumnValue(columnValues);
+    }
+
+    /// <summary>
+    /// Union of the key columns of every writable index, as a case-insensitive set matching the
+    /// decode dictionary's comparer. Used to narrow <see cref="RowEncoder.DecodeWritableAsync"/>
+    /// to the columns the delete path actually consumes — safe only because deleted rows are never
+    /// re-encoded from the decoded dictionary.
+    /// </summary>
+    private static HashSet<string> CollectIndexKeyColumns(IReadOnlyList<TableIndexSchema> writableIndexes)
+    {
+        HashSet<string> columns = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 0; i < writableIndexes.Count; i++)
+        {
+            foreach (string columnName in writableIndexes[i].Columns)
+                columns.Add(columnName);
+        }
+
+        return columns;
     }
 
     /// <summary>
@@ -270,6 +299,14 @@ internal sealed class RowDeleter
     {
         ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, chunk).ConfigureAwait(false);
 
+        // Index writability is fixed for the statement, so filter once per chunk instead of per row;
+        // the decode below is narrowed to the index key columns — the only values this path consumes
+        // (the row bytes are deleted wholesale, never re-encoded). Values for those columns are
+        // identical to a full decode; other columns are simply never materialized.
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+        HashSet<string> requiredColumns = CollectIndexKeyColumns(writableIndexes);
+        RowEncoder.DictionaryDecodeState decodeState = new();
+
         List<KvTableStore.RowDelete> batch = new(chunk.Count);
         for (int i = 0; i < chunk.Count; i++)
         {
@@ -280,12 +317,14 @@ internal sealed class RowDeleter
 
             Dictionary<string, ColumnValue> writableRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, data.Value,
-                visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+                requiredColumns: requiredColumns,
+                visibilitySchemaVersion: table.Schema.Version,
+                decodeState: decodeState).ConfigureAwait(false);
 
             batch.Add(new KvTableStore.RowDelete
             {
                 RowId = rowId,
-                IndexEntries = CollectIndexDeletes(table, rowId, writableRow),
+                IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
             });
         }
 
@@ -305,19 +344,16 @@ internal sealed class RowDeleter
     /// exists so a no-index (or all-NULL-key) delete allocates no per-row collection.
     /// </summary>
     private static IReadOnlyList<KvTableStore.IndexDelete>? CollectIndexDeletes(
-        TableDescriptor table,
+        IReadOnlyList<TableIndexSchema> writableIndexes,
         ObjectIdValue rowId,
         Dictionary<string, ColumnValue> row
     )
     {
         List<KvTableStore.IndexDelete>? entries = null;
 
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        for (int idx = 0; idx < writableIndexes.Count; idx++)
         {
-            TableIndexSchema index = kv.Value;
-
-            if (!SchemaElementStateRules.IsWritableIndex(table.Schema, index))
-                continue;
+            TableIndexSchema index = writableIndexes[idx];
 
             if (index.Type == IndexType.Unique)
             {

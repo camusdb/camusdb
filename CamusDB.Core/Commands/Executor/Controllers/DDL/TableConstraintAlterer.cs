@@ -442,6 +442,12 @@ internal sealed class TableConstraintAlterer
         ).ConfigureAwait(false);
         try
         {
+            // Only the candidate column's value matters here, so narrow the per-row decode to it —
+            // its decoded value (including an injected default for rows written before the column
+            // existed) is identical to what a full decode would produce.
+            HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase) { columnName };
+            RowEncoder.DictionaryDecodeState decodeState = new();
+
             await foreach ((Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data)
                 in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
             {
@@ -450,7 +456,9 @@ internal sealed class TableConstraintAlterer
                     tx.TransactionId,
                     rowId,
                     data,
-                    visibilitySchemaVersion: table.Schema.Version
+                    requiredColumns: requiredColumns,
+                    visibilitySchemaVersion: table.Schema.Version,
+                    decodeState: decodeState
                 ).ConfigureAwait(false);
 
                 if (!row.TryGetValue(columnName, out ColumnValue? cv) || cv is null || cv.Type == ColumnType.Null)
@@ -481,6 +489,10 @@ internal sealed class TableConstraintAlterer
         ).ConfigureAwait(false);
         try
         {
+            // The CHECK condition may reference any column, so no required-column narrowing here —
+            // but the per-row decode plan is still shared across the scan.
+            RowEncoder.DictionaryDecodeState decodeState = new();
+
             await foreach ((Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data)
                 in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
             {
@@ -489,7 +501,8 @@ internal sealed class TableConstraintAlterer
                     tx.TransactionId,
                     rowId,
                     data,
-                    visibilitySchemaVersion: table.Schema.Version
+                    visibilitySchemaVersion: table.Schema.Version,
+                    decodeState: decodeState
                 ).ConfigureAwait(false);
 
                 bool? result = CheckEvaluator.Evaluate(parsedCondition, row);

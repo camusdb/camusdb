@@ -247,6 +247,12 @@ internal sealed class TtlSpanSweeper
         ObjectIdValue? lastScanned = null;
         int scanned = 0;
 
+        // The candidate scan only reads the expiry column, so narrow the per-row decode to it —
+        // a wide row's other columns are never materialized. The delete phase re-reads and fully
+        // re-checks each candidate under the mutation lock, so this projection cannot lose data.
+        HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase) { expirationColumn };
+        RowEncoder.DictionaryDecodeState decodeState = new();
+
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly,
             priority: TransactionPriority.Background).ConfigureAwait(false);
@@ -262,7 +268,9 @@ internal sealed class TtlSpanSweeper
 
                 Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                     table.Schema, tx.TransactionId, rowId, data,
-                    visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+                    requiredColumns: requiredColumns,
+                    visibilitySchemaVersion: table.Schema.Version,
+                    decodeState: decodeState).ConfigureAwait(false);
 
                 if (TtlExpiryPredicate.IsExpired(row, expirationColumn, cutoffEpochMs))
                     candidates.Add(rowId);

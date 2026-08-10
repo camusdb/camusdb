@@ -111,7 +111,7 @@ internal sealed class TestPreparedStatementParseElimination : BaseTest
     }
 
     [Test]
-    public async Task Rest_PreparedExecutionParsesNothingWhileInlineStillParses()
+    public async Task Rest_PreparedAndWarmInlineExecutionsParseNothing()
     {
         string db = await CreateDatabaseWithRowAsync();
         const string sql = "SELECT name FROM robots WHERE year = @year";
@@ -148,14 +148,14 @@ internal sealed class TestPreparedStatementParseElimination : BaseTest
 
         long preparedParses = await CountParsesAsync(async () => await Sql(preparedBody()).ExecuteSQLQuery());
 
-        Assert.That(inlineParses, Is.GreaterThan(0),
-            "an inline request re-parses at the transport layer to route the statement");
+        Assert.That(inlineParses, Is.Zero,
+            "a warm inline request must not parse: the transport routing parse and the execution parse both hit the shared parser cache");
         Assert.That(preparedParses, Is.Zero,
             "a prepared execution must not parse at all — the root node was recorded at prepare time");
     }
 
     [Test]
-    public async Task Grpc_PreparedExecutionParsesNothingWhileInlineStillParses()
+    public async Task Grpc_PreparedAndWarmInlineExecutionsParseNothing()
     {
         string db = await CreateDatabaseWithRowAsync();
         const string sql = "SELECT name FROM robots WHERE year = @year";
@@ -207,8 +207,8 @@ internal sealed class TestPreparedStatementParseElimination : BaseTest
                 await WaitTerminal(writer, 5);
             });
 
-            Assert.That(inlineParses, Is.GreaterThan(0),
-                "an inline batched query re-parses to answer the SHOW routing check");
+            Assert.That(inlineParses, Is.Zero,
+                "a warm inline batched query must not parse: the routing check and the execution both hit the shared parser cache");
             Assert.That(preparedParses, Is.Zero,
                 "a prepared execution must not parse at all");
         });

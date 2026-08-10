@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using Kahuna;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -87,8 +88,15 @@ public sealed class KvTransactionsManager : IDisposable
     /// </summary>
     private readonly IQueryResultCache? _cache;
 
-    private readonly Lock activeSync = new();
-    private readonly List<KvTransaction> activeTransactions = [];
+    /// <summary>
+    /// Live transactions, keyed by <see cref="KvTransaction.ClientId"/> — the identity that is
+    /// immutable from construction (a deferred-start transaction's <c>TransactionId</c> changes when
+    /// its session starts, so it must not be the key). A concurrent dictionary keeps begin/finalize
+    /// O(1) and lock-free; the previous <c>List</c> + global lock made every finalize an O(n) scan
+    /// under a lock every other begin/finalize contended on. Consumed only by the test-fixture bulk
+    /// rollback and disposal, so neither ordering nor duplicates matter.
+    /// </summary>
+    private readonly ConcurrentDictionary<Kommander.Time.HLCTimestamp, KvTransaction> activeTransactions = new();
 
     public KvTransactionsManager(
         IKahuna kahuna,
@@ -111,11 +119,7 @@ public sealed class KvTransactionsManager : IDisposable
     /// </summary>
     public async Task RollbackAllActiveAsync(CancellationToken cancellationToken = default)
     {
-        List<KvTransaction> snapshot;
-        lock (activeSync)
-            snapshot = [.. activeTransactions];
-
-        foreach (KvTransaction tx in snapshot)
+        foreach (KvTransaction tx in activeTransactions.Values)
         {
             try
             {
@@ -127,20 +131,23 @@ public sealed class KvTransactionsManager : IDisposable
             }
         }
 
-        lock (activeSync)
-            activeTransactions.RemoveAll(tx => tx.Status != KvTransactionStatus.Active);
+        foreach (KeyValuePair<Kommander.Time.HLCTimestamp, KvTransaction> entry in activeTransactions)
+        {
+            if (entry.Value.Status != KvTransactionStatus.Active)
+                activeTransactions.TryRemove(entry);
+        }
     }
 
     private void Track(KvTransaction tx)
     {
-        lock (activeSync)
-            activeTransactions.Add(tx);
+        activeTransactions[tx.ClientId] = tx;
     }
 
     private void Untrack(KvTransaction tx)
     {
-        lock (activeSync)
-            activeTransactions.Remove(tx);
+        // Pair-remove: only removes the entry when it still maps to this exact transaction, so a
+        // later transaction reusing the same client id is never untracked by a stale finalize.
+        activeTransactions.TryRemove(new KeyValuePair<Kommander.Time.HLCTimestamp, KvTransaction>(tx.ClientId, tx));
     }
 
     /// <summary>
@@ -911,7 +918,6 @@ public sealed class KvTransactionsManager : IDisposable
 
     public void Dispose()
     {
-        lock (activeSync)
-            activeTransactions.Clear();
+        activeTransactions.Clear();
     }
 }

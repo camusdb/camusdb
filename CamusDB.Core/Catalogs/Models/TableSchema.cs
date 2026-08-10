@@ -187,10 +187,32 @@ public sealed class TableSchema
     [JsonIgnore]
     public Func<HLCTimestamp, int, ValueTask<TableSchemaHistory?>>? SchemaHistoryLoader { get; set; }
 
+    /// <summary>
+    /// Memoized wrapper for the current-version case of <see cref="GetSchemaHistory"/> /
+    /// <see cref="GetSchemaHistoryAsync"/>: both used to allocate a fresh <see cref="TableSchemaHistory"/>
+    /// per call, and mutation decode paths call them once (or twice) per row. The cache is validated by
+    /// value (<see cref="Version"/>) and by list identity (<see cref="Columns"/>) on every read, so a DDL
+    /// that bumps the version or swaps the column list naturally invalidates it. The wrapper shares the
+    /// live <see cref="Columns"/> list exactly as the per-call allocation did — no ownership change.
+    /// A benign race may build two identical instances; the field write is an atomic reference store.
+    /// </summary>
+    private TableSchemaHistory? currentVersionHistory;
+
+    private TableSchemaHistory GetCurrentVersionHistory()
+    {
+        TableSchemaHistory? cached = currentVersionHistory;
+        if (cached is not null && cached.Version == Version && ReferenceEquals(cached.Columns, Columns))
+            return cached;
+
+        cached = new() { Version = Version, Columns = Columns };
+        currentVersionHistory = cached;
+        return cached;
+    }
+
     public TableSchemaHistory GetSchemaHistory(int version)
     {
         if (version == Version && Columns is not null)
-            return new() { Version = Version, Columns = Columns };
+            return GetCurrentVersionHistory();
 
         if (SchemaHistory is not null)
         {
@@ -216,7 +238,7 @@ public sealed class TableSchema
     public async ValueTask<TableSchemaHistory> GetSchemaHistoryAsync(HLCTimestamp txId, int version)
     {
         if (version == Version && Columns is not null)
-            return new() { Version = Version, Columns = Columns };
+            return GetCurrentVersionHistory();
 
         if (SchemaHistory is not null)
         {

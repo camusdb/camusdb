@@ -39,7 +39,7 @@ internal sealed class QueryScanner
     /// memory than the projected-only slot path; those shapes keep the existing decode. The global
     /// <see cref="CamusDBOptions.BorrowedDecode"/> override still forces it on everywhere for A/B runs.
     /// </summary>
-    private static bool ShouldUseBorrowedDecode(QueryPlan plan)
+    internal static bool ShouldUseBorrowedDecode(QueryPlan plan)
     {
         switch (plan.Database.Options.BorrowedDecode)
         {

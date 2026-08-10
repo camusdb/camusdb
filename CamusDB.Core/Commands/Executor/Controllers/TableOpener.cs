@@ -89,10 +89,14 @@ internal sealed class TableOpener
             }
         }
 
-        AsyncLazy<TableDescriptor> openTableLazy = database.TableDescriptors.GetOrAdd(
-                                                        tableSchema.Name ?? "",
-                                                        (_) => new(() => LoadTable(database, tableSchema))
-                                                   );
+        // Fast path first: GetOrAdd(key, factory) evaluates the factory-lambda expression — two
+        // closure allocations — on every call, including the overwhelmingly common cache hit.
+        string descriptorKey = tableSchema.Name ?? "";
+        if (!database.TableDescriptors.TryGetValue(descriptorKey, out AsyncLazy<TableDescriptor>? openTableLazy))
+            openTableLazy = database.TableDescriptors.GetOrAdd(
+                descriptorKey,
+                (_) => new(() => LoadTable(database, tableSchema))
+            );
         return await openTableLazy;
     }
 

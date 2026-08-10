@@ -657,6 +657,38 @@ public sealed class KvTransaction
         }
     }
 
+    /// <summary>
+    /// Bulk form of <see cref="TrackModified"/> for batch write paths: records every key of the
+    /// batch under a single <c>trackSync</c> acquisition and one capacity reservation, instead of
+    /// one lock round-trip per key — a large batch insert otherwise takes hundreds of thousands of
+    /// uncontended-but-real monitor acquisitions. All keys are recorded with the same durability.
+    /// </summary>
+    public void TrackModifiedRange(IReadOnlyList<(string key, int expiresMs, KeyValueDurability durability)> keys, KeyValueDurability durability)
+    {
+        lock (trackSync)
+        {
+            modifiedKeys ??= [];
+            modifiedKeys.EnsureCapacity(modifiedKeys.Count + keys.Count);
+            for (int i = 0; i < keys.Count; i++)
+                modifiedKeys.Add((keys[i].key, durability));
+        }
+    }
+
+    /// <summary>
+    /// Bulk form of <see cref="TrackModified"/> over plain key strings — see the tuple overload for
+    /// why this exists. All keys are recorded with the same durability.
+    /// </summary>
+    public void TrackModifiedRange(IReadOnlyList<string> keys, KeyValueDurability durability)
+    {
+        lock (trackSync)
+        {
+            modifiedKeys ??= [];
+            modifiedKeys.EnsureCapacity(modifiedKeys.Count + keys.Count);
+            for (int i = 0; i < keys.Count; i++)
+                modifiedKeys.Add((keys[i], durability));
+        }
+    }
+
     public void PinSchemaVersion(
         string resource,
         long schemaVersion,

@@ -594,8 +594,10 @@ public sealed class KvTableStore
         {
             type = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
                 ServerDiagnostics.AddKvRetryWait("mustretry_595");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
@@ -1700,8 +1702,12 @@ public sealed class KvTableStore
                 setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
             }
 
-            foreach (IndexWrite ix in row.IndexEntries ?? [])
+            // Indexed loop: foreach over the IReadOnlyList interface boxes the list enumerator
+            // on the heap once per row; same for the sibling batch loops below.
+            IReadOnlyList<IndexWrite>? indexEntries = row.IndexEntries;
+            for (int e = 0; indexEntries is not null && e < indexEntries.Count; e++)
             {
+                IndexWrite ix = indexEntries[e];
                 string kvKey = ix.Unique
                     ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
                     : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
@@ -1748,8 +1754,10 @@ public sealed class KvTableStore
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
-                foreach (IndexWrite ix in row.IndexEntries ?? [])
+                IReadOnlyList<IndexWrite>? indexEntries = row.IndexEntries;
+                for (int e = 0; indexEntries is not null && e < indexEntries.Count; e++)
                 {
+                    IndexWrite ix = indexEntries[e];
                     string kvKey = ix.Unique
                         ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
                         : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, row.RowId);
@@ -1787,8 +1795,7 @@ public sealed class KvTableStore
 
         // Track modified keys for the 2PC commit. Locks were already tracked inside
         // AcquireManyWithRetry as each key was confirmed Locked.
-        foreach ((string key, int _, KeyValueDurability durability) in lockKeys)
-            tx.TrackModified(key, KeyValueDurability.Persistent);
+        tx.TrackModifiedRange(lockKeys, KeyValueDurability.Persistent);
     }
 
     private async Task AcquireManyWithRetry(
@@ -2066,8 +2073,12 @@ public sealed class KvTableStore
                 setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
             }
 
-            foreach (IndexDelete old in row.OldIndexEntries ?? [])
+            // Indexed loops: foreach over the IReadOnlyList interface boxes the list enumerator
+            // on the heap once per row per loop.
+            IReadOnlyList<IndexDelete>? oldIndexEntries = row.OldIndexEntries;
+            for (int e = 0; oldIndexEntries is not null && e < oldIndexEntries.Count; e++)
             {
+                IndexDelete old = oldIndexEntries[e];
                 string kvKey = old.Unique
                     ? BuildUniqueIndexKey(old.IndexId, old.Key)
                     : BuildNonUniqueIndexKey(old.IndexId, old.Key, old.RowId);
@@ -2077,8 +2088,10 @@ public sealed class KvTableStore
                     deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Durability = KeyValueDurability.Persistent });
             }
 
-            foreach (IndexWrite newIx in row.NewIndexEntries ?? [])
+            IReadOnlyList<IndexWrite>? newIndexEntries = row.NewIndexEntries;
+            for (int e = 0; newIndexEntries is not null && e < newIndexEntries.Count; e++)
             {
+                IndexWrite newIx = newIndexEntries[e];
                 string kvKey = newIx.Unique
                     ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
                     : BuildNonUniqueIndexKey(newIx.IndexId, newIx.Key, row.RowId);
@@ -2125,8 +2138,10 @@ public sealed class KvTableStore
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
-                foreach (IndexDelete old in row.OldIndexEntries ?? [])
+                IReadOnlyList<IndexDelete>? oldIndexEntries = row.OldIndexEntries;
+                for (int e = 0; oldIndexEntries is not null && e < oldIndexEntries.Count; e++)
                 {
+                    IndexDelete old = oldIndexEntries[e];
                     string kvKey = old.Unique
                         ? BuildUniqueIndexKey(old.IndexId, old.Key)
                         : BuildNonUniqueIndexKey(old.IndexId, old.Key, old.RowId);
@@ -2134,8 +2149,10 @@ public sealed class KvTableStore
                     batchByKey[kvKey] = false;
                 }
 
-                foreach (IndexWrite newIx in row.NewIndexEntries ?? [])
+                IReadOnlyList<IndexWrite>? newIndexEntries = row.NewIndexEntries;
+                for (int e = 0; newIndexEntries is not null && e < newIndexEntries.Count; e++)
                 {
+                    IndexWrite newIx = newIndexEntries[e];
                     string kvKey = newIx.Unique
                         ? BuildUniqueIndexKey(newIx.IndexId, newIx.Key)
                         : BuildNonUniqueIndexKey(newIx.IndexId, newIx.Key, row.RowId);
@@ -2174,8 +2191,7 @@ public sealed class KvTableStore
         }
 
         // Track all modified keys for 2PC commit. Locks were already tracked inside AcquireManyWithRetry.
-        foreach ((string key, _, _) in lockKeys)
-            tx.TrackModified(key, KeyValueDurability.Persistent);
+        tx.TrackModifiedRange(lockKeys, KeyValueDurability.Persistent);
     }
 
     // -----------------------------------------------------------------------
@@ -2225,8 +2241,10 @@ public sealed class KvTableStore
         {
             keys.Add(BuildRowKey(row.RowId));
 
-            foreach (IndexDelete ix in row.IndexEntries ?? [])
+            IReadOnlyList<IndexDelete>? indexEntries = row.IndexEntries;
+            for (int e = 0; indexEntries is not null && e < indexEntries.Count; e++)
             {
+                IndexDelete ix = indexEntries[e];
                 keys.Add(ix.Unique
                     ? BuildUniqueIndexKey(ix.IndexId, ix.Key)
                     : BuildNonUniqueIndexKey(ix.IndexId, ix.Key, ix.RowId));
@@ -2256,8 +2274,7 @@ public sealed class KvTableStore
             await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
             await SetManyWithRetry(tx, tombstoneItems, new Dictionary<string, bool>(), cancellationToken).ConfigureAwait(false);
 
-            foreach (string key in keys)
-                tx.TrackModified(key, KeyValueDurability.Persistent);
+            tx.TrackModifiedRange(keys, KeyValueDurability.Persistent);
         }
         else
         {
@@ -2417,8 +2434,7 @@ public sealed class KvTableStore
         await DeleteManyWithRetry(tx, deleteItems, cancellationToken).ConfigureAwait(false);
 
         // Locks were already tracked inside AcquireManyWithRetry.
-        foreach (string key in keys)
-            tx.TrackModified(key, KeyValueDurability.Persistent);
+        tx.TrackModifiedRange(keys, KeyValueDurability.Persistent);
     }
 
     private async Task DeleteManyWithRetry(KvTransaction tx, List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
@@ -2608,8 +2624,10 @@ public sealed class KvTableStore
         {
             (type, entry) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
                 ServerDiagnostics.AddKvRetryWait("mustretry_2560");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
@@ -2632,8 +2650,10 @@ public sealed class KvTableStore
         {
             (type, revision, ts) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
                 ServerDiagnostics.AddKvRetryWait("mustretry_2583");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 
@@ -2656,8 +2676,10 @@ public sealed class KvTableStore
         {
             (type, endpoint, durability) = await fn().ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
                 ServerDiagnostics.AddKvRetryWait("mustretry_2606");
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
 

@@ -156,6 +156,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>Configuration for this engine, for the controllers and stores it owns.</summary>
     internal CamusDBOptions Options => options;
 
+    /// <summary>
+    /// Parses SQL through this executor's shared parser cache. Exists for transports (HTTP/gRPC)
+    /// that must inspect a statement's root node to route it before building a ticket: without
+    /// this, an inline request pays a full, uncached lex+parse per request just to read the root
+    /// node type, and then the executor parses the same text again (cached) during execution.
+    /// The returned AST is the same cached, immutable, share-safe instance execution will use.
+    /// </summary>
+    public NodeAst ParseSql(string sql) => SQLParserProcessor.Parse(sql, sqlParserCache);
+
     private readonly SemiJoinAnalyzer semiJoinAnalyzer;
 
     private readonly ISchemaDdlForwarder? schemaDdlForwarder;
@@ -1880,6 +1889,18 @@ public sealed class CommandExecutor : IAsyncDisposable
             ? null
             : ObjectId.ToValue(startOffset!);
 
+        // The backfill only reads the index's key and INCLUDE columns, so narrow the per-row decode
+        // to them — values for those columns are identical to a full decode, and the scanned rows are
+        // never re-encoded, only turned into index entries.
+        HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string columnName in indexInfo.ColumnNames)
+            requiredColumns.Add(columnName);
+        if (indexInfo.IncludeColumnNames is { Length: > 0 } includeColumnNames)
+        {
+            foreach (string columnName in includeColumnNames)
+                requiredColumns.Add(columnName);
+        }
+
         int totalRows = 0;
 
         while (true)
@@ -1891,6 +1912,10 @@ public sealed class CommandExecutor : IAsyncDisposable
             int batchRows = 0;
             ObjectIdValue lastRowId = default;
 
+            // Per-batch decode-plan cache; scoped to the batch transaction because the visibility
+            // version is re-read from the live schema each batch.
+            RowEncoder.DictionaryDecodeState decodeState = new();
+
             try
             {
                 // Each scanned row produces an index entry in this same transaction, so the rows read
@@ -1900,7 +1925,9 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
                         table.Schema, tx.TransactionId, rowId, data,
-                        visibilitySchemaVersion: table.Schema.Version).ConfigureAwait(false);
+                        requiredColumns: requiredColumns,
+                        visibilitySchemaVersion: table.Schema.Version,
+                        decodeState: decodeState).ConfigureAwait(false);
 
                     // NULLs are distinct: a unique index omits entries for rows with a NULL (or absent)
                     // value in any indexed column, so multiple such rows can coexist. This must match
@@ -3258,9 +3285,18 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private void SetAuthorizationScope(ExecuteSQLTicket ticket, NodeAst ast)
     {
-        AuthorizationContext.Current = options.AuthenticationEnabled
-            ? new AuthorizationScope(ticket.Principal, MapRequiredPrivilege(ast.nodeType))
-            : default;
+        if (options.AuthenticationEnabled)
+        {
+            AuthorizationContext.Current = new AuthorizationScope(ticket.Principal, MapRequiredPrivilege(ast.nodeType));
+            return;
+        }
+
+        // Auth disabled: the scope must still be cleared when a pooled execution context carries a
+        // stale value — but writing an AsyncLocal (even `default`) forces the runtime to clone the
+        // ExecutionContext and re-copy it across every await in the statement. Reading is free, so
+        // only pay for the write when there is actually something to clear.
+        if (AuthorizationContext.Current != default)
+            AuthorizationContext.Current = default;
     }
 
     /// <summary>
