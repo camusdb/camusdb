@@ -114,6 +114,28 @@ public sealed class KvTransactionsManager : IDisposable
     }
 
     /// <summary>
+    /// True while any transaction started here is still <see cref="KvTransactionStatus.Active"/>.
+    ///
+    /// <para>Read by idle eviction, which must refuse to dispose a database whose transactions are
+    /// still running. Deliberately checks the status rather than the dictionary's count: a finalized
+    /// transaction can linger in the map until its untrack lands, and treating that as "busy" would
+    /// make a database with churn permanently un-evictable.</para>
+    /// </summary>
+    public bool HasActiveTransactions
+    {
+        get
+        {
+            foreach (KvTransaction tx in activeTransactions.Values)
+            {
+                if (tx.Status == KvTransactionStatus.Active)
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Rolls back every transaction still marked <see cref="KvTransactionStatus.Active"/>.
     /// Used by test fixtures that reuse a long-lived Kahuna node across methods.
     /// </summary>

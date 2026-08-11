@@ -213,6 +213,7 @@ public static class ConfigResolver
 
         OrphanRetentionMs = config.OrphanRetentionMs,
         OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs,
+        DatabaseIdleEvictionMs = config.DatabaseIdleEvictionMs,
 
         EngineMetricsEnabled = config.EngineMetricsEnabled,
 

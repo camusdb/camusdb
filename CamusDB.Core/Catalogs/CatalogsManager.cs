@@ -997,7 +997,16 @@ public sealed class CatalogsManager
     /// Proposes a <see cref="SchemaOp.SetTableSettings"/> delta and replicates it to all cluster nodes,
     /// so every node's in-memory <see cref="TableSchema.Settings"/> updates and the KV checkpoint is
     /// rewritten. Advances the database schema version (like check constraints) but not
-    /// <see cref="TableSchema.Version"/>. Only valid in cluster mode; standalone applies directly.
+    /// <see cref="TableSchema.Version"/> — settings do not affect row encoding.
+    ///
+    /// <para><b>Both modes use this path.</b> A standalone node is the only member of its own schema
+    /// group, so proposing costs it a single-node commit and buys the same guarantees the cluster gets:
+    /// the database schema version and the descriptor's head-version fence advance together, from the
+    /// one place that advances them for every other schema operation. The earlier standalone shortcut
+    /// wrote the table blob directly and left the version untouched, which made a background sweep that
+    /// keys on the database schema version unable to notice a table's settings changing at all — TTL
+    /// could be switched on and the sweep would never see it. Changing settings <em>is</em> a schema
+    /// change; do not reintroduce a mode-specific path that pretends otherwise.</para>
     /// </summary>
     public async Task ReplicateSetTableSettingsAsync(
         DatabaseDescriptor database,
@@ -3059,82 +3068,16 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
-    /// Applies <c>ALTER TABLE … SET (key = value)</c> table storage parameters. Version-neutral: it
-    /// mutates <see cref="TableSchema.Settings"/> and rewrites the per-object table blob without
-    /// bumping <see cref="TableSchema.Version"/> (settings do not affect row encoding), mirroring how
-    /// index and check-constraint changes ride the blob.
-    ///
-    /// <para>The only consumer of these settings is the background auto-analyze scheduler, which reads
-    /// the setting from the freshly-scanned KV meta blob on the registry leader — not from any node's
-    /// in-memory descriptor. So a direct blob write is sufficient in both modes; the caller forwards to
-    /// the schema leader in cluster mode so the setting also lands in the leader's in-memory schema and
-    /// survives a later versioned DDL (which rebuilds the blob from that in-memory state).</para>
-    /// </summary>
-    public async Task AlterTableSettingsAsync(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        IReadOnlyDictionary<string, string> settings,
-        IReadOnlyCollection<string>? removedKeys = null)
-    {
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-
-        Dictionary<string, string>? previousSettings = null;
-        bool mutated = false;
-        try
-        {
-            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-            try
-            {
-                // Snapshot for revert: PersistSchemaTableAsync serializes the in-memory schema, so the
-                // mutation must precede persist; a failed persist/commit must not leave in-memory ahead.
-                previousSettings = table.Schema.Settings is null ? null
-                    : new Dictionary<string, string>(table.Schema.Settings, StringComparer.Ordinal);
-
-                Dictionary<string, string> merged = table.Schema.Settings is null
-                    ? new Dictionary<string, string>(StringComparer.Ordinal)
-                    : new Dictionary<string, string>(table.Schema.Settings, StringComparer.Ordinal);
-
-                foreach (KeyValuePair<string, string> kv in settings)
-                    merged[kv.Key] = kv.Value;
-
-                if (removedKeys is not null)
-                {
-                    foreach (string key in removedKeys)
-                        merged.Remove(key);
-                }
-
-                table.Schema.Settings = merged;
-                mutated = true;
-            }
-            finally
-            {
-                database.Schema.ReleaseLock();
-            }
-
-            await PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-            mutated = false;
-        }
-        finally
-        {
-            if (mutated)
-            {
-                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-                try { table.Schema.Settings = previousSettings; }
-                finally { database.Schema.ReleaseLock(); }
-            }
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
     /// Standalone-mode counterpart of <see cref="ReplicateSetCommentAsync"/>: mutates the in-memory
-    /// schema and rewrites the table blob directly, with no schema-log entry. Like the settings path
-    /// it rides the blob without bumping <see cref="TableSchema.Version"/>, and — matching that same
-    /// precedent — it does not advance the database schema version either; only the replicated path
-    /// does.
+    /// schema and rewrites the table blob directly, with no schema-log entry. It rides the blob without
+    /// bumping <see cref="TableSchema.Version"/>, and does not advance the database schema version
+    /// either; only the replicated path does.
+    ///
+    /// <para><b>Known divergence between the modes.</b> The same statement advances the database schema
+    /// version in cluster mode (its delta lands in the central apply) and not here. Nothing currently
+    /// keys off the version for comments, so this is latent rather than broken — but it is the same
+    /// shape of bug that made table settings invisible to background sweeps, and the fix is the same:
+    /// propose the delta in both modes rather than shortcutting one.</para>
     ///
     /// <para>Ordering matters and is not incidental: the mutation must happen before the persist
     /// (which serializes the in-memory schema), the schema lock must be released before the persist

@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
+
 namespace CamusDB.Core.Storage.Kv;
 
 /// <summary>
@@ -50,18 +52,20 @@ internal enum SchemaAckOutcome
 /// </summary>
 internal sealed class SchemaAckTracker
 {
-    private readonly object sync = new();
-    private readonly Dictionary<string, DatabaseAcks> databases = new(StringComparer.Ordinal);
+    // One entry per database, each carrying its own lock. A single tracker-wide lock would make DDL on
+    // one database contend with DDL on every other — and the gate below is held for as long as a
+    // cluster takes to converge, so that contention is measured in round-trips, not instructions.
+    private readonly ConcurrentDictionary<string, DatabaseAcks> databases = new(StringComparer.Ordinal);
 
     public void RecordApplied(string database, string node, long schemaVersion)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(database);
         ArgumentException.ThrowIfNullOrWhiteSpace(node);
 
-        lock (sync)
-        {
-            DatabaseAcks acks = GetOrCreate(database);
+        DatabaseAcks acks = databases.GetOrAdd(database, _ => new DatabaseAcks());
 
+        lock (acks.Sync)
+        {
             long version = acks.Nodes.TryGetValue(node, out NodeAck existing)
                 ? Math.Max(existing.Version, schemaVersion)
                 : schemaVersion;
@@ -71,13 +75,41 @@ internal sealed class SchemaAckTracker
             // this apply-derived signal when one is available.
             acks.Nodes[node] = new NodeAck(version, DateTime.UtcNow);
         }
+
+        // Outside the lock: waking a waiter must not run continuations while this database's lock is
+        // held. Signalled on every record, not only on a version advance — a refreshed LastSeen can
+        // change a lease-expiry verdict too, and a waiter that wakes needlessly simply re-evaluates.
+        acks.SignalAck();
     }
 
     /// <summary>
-    /// Polls until every endpoint returned by <paramref name="getLiveMembers"/> has acked
+    /// How long the gate may sleep without being woken by an ack.
+    ///
+    /// <para>Acks wake it immediately, so this is <b>not</b> the convergence latency — it is the
+    /// resolution at which the two conditions that change with no ack behind them are re-examined:
+    /// a live member's lease expiring, and cluster membership changing. Both are states rather than
+    /// events, so nothing can signal them; they have to be looked at. The fixed deadlines
+    /// (the quorum backstop, the overall timeout) are not polled — the sleep is shortened to land
+    /// exactly on whichever comes first.</para>
+    /// </summary>
+    private static readonly TimeSpan LivenessRecheckInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Waits until every endpoint returned by <paramref name="getLiveMembers"/> has acked
     /// <paramref name="schemaVersion"/> (full convergence), OR — when
     /// <paramref name="quorumBackstopDelay"/> is finite — until a majority (⌊N/2⌋+1) of those
     /// members has acked and the backstop delay has elapsed (quorum backstop).
+    ///
+    /// <para><b>Woken by acks, not by polling.</b> Each iteration captures the database's ack signal
+    /// <em>before</em> evaluating the condition, so an ack that lands during evaluation completes the
+    /// captured signal and the next wait returns immediately — the ordering is what makes a lost
+    /// wake-up impossible. A coarse timer still runs alongside it for the conditions no ack announces
+    /// (see <see cref="LivenessRecheckInterval"/>); replacing the poll with a pure signal would hang a
+    /// gate whose only remaining blocker is a silent node whose lease is about to expire.</para>
+    ///
+    /// <para>The entry is re-resolved every iteration rather than captured once, so a database whose
+    /// state is forgotten and rebuilt underneath an in-flight gate is picked up rather than waited on
+    /// forever.</para>
     /// </summary>
     /// <param name="quorumBackstopDelay">
     /// How long to wait for full convergence before accepting quorum. Pass
@@ -108,42 +140,85 @@ internal sealed class SchemaAckTracker
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // Captured BEFORE the condition is evaluated. An ack recorded after the evaluation but
+            // before the await completes this task, so the wait returns at once and re-evaluates.
+            // Capturing it afterwards would drop exactly that ack and sleep through it.
+            databases.TryGetValue(database, out DatabaseAcks? acks);
+            Task ackArrived = acks?.AckArrived ?? Task.CompletedTask;
+
             IReadOnlyCollection<string> liveMembers = getLiveMembers();
             DateTime now = DateTime.UtcNow;
 
-            lock (sync)
+            if (acks is null)
             {
-                databases.TryGetValue(database, out DatabaseAcks? acks);
-
-                if (HasEveryLiveNodeAcked(acks, schemaVersion, liveMembers, liveNodeLease, now))
+                if (HasEveryLiveNodeAcked(null, schemaVersion, liveMembers, liveNodeLease, now))
                     return SchemaAckOutcome.FullConvergence;
 
                 if (backstopEnabled && now >= backstopDeadline &&
-                    HasQuorumAcked(acks, schemaVersion, liveMembers, liveNodeLease, now))
+                    HasQuorumAcked(null, schemaVersion, liveMembers, liveNodeLease, now))
                     return SchemaAckOutcome.QuorumBackstop;
+            }
+            else
+            {
+                lock (acks.Sync)
+                {
+                    if (HasEveryLiveNodeAcked(acks, schemaVersion, liveMembers, liveNodeLease, now))
+                        return SchemaAckOutcome.FullConvergence;
+
+                    if (backstopEnabled && now >= backstopDeadline &&
+                        HasQuorumAcked(acks, schemaVersion, liveMembers, liveNodeLease, now))
+                        return SchemaAckOutcome.QuorumBackstop;
+                }
             }
 
             if (now >= deadline)
                 return SchemaAckOutcome.Timeout;
 
-            TimeSpan remaining = deadline - now;
-            TimeSpan delay = remaining < TimeSpan.FromMilliseconds(25)
-                ? remaining
-                : TimeSpan.FromMilliseconds(25);
+            // Sleep until the next thing that could change the answer: an ack (signalled), the
+            // liveness re-check, or whichever fixed deadline comes first.
+            TimeSpan delay = deadline - now;
 
-            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            if (backstopEnabled && now < backstopDeadline && backstopDeadline - now < delay)
+                delay = backstopDeadline - now;
+
+            if (LivenessRecheckInterval < delay)
+                delay = LivenessRecheckInterval;
+
+            if (delay > TimeSpan.Zero)
+            {
+                // A no-op when the ack signal wins the race; the delay task is abandoned to the
+                // timer queue either way, which is why the interval is coarse rather than 25 ms.
+                await Task.WhenAny(ackArrived, Task.Delay(delay, cancellationToken)).ConfigureAwait(false);
+            }
         }
     }
 
-    private DatabaseAcks GetOrCreate(string database)
+    /// <summary>
+    /// Drops all ack state for a database this node is no longer holding open.
+    ///
+    /// <para>The map is keyed by database and only ever grows: every database that has had a single
+    /// DDL applied here keeps an entry, with one node-ack record per cluster member, for the life of
+    /// the process. On a node that has served thousands of databases that is pure residue, so the
+    /// entry is released when the descriptor is.</para>
+    ///
+    /// <para>Safe to forget because the state is a cache of progress, not a source of truth: reopening
+    /// the database re-records this node's applied version (see
+    /// <c>EmbeddedKahuna.RecordAndPublishSchemaApplied</c>, called from schema-replicator
+    /// registration), and a DDL gate consults live Raft membership for who must ack. Forgetting a
+    /// database with a gate in flight would only make that gate wait for acks to be re-reported, which
+    /// is why eviction never runs while DDL is in flight.</para>
+    /// </summary>
+    public void Forget(string database)
     {
-        if (!databases.TryGetValue(database, out DatabaseAcks? acks))
-        {
-            acks = new();
-            databases[database] = acks;
-        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(database);
 
-        return acks;
+        if (databases.TryRemove(database, out DatabaseAcks? removed))
+        {
+            // Wake anything waiting on the entry that was just detached. Its waiters hold a signal
+            // belonging to an object no future ack will ever touch, so without this they would sit
+            // until the liveness re-check rather than immediately re-resolving the live entry.
+            removed.SignalAck();
+        }
     }
 
     private static bool HasEveryLiveNodeAcked(
@@ -249,13 +324,14 @@ internal sealed class SchemaAckTracker
     {
         List<string> lagging = [];
 
-        lock (sync)
-        {
-            databases.TryGetValue(database, out DatabaseAcks? acks);
+        if (!databases.TryGetValue(database, out DatabaseAcks? acks))
+            return [.. liveMembers]; // nothing recorded: every member is behind
 
+        lock (acks.Sync)
+        {
             foreach (string node in liveMembers)
             {
-                if (acks is not null && acks.Nodes.TryGetValue(node, out NodeAck ack) && ack.Version >= schemaVersion)
+                if (acks.Nodes.TryGetValue(node, out NodeAck ack) && ack.Version >= schemaVersion)
                     continue; // acked the target version or newer
 
                 lagging.Add(node);
@@ -267,8 +343,38 @@ internal sealed class SchemaAckTracker
 
     private readonly record struct NodeAck(long Version, DateTime LastSeen);
 
+    /// <summary>
+    /// One database's ack records, the lock that guards them, and the signal that wakes its waiters.
+    ///
+    /// <para>The lock is per database precisely so that a DDL gate on one database — which is held
+    /// open for as long as the cluster takes to converge — cannot delay an unrelated database's
+    /// DDL.</para>
+    /// </summary>
     private sealed class DatabaseAcks
     {
+        public object Sync { get; } = new();
+
         public Dictionary<string, NodeAck> Nodes { get; } = new(StringComparer.Ordinal);
+
+        // Completed (and replaced) on every recorded ack. Waiters capture it before testing their
+        // condition, so an ack landing mid-test still wakes them. RunContinuationsAsynchronously
+        // keeps a waiter's continuation off the thread that recorded the ack — that thread is on the
+        // schema-apply path and must not be handed someone else's gate evaluation.
+        private TaskCompletionSource ackSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task AckArrived => Volatile.Read(ref ackSignal).Task;
+
+        /// <summary>
+        /// Releases every current waiter and arms a fresh signal for the next round. The swap happens
+        /// before the completion so a waiter that wakes and immediately re-captures gets the new
+        /// signal rather than one that has already fired.
+        /// </summary>
+        public void SignalAck()
+        {
+            TaskCompletionSource previous = Interlocked.Exchange(
+                ref ackSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+
+            previous.TrySetResult();
+        }
     }
 }

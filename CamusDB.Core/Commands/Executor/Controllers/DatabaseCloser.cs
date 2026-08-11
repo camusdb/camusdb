@@ -53,7 +53,9 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        foreach (string name in databaseDescriptors.Descriptors.Keys.ToList())
-            await Close(name).ConfigureAwait(false);
+        // Keyed by database id, not name — the descriptor cache is id-keyed so a rename cannot orphan
+        // an entry. Naming this variable "name" is how it reads as a by-name lookup that it is not.
+        foreach (string id in databaseDescriptors.Descriptors.Keys.ToList())
+            await Close(id).ConfigureAwait(false);
     }
 }

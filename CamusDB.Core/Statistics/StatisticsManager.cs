@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Statistics.Models;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
@@ -394,9 +395,21 @@ public sealed class StatisticsManager
         if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
             return false;
 
-        long rowCount = Interlocked.Read(ref entry.RowCount);
-        long mutations = Interlocked.Read(ref entry.MutationsSinceAnalyze);
+        return EvaluateStaleness(
+            Interlocked.Read(ref entry.RowCount),
+            Interlocked.Read(ref entry.MutationsSinceAnalyze),
+            fractionStaleRows,
+            minStaleRows);
+    }
 
+    /// <summary>
+    /// The staleness arithmetic itself, over a row count and a mutation count from any source. Shared
+    /// by the cached test and the cache-free probe so the two can never drift into disagreeing about
+    /// what "stale" means — a probe that answered differently from the cache would make a table's
+    /// eligibility for ANALYZE depend on whether this node happened to have it open.
+    /// </summary>
+    private static bool EvaluateStaleness(long rowCount, long mutations, double fractionStaleRows, long minStaleRows)
+    {
         // Has tracked data but no histograms/NDV have ever been built for it.
         if (rowCount < 0)
             return true;
@@ -406,6 +419,99 @@ public sealed class StatisticsManager
 
         return mutations >= (long)(fractionStaleRows * rowCount) + minStaleRows;
     }
+
+    /// <summary>
+    /// Answers "is this table stale enough to analyze?" for a table this node may never have opened,
+    /// <b>without creating a cache entry</b> — background discovery must be able to look at every table
+    /// in the cluster without that inspection itself becoming resident state.
+    ///
+    /// <para><b>Being cache-neutral is the point, not an implementation detail.</b> The obvious
+    /// alternative — load the table's statistics and then ask <see cref="IsStale(DatabaseDescriptor,
+    /// string, double, long)"/> — allocates an <c>Entry</c> (two semaphores and several dictionaries)
+    /// for every table merely being <em>checked</em>. Across a cluster of thousands of databases that
+    /// turns a periodic freshness poll into an unbounded memory leak. Do not "simplify" this back onto
+    /// the loading path.</para>
+    ///
+    /// <para>A table this node already tracks is answered from the live entry, which is both free and
+    /// strictly more accurate: it includes mutations this node has not flushed yet. Only a table with
+    /// no entry pays a point read of the persisted blob, and that read leaves no trace.</para>
+    /// </summary>
+    public async Task<bool> IsStaleWithoutCachingAsync(
+        EmbeddedKahuna node,
+        string dbId,
+        string tableId,
+        double fractionStaleRows,
+        long minStaleRows,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(node);
+
+        // Already tracked here: use it. Reading the persisted blob instead would ignore this node's
+        // unflushed mutations and under-report staleness for exactly the tables that are busiest.
+        if (_cache.TryGetValue(CacheKey(dbId, tableId), out Entry? cached) && cached.Loaded)
+        {
+            return EvaluateStaleness(
+                Interlocked.Read(ref cached.RowCount),
+                Interlocked.Read(ref cached.MutationsSinceAnalyze),
+                fractionStaleRows,
+                minStaleRows);
+        }
+
+        TableStatistics? persisted;
+        try
+        {
+            persisted = await ReadPersistedStatisticsAsync(node, dbId, tableId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Advisory metadata: an unreadable blob means "no evidence this table is stale", never a
+            // failed discovery tick.
+            _logger.LogWarning(ex, "Stats freshness probe failed for table id {TableId}", tableId);
+            return false;
+        }
+
+        if (persisted is null)
+            return false; // never persisted: nothing has been tracked, so nothing is stale
+
+        // Mirrors what the cache would hold after a load with no local deltas: the merge clamps both
+        // values at zero (see MergeBaseIntoEntry / MergeStaleness).
+        return EvaluateStaleness(
+            Math.Max(0, persisted.RowCount),
+            Math.Max(0, persisted.MutationsSinceAnalyze),
+            fractionStaleRows,
+            minStaleRows);
+    }
+
+    /// <summary>
+    /// Point-reads a table's persisted statistics blob straight off the shared node, given only its
+    /// database and table ids. Deliberately takes no <see cref="DatabaseDescriptor"/>: the caller is
+    /// discovery, and requiring a descriptor is what would force the database open.
+    /// </summary>
+    private static async Task<TableStatistics?> ReadPersistedStatisticsAsync(
+        EmbeddedKahuna node, string dbId, string tableId, CancellationToken cancellationToken)
+    {
+        // HLCTimestamp.Zero is the synthetic read-only context used elsewhere for advisory reads: a
+        // non-transactional read-committed point read, with no START/ROLLBACK round-trips.
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
+            Kommander.Time.HLCTimestamp.Zero,
+            KahunaKey(dbId, tableId),
+            -1,
+            Kommander.Time.HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            cancellationToken
+        ).ConfigureAwait(false);
+
+        if (getType == KeyValueResponseType.Get && entry?.Value is not null)
+            return MetaJsonSerializer.DeserializeCompat(entry.Value, MetaJsonContext.Default.TableStatistics);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Test-only seam: how many tables currently hold a cache entry. Exposed so a test can assert that
+    /// a discovery sweep left no residue (see <see cref="IsStaleWithoutCachingAsync"/>).
+    /// </summary>
+    internal int CachedTableCount => _cache.Count;
 
     /// <summary>
     /// Marks a completed <c>ANALYZE</c>: records the snapshot timestamp it read and subtracts the
@@ -1241,6 +1347,42 @@ public sealed class StatisticsManager
     {
         if (_cache.TryRemove(CacheKey(database.Id, tableId), out Entry? entry))
             entry.Dropped = true;
+    }
+
+    /// <summary>
+    /// Evicts every cached entry belonging to a database, for use when this node stops holding that
+    /// database open. Returns how many entries were released.
+    ///
+    /// <para>Statistics are per table and the cache is process-wide, so without this the cost of
+    /// having <em>once</em> served a database outlives the database being closed: its tables keep an
+    /// <c>Entry</c> each — two semaphores and several dictionaries — until the process ends. Reopening
+    /// reloads them from the persisted blob, which is the same thing a cold node does, so nothing is
+    /// lost beyond the reload.</para>
+    ///
+    /// <para>Entries are fenced as dropped on the way out, exactly as a dropped table's entry is, so a
+    /// background flush still holding a reference aborts instead of writing a stale view back over
+    /// state another node may have advanced.</para>
+    /// </summary>
+    public int EvictDatabaseStats(string dbId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dbId);
+
+        string prefix = string.Concat(dbId, ":");
+        int evicted = 0;
+
+        foreach (string key in _cache.Keys)
+        {
+            if (!key.StartsWith(prefix, StringComparison.Ordinal))
+                continue;
+
+            if (_cache.TryRemove(key, out Entry? entry))
+            {
+                entry.Dropped = true;
+                evicted++;
+            }
+        }
+
+        return evicted;
     }
 
     /// <summary>

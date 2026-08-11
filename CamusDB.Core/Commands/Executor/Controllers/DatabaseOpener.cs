@@ -122,6 +122,12 @@ internal sealed class DatabaseOpener
                 $"Database '{name}' does not exist");
         }
 
+        // Stamp before handing the descriptor out, not after the caller takes a use-reference. This
+        // is what makes idle eviction safe: a descriptor being resolved right now cannot look idle to
+        // a concurrent sweep, so the sweep can never dispose one in the instant between a caller
+        // resolving it and referencing it.
+        descriptor.Touch();
+
         return descriptor;
     }
 

@@ -42,12 +42,16 @@ internal sealed class TtlScheduler : IAsyncDisposable
     private readonly Func<CancellationToken, Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>>> discoverTtlTables;
 
     /// <summary>
-    /// Every open database, independent of whether any of its tables has TTL configured. The reaper
-    /// needs this precisely because a table that was reset or dropped no longer appears in
-    /// <c>discoverTtlTables</c> — the metadata to reclaim belongs to tables the sweep has stopped
-    /// seeing, so a reaper driven by the sweep's own candidate list could never find it.
+    /// Every registered database's id and name, independent of whether any of its tables has TTL
+    /// configured, and without opening any of them. The reaper needs this precisely because a table
+    /// that was reset or dropped no longer appears in <c>discoverTtlTables</c> — the metadata to
+    /// reclaim belongs to tables the sweep has stopped seeing, so a reaper driven by the sweep's own
+    /// candidate list could never find it.
+    ///
+    /// <para>Ids, not descriptors: run metadata is addressed by database id, so making the reaper open
+    /// every registered database would hold every catalog in memory to delete a handful of keys.</para>
     /// </summary>
-    private readonly Func<CancellationToken, Task<IReadOnlyList<DatabaseDescriptor>>> discoverDatabases;
+    private readonly Func<CancellationToken, Task<IReadOnlyList<(string Id, string Name)>>> discoverDatabases;
     private readonly ILogger<ICamusDB> logger;
     private readonly CamusDBOptions options;
     private readonly CancellationTokenSource cts = new();
@@ -106,7 +110,7 @@ internal sealed class TtlScheduler : IAsyncDisposable
         TtlSpanCoordinator coordinator,
         TtlSpanSweeper sweeper,
         Func<CancellationToken, Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>>> discoverTtlTables,
-        Func<CancellationToken, Task<IReadOnlyList<DatabaseDescriptor>>> discoverDatabases,
+        Func<CancellationToken, Task<IReadOnlyList<(string Id, string Name)>>> discoverDatabases,
         ILogger<ICamusDB> logger,
         CamusDBOptions options)
     {
@@ -388,10 +392,10 @@ internal sealed class TtlScheduler : IAsyncDisposable
         if (!await IsLeaderAsync(ct).ConfigureAwait(false))
             return;
 
-        IReadOnlyList<DatabaseDescriptor> databaseList;
+        IReadOnlyList<(string Id, string Name)> databases;
         try
         {
-            databaseList = await discoverDatabases(ct).ConfigureAwait(false);
+            databases = await discoverDatabases(ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -399,25 +403,29 @@ internal sealed class TtlScheduler : IAsyncDisposable
             return;
         }
 
-        Dictionary<string, DatabaseDescriptor> databases = new(StringComparer.Ordinal);
-        foreach (DatabaseDescriptor db in databaseList)
-            databases[db.Id] = db;
+        HashSet<string> visited = new(StringComparer.Ordinal);
 
-        foreach (KeyValuePair<string, DatabaseDescriptor> entry in databases)
+        foreach ((string dbId, string dbName) in databases)
         {
             if (ct.IsCancellationRequested)
                 break;
 
-            liveTableIds.TryGetValue(entry.Key, out HashSet<string>? live);
+            // The registry is scanned, so a duplicate id cannot normally appear; guard anyway, since
+            // reaping the same database twice would issue a second round of deletes for keys the first
+            // pass already removed.
+            if (!visited.Add(dbId))
+                continue;
+
+            liveTableIds.TryGetValue(dbId, out HashSet<string>? live);
 
             IReadOnlyList<string> withMetadata;
             try
             {
-                withMetadata = await coordinator.ListRunTableIdsAsync(entry.Key, ct).ConfigureAwait(false);
+                withMetadata = await coordinator.ListRunTableIdsAsync(dbId, ct).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "TTL metadata reap could not enumerate runs in database {Db}", entry.Value.Name);
+                logger.LogWarning(ex, "TTL metadata reap could not enumerate runs in database {Db}", dbName);
                 continue;
             }
 
@@ -428,19 +436,19 @@ internal sealed class TtlScheduler : IAsyncDisposable
 
                 try
                 {
-                    TtlRunManifest? stale = await coordinator.ReadManifestAsync(entry.Key, tableId, ct).ConfigureAwait(false);
+                    TtlRunManifest? stale = await coordinator.ReadManifestAsync(dbId, tableId, ct).ConfigureAwait(false);
 
                     // Span count comes from the manifest where one survives; a manifest already gone but
                     // span records left behind still needs its spans cleared, so fall back to the
                     // configured width, which is the most this run could have had.
                     int spanCount = stale?.SpanCount ?? Math.Max(1, options.TtlSpansPerTable);
 
-                    await coordinator.DeleteRunAsync(entry.Key, tableId, spanCount, ct).ConfigureAwait(false);
+                    await coordinator.DeleteRunAsync(dbId, tableId, spanCount, ct).ConfigureAwait(false);
 
                     if (logger.IsEnabled(LogLevel.Information))
                         logger.LogInformation(
                             "Reclaimed TTL run metadata for table id {TableId} in database {Db}; it is no longer swept",
-                            tableId, entry.Value.Name);
+                            tableId, dbName);
                 }
                 catch (Exception ex)
                 {

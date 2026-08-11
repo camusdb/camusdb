@@ -297,6 +297,13 @@ public class ConfigDefinition
     public int OrphanReclaimIntervalMs { get; set; } = 5 * 60 * 1000;
 
     /// <summary>
+    /// How long a database may sit unused before this node releases its descriptor, in milliseconds.
+    /// <c>&lt;= 0</c> disables idle eviction. Maps to <c>CamusDBOptions.DatabaseIdleEvictionMs</c>
+    /// (yml <c>database_idle_eviction_ms</c>). Default 15 minutes.
+    /// </summary>
+    public int DatabaseIdleEvictionMs { get; set; } = 15 * 60 * 1000;
+
+    /// <summary>
     /// Enables cost-based access-path selection in the query planner.
     /// When <c>true</c> (default), the planner costs all viable index steps for ANALYZEd tables
     /// and picks the cheapest. When <c>false</c>, the rule-based (score-based) path is used

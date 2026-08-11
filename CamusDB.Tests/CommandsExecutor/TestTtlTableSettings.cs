@@ -8,12 +8,18 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
 using Nito.AsyncEx;
 
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
+
 using CamusDB.Core;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -83,6 +89,90 @@ public sealed class TestTtlTableSettings : BaseTest
 
         await database.Transactions.CommitAsync(txn);
         return rendered;
+    }
+
+    // ── Settings are a schema change ──────────────────────────────────────────
+
+    /// <summary>
+    /// Changing table settings must advance the database schema version, and the descriptor's
+    /// head-version fence must advance with it.
+    ///
+    /// <para>This is not bookkeeping for its own sake. Background sweeps decide whether a database's
+    /// metadata is worth re-reading by comparing that version, so a settings change that left it
+    /// untouched would be invisible to them — TTL could be switched on and the sweep would go on
+    /// believing nothing had changed. The head fence is asserted alongside it because the two are read
+    /// together as a stability signal: a version that moved without its fence reads as "a schema change
+    /// is still in flight", which blocks branching from the database.</para>
+    /// </summary>
+    [Test]
+    public async Task SettingsChangeAdvancesTheDatabaseSchemaVersionAndItsFence()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSessionsTable();
+
+        long versionBefore = database.Schema.SchemaVersion;
+        Assert.AreEqual(
+            versionBefore, database.HeadSchemaVersion,
+            "Precondition: the schema is stable before the ALTER");
+
+        await ExecDdlAsync(executor, dbname, "ALTER TABLE sessions SET (ttl_expiration_expression = 'expires_at')");
+
+        Assert.Greater(
+            database.Schema.SchemaVersion, versionBefore,
+            "ALTER TABLE SET must advance the database schema version");
+        Assert.AreEqual(
+            database.Schema.SchemaVersion, database.HeadSchemaVersion,
+            "The head-version fence must advance with the schema version, or the database reads as having in-flight DDL");
+
+        long versionAfterSet = database.Schema.SchemaVersion;
+
+        await ExecDdlAsync(executor, dbname, "ALTER TABLE sessions RESET (ttl_expiration_expression)");
+
+        Assert.Greater(
+            database.Schema.SchemaVersion, versionAfterSet,
+            "RESET is the same delta in the opposite direction and must advance the version too");
+        Assert.AreEqual(
+            database.Schema.SchemaVersion, database.HeadSchemaVersion,
+            "The head-version fence must advance on RESET as well");
+    }
+
+    /// <summary>
+    /// The advanced version must also be durable: a sweep reads it from the persisted meta key, not
+    /// from this node's memory, so an in-memory-only bump would be invisible to exactly the consumer
+    /// that needs it.
+    /// </summary>
+    [Test]
+    public async Task SettingsChangeAdvancesThePersistedSchemaVersionKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSessionsTable();
+
+        long persistedBefore = await ReadPersistedSchemaVersionAsync(database);
+
+        await ExecDdlAsync(executor, dbname, "ALTER TABLE sessions SET (ttl_expiration_expression = 'expires_at')");
+
+        long persistedAfter = await ReadPersistedSchemaVersionAsync(database);
+
+        Assert.Greater(
+            persistedAfter, persistedBefore,
+            "The persisted {dbId}/meta/version key must advance, since background sweeps read it rather than in-memory state");
+        Assert.AreEqual(
+            database.Schema.SchemaVersion, persistedAfter,
+            "The persisted version must match the in-memory one after the change commits");
+    }
+
+    private static async Task<long> ReadPersistedSchemaVersionAsync(DatabaseDescriptor database)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero,
+            $"{database.Id}/meta/version",
+            -1,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None);
+
+        if (type != KeyValueResponseType.Get || entry?.Value is null)
+            throw new InvalidOperationException($"No persisted schema version for database '{database.Name}'");
+
+        return MetaJsonSerializer.DeserializeCompat(entry.Value, MetaJsonContext.Default.Int64);
     }
 
     // ── The happy path ────────────────────────────────────────────────────────

@@ -258,6 +258,24 @@ public sealed record CamusDBOptions
     public int OrphanReclaimIntervalMs { get; init; } = 5 * 60 * 1000;
 
     /// <summary>
+    /// How long a database descriptor may sit unused before this node releases it, in milliseconds.
+    /// A value <c>&lt;= 0</c> disables idle eviction entirely, so a database stays open until it is
+    /// explicitly closed, dropped, or the process ends. Default is 15 minutes.
+    ///
+    /// <para>This is what bounds the memory a node spends on databases it is not serving. Without it
+    /// the open set only ever grows: every database ever touched keeps its catalog, transactions
+    /// manager, schema-apply subscription and per-table state resident for the process lifetime,
+    /// which at thousands of registered databases is the dominant cost of an otherwise idle node.</para>
+    ///
+    /// <para>The window is also a correctness parameter, not only a tuning one. Eviction is safe
+    /// because a descriptor being resolved right now cannot look idle — see
+    /// <c>DatabaseEvictor</c> — so shrinking this toward zero erodes the margin that argument rests
+    /// on. Values below a second are for tests that drive the sweep deliberately, not for
+    /// deployment.</para>
+    /// </summary>
+    public int DatabaseIdleEvictionMs { get; init; } = 15 * 60 * 1000;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of a database-registry drop-intent fence (the mutex taken by
     /// <c>DROP</c>/<c>RELINK</c>/the orphan GC per database id and per table). The fence's KV key carries
     /// this as a native expiry: a holder that crashes without releasing frees the fence once the lease

@@ -597,6 +597,13 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// Releases the schema-ack state for a database this node has stopped holding open, so the tracker
+    /// tracks the databases in use rather than every database ever touched. See
+    /// <see cref="SchemaAckTracker.Forget"/> for why this is safe to discard and re-derive.
+    /// </summary>
+    internal void ForgetSchemaAcks(string db) => schemaAcks.Forget(db);
+
+    /// <summary>
     /// Records the local apply ack and, if an <see cref="ISchemaAckSender"/> is wired, fires
     /// a best-effort notification to the current schema-partition leader so it can observe this
     /// follower's progress. The send is fire-and-forget; the gate's timeout is the backstop.

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using System.Linq;
 using CamusDB.Core.Auth;
 using CamusDB.Core.Cache;
@@ -49,6 +50,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly DatabaseCreator databaseCreator;
 
     private readonly DatabaseCloser databaseCloser;
+
+    private readonly DatabaseEvictor databaseEvictor;
 
     private readonly DatabaseDropper databaseDroper;
 
@@ -242,13 +245,16 @@ public sealed class CommandExecutor : IAsyncDisposable
         }
 
         databaseDescriptors = new();
-        // The statistics hook is a lambda over this executor's own manager, which is constructed a few
-        // lines below; it is never invoked before a database is opened, so the later assignment is
-        // already visible by then.
+        statisticsManager = new(logger);
         databaseOpener = new(
             this, databaseDescriptors, catalogs, logger, options, sharedNode, registryTask, isClusterMode, cache,
-            (db, tableId) => statisticsManager.EvictTableStats(db, tableId));
+            statisticsManager.EvictTableStats);
         databaseCloser = new(databaseDescriptors, logger);
+        databaseEvictor = new(databaseDescriptors, statisticsManager, logger, options.DatabaseIdleEvictionMs);
+
+        // Started here rather than alongside the KV-backed schedulers: eviction reads nothing but this
+        // engine's own descriptor cache, so it has no registry or partition-readiness to wait for.
+        databaseEvictor.Start();
         databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
         tableOpener = new(catalogs, logger);
@@ -258,7 +264,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableConstraintAlterer = new(logger);
         rowInserter = new(logger);
         rowUpdater = new(logger);
-        statisticsManager = new(logger);
         tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna);
@@ -365,7 +370,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TtlScheduler scheduler = new(
             node, registry.RegistryBucket, ttlCoordinatorInstance, ttlSweeperInstance,
-            DiscoverTtlTablesAsync, DiscoverOpenDatabasesAsync, logger, options);
+            DiscoverTtlTablesAsync, DiscoverRegisteredDatabasesAsync, logger, options);
 
         scheduler.Start();
         ttlScheduler = scheduler;
@@ -380,6 +385,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     ///
     /// <para>The TTL configuration is read straight from the per-object meta blob, so a table with TTL
     /// off costs discovery one deserialization and is never opened.</para>
+    ///
+    /// <para><b>A database is opened only once its metadata has already proved it has TTL work.</b>
+    /// The meta scan needs nothing but the database id and the shared node, so opening first would
+    /// force every registered database resident on every tick — on every node, since the sweep half of
+    /// TTL is not leader-gated — which defeats lazy opening entirely and holds every catalog in memory
+    /// for the life of the process. Keep the scan strictly ahead of the open.</para>
     /// </summary>
     private async Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>> DiscoverTtlTablesAsync(CancellationToken ct)
     {
@@ -388,12 +399,31 @@ public sealed class CommandExecutor : IAsyncDisposable
             return result;
 
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
-        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
+        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.GetBackgroundSnapshotAsync().ConfigureAwait(false);
+
+        HashSet<string> liveDatabaseIds = new(StringComparer.Ordinal);
 
         foreach (DatabaseRegistryEntry entry in entries)
         {
             if (ct.IsCancellationRequested)
                 break;
+
+            liveDatabaseIds.Add(entry.Id);
+
+            List<(string tableId, string tableName)> ttlTables;
+            try
+            {
+                ttlTables = await ScanTableMetaCachedAsync(
+                    ttlMetaDiscoveryCache, entry.Id, ScanTtlTableMetaAsync, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "TTL discovery: could not read table metadata for database {Db}", entry.Name);
+                continue;
+            }
+
+            if (ttlTables.Count == 0)
+                continue; // nothing configured here: leave the database closed
 
             DatabaseDescriptor database;
             try
@@ -406,7 +436,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 continue;
             }
 
-            foreach ((string _, string tableName) in await ScanTtlTableMetaAsync(entry.Id, ct).ConfigureAwait(false))
+            foreach ((string _, string tableName) in ttlTables)
             {
                 if (ct.IsCancellationRequested)
                     break;
@@ -423,37 +453,143 @@ public sealed class CommandExecutor : IAsyncDisposable
             }
         }
 
+        PruneMetaDiscoveryCache(ttlMetaDiscoveryCache, liveDatabaseIds);
+
         return result;
     }
 
     /// <summary>
-    /// Every registered database, opened. Used by the TTL metadata reaper, which must look at databases
-    /// whose tables have <em>stopped</em> being swept — the very tables TTL discovery no longer returns.
+    /// Every registered database's id and name, straight from the registry — nothing is opened. Used by
+    /// the TTL metadata reaper, which must look at databases whose tables have <em>stopped</em> being
+    /// swept: the metadata it reclaims belongs to tables TTL discovery no longer returns, so a reaper
+    /// driven by the sweep's own candidate list could never find it.
+    ///
+    /// <para>Ids and names are all the reaper needs — the run keys it enumerates and deletes are
+    /// addressed by database id, and the name only ever reaches a log message. It therefore has no
+    /// reason to hold a descriptor, and materializing one per registered database was the single
+    /// largest source of unbounded descriptor growth on an idle node.</para>
     /// </summary>
-    private async Task<IReadOnlyList<DatabaseDescriptor>> DiscoverOpenDatabasesAsync(CancellationToken ct)
+    private async Task<IReadOnlyList<(string Id, string Name)>> DiscoverRegisteredDatabasesAsync(CancellationToken ct)
     {
-        List<DatabaseDescriptor> result = [];
+        List<(string, string)> result = [];
         if (sharedNode is null)
             return result;
 
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
 
-        foreach (DatabaseRegistryEntry entry in await registry.ScanAllEntriesAsync().ConfigureAwait(false))
+        foreach (DatabaseRegistryEntry entry in await registry.GetBackgroundSnapshotAsync().ConfigureAwait(false))
         {
             if (ct.IsCancellationRequested)
                 break;
 
-            try
-            {
-                result.Add(await databaseOpener.Open(entry.Name).ConfigureAwait(false));
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "TTL reap discovery: could not open database {Db}", entry.Name);
-            }
+            result.Add((entry.Id, entry.Name));
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// One database's discovery result, and the schema version it was derived from.
+    /// </summary>
+    private readonly record struct MetaDiscoveryResult(long SchemaVersion, List<(string tableId, string tableName)> Tables);
+
+    /// <summary>
+    /// Per-database memo of what the last metadata scan found, keyed by the database schema version it
+    /// was taken at. Every DDL — including <c>ALTER TABLE … SET</c>, which is what turns TTL on and off
+    /// — advances that version, so an unchanged version means the answer cannot have changed.
+    ///
+    /// <para>This is what keeps a steady-state tick from re-scanning every database's metadata bucket
+    /// forever. Without it, discovery's cost is a range scan per registered database per tick whether
+    /// or not anything has changed, which is most of the idle cost of running many databases. With it,
+    /// an unchanged database costs one point read.</para>
+    ///
+    /// <para>Bounded by pruning against the registry snapshot on every pass: a memo is state that grows
+    /// with the number of databases, so left unpruned it would recreate in miniature the very problem
+    /// discovery is being fixed to avoid.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<string, MetaDiscoveryResult> ttlMetaDiscoveryCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, MetaDiscoveryResult> tableMetaDiscoveryCache = new(StringComparer.Ordinal);
+
+    private int metaDiscoveryScans;
+
+    /// <summary>
+    /// How many times background discovery has range-scanned a database's metadata bucket. The count a
+    /// test needs to tell "the memo was used" from "the memo happened to produce the same answer" —
+    /// the two are indistinguishable from the discovery result alone.
+    /// </summary>
+    internal int MetaDiscoveryScanCount => Volatile.Read(ref metaDiscoveryScans);
+
+    /// <summary>
+    /// Reads a database's schema version straight from its meta key, or null when it cannot be read.
+    /// A null answer means "do not trust a memo" — the caller rescans rather than guessing.
+    /// </summary>
+    private async Task<long?> TryReadSchemaVersionAsync(string dbId, CancellationToken ct)
+    {
+        try
+        {
+            (Kahuna.Shared.KeyValue.KeyValueResponseType type, Kahuna.Server.KeyValues.ReadOnlyKeyValueEntry? entry) =
+                await sharedNode!.Kahuna.LocateAndTryGetValue(
+                    Kommander.Time.HLCTimestamp.Zero,
+                    $"{dbId}/meta/version",
+                    -1,
+                    Kommander.Time.HLCTimestamp.Zero,
+                    Kahuna.Shared.KeyValue.KeyValueDurability.Persistent,
+                    ct).ConfigureAwait(false);
+
+            if (type != Kahuna.Shared.KeyValue.KeyValueResponseType.Get || entry?.Value is null)
+                return null;
+
+            return CamusDB.Core.Catalogs.MetaJsonSerializer.DeserializeCompat(
+                entry.Value, CamusDB.Core.Catalogs.MetaJsonContext.Default.Int64);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Discovery could not read the schema version for database id {DbId}", dbId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="scan"/> for a database only when its schema version has moved since the
+    /// memo was taken. An unreadable version is treated as "changed", so a failure to read the cheap
+    /// signal degrades to today's behavior rather than to a stale answer.
+    /// </summary>
+    private async Task<List<(string tableId, string tableName)>> ScanTableMetaCachedAsync(
+        ConcurrentDictionary<string, MetaDiscoveryResult> cache,
+        string dbId,
+        Func<string, CancellationToken, Task<List<(string tableId, string tableName)>>> scan,
+        CancellationToken ct)
+    {
+        long? version = await TryReadSchemaVersionAsync(dbId, ct).ConfigureAwait(false);
+
+        if (version is not null &&
+            cache.TryGetValue(dbId, out MetaDiscoveryResult memo) &&
+            memo.SchemaVersion == version.Value)
+            return memo.Tables;
+
+        List<(string tableId, string tableName)> tables = await scan(dbId, ct).ConfigureAwait(false);
+
+        if (version is not null)
+            cache[dbId] = new MetaDiscoveryResult(version.Value, tables);
+
+        return tables;
+    }
+
+    /// <summary>
+    /// Drops memos for databases that are no longer registered, so the cache tracks the live set rather
+    /// than every database this node has ever swept.
+    /// </summary>
+    private static void PruneMetaDiscoveryCache(
+        ConcurrentDictionary<string, MetaDiscoveryResult> cache, HashSet<string> liveDatabaseIds)
+    {
+        if (cache.Count == liveDatabaseIds.Count)
+            return;
+
+        foreach (string dbId in cache.Keys)
+        {
+            if (!liveDatabaseIds.Contains(dbId))
+                cache.TryRemove(dbId, out _);
+        }
     }
 
     /// <summary>
@@ -462,6 +598,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private async Task<List<(string tableId, string tableName)>> ScanTtlTableMetaAsync(string dbId, CancellationToken ct)
     {
+        Interlocked.Increment(ref metaDiscoveryScans);
+
         string metaBucket = $"{dbId}/meta";
         string tablePrefix = $"{dbId}/meta/table:";
         var tables = new List<(string, string)>();
@@ -494,8 +632,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Cluster-visible candidate discovery for auto-analyze. Runs on the elected leader and enumerates
     /// <em>authoritative</em> metadata — every database in the registry and every table's per-object
     /// meta key — rather than this node's open-object list, so a hot table opened and mutated only on a
-    /// follower is still found. For each table it loads the persisted staleness state (which another
-    /// node's flush writes), and opens the descriptor only for tables that are actually stale.
+    /// follower is still found. Staleness is read from cluster-wide persisted state (which another
+    /// node's flush writes), and the database is opened only once some table in it has been found
+    /// stale.
+    ///
+    /// <para><b>Probing must leave no residue.</b> Both the descriptor and the statistics cache entry
+    /// are created only for a table actually selected for analysis. Checking a table used to open its
+    /// database and materialize a statistics entry for it, which meant a periodic freshness poll
+    /// eventually pulled every database and every table in the cluster into memory and kept them
+    /// there — the poll's own cost grew with what it had already inspected.</para>
     /// </summary>
     private async Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>> DiscoverStaleTablesAsync(CancellationToken ct)
     {
@@ -507,34 +652,54 @@ public sealed class CommandExecutor : IAsyncDisposable
         long minRows = options.AutoAnalyzeMinStaleRows;
 
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
-        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
+        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.GetBackgroundSnapshotAsync().ConfigureAwait(false);
+
+        HashSet<string> liveDatabaseIds = new(StringComparer.Ordinal);
 
         foreach (DatabaseRegistryEntry entry in entries)
         {
             if (ct.IsCancellationRequested)
                 break;
 
-            DatabaseDescriptor database;
+            liveDatabaseIds.Add(entry.Id);
+
+            List<(string tableId, string tableName)> tables;
             try
             {
-                database = await databaseOpener.Open(entry.Name).ConfigureAwait(false);
+                tables = await ScanTableMetaCachedAsync(
+                    tableMetaDiscoveryCache, entry.Id, ScanTableMetaAsync, ct).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Auto-analyze discovery: could not open database {Db}", entry.Name);
+                logger.LogWarning(ex, "Auto-analyze discovery: could not read table metadata for database {Db}", entry.Name);
                 continue;
             }
 
-            foreach ((string tableId, string tableName) in await ScanTableMetaAsync(entry.Id, ct).ConfigureAwait(false))
+            // Deferred so a database whose tables are all fresh is never opened. Resolved at most once
+            // per database, on the first stale table found in it.
+            DatabaseDescriptor? database = null;
+
+            foreach ((string tableId, string tableName) in tables)
             {
                 if (ct.IsCancellationRequested)
                     break;
 
-                // Load persisted staleness so the decision reads cluster-wide state (a follower's
-                // flushed mutation count), not this node's possibly-absent cache entry.
-                await statisticsManager.LoadByIdAsync(database, tableId).ConfigureAwait(false);
-                if (!statisticsManager.IsStale(database, tableId, fraction, minRows))
+                if (!await statisticsManager.IsStaleWithoutCachingAsync(
+                        sharedNode, entry.Id, tableId, fraction, minRows, ct).ConfigureAwait(false))
                     continue;
+
+                if (database is null)
+                {
+                    try
+                    {
+                        database = await databaseOpener.Open(entry.Name).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Auto-analyze discovery: could not open database {Db}", entry.Name);
+                        break; // every remaining table in this database would fail the same way
+                    }
+                }
 
                 try
                 {
@@ -548,6 +713,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             }
         }
 
+        PruneMetaDiscoveryCache(tableMetaDiscoveryCache, liveDatabaseIds);
+
         return result;
     }
 
@@ -558,6 +725,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private async Task<List<(string tableId, string tableName)>> ScanTableMetaAsync(string dbId, CancellationToken ct)
     {
+        Interlocked.Increment(ref metaDiscoveryScans);
+
         string metaBucket = $"{dbId}/meta";
         string tablePrefix = $"{dbId}/meta/table:";
         var tables = new List<(string, string)>();
@@ -581,6 +750,28 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         return tables;
     }
+
+    /// <summary>
+    /// How many database descriptors this engine currently holds open. A read-only count, exposed so a
+    /// test can assert that background work left the set alone: the background schedulers must open a
+    /// database only when its metadata has already shown there is work to do there, and the only way to
+    /// pin that down is to watch the count across a sweep.
+    /// </summary>
+    internal int OpenDatabaseCount => databaseDescriptors.Descriptors.Count;
+
+    /// <summary>
+    /// Test-only seam: attempts to release every descriptor idle for at least
+    /// <paramref name="idleWindowMs"/>, returning how many were released. Drives the eviction path
+    /// deterministically; the periodic sweep that will call it on a timer is configuration-driven.
+    /// </summary>
+    internal int EvictIdleDatabasesForTests(long idleWindowMs) => databaseEvictor.EvictIdle(idleWindowMs);
+
+    /// <summary>
+    /// Test-only seam: attempts to release one database and reports why it was or was not released, so
+    /// a test can assert on the reason a busy database was spared rather than only on the count.
+    /// </summary>
+    internal DatabaseEvictionOutcome TryEvictDatabaseForTests(string id, long idleWindowMs)
+        => databaseEvictor.TryEvict(id, idleWindowMs);
 
     /// <summary>
     /// Test-only seam: forces one auto-analyze sweep (after the deferred renewer start completes) and
@@ -2840,25 +3031,20 @@ public sealed class CommandExecutor : IAsyncDisposable
             // separately where the two could disagree.
             ApplyDerivedTtlMarker(settings, merged);
 
-            if (isClusterMode)
+            // Settings DDL replicates through the schema log, which only the schema leader may propose.
+            // There is no HTTP forwarder for it yet, so a non-leader rejects with a clear error and the
+            // client retargets the leader (the in-process path issues it on the leader). A standalone
+            // node is the only member of its own schema group, so the check is a cluster concern only.
+            if (isClusterMode &&
+                !await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
             {
-                // Settings DDL replicates through the schema log, which only the schema leader may
-                // propose. There is no HTTP forwarder for it yet, so a non-leader rejects with a clear
-                // error and the client retargets the leader (the in-process path issues it on the leader).
-                if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
-                {
-                    string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInternalOperation,
-                        $"ALTER TABLE SET must be executed by schema leader '{leader}' for database '{database.Name}'");
-                }
+                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"ALTER TABLE SET must be executed by schema leader '{leader}' for database '{database.Name}'");
+            }
 
-                await catalogs.ReplicateSetTableSettingsAsync(database, ticket.TableName, settings).ConfigureAwait(false);
-            }
-            else
-            {
-                await catalogs.AlterTableSettingsAsync(database, table, settings).ConfigureAwait(false);
-            }
+            await catalogs.ReplicateSetTableSettingsAsync(database, ticket.TableName, settings).ConfigureAwait(false);
 
             tableId = table.Id;
         }
@@ -2903,24 +3089,17 @@ public sealed class CommandExecutor : IAsyncDisposable
             if (keys.Contains(CamusDB.Core.Catalogs.Models.TableSettings.TtlExpirationExpressionKey))
                 keys.Add(CamusDB.Core.Catalogs.Models.TableSettings.TtlKey);
 
-            if (isClusterMode)
+            if (isClusterMode &&
+                !await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
             {
-                if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
-                {
-                    string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInternalOperation,
-                        $"ALTER TABLE RESET must be executed by schema leader '{leader}' for database '{database.Name}'");
-                }
+                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"ALTER TABLE RESET must be executed by schema leader '{leader}' for database '{database.Name}'");
+            }
 
-                await catalogs.ReplicateSetTableSettingsAsync(
-                    database, ticket.TableName, new Dictionary<string, string>(StringComparer.Ordinal), keys).ConfigureAwait(false);
-            }
-            else
-            {
-                await catalogs.AlterTableSettingsAsync(
-                    database, table, new Dictionary<string, string>(StringComparer.Ordinal), keys).ConfigureAwait(false);
-            }
+            await catalogs.ReplicateSetTableSettingsAsync(
+                database, ticket.TableName, new Dictionary<string, string>(StringComparer.Ordinal), keys).ConfigureAwait(false);
         }
         finally
         {
@@ -3709,8 +3888,8 @@ public sealed class CommandExecutor : IAsyncDisposable
                             Kind = GrantScopeKind.Table,
                             DatabaseId = entry.Id,
                             DatabaseName = entry.Name,
-                            TableId = grantedView.Id,
-                            TableName = grantedView.Name,
+                            TableId = grantedView.Id ?? "",
+                            TableName = grantedView.Name ?? "",
                         };
 
                     TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
@@ -5875,6 +6054,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         if (ttlScheduler is not null)
             await ttlScheduler.DisposeAsync().ConfigureAwait(false);
+
+        // Before the closer: stopping the sweep first means it can never be mid-eviction while
+        // shutdown is disposing the very descriptors it is inspecting.
+        await databaseEvictor.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

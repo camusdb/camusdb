@@ -69,7 +69,15 @@ public sealed record DatabaseDescriptor : IDisposable
     /// Does not touch the id, the key space, or any cached table descriptor — none of which a rename
     /// changes.
     /// </summary>
-    internal void SetName(string name) => _name = name;
+    internal void SetName(string name)
+    {
+        _name = name;
+
+        // A rename is a use. The path that lands here resolves the descriptor by id and never takes a
+        // use-reference, so without this a database renamed moments ago would still look untouched to
+        // the idle sweep.
+        Touch();
+    }
 
     public EmbeddedKahuna Kahuna { get; }
 
@@ -232,6 +240,34 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public bool IsDropped => _dropped != 0;
 
+    /// <summary>
+    /// True while at least one caller holds a use-reference. Read by idle eviction, which must never
+    /// dispose a descriptor somebody is working through.
+    /// </summary>
+    internal bool HasLiveUses => Volatile.Read(ref _useCount) > 0;
+
+    // Monotonic tick of the last time this descriptor was resolved or used. Environment.TickCount64
+    // is deliberate: this measures how long a local object has sat unused, which is a local wall-clock
+    // question and involves no cross-node ordering — an HLC timestamp would say nothing more here.
+    private long _lastUsedTicks = Environment.TickCount64;
+
+    /// <summary>
+    /// Milliseconds since this descriptor was last resolved or used.
+    ///
+    /// <para>This is the value idle eviction is safe by. A caller that resolves a descriptor stamps it
+    /// <em>before</em> it can acquire a use-reference, so the gap between "resolved" and "referenced" —
+    /// a few instructions with no await in it — is always covered by a fresh stamp. An eviction that
+    /// insists on minutes of idleness therefore cannot be racing a caller in that gap: if one were
+    /// there, this value would be near zero.</para>
+    /// </summary>
+    internal long IdleMilliseconds => Environment.TickCount64 - Volatile.Read(ref _lastUsedTicks);
+
+    /// <summary>
+    /// Marks the descriptor as used right now. Called when it is resolved and whenever a use-reference
+    /// is taken or released, so a long-running operation leaves it looking fresh at both ends.
+    /// </summary>
+    internal void Touch() => Volatile.Write(ref _lastUsedTicks, Environment.TickCount64);
+
     internal void MarkDropped()
     {
         Interlocked.Exchange(ref _dropped, 1);
@@ -262,10 +298,16 @@ public sealed record DatabaseDescriptor : IDisposable
                 CamusDBErrorCodes.DatabaseDoesntExist,
                 $"Database '{Name}' is being dropped");
         }
+
+        Touch();
     }
 
     internal void Release()
     {
+        // Stamped on the way out as well as in: an operation that ran for an hour leaves the
+        // descriptor freshly used, not idle since the moment it started.
+        Touch();
+
         if (Interlocked.Decrement(ref _useCount) == 0 && _dropped != 0)
             _drainedTcs.TrySetResult();
     }

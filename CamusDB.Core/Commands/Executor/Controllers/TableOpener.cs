@@ -137,9 +137,15 @@ internal sealed class TableOpener
         // path via SchemaReplicator.InvalidateAppliedTableDescriptor (which also evicts on
         // AddIndex/DropIndex/SetElementState(Index), so index DDL rebuilds rangedIndexIds too). A
         // recreated table with the same name gets a NEW ObjectId, so RegisterKeyRangeAsync is called with a
-        // brand-new key space ({newId}:r) — completely disjoint from the old one ({oldId}:r). Kahuna
-        // has no deregistration API, so the old key-range descriptor stays in node memory until
-        // process restart, but it is never written to and poses no correctness risk (bounded leak).
+        // brand-new key space ({newId}:r) — completely disjoint from the old one ({oldId}:r). The old
+        // space's descriptors are left in the replicated range map; they are never written to and pose
+        // no correctness risk (bounded leak). Reclaiming them is possible — Kahuna exposes
+        // RemoveKeyRangeAsync — but only where the key space is genuinely being destroyed, because
+        // removal deletes the replicated descriptors and clears routing mode on EVERY node. That makes
+        // it the right call when a drop's keyspace purge runs, and the wrong call anywhere a table's
+        // data survives: re-registering later re-seeds a single whole-space descriptor at the initial
+        // generation, discarding the boundaries the auto-splitter had discovered for data that is still
+        // physically distributed by them.
         // Lazy-on-open registration is the correct contract: K1 forwarding means the very first
         // writer pays at most one extra round-trip to establish the range descriptor.
         if (database.Options.KeyRangeShardingEnabled)

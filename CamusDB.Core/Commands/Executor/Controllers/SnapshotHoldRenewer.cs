@@ -138,7 +138,7 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
         }
 
         int renewed = 0;
-        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.ScanAllEntriesAsync().ConfigureAwait(false);
+        IReadOnlyList<DatabaseRegistryEntry> entries = await registry.GetBackgroundSnapshotAsync().ConfigureAwait(false);
         foreach (DatabaseRegistryEntry entry in entries)
         {
             if (string.IsNullOrEmpty(entry.ImmediateParentHoldId))

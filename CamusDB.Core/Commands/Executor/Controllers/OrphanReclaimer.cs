@@ -158,7 +158,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
 
         int reclaimed = 0;
 
-        foreach (DatabaseRegistryEntry db in await registry.ScanAllEntriesAsync().ConfigureAwait(false))
+        foreach (DatabaseRegistryEntry db in await registry.GetBackgroundSnapshotAsync().ConfigureAwait(false))
         {
             if (ct.IsCancellationRequested)
                 break;
@@ -262,7 +262,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         int reclaimed = 0;
 
         // One authoritative registry snapshot per sweep for the db list (down from a second scan).
-        foreach (DatabaseRegistryEntry db in await registry.ScanAllEntriesAsync().ConfigureAwait(false))
+        foreach (DatabaseRegistryEntry db in await registry.GetBackgroundSnapshotAsync().ConfigureAwait(false))
         {
             if (ct.IsCancellationRequested)
                 break;

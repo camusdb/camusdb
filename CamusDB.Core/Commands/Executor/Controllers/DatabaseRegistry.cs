@@ -304,6 +304,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         long current = Volatile.Read(ref loadedGeneration);
         if (generation > current)
             Volatile.Write(ref loadedGeneration, generation);
+
+        // Every local registration/unregistration/rename passes through here, which makes this the one
+        // place that knows the shared background snapshot has just gone stale.
+        InvalidateBackgroundSnapshot();
     }
 
     /// <summary>
@@ -335,49 +339,116 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// </summary>
     private async Task RevalidateFromKvLockedAsync(long authoritativeGeneration)
     {
+        if (Volatile.Read(ref loadedGeneration) >= authoritativeGeneration)
+            return; // another hit already reloaded to at least this generation
+
+        List<DatabaseRegistryEntry> entries = [];
+
+        KvTransaction tx = KvTransaction.CreateReadOnly();
+        string namePrefix = NameKeyPrefix;
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            tx.TransactionId, RegistryBucket, null, true, null, true, 1000,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
         {
-            if (Volatile.Read(ref loadedGeneration) >= authoritativeGeneration)
-                return; // another hit already reloaded to at least this generation
+            if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || entry.Value is null)
+                continue;
 
-            HashSet<string> present = new(StringComparer.Ordinal);
-
-            KvTransaction tx = KvTransaction.CreateReadOnly();
-            string namePrefix = NameKeyPrefix;
-
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                tx.TransactionId, RegistryBucket, null, true, null, true, 1000,
-                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-            {
-                if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || entry.Value is null)
-                    continue;
-
-                DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
-                    entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
-
-                present.Add(Normalize(loaded.Name));
-                byName[Normalize(loaded.Name)] = loaded;
-                byId[loaded.Id] = loaded;
-            }
-
-            // Evict names that no longer exist in KV. Remove the id mapping only if it still points at the
-            // evicted entry — a rename re-points byId[id] at the NEW name, which the upsert above already
-            // wrote, so the id must not be dropped along with the old name. `name` here is the normalized
-            // cache key, so compare it against the entry's normalized name.
-            foreach (string name in byName.Keys.ToList())
-            {
-                if (present.Contains(name))
-                    continue;
-
-                if (byName.TryRemove(name, out DatabaseRegistryEntry? removed)
-                    && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
-                    && Normalize(currentById.Name) == name)
-                {
-                    byId.TryRemove(removed.Id, out _);
-                }
-            }
-
-            Volatile.Write(ref loadedGeneration, authoritativeGeneration);
+            entries.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.DatabaseRegistryEntry));
         }
+
+        ReconcileCachesLocked(entries, authoritativeGeneration);
+    }
+
+    /// <summary>
+    /// Rewrites the caches to match a full set of entries just read from KV, then records that the cache
+    /// reflects <paramref name="authoritativeGeneration"/>. Caller must hold <see cref="writeSem"/>.
+    ///
+    /// <para>Reconciles in place — upsert present, evict vanished — rather than clearing first, so a
+    /// concurrent lock-free reader never observes a transiently empty cache.</para>
+    ///
+    /// <para>Adopting the generation is a claim about the <b>whole</b> cache, which is why only a caller
+    /// that has read every entry may make it. A caller that refreshed a single name must not, however
+    /// current that one name now is.</para>
+    /// </summary>
+    private void ReconcileCachesLocked(IReadOnlyList<DatabaseRegistryEntry> entries, long authoritativeGeneration)
+    {
+        HashSet<string> present = new(StringComparer.Ordinal);
+
+        foreach (DatabaseRegistryEntry loaded in entries)
+        {
+            present.Add(Normalize(loaded.Name));
+            byName[Normalize(loaded.Name)] = loaded;
+            byId[loaded.Id] = loaded;
+        }
+
+        // Evict names that no longer exist in KV. Remove the id mapping only if it still points at the
+        // evicted entry — a rename re-points byId[id] at the NEW name, which the upsert above already
+        // wrote, so the id must not be dropped along with the old name. `name` here is the normalized
+        // cache key, so compare it against the entry's normalized name.
+        foreach (string name in byName.Keys.ToList())
+        {
+            if (present.Contains(name))
+                continue;
+
+            if (byName.TryRemove(name, out DatabaseRegistryEntry? removed)
+                && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
+                && Normalize(currentById.Name) == name)
+            {
+                byId.TryRemove(removed.Id, out _);
+            }
+        }
+
+        Volatile.Write(ref loadedGeneration, authoritativeGeneration);
+    }
+
+    /// <summary>
+    /// Refreshes <b>one</b> name against KV and returns what it resolves to now, or null if it no longer
+    /// exists. This is what a stale cache hit costs on the foreground resolve path: a single point read,
+    /// not a scan of the whole registry bucket.
+    ///
+    /// <para><b>Why not just revalidate everything.</b> The generation stamp is deliberately coarse — any
+    /// mutation anywhere invalidates every cached name — so under steady DDL churn a full rebuild would
+    /// run on the resolve path of user statements, and its cost grows with the number of registered
+    /// databases. A caller opening one database only needs the truth about that one name.</para>
+    ///
+    /// <para><b>The generation is deliberately not adopted here.</b> Adopting it would claim the entire
+    /// cache is current on the strength of having checked a single key, which is exactly the stale-hit
+    /// bug the stamp exists to prevent. The cost of that honesty is that other names keep revalidating
+    /// until a full reconcile runs; the background snapshot performs one, so a node converges within a
+    /// sweep rather than on a user's statement.</para>
+    ///
+    /// <para>Caller must hold <see cref="writeSem"/>: the upsert/evict below must not interleave with a
+    /// mutation's own cache update.</para>
+    /// </summary>
+    private async Task<DatabaseRegistryEntry?> RevalidateSingleNameLockedAsync(string normalizedName)
+    {
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? kvEntry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, NameKey(normalizedName), -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (getType == KeyValueResponseType.Get && kvEntry?.Value is not null)
+        {
+            DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
+                kvEntry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+            byName[Normalize(loaded.Name)] = loaded;
+            byId[loaded.Id] = loaded;
+            return loaded;
+        }
+
+        // Gone from KV: dropped, or renamed away on another node. Evict it, and drop the id mapping only
+        // if it still points at this name — a rename re-points byId at the new name, and that mapping
+        // must survive the old name's eviction.
+        if (byName.TryRemove(normalizedName, out DatabaseRegistryEntry? removed)
+            && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
+            && Normalize(currentById.Name) == normalizedName)
+        {
+            byId.TryRemove(removed.Id, out _);
+        }
+
+        return null;
     }
 
     // -----------------------------------------------------------------------
@@ -575,17 +646,29 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             // A cache hit is authoritative only while this node's cache is at the current generation.
             // If a mutation (possibly on another node) has advanced the generation since we last loaded,
-            // the hit may be stale — revalidate against KV before trusting it, then re-resolve from the
-            // reconciled cache (the name may now be gone, or repointed to a new id).
+            // the hit may be stale — so the answer for this one name is re-read from KV before it is
+            // trusted (the name may now be gone, or repointed to a new id).
             long authGen = await ReadGenerationAsync().ConfigureAwait(false);
             if (authGen == Volatile.Read(ref loadedGeneration))
                 return cached;
 
-            await RevalidateFromKvAsync(authGen).ConfigureAwait(false);
+            // One key, not the whole bucket. A full rebuild here would put a scan whose cost grows with
+            // the number of registered databases directly under a user statement, every time any DDL
+            // anywhere moved the generation. Rebuilding is left to the background sweep.
+            await writeSem.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // Re-check under the lock: a concurrent reconcile may have brought the whole cache to
+                // this generation already, in which case the cached entry is trustworthy as it stands.
+                if (Volatile.Read(ref loadedGeneration) >= authGen)
+                    return byName.TryGetValue(name, out DatabaseRegistryEntry? reconciled) ? reconciled : null;
 
-            if (byName.TryGetValue(name, out DatabaseRegistryEntry? revalidated))
-                return revalidated;
-            return null; // the name was dropped/renamed away on another node
+                return await RevalidateSingleNameLockedAsync(name).ConfigureAwait(false);
+            }
+            finally
+            {
+                writeSem.Release();
+            }
         }
 
         // Cache miss — try a live point-read from the persistent KV store.
@@ -1639,9 +1722,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         string namePrefix = NameKeyPrefix;
         List<DatabaseRegistryEntry> entries = [];
 
-        KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
+        // A read-only context, not the read-write transaction this once opened: nothing here writes,
+        // and a read-write transaction over a full bucket scan makes every background sweep look like a
+        // writer to the coordinator. The synthetic read-only identity performs read-committed per-key
+        // reads with no START/ROLLBACK round-trips, matching how the catalog's own meta scans read.
+        KvTransaction tx = transactions.CreateReadOnlyTransaction();
         try
         {
             await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
@@ -1660,8 +1745,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
                     kve.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
-                // Backfill cache for entries registered on other nodes.
-                byName.TryAdd(loaded.Name, loaded);
+                // Backfill cache for entries registered on other nodes. Keyed by the normalized name,
+                // like every other write to this dictionary: the raw name was silently dead for any
+                // database created with an upper-case letter, because every lookup normalizes first —
+                // the entry went in under a key nothing would ever ask for.
+                byName.TryAdd(Normalize(loaded.Name), loaded);
                 byId.TryAdd(loaded.Id, loaded);
 
                 entries.Add(loaded);
@@ -1674,6 +1762,110 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         return entries;
     }
+
+    /// <summary>
+    /// How long a background snapshot is reused before it is rescanned. Sized to coalesce the sweeps
+    /// that fire together — row-level TTL discovery and its metadata reaper run inside one sweep, and
+    /// the other periodic loops tick on the same order of magnitude — while staying far shorter than
+    /// any of their intervals, so a database registered or dropped on another node is picked up on the
+    /// next tick rather than the one after.
+    /// </summary>
+    private const int BackgroundSnapshotValidityMs = 10_000;
+
+    private readonly SemaphoreSlim snapshotSem = new(1, 1);
+    private IReadOnlyList<DatabaseRegistryEntry>? backgroundSnapshot;
+    private long backgroundSnapshotTicks;
+
+    /// <summary>
+    /// The registry entry list for <b>background sweeps</b>: the same content as
+    /// <see cref="ScanAllEntriesAsync"/>, but shared between callers for a short window instead of
+    /// rescanning the whole bucket once per loop. Every periodic loop in the engine — TTL discovery and
+    /// its reaper, auto-analyze discovery, the snapshot-hold renewer, the orphan reclaimer — wants the
+    /// same list at roughly the same moment, and independently scanning for each turns one registry
+    /// read into five that grow with the number of registered databases.
+    ///
+    /// <para><b>Only for work that re-confirms what it acts on.</b> The list may be up to
+    /// <see cref="BackgroundSnapshotValidityMs"/> old, so a database registered a moment ago can be
+    /// missing and one just dropped can still appear. That is safe for the sweeps precisely because
+    /// each re-establishes its own ground truth per database — a fence acquisition, an existence
+    /// re-check, or a metadata scan that simply finds nothing. A foreground statement that reports the
+    /// registry to a user (<c>SHOW</c>) must call <see cref="ScanAllEntriesAsync"/> instead, and see
+    /// its own writes.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<DatabaseRegistryEntry>> GetBackgroundSnapshotAsync()
+    {
+        if (TryReadFreshSnapshot(out IReadOnlyList<DatabaseRegistryEntry> fresh))
+            return fresh;
+
+        // Single-flight: concurrent sweeps queue here and take the one scan's result rather than each
+        // launching their own, which is the whole point of sharing.
+        await snapshotSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (TryReadFreshSnapshot(out fresh))
+                return fresh;
+
+            // Read the generation BEFORE the scan. A mutation landing mid-scan then leaves this value
+            // behind the authoritative one, so the cache is correctly recorded as stale and revalidates
+            // again — whereas a generation read afterwards would claim currency for a change the scan
+            // may not have seen.
+            long generationBeforeScan = isClusterMode ? await ReadGenerationAsync().ConfigureAwait(false) : 0;
+
+            IReadOnlyList<DatabaseRegistryEntry> scanned = await ScanAllEntriesAsync().ConfigureAwait(false);
+
+            // The background sweep is where a full rebuild belongs, so it is also where the cache earns
+            // the right to call itself current. Without this the foreground resolve path — which now
+            // refreshes a single name and deliberately does not adopt the generation — would keep paying
+            // a point read per open forever on a node that reads but never writes.
+            if (isClusterMode && Volatile.Read(ref loadedGeneration) < generationBeforeScan)
+            {
+                await writeSem.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (Volatile.Read(ref loadedGeneration) < generationBeforeScan)
+                        ReconcileCachesLocked(scanned, generationBeforeScan);
+                }
+                finally
+                {
+                    writeSem.Release();
+                }
+            }
+
+            // List before timestamp: a reader that sees the new timestamp with the old list would serve
+            // one extra round of stale data, while this ordering costs at worst one redundant scan.
+            Volatile.Write(ref backgroundSnapshot, scanned);
+            Volatile.Write(ref backgroundSnapshotTicks, Environment.TickCount64);
+
+            return scanned;
+        }
+        finally
+        {
+            snapshotSem.Release();
+        }
+    }
+
+    private bool TryReadFreshSnapshot(out IReadOnlyList<DatabaseRegistryEntry> entries)
+    {
+        IReadOnlyList<DatabaseRegistryEntry>? cached = Volatile.Read(ref backgroundSnapshot);
+
+        if (cached is not null &&
+            Environment.TickCount64 - Volatile.Read(ref backgroundSnapshotTicks) < BackgroundSnapshotValidityMs)
+        {
+            entries = cached;
+            return true;
+        }
+
+        entries = [];
+        return false;
+    }
+
+    /// <summary>
+    /// Drops the shared background snapshot so the next sweep rescans. Called whenever this node
+    /// registers, unregisters, or renames a database: those are exactly the changes a sweep must not
+    /// keep missing, and this node knows about its own immediately. A change made on another node is
+    /// still only picked up when the window lapses.
+    /// </summary>
+    private void InvalidateBackgroundSnapshot() => Volatile.Write(ref backgroundSnapshot, null);
 
     // -----------------------------------------------------------------------
     // KV helpers — mirror CatalogsManager.WriteMetaKey / DeleteMetaKey
