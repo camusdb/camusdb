@@ -346,6 +346,18 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string ConcurrentSchemaChange = "CADB0534";
 
+    /// <summary>
+    /// A monotonic counter (the database id, the table id, or the registry generation stamp) could not be
+    /// reached: the Raft partition owning it reported no confirmed leader for the whole bounded retry
+    /// window — a node still joining, an election in flight, or leadership moving while the request was
+    /// being forwarded.
+    ///
+    /// <para>Deliberately not <see cref="SystemSpaceCorrupt"/>: nothing was allocated, nothing was
+    /// written, and the system keyspace is intact — the counter was merely unreachable for a moment.
+    /// Re-issuing the statement is the correct response, so it maps to HTTP 503 rather than 500.</para>
+    /// </summary>
+    public const string SequenceUnavailable = "CADB0535";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -495,6 +507,7 @@ public static class CamusDBErrorCodes
         RefreshAlreadyInProgress => 409,
         FeatureNotSupported => 501,
         ConcurrentSchemaChange => 409,
+        SequenceUnavailable => 503,
         PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

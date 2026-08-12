@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics.CodeAnalysis;
 using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
@@ -122,6 +123,14 @@ public sealed class Schema : IDisposable
     /// </remarks>
     public void RequireRelationNameAvailable(string name)
     {
+        // A name carrying the reserved prefix would shadow the reference a stored view body uses to
+        // name a relation, so a body could be made to read something other than what it was bound to.
+        if (StoredRelationRef.IsReservedRelationName(name))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Relation name '{name}' starts with '{StoredRelationRef.Prefix}', which is reserved: " +
+                "stored view definitions use it to refer to a relation by its immutable id");
+
         if (Tables.TryGetValue(name, out TableSchema? existingTable))
             throw new CamusDBException(
                 existingTable.IsMaterializedView ? CamusDBErrorCodes.ViewAlreadyExists : CamusDBErrorCodes.TableAlreadyExists,
@@ -131,6 +140,86 @@ public sealed class Schema : IDisposable
             throw new CamusDBException(
                 CamusDBErrorCodes.ViewAlreadyExists,
                 $"Relation '{name}' already exists");
+    }
+
+    // Published as one finished dictionary that is never mutated after publication, so a reader
+    // holding no lock always sees a complete index rather than one being filled in.
+    private volatile Dictionary<string, string>? relationNamesById;
+
+    /// <summary>
+    /// The name a relation id currently answers to. This is the reverse of every other lookup here,
+    /// and it exists because a stored view body names its relations by immutable id — see
+    /// <see cref="Catalogs.Models.StoredRelationRef"/>.
+    /// </summary>
+    /// <remarks>
+    /// Reads a published snapshot and never walks <see cref="Tables"/> or <see cref="Views"/>
+    /// itself. That is the point: those dictionaries are mutated in place by an applying delta, and
+    /// enumerating one while it is being written throws, so only the writer — which holds
+    /// <see cref="Semaphore"/> — may walk them. See <see cref="RebuildRelationNameIndex"/>.
+    /// </remarks>
+    public bool TryGetRelationNameById(string relationId, [MaybeNullWhen(false)] out string name)
+    {
+        Dictionary<string, string>? index = relationNamesById;
+
+        if (index is null)
+        {
+            // Only reachable before the first build — a database is indexed as its schema is loaded,
+            // and every delta re-indexes. Guarded because this is the one path that could walk the
+            // live maps without the lock.
+            index = BuildRelationNameIndexDefensively();
+            relationNamesById = index;
+        }
+
+        return index.TryGetValue(relationId, out name!);
+    }
+
+    /// <summary>
+    /// Re-indexes relation ids to names. Must be called while holding <see cref="Semaphore"/>, with
+    /// the schema's dictionaries in their final post-mutation state.
+    /// </summary>
+    /// <remarks>
+    /// Called after a delta's mutations and <b>before</b> <see cref="SchemaVersion"/> advances, and
+    /// again whenever the maps are replaced wholesale by a schema load. Ordering it before the
+    /// version bump keeps a lock-free reader's worst case to the staleness it already lives with on
+    /// a <see cref="Tables"/> lookup — the pre-delta name — rather than a torn or missing index.
+    /// </remarks>
+    public void RebuildRelationNameIndex()
+    {
+        Dictionary<string, string> names = new(Tables.Count + Views.Count, StringComparer.Ordinal);
+
+        // Tables and materialized views alike: a materialized view is a relation and a body may read
+        // one. Views second, and neither can overwrite the other — ids come from one sequence, so a
+        // collision would mean the sequence handed the same id out twice.
+        foreach (TableSchema table in Tables.Values)
+        {
+            if (table.Id is { Length: > 0 } id && table.Name is { Length: > 0 } tableName)
+                names[id] = tableName;
+        }
+
+        foreach (ViewSchema view in Views.Values)
+        {
+            if (view.Id is { Length: > 0 } id && view.Name is { Length: > 0 } viewName)
+                names[id] = viewName;
+        }
+
+        relationNamesById = names;
+    }
+
+    private Dictionary<string, string> BuildRelationNameIndexDefensively()
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                RebuildRelationNameIndex();
+                return relationNamesById!;
+            }
+            catch (InvalidOperationException) when (attempt < 2)
+            {
+                // A delta mutated a map mid-walk. Retrying is enough: the writer holds the lock for
+                // the length of one apply, not for anything unbounded.
+            }
+        }
     }
 
     public void Dispose()

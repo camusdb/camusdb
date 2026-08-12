@@ -129,9 +129,46 @@ DROP TABLE orders;
 > stricter than it was before views existed; the alternative is a table drop that silently converts
 > every dependent view into a delayed error for whoever reads it next.
 
+### Columns a view reads
+
+A body binds the columns it reads by immutable id, just as it binds its relations, so **renaming a
+column is transparent** — and dropping one is refused rather than leaving the view to fail at its
+next read:
+
+```sql
+CREATE VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open';
+
+ALTER TABLE orders RENAME COLUMN total TO amount;
+SELECT id, total FROM open_orders;    -- still works, still called "total"
+
+ALTER TABLE orders DROP COLUMN amount;
+-- ERROR (CADB0530): Cannot drop column 'amount' of table 'orders' because other objects
+--                   depend on it: open_orders. Drop or replace them first.
+```
+
+The view keeps publishing `total`: its output names are frozen at creation and do not follow the
+base column. `SHOW CREATE VIEW` renders the base column's *current* name, so after the rename the
+body reads `... amount AS total ...`.
+
+A column the body reads only in its `WHERE` counts, as do columns read inside a subquery, and a
+materialized view's body protects the columns it reads on every refresh. `DROP COLUMN` has no
+`CASCADE` form, so the escape hatch is to drop or replace the dependent view first.
+
+> **A rename is still refused in two cases**, because the body would be stranded rather than
+> unaffected: a definition written before columns were bound by id, and a reference in `ORDER BY`,
+> `GROUP BY` or `HAVING` that matches one of the view's own output names. The second is deliberate —
+> those clauses may legally name an output column instead of a relation's, so such a reference is
+> left as written rather than guessing.
+
+> **This is a lower bound, not a guarantee.** A reference the analysis cannot attribute to one
+> relation with certainty is not recorded, so an unusually shaped body may still let a column be
+> dropped. It errs that way on purpose: a missed refusal leaves the behavior that existed before
+> this check, while a wrong one would block a column change nothing actually depends on.
+
 ### Renaming is transparent
 
-Renaming a base table rewrites every dependent view's stored body, so the views keep working:
+A view's stored body refers to the relations it reads by their **immutable ids**, not by name, so a
+rename changes nothing about the view — there is no stored text to bring up to date:
 
 ```sql
 CREATE VIEW open_orders AS SELECT id, customer FROM orders WHERE status = 'open';
@@ -142,17 +179,31 @@ SHOW CREATE VIEW open_orders;
 -- CREATE VIEW `open_orders` AS SELECT id, customer FROM sales AS orders WHERE status = 'open'
 ```
 
-The old name is kept as an alias on purpose: qualified column references inside the body resolve
-through it.
+This applies to renaming a **view** a view reads, exactly as it does to a table.
 
-The rewrite is an **AST edit**, never a textual substitution — a matching word inside a string
-literal or a column name is left alone.
+Names come back when the definition is shown. The original name appears as an alias on purpose:
+qualified column references inside the body resolve through it, so it has to stay fixed for the life
+of the definition. An alias that would merely repeat the relation's current name is not printed, so
+an ordinary view renders as you wrote it.
 
-> **Rename caveat.** The rename and each dependent view's rewrite are separate replicated changes.
-> There is a brief window in which the rename has landed but a given view's rewrite has not, during
-> which reading that view fails with "table does not exist". The window cannot produce a *wrong*
-> answer — the stale body names a relation that is simply gone — but it is a window. Folding them
-> into one change is a planned improvement.
+> **Definitions created by earlier versions** name their relations directly. They keep working and
+> keep rendering unchanged, and the first rename that would otherwise strand one converts it to the
+> id form instead — in the same replicated change as the rename, validated against a single schema
+> snapshot and checkpointed together, so a relation created under the freed name cannot be picked up
+> by a body that has not caught up. After that conversion the view is in the same position as any
+> other: renames stop touching it entirely.
+
+### Reserved relation names
+
+A table, view or materialized view may not be named with the prefix `__camus_rel_`:
+
+```sql
+CREATE TABLE __camus_rel_7 (id int64 PRIMARY KEY);
+-- ERROR (CADB0400): Table name '__camus_rel_7' starts with '__camus_rel_', which is reserved
+```
+
+Stored view definitions use that prefix to refer to a relation by its immutable id, so a relation
+answering to such a name could shadow what a definition points at.
 
 ### Cycles
 
@@ -491,5 +542,6 @@ unexpected:
   inner reference checked when it is *created*, not on every read; a grant revoked afterwards does not
   break the outer view until it is replaced. The inner view still runs as its own owner, so this
   widens nothing beyond what its author could already reach.
-- **Column-level drop dependencies.** Dropping a *column* a view reads is not currently refused
-  (dropping the *table* is).
+- **Absorbing a column rename into a definition written before columns were bound by id**, or into a
+  reference in `ORDER BY` / `GROUP BY` / `HAVING` that matches one of the view's own output names.
+  Both are refused instead (see *Columns a view reads*).

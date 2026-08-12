@@ -224,6 +224,7 @@ public static class ConfigResolver
         RangeLockExpiresMs = config.RangeLockExpiresMs,
         MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs,
         TransactionFinalizeRetryBudgetMs = config.TransactionFinalizeRetryBudgetMs,
+        SequenceRetryBudgetMs = config.SequenceRetryBudgetMs,
         TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs,
         TransactionReaperIntervalMs = config.TransactionReaperIntervalMs,
         PreparedStatementIdleTimeoutMs = config.PreparedStatementIdleTimeoutMs,

@@ -318,17 +318,19 @@ public enum SchemaRenameKind
 public sealed class SchemaRenamePayload
 {
     /// <summary>
-    /// The rewritten bodies of every view that reads the relation being renamed, keyed by view name,
-    /// applied in the <b>same</b> delta as the rename. Null when nothing depends on it.
+    /// Converted bodies of views that read the relation being renamed and still name their relations
+    /// in text, keyed by view name, applied in the <b>same</b> delta as the rename. Null — the
+    /// steady state — when every dependent already refers to its relations by immutable id and the
+    /// rename is therefore metadata-only.
     /// </summary>
     /// <remarks>
-    /// They ride the rename rather than following it as separate deltas because the gap between two
-    /// deltas is not merely a window of unavailability. A view whose stored body still names the old
-    /// relation does not fail during that gap — it <em>resolves</em>, and if anything has since created
-    /// a new relation under the freed name it resolves to that one and returns its rows. One delta
-    /// removes the gap: every node observes the complete old graph or the complete new one. It also
-    /// removes the second failure mode, where a crash or leadership change between deltas left the
-    /// rewrites permanently half-applied.
+    /// The conversion rides the rename rather than following it, because the gap between two deltas
+    /// is not merely a window of unavailability. A body that still names the old relation does not
+    /// fail during that gap — it <em>resolves</em>, and if anything has since created a new relation
+    /// under the freed name it resolves to that one and returns its rows. One delta removes the gap:
+    /// every node observes the complete old graph or the complete new one. It also removes the second
+    /// failure mode, where a crash or leadership change between deltas left the change permanently
+    /// half-applied.
     /// </remarks>
     public Dictionary<string, ViewDefinition>? DependentViewDefinitions { get; set; }
 

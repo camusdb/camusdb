@@ -14,20 +14,20 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
-/// Keeps stored view bodies valid across changes to the relations they read: rewrites dependent
-/// views when a base relation is renamed, and refuses a drop that would orphan one.
+/// Keeps stored view bodies valid across changes to the relations they read: refuses a drop that
+/// would orphan one, and converts a body that still names its relations so a rename cannot strand it.
 ///
-/// <para><b>Why a rewrite is needed at all.</b> PostgreSQL stores a view as a parse tree keyed by
-/// OID, so renaming a table leaves every dependent view working and merely changes what
-/// <c>pg_get_viewdef</c> prints. CamusDB stores a view as text, so the same rename would leave the
-/// text naming something that no longer exists and the view would fail at its next read. Producing
-/// PostgreSQL's behavior therefore has to be explicit: find the dependents by id — ids are immutable,
-/// which is the whole reason dependencies are recorded as ids — re-parse each body, swap the
-/// identifier in the AST, and re-render.</para>
+/// <para><b>Why a rename used to need anything at all.</b> A body written before relation ids were
+/// stored names its sources in text, so renaming a table left that text pointing at something that
+/// no longer existed. Keeping such a view working meant finding every dependent and editing its
+/// body — and correctness then depended on that edit reaching all of them, which is a class of bug
+/// this codebase has already paid for twice.</para>
 ///
-/// <para>The swap is an <b>AST edit</b>, never a string substitution. A textual replace would
-/// happily rewrite a matching word inside a string literal, a column name, or an unrelated table's
-/// alias, and the damage would not surface until someone read the view.</para>
+/// <para>Bodies are now bound to immutable relation ids (see <see cref="StoredBodyBinder"/>), so a
+/// rename is metadata-only and there is nothing to reach. What remains here is the bridge for the
+/// older form: when a rename would have stranded a name-bound body, that body is rebound to ids and
+/// rides the rename in the same replicated change. It converts exactly once, at the only moment it
+/// could otherwise break, and is immune afterwards.</para>
 /// </summary>
 internal static class ViewDependencyMaintainer
 {
@@ -57,45 +57,105 @@ internal static class ViewDependencyMaintainer
     }
 
     /// <summary>
-    /// Rewrites every view that reads <paramref name="relationId"/> so its body names
-    /// <paramref name="newName"/> instead of <paramref name="oldName"/>.
+    /// Refuses a column change that would leave a view reading a column that no longer exists, or
+    /// that answers to a different name than the body asks for.
     /// </summary>
     /// <remarks>
-    /// <para>Each rewrite is proposed as its own <c>SetViewDefinition</c> delta, applied after the
-    /// rename itself. That leaves a window in which the rename has landed but a given view's rewrite
-    /// has not, during which reading that view fails with "table does not exist". The window is small
-    /// and — this is the part that matters — it <b>cannot produce a wrong answer</b>: the stale body
-    /// names a relation that is simply gone, so the read errors rather than silently resolving to
-    /// something else. Folding the rename and every rewrite into one delta would close the window
-    /// entirely and is the better end state; it is not required for correctness of the data.</para>
+    /// <para>Same reasoning as the table-drop rule above, applied one level down: without it a
+    /// <c>DROP COLUMN</c> or <c>RENAME COLUMN</c> succeeds and the dependent view fails at its next
+    /// read, with nothing at the time of the change to say so. There is no <c>CASCADE</c> form of
+    /// either statement, so the escape hatch is to drop or replace the view first — which the
+    /// message says.</para>
     ///
-    /// <para>Idempotent: a body that already names <paramref name="newName"/> renders identically and
-    /// is skipped, so a replay or a partially-completed rewrite can be re-run safely.</para>
+    /// <para><b>The two arms differ.</b> A drop is refused by any dependent, because the column is
+    /// about to stop existing and no form of reference survives that. A rename is refused only by a
+    /// dependent that still names the column in <em>text</em>: a body that refers to it by id is
+    /// unaffected — the id does not move — so refusing on its behalf would block a change that
+    /// cannot break it.</para>
+    ///
+    /// <para>Rests on <see cref="ViewDefinition.DependsOnColumnIds"/>, which is a lower bound: a
+    /// view whose definition predates column analysis, or whose reference could not be resolved with
+    /// certainty, is not protected here. That is the same exposure as before this check existed.</para>
     /// </remarks>
+    /// <param name="renaming">
+    /// True for <c>RENAME COLUMN</c>, which only bodies that still spell the column out can object
+    /// to; false for <c>DROP COLUMN</c>, which every dependent objects to.
+    /// </param>
+    public static void RequireNoDependentViewsOnColumn(
+        Schema schema, string tableName, string columnName, string columnId, bool renaming)
+    {
+        string operation = renaming ? "rename" : "drop";
+        string token = StoredColumnRef.Format(columnId);
+
+        List<string> dependents = [];
+
+        foreach ((string viewName, ViewSchema view) in schema.Views)
+        {
+            if (Objects(view.Definition))
+                dependents.Add(viewName);
+        }
+
+        // Materialized views keep their definition on the relation rather than in the view map, and
+        // a body that would break on its next refresh has the same claim on the column as one that
+        // would break on its next read.
+        foreach ((string relationName, TableSchema relation) in schema.Tables)
+        {
+            if (relation.IsMaterializedView && Objects(relation.ViewDefinition))
+                dependents.Add(relationName);
+        }
+
+        bool Objects(ViewDefinition? definition)
+        {
+            if (!Reads(definition, columnId))
+                return false;
+
+            // Bound to the id: a rename cannot reach it. A drop still can.
+            return !renaming || definition!.Sql?.Contains(token, StringComparison.OrdinalIgnoreCase) != true;
+        }
+
+        if (dependents.Count == 0)
+            return;
+
+        dependents.Sort(StringComparer.OrdinalIgnoreCase);
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.DependentObjectsExist,
+            $"Cannot {operation} column '{columnName}' of table '{tableName}' because other objects " +
+            $"depend on it: {string.Join(", ", dependents)}. Drop or replace them first.");
+
+        static bool Reads(ViewDefinition? definition, string columnId) =>
+            definition?.DependsOnColumnIds?.Contains(columnId, StringComparer.Ordinal) == true;
+    }
+
     /// <summary>
-    /// Builds the rewritten body of every view that reads <paramref name="relationId"/>, so a rename
-    /// can carry them in its own delta. Returns null when nothing depends on the relation.
+    /// Builds the id-bound body of every view reading <paramref name="relationId"/> whose stored
+    /// body still names its relations, so a rename can carry the conversion in its own delta.
+    /// Returns null when there is nothing to convert — which is the steady state, and is what makes
+    /// a rename metadata-only.
     /// </summary>
     /// <remarks>
-    /// Computed against one schema snapshot and applied with the rename as a single transition. The
-    /// alternative — rename first, rewrite afterwards — leaves a window in which a stale body names a
-    /// relation that no longer exists; and because the old name is free the moment the rename commits,
-    /// anything that creates a relation under it during that window makes the stale body resolve to
-    /// <em>that</em> relation and return its rows. A wrong answer, not an outage.
+    /// <para>Computed against one schema snapshot, while the relation still answers to its old name,
+    /// and applied together with the rename as a single transition. Converting afterwards instead
+    /// would leave a window in which the stored body names a relation that no longer exists — and
+    /// because the old name is free the moment the rename commits, anything created under it during
+    /// that window would make the body resolve to <em>that</em> relation and return its rows. A
+    /// wrong answer, not an outage.</para>
+    ///
+    /// <para>Both edge kinds are consulted. A dependent records what it reads in
+    /// <c>DependsOnTableIds</c> or in <c>DependsOnViewIds</c> depending on what that relation is, and
+    /// reading only one list silently skips every view that reads a renamed <em>view</em> — a bug
+    /// this code shipped once already.</para>
+    ///
+    /// <para>Idempotent: a body already bound to ids binds to itself, renders identically, and is
+    /// skipped, so a replay or a partially-completed conversion re-runs harmlessly.</para>
     /// </remarks>
-    public static Dictionary<string, ViewDefinition>? BuildRenameRewrites(
+    public static Dictionary<string, ViewDefinition>? BuildRenameConversions(
         Schema schema,
         string relationId,
-        string oldName,
-        string newName,
         Func<string, NodeAst> parse)
     {
         Dictionary<string, ViewDefinition>? rewrites = null;
 
-        // Both edge kinds. A dependent records the relation it reads in DependsOnTableIds or in
-        // DependsOnViewIds depending on what that relation is, and a rename has to reach the
-        // dependents either way — consulting only one list silently skips every view that reads a
-        // renamed *view*, which is exactly the case the stale body would then resolve wrongly.
         IEnumerable<string> dependents = ViewDependencyGraph
             .DirectDependentsOfTable(schema, relationId)
             .Concat(ViewDependencyGraph.DirectDependentsOfView(schema, relationId))
@@ -107,8 +167,10 @@ internal static class ViewDependencyMaintainer
                 continue;
 
             NodeAst body = parse(view.Definition.Sql);
-            NodeAst rewritten = RenameRelationInFrom(body, oldName, newName);
+            NodeAst rewritten = StoredBodyBinder.BindStoredForm(schema, body);
 
+            // Same instance means every relation was already bound by id, so the rename cannot
+            // disturb this body and there is nothing to carry.
             if (ReferenceEquals(rewritten, body))
                 continue;
 
@@ -119,6 +181,10 @@ internal static class ViewDependencyMaintainer
                 Columns = view.Definition.Columns,
                 DependsOnTableIds = view.Definition.DependsOnTableIds,
                 DependsOnViewIds = view.Definition.DependsOnViewIds,
+                // Carried like every other field: a conversion rewrites how the body names its
+                // relations, not what it depends on, and dropping this would silently un-protect
+                // every column the view reads.
+                DependsOnColumnIds = view.Definition.DependsOnColumnIds,
                 CheckOption = view.Definition.CheckOption,
                 Owner = view.Definition.Owner,
                 // Carried explicitly: dropping it would silently strip the view's ownership, and an
@@ -128,113 +194,5 @@ internal static class ViewDependencyMaintainer
         }
 
         return rewrites;
-    }
-
-    /// <summary>
-    /// Returns the tree with every FROM-position reference to <paramref name="oldName"/> renamed, or
-    /// the same instance when nothing matched.
-    /// </summary>
-    /// <remarks>
-    /// Only FROM positions are touched. A column that happens to share the table's name, and a string
-    /// literal containing it, are left alone — which is exactly what a textual rewrite would get
-    /// wrong.
-    /// </remarks>
-    internal static NodeAst RenameRelationInFrom(NodeAst node, string oldName, string newName)
-    {
-        NodeAst? left = node.leftAst;
-        NodeAst? right = node.rightAst;
-        NodeAst? one = node.extendedOne;
-        NodeAst? two = node.extendedTwo;
-        NodeAst? three = node.extendedThree;
-        NodeAst? four = node.extendedFour;
-        NodeAst? five = node.extendedFive;
-        NodeAst? six = node.extendedSix;
-
-        if (node.nodeType == NodeType.Select && right is not null)
-            right = RenameInFromClause(right, oldName, newName);
-        else
-            right = Recurse(right);
-
-        left = Recurse(left);
-        one = Recurse(one);
-        two = Recurse(two);
-        three = Recurse(three);
-        four = Recurse(four);
-        five = Recurse(five);
-        six = Recurse(six);
-
-        if (ReferenceEquals(left, node.leftAst) && ReferenceEquals(right, node.rightAst) &&
-            ReferenceEquals(one, node.extendedOne) && ReferenceEquals(two, node.extendedTwo) &&
-            ReferenceEquals(three, node.extendedThree) && ReferenceEquals(four, node.extendedFour) &&
-            ReferenceEquals(five, node.extendedFive) && ReferenceEquals(six, node.extendedSix))
-            return node;
-
-        return new NodeAst(
-            node.nodeType, left, right, one, two, three, four, five, node.yytext, six, node.extendedSeven);
-
-        NodeAst? Recurse(NodeAst? child) => child is null ? null : RenameRelationInFrom(child, oldName, newName);
-    }
-
-    private static NodeAst RenameInFromClause(NodeAst from, string oldName, string newName)
-    {
-        switch (from.nodeType)
-        {
-            case NodeType.Identifier:
-                return string.Equals(from.yytext, oldName, StringComparison.OrdinalIgnoreCase)
-                    ? new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, newName)
-                    : from;
-
-            case NodeType.TableReference:
-                {
-                    if (!string.Equals(from.leftAst?.yytext, oldName, StringComparison.OrdinalIgnoreCase))
-                        return from;
-
-                    // The alias is preserved deliberately. Every qualified column reference in the
-                    // body resolves through the alias, so changing it here would break the very body
-                    // this rewrite exists to keep working. A table with no alias gets one — its old
-                    // name — for the same reason.
-                    NodeAst alias = from.rightAst
-                        ?? new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, oldName);
-
-                    return new NodeAst(
-                        NodeType.TableReference,
-                        new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, newName),
-                        alias,
-                        from.extendedOne, null, null, null, null, null);
-                }
-
-            case NodeType.DerivedTableReference:
-                {
-                    NodeAst inner = RenameRelationInFrom(from.leftAst!, oldName, newName);
-                    return ReferenceEquals(inner, from.leftAst)
-                        ? from
-                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, null, null, null, null, null, null);
-                }
-
-            case NodeType.Join:
-                {
-                    NodeAst l = RenameInFromClause(from.leftAst!, oldName, newName);
-                    NodeAst r = RenameInFromClause(from.rightAst!, oldName, newName);
-                    NodeAst? on = from.extendedOne is null ? null : RenameRelationInFrom(from.extendedOne, oldName, newName);
-
-                    return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst) && ReferenceEquals(on, from.extendedOne)
-                        ? from
-                        : new NodeAst(NodeType.Join, l, r, on, null, null, null, null, null);
-                }
-
-            case NodeType.CommaJoin:
-            case NodeType.CommaJoinTableList:
-                {
-                    NodeAst l = RenameInFromClause(from.leftAst!, oldName, newName);
-                    NodeAst r = RenameInFromClause(from.rightAst!, oldName, newName);
-
-                    return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
-                        ? from
-                        : new NodeAst(from.nodeType, l, r, null, null, null, null, null, null);
-                }
-
-            default:
-                return from;
-        }
     }
 }

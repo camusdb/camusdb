@@ -131,6 +131,62 @@ internal sealed class TestRegistryCoherence : BaseTest
     }
 
     /// <summary>
+    /// Every single mutation must move the generation stamp — including consecutive ones.
+    ///
+    /// <para>The other tests here warm node B by resolving a name, which leaves B's cache <em>behind</em>
+    /// the current generation, so B revalidates on every hit and would resolve a drop correctly even if the
+    /// stamp never moved at all. That blind spot is real: it hid a stamp that moved roughly once per
+    /// thousand mutations, because it was read from a counter whose durable value is the high-water mark of
+    /// a reserved block rather than a per-mutation value.</para>
+    ///
+    /// <para>Node B is therefore opened fresh for each round, which loads the current generation along with
+    /// the cache — a node that is genuinely up to date, and so one whose cache hit is trusted outright.
+    /// Only a stamp that actually moved can dislodge it. Several rounds run because the defect was
+    /// invisible within one reserved block: the first mutation after B adopted was already enough to serve
+    /// a dropped name, and every further one stayed wrong for the rest of the block.</para>
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task EverySuccessiveMutation_IsSeen_ByANodeThatIsAlreadyCurrent()
+    {
+        DatabaseRegistry a = await DatabaseRegistry.OpenAsync(TestNode!, Options, isClusterMode: true);
+        try
+        {
+            for (int round = 0; round < 3; round++)
+            {
+                string name = "coh_" + Guid.NewGuid().ToString("n");
+                string id = await a.AllocateIdAsync();
+                await a.RegisterAsync(name, id);
+
+                // Opened after the registration, so B loads both the entry and the generation it belongs
+                // to: current cache, current stamp, nothing to revalidate against.
+                DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, Options, isClusterMode: true);
+                try
+                {
+                    Assert.AreEqual(
+                        id, (await b.TryResolveEntryAsync(name))!.Id,
+                        $"round {round} precondition: B is current and resolves the name from its cache");
+
+                    await a.UnregisterAsync(name);
+
+                    Assert.IsNull(
+                        await b.TryResolveEntryAsync(name),
+                        $"round {round}: a drop on another node must move the generation stamp, or a node " +
+                        "that was up to date keeps serving the name it already had");
+                }
+                finally
+                {
+                    await b.DisposeAsync();
+                }
+            }
+        }
+        finally
+        {
+            await a.DisposeAsync();
+        }
+    }
+
+    /// <summary>
     /// Coherence must not over-invalidate: when nothing has changed, a repeated resolve keeps returning
     /// the cached mapping (the generation matched, so no needless revalidation churn).
     /// </summary>

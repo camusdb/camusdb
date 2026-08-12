@@ -45,6 +45,25 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
     /// <summary>Renders a single scalar expression (a projection item, a predicate) to canonical SQL.</summary>
     public static string RenderExpression(NodeAst expr) => Instance.Render(expr);
 
+    /// <summary>
+    /// Whether the text appended to <paramref name="sb"/> from <paramref name="start"/> onwards is
+    /// exactly <paramref name="text"/>. Ordinal, so an alias that differs only in case is kept — the
+    /// case a view publishes its columns in is part of what it publishes.
+    /// </summary>
+    private static bool Spans(StringBuilder sb, int start, string text)
+    {
+        if (sb.Length - start != text.Length)
+            return false;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (sb[start + i] != text[i])
+                return false;
+        }
+
+        return true;
+    }
+
     protected override CamusDBException Unsupported(NodeAst expr) => new(
         CamusDBErrorCodes.InvalidInput,
         $"View body contains an expression that cannot be represented ({expr.nodeType})");
@@ -70,9 +89,22 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
                 return true;
 
             case NodeType.ExprAlias:
-                RenderNode(sb, expr.leftAst!);
-                sb.Append(" AS ").Append(expr.rightAst!.yytext);
-                return true;
+                {
+                    int start = sb.Length;
+                    RenderNode(sb, expr.leftAst!);
+
+                    string? alias = expr.rightAst!.yytext;
+
+                    // An alias that repeats what it aliases carries nothing, so it is not printed.
+                    // Stored bodies alias every projection — that is what pins a view's published
+                    // column names against a base-column rename — and echoing all of them back would
+                    // turn every ordinary view into "SELECT id AS id, total AS total".
+                    if (alias is not null && Spans(sb, start, alias))
+                        return true;
+
+                    sb.Append(" AS ").Append(alias);
+                    return true;
+                }
 
             case NodeType.ExprScalarSubquery:
                 sb.Append('(');

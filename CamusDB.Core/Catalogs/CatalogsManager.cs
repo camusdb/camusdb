@@ -1755,6 +1755,12 @@ public sealed class CatalogsManager
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
+        // Same reasoning as the generation bump below, and for the same reason it lives here: every
+        // op that can create, drop or rename a relation lands in this method, and a stored view body
+        // resolves the relations it reads through this index. Rebuilt before the version advances so
+        // a lock-free reader sees either the pre-delta index or the post-delta one, never a torn one.
+        schema.RebuildRelationNameIndex();
+
         schema.SchemaVersion = entry.ToVersion;
 
         // One place, deliberately. Every op that touches a relation lands here, so a generation bump
@@ -2156,7 +2162,7 @@ public sealed class CatalogsManager
     /// so dependents that recorded it keep resolving across the rename.
     /// </summary>
     /// <summary>
-    /// Applies the dependent-view rewrites carried by a rename, in the same apply as the rename
+    /// Applies the dependent-view conversions carried by a rename, in the same apply as the rename
     /// itself. Idempotent: overwriting a definition with the one already stored is a no-op, so a
     /// re-delivered entry replays harmlessly. A view that is no longer present is skipped rather than
     /// failing — it was dropped after the entry was proposed, and a rename must not wedge on that.
@@ -3655,6 +3661,11 @@ public sealed class CatalogsManager
                 // of earlier views, never the reverse, so this one ordering is sufficient.
                 database.Schema.Views = await LoadViewsAsync(database, tx).ConfigureAwait(false);
             }
+
+            // Both maps were replaced wholesale above, so the id index has to be built from them
+            // here: after this point readers resolve relation references through it and must never
+            // walk the maps themselves.
+            database.Schema.RebuildRelationNameIndex();
 
             // Seed the Raft schema fence from the on-disk version so HeadSchemaVersion ≥
             // SchemaVersion holds immediately after a load or reopen.  Without this, the fence

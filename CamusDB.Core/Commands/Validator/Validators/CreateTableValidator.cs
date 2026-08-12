@@ -22,6 +22,7 @@ internal sealed class CreateTableValidator : ValidatorBase
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Database name is required");
 
         ValidateIdentifier(ticket.TableName, "Table");
+        ValidateNotReservedRelationName(ticket.TableName, "Table");
 
         ValidateCommentLength(ticket.Comment, $"Table '{ticket.TableName}'");
 
@@ -43,6 +44,7 @@ internal sealed class CreateTableValidator : ValidatorBase
             ColumnInfo columnInfo = ticket.Columns[i];
 
             ValidateIdentifier(columnInfo.Name, "Column");
+            ValidateNotReservedColumnName(columnInfo.Name, "Column");
 
             if (IsReservedName(columnInfo.Name))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Reserved column name: " + columnInfo.Name);

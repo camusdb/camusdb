@@ -448,16 +448,23 @@ public sealed class TestViews : SharedNodeBaseTest
         await ExecDdl(database, executor, dbname,
             "CREATE VIEW open_orders AS SELECT id, customer FROM orders WHERE status = 'open'");
 
+        string bodyBeforeRename = database.Schema.Views["open_orders"].Definition!.Sql;
+
         await ExecDdl(database, executor, dbname, "ALTER TABLE orders RENAME TO sales");
 
-        // The stored body must now name the new table. The old name is kept as the alias on purpose:
-        // every qualified column reference in the body resolves through it, so dropping it would
-        // break the very body this rewrite exists to preserve.
-        string body = database.Schema.Views["open_orders"].Definition!.Sql;
-        StringAssert.Contains("FROM sales AS orders", body);
+        // The stored body binds the relation by its immutable id, so a rename has nothing to rewrite
+        // and must leave the definition byte-for-byte alone.
+        Assert.AreEqual(bodyBeforeRename, database.Schema.Views["open_orders"].Definition!.Sql,
+            "a rename must not touch a definition that refers to the relation by id");
 
         Assert.AreEqual(3, (await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders")).Count,
             "renaming a base table must be transparent to a view that reads it");
+
+        // The name comes back when the definition is shown. The original name is kept as the alias
+        // on purpose: every qualified column reference in the body resolves through it, so dropping
+        // it would break the very body this is meant to preserve.
+        List<QueryResultRow> shown = await ExecQuery(database, executor, dbname, "SHOW CREATE VIEW open_orders");
+        StringAssert.Contains("FROM sales AS orders", shown[0].Row["create view"].StrValue!);
     }
 
     /// <summary>

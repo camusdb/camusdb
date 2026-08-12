@@ -71,12 +71,18 @@ public sealed class ViewDefinition
 {
     /// <summary>
     /// The view body as SQL, <b>normalized at creation time</b>: <c>*</c> expanded to an explicit
-    /// column list and identifiers rendered canonically.
+    /// column list, identifiers rendered canonically, and each relation it reads referred to by its
+    /// immutable id rather than by name.
     ///
     /// <para>Storing the normalized form rather than what the user typed is what freezes the view's
-    /// shape (see <see cref="ViewColumnSchema"/>) and what makes a rename a targeted AST edit rather
-    /// than a string substitution — the latter would happily rewrite a matching word inside a string
-    /// literal or an unrelated table's column list.</para>
+    /// shape (see <see cref="ViewColumnSchema"/>).</para>
+    ///
+    /// <para><b>This is not printable as-is.</b> A relation appears here as a
+    /// <c>CamusDB.Core.Catalogs.Models.StoredRelationRef</c> token, so a name is presentation and is
+    /// produced when the body is read or shown — that is what makes a rename metadata-only, with no
+    /// dependent definition to rewrite. Anything surfacing this to a user must resolve it first;
+    /// <c>SHOW CREATE VIEW</c> does. Bodies stored before ids were used name their relations
+    /// directly and are still read that way.</para>
     /// </summary>
     public string Sql { get; set; } = "";
 
@@ -95,6 +101,21 @@ public sealed class ViewDefinition
     /// <see cref="DependsOnTableIds"/> because the two live in different name maps and different
     /// meta key families.</summary>
     public List<string>? DependsOnViewIds { get; set; }
+
+    /// <summary>
+    /// Ids of the individual table columns this view reads, so DDL that would break the body can be
+    /// refused rather than succeeding and leaving a view that fails at its next read.
+    /// </summary>
+    /// <remarks>
+    /// <para>A <b>best-effort lower bound</b>, not a complete set: a reference that cannot be
+    /// resolved with certainty is omitted, because a missing entry only permits what the engine
+    /// already permitted, whereas a wrong entry would refuse DDL over a column no view reads. See
+    /// <c>ViewColumnDependencyAnalyzer</c>.</para>
+    ///
+    /// <para>Null on a definition stored before column dependencies were recorded, which is not the
+    /// same as an empty list: empty means "reads no table column", null means "never analyzed".</para>
+    /// </remarks>
+    public List<string>? DependsOnColumnIds { get; set; }
 
     /// <summary>Whether writes through this view must satisfy its predicate. Meaningful only on an
     /// auto-updatable view.</summary>

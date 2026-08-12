@@ -603,6 +603,27 @@ public sealed record CamusDBOptions
     public int TransactionFinalizeRetryBudgetMs { get; init; } = 15_000;
 
     /// <summary>
+    /// Total wall-clock budget, in milliseconds, for retrying a call against one of the persistent
+    /// monotonic counters — the database id, the table id, the registry's cross-node generation stamp —
+    /// while the storage layer answers <c>MustRetry</c>.
+    ///
+    /// <para><c>MustRetry</c> means the Raft partition owning the counter has no confirmed leader at that
+    /// instant. Every DDL statement that names a new relation allocates an id first, so this budget is
+    /// what decides whether a routine election is invisible or fails a user's CREATE TABLE with
+    /// <see cref="CamusDBErrorCodes.SequenceUnavailable"/>.</para>
+    ///
+    /// <para>A wall-clock budget rather than an attempt count, and sized against the election itself: an
+    /// election runs on the order of seconds (Kommander's election timeout is 2–4 s before increments),
+    /// while a handful of attempts with short back-off spends its whole allowance in well under one. An
+    /// attempt cap also shrinks the effective budget on a saturated node, which makes each attempt slower
+    /// without making it more patient — exactly when the wait was most worth making.</para>
+    ///
+    /// <para><c>&lt;= 0</c> disables retrying: the call is attempted once and any <c>MustRetry</c>
+    /// surfaces immediately. Default: 10 000 ms (10 s).</para>
+    /// </summary>
+    public int SequenceRetryBudgetMs { get; init; } = 10_000;
+
+    /// <summary>
     /// How long, in milliseconds, an explicit (client-driven) transaction may sit idle — no
     /// statement issued against it — before the background reaper rolls it back and releases its
     /// locks. "Idle" is measured from the last time the client referenced the transaction (its

@@ -292,6 +292,12 @@ internal sealed class MaterializedViewRefresher
     {
         NodeAst bodyAst = SQLParserProcessor.Parse(definition.Sql);
 
+        // Same resolution a query-time expansion does: the stored body names its sources by
+        // immutable id, so a rebuild reads whatever those ids point at now rather than whatever they
+        // were called when the view was created.
+        if (StoredBodyBinder.MayContainReferences(definition.Sql))
+            bodyAst = StoredBodyBinder.ResolveStoredForm(database.Schema, bodyAst, view.Name ?? "");
+
         await using SelectRowSource source = await executor
             .BuildMaterializedViewSourceAsync(database, bodyAst, ticket, snapshot).ConfigureAwait(false);
 

@@ -152,7 +152,43 @@ internal abstract class ValidatorBase
 
     protected static bool IsReservedName(string name)
     {
-        return name == "_id";            
+        return name == "_id";
+    }
+
+    /// <summary>
+    /// Refuses a relation name that would shadow the reference a stored view body uses to name a
+    /// relation by its immutable id.
+    /// </summary>
+    /// <remarks>
+    /// Relation names only — tables, views and materialized views share one namespace with those
+    /// references. Users, databases, columns and indexes are deliberately left alone: none of them
+    /// can be named in a FROM clause, so none of them can shadow anything.
+    /// </remarks>
+    protected static void ValidateNotReservedRelationName(string name, string kind)
+    {
+        if (!Catalogs.Models.StoredRelationRef.IsReservedRelationName(name))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"{kind} name '{name}' starts with '{Catalogs.Models.StoredRelationRef.Prefix}', which is " +
+            "reserved: stored view definitions use it to refer to a relation by its immutable id");
+    }
+
+    /// <summary>
+    /// Refuses a column name that would shadow the reference a stored view body uses to name a
+    /// column by its immutable id. The column-position counterpart of
+    /// <see cref="ValidateNotReservedRelationName"/>.
+    /// </summary>
+    protected static void ValidateNotReservedColumnName(string name, string kind)
+    {
+        if (!Catalogs.Models.StoredColumnRef.IsReservedColumnName(name))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"{kind} name '{name}' starts with '{Catalogs.Models.StoredColumnRef.Prefix}', which is " +
+            "reserved: stored view definitions use it to refer to a column by its immutable id");
     }
 }
 

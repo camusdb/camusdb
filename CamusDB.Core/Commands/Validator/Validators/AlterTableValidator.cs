@@ -24,6 +24,7 @@ internal sealed class AlterTableValidator : ValidatorBase
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Table name is required");
 
         ValidateIdentifier(ticket.Column.Name, "Column");
+        ValidateNotReservedColumnName(ticket.Column.Name, "Column");
 
         // Covers ADD COLUMN … COMMENT '…'; other operations carry no comment and pass a null.
         ValidateCommentLength(ticket.Column.Comment, $"Column '{ticket.Column.Name}'");
@@ -36,6 +37,7 @@ internal sealed class AlterTableValidator : ValidatorBase
         if (ticket.Operation == AlterTableOperation.RenameColumn)
         {
             ValidateIdentifier(ticket.NewName ?? "", "New column");
+            ValidateNotReservedColumnName(ticket.NewName ?? "", "New column");
 
             if (ticket.NewName!.StartsWith('~'))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,

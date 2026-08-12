@@ -93,14 +93,26 @@ internal static class ViewDefinitionBuilder
         // view's own column names would fail to resolve.
         NodeAst aliasedBody = ApplyOutputNames(normalizedBody, effectiveProjections, columns);
 
+        // Computed from the body while it still names its relations, because that is what the
+        // lookup below matches on. Binding first would leave nothing for it to resolve.
         (List<string> tableIds, List<string> viewIds) = ResolveDependencies(schema, aliasedBody);
+
+        // Also computed from the name-form body, and for the same reason: the analyzer resolves a
+        // column through the relation name or alias the FROM clause still carries.
+        List<string> columnIds = ViewColumnDependencyAnalyzer.Collect(schema, aliasedBody);
+
+        // The stored body refers to its relations by immutable id, so a rename is metadata-only and
+        // no dependent definition has to be rewritten to keep working. Names come back at every
+        // point a body is read or shown; see StoredBodyBinder.
+        NodeAst boundBody = StoredBodyBinder.BindStoredForm(schema, aliasedBody);
 
         return new ViewDefinition
         {
-            Sql = ViewBodyRenderer.RenderSelect(aliasedBody),
+            Sql = ViewBodyRenderer.RenderSelect(boundBody),
             Columns = columns,
             DependsOnTableIds = tableIds,
             DependsOnViewIds = viewIds,
+            DependsOnColumnIds = columnIds,
             CheckOption = checkOption,
             Owner = owner,
             OwnerId = ownerId,
@@ -109,9 +121,16 @@ internal static class ViewDefinitionBuilder
 
     /// <summary>
     /// Rebuilds the projection list so every item carries its final view column name as an explicit
-    /// alias. A projection that is already a bare identifier matching its output name is left alone,
-    /// so an ordinary view does not render as <c>id AS id</c>.
+    /// alias.
     /// </summary>
+    /// <remarks>
+    /// <b>Every</b> item, including one whose name already matches the column it selects. That looks
+    /// redundant and is not: the body's columns are stored by immutable id, so a projection written
+    /// <c>total</c> is stored as a token and would publish whatever that column is called at read
+    /// time — silently renaming the view's own output the first time the base column is renamed. The
+    /// alias is what pins the published name. It costs nothing to read, because the renderer omits an
+    /// alias that merely repeats what it aliases.
+    /// </remarks>
     private static NodeAst ApplyOutputNames(
         NodeAst select, List<NodeAst> projections, List<ViewColumnSchema> columns)
     {
@@ -124,10 +143,8 @@ internal static class ViewDefinitionBuilder
             string finalName = columns[i].Name;
 
             bool alreadyNamed =
-                (projection.nodeType == NodeType.Identifier &&
-                 string.Equals(projection.yytext, finalName, StringComparison.Ordinal)) ||
-                (projection.nodeType == NodeType.ExprAlias &&
-                 string.Equals(projection.rightAst?.yytext, finalName, StringComparison.Ordinal));
+                projection.nodeType == NodeType.ExprAlias &&
+                string.Equals(projection.rightAst?.yytext, finalName, StringComparison.Ordinal);
 
             NodeAst item;
             if (alreadyNamed)

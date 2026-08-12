@@ -138,7 +138,7 @@ internal sealed class SchemaQuerier
     /// so renames can rewrite it as a targeted AST edit. PostgreSQL's <c>pg_get_viewdef</c> behaves
     /// the same way for the same reason, so normalized output is expected rather than surprising.
     /// </remarks>
-    internal async IAsyncEnumerable<QueryResultRow> ShowCreateView(string viewName, ViewSchema view)
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateView(Schema schema, string viewName, ViewSchema view)
     {
         await Task.CompletedTask;
 
@@ -150,7 +150,7 @@ internal sealed class SchemaQuerier
 
         // The column list is emitted only when it renames something the body does not already
         // produce; echoing it unconditionally would add noise to every ordinary view.
-        sql.Append(" AS ").Append(definition.Sql);
+        sql.Append(" AS ").Append(RenderStoredBody(schema, definition, view.Name ?? viewName));
 
         if (definition.CheckOption == CheckOptionKind.Local)
             sql.Append(" WITH LOCAL CHECK OPTION");
@@ -172,7 +172,7 @@ internal sealed class SchemaQuerier
     /// that is the statement which reproduces it. Re-running the output of this statement has to give
     /// back the same object, and <c>WITH DATA</c> would give back a populated one.
     /// </remarks>
-    internal async IAsyncEnumerable<QueryResultRow> ShowCreateMaterializedView(TableSchema view)
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateMaterializedView(Schema schema, TableSchema view)
     {
         await Task.CompletedTask;
 
@@ -181,7 +181,8 @@ internal sealed class SchemaQuerier
                 CamusDBErrorCodes.SystemSpaceCorrupt, $"Materialized view '{view.Name}' has no stored definition");
 
         StringBuilder sql = new();
-        sql.Append("CREATE MATERIALIZED VIEW `").Append(view.Name).Append("` AS ").Append(definition.Sql);
+        sql.Append("CREATE MATERIALIZED VIEW `").Append(view.Name).Append("` AS ")
+           .Append(RenderStoredBody(schema, definition, view.Name ?? ""));
 
         if (!view.IsPopulated)
             sql.Append(" WITH NO DATA");
@@ -191,6 +192,31 @@ internal sealed class SchemaQuerier
             { "materialized_view", new ColumnValue(ColumnType.String, view.Name ?? "") },
             { "create materialized view", new ColumnValue(ColumnType.String, sql.ToString()) }
         });
+    }
+
+    /// <summary>
+    /// The stored body as a user should read it: relation references resolved to the names those
+    /// relations currently answer to.
+    /// </summary>
+    /// <remarks>
+    /// <para>A body binds its sources by immutable id, so the stored text is not printable as-is —
+    /// a name is presentation, produced here. This is why no second, pre-rendered copy of the body
+    /// is kept: one authoritative form that renders on the way out cannot drift from itself, and
+    /// two copies is exactly the hazard binding by id exists to remove.</para>
+    ///
+    /// <para>Costs a parse and a re-render per statement, which is acceptable for <c>SHOW</c> and
+    /// happens only for a body that actually carries a reference — a body written before ids were
+    /// stored is returned untouched, character for character.</para>
+    /// </remarks>
+    private static string RenderStoredBody(Schema schema, ViewDefinition definition, string viewName)
+    {
+        if (!DDL.StoredBodyBinder.MayContainReferences(definition.Sql))
+            return definition.Sql;
+
+        NodeAst body = SQLParserProcessor.Parse(definition.Sql);
+
+        return DDL.ViewBodyRenderer.RenderSelect(
+            DDL.StoredBodyBinder.ResolveStoredForm(schema, body, viewName));
     }
 
     /// <summary>

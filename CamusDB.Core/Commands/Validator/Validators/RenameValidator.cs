@@ -39,5 +39,7 @@ internal sealed class RenameValidator : ValidatorBase
         if (IsReservedName(payload.NewName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                 $"'{payload.NewName}' is a reserved name and cannot be used as a table name");
+
+        ValidateNotReservedRelationName(payload.NewName, "New table");
     }
 }

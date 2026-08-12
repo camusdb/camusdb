@@ -1955,6 +1955,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
+        // Checked before the statement can be forwarded, so the caller is refused here rather than
+        // learning about it from another node. The node that ultimately applies the change runs this
+        // same path and re-checks against its own schema.
+        RequireNoViewDependsOnAlteredColumn(database, ticket);
+
         bool? forwarded = await TryForwardAlterTableAsync(database, ticket).ConfigureAwait(false);
         if (forwarded is not null)
             return forwarded.Value;
@@ -1968,6 +1973,35 @@ public sealed class CommandExecutor : IAsyncDisposable
             tx => tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx),
             postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses a <c>DROP COLUMN</c> or <c>RENAME COLUMN</c> that a view reads. Adding a column
+    /// breaks nothing, so it is not checked.
+    /// </summary>
+    /// <remarks>
+    /// Resolves the column to its immutable id first: views record what they read by id, and a name
+    /// is exactly the thing these two statements are about to change.
+    /// </remarks>
+    private static void RequireNoViewDependsOnAlteredColumn(DatabaseDescriptor database, AlterTableTicket ticket)
+    {
+        if (ticket.Operation is not (AlterTableOperation.DropColumn or AlterTableOperation.RenameColumn))
+            return;
+
+        if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? tableSchema))
+            return;
+
+        string columnName = ticket.Column.Name;
+
+        TableColumnSchema? column = tableSchema.Columns?
+            .FirstOrDefault(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+
+        if (column?.Id is not { Length: > 0 } columnId)
+            return;
+
+        Controllers.DDL.ViewDependencyMaintainer.RequireNoDependentViewsOnColumn(
+            database.Schema, ticket.TableName, columnName, columnId,
+            renaming: ticket.Operation == AlterTableOperation.RenameColumn);
     }
 
     /// <summary>
@@ -2676,9 +2710,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         TableDescriptor renameTable = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        dependentViews ??= Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
-            database.Schema, renameTable.Id, ticket.TableName, ticket.NewName,
-            sql => SQLParserProcessor.Parse(sql, sqlParserCache));
+        dependentViews ??= Controllers.DDL.ViewDependencyMaintainer.BuildRenameConversions(
+            database.Schema, renameTable.Id, sql => SQLParserProcessor.Parse(sql, sqlParserCache));
 
         return await ExecuteDdlInTransaction(database,
             tx => catalogs.RenameTable(database, ticket, tx, dependentViews),
@@ -4070,11 +4103,11 @@ public sealed class CommandExecutor : IAsyncDisposable
                     string newViewName = ast.rightAst!.yytext!;
 
                     // A view can be read by other views, so renaming one has the same single-delta
-                    // requirement as renaming a table: the dependents' rewritten bodies ride the
-                    // rename rather than following it.
+                    // requirement as renaming a table: any dependent still bound by name is
+                    // converted to ids and rides the rename rather than following it.
                     Dictionary<string, Catalogs.Models.ViewDefinition>? viewRenameRewrites =
-                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
-                            database.Schema, renamedView.Id!, renamedViewName, newViewName,
+                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameConversions(
+                            database.Schema, renamedView.Id!,
                             sql => SQLParserProcessor.Parse(sql, sqlParserCache));
 
                     await catalogs.RenameViewAsync(
@@ -4144,11 +4177,11 @@ public sealed class CommandExecutor : IAsyncDisposable
                     TableSchema renamedMatView = Controllers.DDL.MaterializedViewRefresher
                         .RequireMaterializedView(database, oldMatViewName);
 
-                    // Same single-delta rule as a table rename: the dependents' rewritten bodies ride
-                    // the rename rather than following it.
+                    // Same single-delta rule as a table rename: a dependent still bound by name is
+                    // converted to ids and rides the rename rather than following it.
                     Dictionary<string, Catalogs.Models.ViewDefinition>? matViewRewrites =
-                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
-                            database.Schema, renamedMatView.Id!, oldMatViewName, newMatViewName,
+                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameConversions(
+                            database.Schema, renamedMatView.Id!,
                             sql => SQLParserProcessor.Parse(sql, sqlParserCache));
 
                     await RenameTable(new RenameTableTicket(
@@ -4196,6 +4229,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     AlterTableTicket alterTableTicket = sqlExecutor.CreateAlterTableTicket(ticket, ast);
                     validator.Validate(alterTableTicket);
+                    RequireNoViewDependsOnAlteredColumn(database, alterTableTicket);
 
                     bool? forwarded = await TryForwardAlterTableAsync(database, alterTableTicket).ConfigureAwait(false);
                     if (forwarded is not null)
@@ -4264,6 +4298,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                 {
                     AlterTableTicket renameColumnTicket = sqlExecutor.CreateAlterTableTicket(ticket, ast);
                     validator.Validate(renameColumnTicket);
+                    RequireNoViewDependsOnAlteredColumn(database, renameColumnTicket);
 
                     bool? forwarded = await TryForwardAlterTableAsync(database, renameColumnTicket).ConfigureAwait(false);
                     if (forwarded is not null)
@@ -4348,15 +4383,15 @@ public sealed class CommandExecutor : IAsyncDisposable
 
                     TableDescriptor renameTableDesc = await tableOpener.Open(database, oldTableName).ConfigureAwait(false);
 
-                    // A view stores its body as text, so a rename would leave every dependent naming a
-                    // relation that no longer exists. The rewrites are computed here and carried IN the
-                    // rename's own delta: applied afterwards, there would be an interval in which a
-                    // stale body still names the old relation — and since the rename frees that name,
-                    // anything created under it in the meantime would be read through the stale body
-                    // and return its rows.
+                    // A body written before relation ids were stored names its sources in text, so a
+                    // rename would leave it pointing at something that no longer exists. Such a body
+                    // is rebound to ids here and carried IN the rename's own delta: converted
+                    // afterwards, there would be an interval in which it still names the old
+                    // relation — and since the rename frees that name, anything created under it in
+                    // the meantime would be read through that body and return its rows.
                     Dictionary<string, Catalogs.Models.ViewDefinition>? renameRewrites =
-                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameRewrites(
-                            database.Schema, renameTableDesc.Id, oldTableName, newTableName,
+                        Controllers.DDL.ViewDependencyMaintainer.BuildRenameConversions(
+                            database.Schema, renameTableDesc.Id,
                             sql => SQLParserProcessor.Parse(sql, sqlParserCache));
 
                     return await ExecuteDdlInTransaction(database, async tx =>
@@ -5621,7 +5656,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateViewSchema;
 
-                    return (database, schemaQuerier.ShowCreateView(showViewName, shownView));
+                    return (database, schemaQuerier.ShowCreateView(database.Schema, showViewName, shownView));
                 }
 
             case NodeType.ShowCreateMaterializedView:
@@ -5632,7 +5667,7 @@ public sealed class CommandExecutor : IAsyncDisposable
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateMaterializedViewSchema;
 
-                    return (database, schemaQuerier.ShowCreateMaterializedView(shownMatView));
+                    return (database, schemaQuerier.ShowCreateMaterializedView(database.Schema, shownMatView));
                 }
 
             case NodeType.ShowOrphanTables:

@@ -105,6 +105,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # where each of those conditions takes longer in wall-clock without taking more attempts.
 # transaction_finalize_retry_budget_ms: 15000  # total retry budget per finalize; <= 0 = attempt once
 
+# Id-counter retry budget. Database ids, table ids, and the registry's cross-node generation stamp all
+# come from persistent monotonic counters, and a call against one is refused while its Raft partition
+# has no confirmed leader — a node still joining, or an election in flight. Every CREATE TABLE / VIEW /
+# CTAS allocates an id first, so this budget is what decides whether an election is invisible or fails
+# the statement with CADB0535. Sized against the election, which runs in seconds.
+# sequence_retry_budget_ms: 10000  # total retry budget per counter call; <= 0 = attempt once
+
 # Abandoned explicit-transaction reaper. A client that opens a transaction (/start-transaction)
 # and never commits/rolls back would otherwise hold its locks indefinitely (a Serializable+RW
 # transaction's heartbeat renews them forever). The reaper rolls back any explicit transaction

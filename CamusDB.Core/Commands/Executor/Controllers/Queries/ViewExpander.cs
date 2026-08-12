@@ -243,6 +243,12 @@ internal static class ViewExpander
 
         NodeAst body = parseBody(sql);
 
+        // The stored body names its relations by immutable id, so the ids are resolved against the
+        // current schema before anything binds against them. Skipped outright for a body that
+        // carries none, which is every body written before ids were stored.
+        if (DDL.StoredBodyBinder.MayContainReferences(sql))
+            body = DDL.StoredBodyBinder.ResolveStoredForm(schema, body, name);
+
         expansionStack.Add(view.Id);
         try
         {

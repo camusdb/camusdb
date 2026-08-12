@@ -453,6 +453,13 @@ public class ConfigDefinition
     public int TransactionFinalizeRetryBudgetMs { get; set; } = 15_000;
 
     /// <summary>
+    /// Total wall-clock budget in milliseconds for retrying a monotonic id counter (database id, table
+    /// id, registry generation) against <c>MustRetry</c> before failing the statement with CADB0535.
+    /// &lt;= 0 attempts the call once. Default 10 000 (10 s).
+    /// </summary>
+    public int SequenceRetryBudgetMs { get; set; } = 10_000;
+
+    /// <summary>
     /// Idle timeout in milliseconds for explicit (client-driven) transactions before the background
     /// reaper rolls them back. &lt;= 0 disables the reaper. Default 300 000 (5 min).
     /// </summary>

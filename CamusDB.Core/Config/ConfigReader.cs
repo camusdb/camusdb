@@ -80,6 +80,7 @@ public class ConfigReader
         "range_lock_expires_ms",
         "max_serializable_transaction_lifetime_ms",
         "transaction_finalize_retry_budget_ms",
+        "sequence_retry_budget_ms",
         "transaction_idle_timeout_ms",
         "transaction_reaper_interval_ms",
         "prepared_statement_idle_timeout_ms",

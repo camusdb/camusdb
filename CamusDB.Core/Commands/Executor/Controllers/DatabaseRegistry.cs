@@ -10,6 +10,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Util;
+using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -68,13 +69,27 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // Cross-node cache-coherence stamp. The in-memory caches above are loaded once at OpenAsync and
     // lazily backfilled, so without this a name dropped/renamed on ANOTHER node stays resolvable here from
     // a stale cache hit — a namespace split-brain that, with deferred drop, lets this node read/mutate a
-    // detached-but-retained keyspace. Every mutation (Register/Unregister/Rename) advances a shared,
-    // Raft-replicated monotonic generation sequence; a cache HIT is trusted only while this node's
-    // last-loaded generation still matches the authoritative one, otherwise the cache is revalidated
-    // against KV before resolving. `loadedGeneration` is the generation this node's cache reflects; it is
-    // read lock-free on the hit path (a stale read only forces a redundant, harmless revalidation).
+    // detached-but-retained keyspace. Every mutation (Register/Unregister/Rename) rewrites a single shared,
+    // Raft-replicated key; a cache HIT is trusted only while this node's last-loaded generation still
+    // matches the authoritative one, otherwise the cache is revalidated against KV before resolving.
+    // `loadedGeneration` is the generation this node's cache reflects; it is read lock-free on the hit path
+    // (a stale read only forces a redundant, harmless revalidation).
     private long loadedGeneration;
-    private string GenerationSequenceKey => $"{keyPrefix}dbregistry/generation";
+
+    /// <summary>
+    /// The stamp's key. Its <em>revision</em> — not its value — is the generation: the store assigns each
+    /// write of a key a strictly increasing revision, ordered by that key's partition leader, which is
+    /// exactly the "has anything changed since I last looked" signal a cache needs.
+    ///
+    /// <para>Deliberately a plain key rather than the sequence this once was. A sequence's durable value is
+    /// the high-water mark of a <em>reserved block</em>, so it does not move at all for the hundreds of
+    /// allocations served from inside that block — a reader would see one unchanged number across hundreds
+    /// of mutations and keep trusting a cache that had long gone stale. Nor are the values a sequence hands
+    /// out ordered across nodes: a node draining an older block can issue a lower value later than another
+    /// node issued a higher one, so they cannot be compared as generations at all. Sequences promise that
+    /// no value is handed out twice, which is not what a change-detector needs.</para>
+    /// </summary>
+    private string GenerationKey => $"{keyPrefix}dbregistry/generation";
 
     private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -83,6 +98,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     };
 
     private const int MaxRetries = 10;
+
+    // Payload for the generation stamp's key. The revision the store assigns each write is the generation,
+    // so the bytes are never read — they exist only because a write needs a value. Carries the writer's
+    // node id so a dump of the key says which node last moved the stamp.
+    private byte[] GenerationMarker => System.Text.Encoding.UTF8.GetBytes(localNodeId.ToString());
 
     // A drop-intent fence carries a bounded lease (its KV key's native expiry, CamusDBOptions.FenceLeaseMs).
     // If the owner crashes without releasing it, the lease lapses and any node can then re-acquire — a
@@ -195,100 +215,195 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     public Task<string> AllocateTableIdAsync() => AllocateFromSequenceAsync(TableSequenceKey, "table");
 
     /// <summary>
-    /// Core sequence-allocation helper. Creates the sequence on first use (idempotent) and
-    /// advances it once, returning the allocated counter value encoded as a base-62 string.
-    /// Only the proposer/leader calls this; followers apply the pre-allocated id from the
-    /// replicated payload and never invoke the allocator.
+    /// Core sequence-allocation helper. Advances the counter once — creating it first if this is its
+    /// very first use — and returns the allocated value encoded as a base-62 string. Only the
+    /// proposer/leader calls this; followers apply the pre-allocated id from the replicated payload
+    /// and never invoke the allocator.
     /// </summary>
     private async Task<string> AllocateFromSequenceAsync(string seqName, string label)
     {
-        // Ensure the sequence exists (idempotent — AlreadyExists is fine)
-        (SequenceResponseType createType, _) = await kahuna.LocateAndCreateSequence(
-            seqName, initialValue: 0, increment: 1, maxValue: null,
-            SequenceDurability.Persistent, CancellationToken.None
-        ).ConfigureAwait(false);
-
-        if (createType is not (SequenceResponseType.Success or SequenceResponseType.AlreadyExists))
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to ensure {label} id sequence: {createType}");
-
-        // Advance the counter atomically — cluster-safe across all nodes
-        SequenceResponseType nextType;
-        SequenceAllocation allocation;
-        int retries = 0;
-        do
-        {
-            if (retries > 0)
-                await Task.Delay(retries * 10).ConfigureAwait(false);
-
-            (nextType, allocation) = await kahuna.LocateAndNextSequenceValue(
-                seqName, null, SequenceDurability.Persistent, CancellationToken.None
-            ).ConfigureAwait(false);
-        }
-        while (nextType == SequenceResponseType.MustRetry && ++retries < MaxRetries);
+        (SequenceResponseType nextType, SequenceAllocation allocation) =
+            await AdvanceSequenceAsync(seqName).ConfigureAwait(false);
 
         if (nextType != SequenceResponseType.Success)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to allocate {label} id: {nextType}");
+            throw SequenceFailure(nextType, $"Failed to allocate {label} id");
 
         return Base62.Encode(allocation.Start);
     }
+
+    /// <summary>
+    /// Advances <paramref name="seqName"/> by one, creating the counter on the way if it does not exist
+    /// yet, and riding out <see cref="SequenceResponseType.MustRetry"/> on both calls.
+    ///
+    /// <para>The counter is advanced first and created only on <see cref="SequenceResponseType.NotFound"/>:
+    /// it exists on every allocation after the very first, so leading with an unconditional create would
+    /// put an extra round trip — and an extra chance to fail — in front of every table id, for a call
+    /// whose answer is almost always <c>AlreadyExists</c>.</para>
+    ///
+    /// <para>One budget covers the whole allocation rather than each call within it. The caller is a user's
+    /// DDL statement waiting on a single answer, and it should wait out one election — not one per round
+    /// trip, which is what a per-call budget would silently multiply it into.</para>
+    /// </summary>
+    private async Task<(SequenceResponseType, SequenceAllocation)> AdvanceSequenceAsync(string seqName)
+    {
+        ValueStopwatch elapsed = ValueStopwatch.StartNew();
+
+        (SequenceResponseType nextType, SequenceAllocation allocation) = await RetryWhileMustRetryAsync(
+            () => kahuna.LocateAndNextSequenceValue(
+                seqName, null, SequenceDurability.Persistent, CancellationToken.None),
+            elapsed
+        ).ConfigureAwait(false);
+
+        if (nextType != SequenceResponseType.NotFound)
+            return (nextType, allocation);
+
+        (SequenceResponseType createType, _) = await RetryWhileMustRetryAsync(
+            () => kahuna.LocateAndCreateSequence(
+                seqName, initialValue: 0, increment: 1, maxValue: null,
+                SequenceDurability.Persistent, CancellationToken.None),
+            elapsed
+        ).ConfigureAwait(false);
+
+        // AlreadyExists is not a failure: another node created the counter between our advance and our
+        // create, and its incarnation is the one to advance.
+        if (createType is not (SequenceResponseType.Success or SequenceResponseType.AlreadyExists))
+            return (createType, default);
+
+        return await RetryWhileMustRetryAsync(
+            () => kahuna.LocateAndNextSequenceValue(
+                seqName, null, SequenceDurability.Persistent, CancellationToken.None),
+            elapsed
+        ).ConfigureAwait(false);
+    }
+
+    // Capped exponential back-off for the sequence retry loop: 25, 50, 100, 200, 400, 500, 500…
+    private const int SequenceRetryBaseDelayMs = 25;
+    private const int SequenceRetryMaxDelayMs = 500;
+
+    private static int SequenceRetryDelayMs(int attempt) =>
+        (int)Math.Min((long)SequenceRetryBaseDelayMs << Math.Min(attempt, 16), SequenceRetryMaxDelayMs);
+
+    /// <summary>
+    /// Runs a sequence call until it stops answering <see cref="SequenceResponseType.MustRetry"/>,
+    /// bounded by the wall-clock <see cref="CamusDBOptions.SequenceRetryBudgetMs"/>.
+    ///
+    /// <para><c>MustRetry</c> is the storage layer's "this sequence's partition has no confirmed leader
+    /// right now" answer — a node still joining, an election in flight, or leadership moving while the
+    /// request was forwarded. It carries no state change, so every sequence call must ride it out rather
+    /// than surface it: giving up would fail a user's CREATE TABLE over a routine leadership blip.</para>
+    ///
+    /// <para>The budget is time, not attempts, because what is being waited on is an election — which
+    /// takes seconds, and takes no fewer of them when a saturated node makes each attempt slower. The
+    /// loop stops before a sleep that would overshoot, so it never exceeds the budget by a whole back-off
+    /// interval and a non-positive budget yields exactly one attempt.</para>
+    ///
+    /// <para><paramref name="elapsed"/> is started by the caller and shared across the calls making up one
+    /// allocation, so the budget bounds the operation the user is waiting on rather than each round trip.</para>
+    /// </summary>
+    private Task<(SequenceResponseType, T)> RetryWhileMustRetryAsync<T>(
+        Func<Task<(SequenceResponseType, T)>> sequenceCall,
+        ValueStopwatch elapsed)
+        => RetryWhileAsync(sequenceCall, r => r.Item1 == SequenceResponseType.MustRetry, elapsed);
+
+    /// <summary>
+    /// The retry loop itself, over any call whose result can say "not right now". Shared by the
+    /// sequence-backed id counters and the generation stamp's write, which fail the same way — the
+    /// partition has no confirmed leader at that instant — and so must wait the same way.
+    /// </summary>
+    private async Task<T> RetryWhileAsync<T>(
+        Func<Task<T>> call,
+        Func<T, bool> shouldRetry,
+        ValueStopwatch elapsed)
+    {
+        int attempt = 0;
+
+        while (true)
+        {
+            T result = await call().ConfigureAwait(false);
+
+            if (!shouldRetry(result))
+                return result;
+
+            int delayMs = SequenceRetryDelayMs(attempt++);
+
+            if (elapsed.GetElapsedMilliseconds() + delayMs > options.SequenceRetryBudgetMs)
+                return result;
+
+            await Task.Delay(delayMs).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Builds the failure for a sequence call that never reached <see cref="SequenceResponseType.Success"/>.
+    /// An exhausted <see cref="SequenceResponseType.MustRetry"/> means the partition owning the counter
+    /// stayed leaderless for the whole retry window: nothing was allocated and nothing is damaged, so it is
+    /// reported as transient unavailability the caller can simply re-issue. Any other response means the
+    /// system keyspace did not answer as it must, which is what
+    /// <see cref="CamusDBErrorCodes.SystemSpaceCorrupt"/> is for.
+    /// </summary>
+    private static CamusDBException SequenceFailure(SequenceResponseType type, string message) =>
+        new(
+            type == SequenceResponseType.MustRetry
+                ? CamusDBErrorCodes.SequenceUnavailable
+                : CamusDBErrorCodes.SystemSpaceCorrupt,
+            $"{message}: {type}");
 
     // -----------------------------------------------------------------------
     // Cross-node cache-coherence generation stamp
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Reads the authoritative registry generation (the current value of the shared generation sequence)
-    /// without advancing it. Returns 0 when the sequence does not exist yet (no mutation has occurred).
-    /// A cache hit compares this against <c>loadedGeneration</c> to decide whether the local cache is
-    /// still current.
+    /// Reads the authoritative registry generation — the revision of <see cref="GenerationKey"/> — without
+    /// moving it. Returns 0 when no mutation has ever been recorded. A cache hit compares this against
+    /// <c>loadedGeneration</c> to decide whether the local cache is still current.
+    ///
+    /// <para>Reported as revision + 1 so that "never written" stays distinguishable from the first write,
+    /// whose revision is 0. Without the offset, a node holding entries loaded before the very first
+    /// mutation would compare 0 against 0 and trust a cache that had already been invalidated.</para>
+    ///
+    /// <para>A read that does not answer reports 0, which is the conservative direction: 0 matches no cache
+    /// that has adopted a real generation, so the resolve revalidates against KV rather than trusting a
+    /// possibly stale hit. That is why this read is deliberately not retried — an unavailable partition
+    /// costs an extra point read, not correctness, and this runs under every database open.</para>
     /// </summary>
     private async Task<long> ReadGenerationAsync()
     {
-        (SequenceResponseType type, ReadOnlySequenceEntry? entry) = await kahuna.LocateAndGetSequence(
-            GenerationSequenceKey, SequenceDurability.Persistent, CancellationToken.None
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, GenerationKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
         ).ConfigureAwait(false);
 
-        return type == SequenceResponseType.Success && entry is not null ? entry.CurrentValue : 0;
+        return type == KeyValueResponseType.Get && entry is not null ? entry.Revision + 1 : 0;
     }
 
     /// <summary>
-    /// Advances the shared registry generation so every other node's next cache hit revalidates against
-    /// KV. Called after a mutation (Register/Unregister/Rename) has durably committed, so the generation
-    /// only moves once the change is visible. Best-effort: if the bump fails the mutation is already
-    /// committed and must not be undone — coherence for that one change degrades to "observed on the next
-    /// mutation or restart" rather than immediately, which is logged. Returns the new generation (or the
-    /// current local value on failure) so the mutating node can adopt it and avoid revalidating itself.
+    /// Moves the shared registry generation so every other node's next cache hit revalidates against KV.
+    /// Called after a mutation (Register/Unregister/Rename) has durably committed, so the generation only
+    /// moves once the change is visible. Best-effort: if the write fails the mutation is already committed
+    /// and must not be undone — coherence for that one change degrades to "observed on the next mutation or
+    /// restart" rather than immediately. Returns the new generation (or the current local value on failure)
+    /// so the mutating node can adopt it and avoid revalidating itself.
+    ///
+    /// <para>The value written is immaterial — the revision the store assigns the write is the generation —
+    /// so this is a blind write with no read-modify-write and therefore no race between two nodes bumping
+    /// at once: each gets its own revision, and both are above what any reader last adopted.</para>
+    ///
+    /// <para>Because the failure is silent, the bounded retry matters here as much as it does for id
+    /// allocation: a leadership blip that skipped the bump would leave every other node serving a stale
+    /// registry cache with nothing said about it anywhere.</para>
     /// </summary>
     private async Task<long> BumpGenerationAsync()
     {
-        (SequenceResponseType createType, _) = await kahuna.LocateAndCreateSequence(
-            GenerationSequenceKey, initialValue: 0, increment: 1, maxValue: null,
-            SequenceDurability.Persistent, CancellationToken.None
+        (KeyValueResponseType type, long revision, _) = await RetryWhileAsync(
+            () => kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, GenerationKey, GenerationMarker, null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None),
+            r => r.Item1 is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication,
+            ValueStopwatch.StartNew()
         ).ConfigureAwait(false);
 
-        if (createType is SequenceResponseType.Success or SequenceResponseType.AlreadyExists)
-        {
-            SequenceResponseType nextType;
-            SequenceAllocation allocation = default;
-            int retries = 0;
-            do
-            {
-                if (retries > 0)
-                    await Task.Delay(retries * 10).ConfigureAwait(false);
-
-                (nextType, allocation) = await kahuna.LocateAndNextSequenceValue(
-                    GenerationSequenceKey, null, SequenceDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
-            }
-            while (nextType == SequenceResponseType.MustRetry && ++retries < MaxRetries);
-
-            if (nextType == SequenceResponseType.Success)
-                return allocation.Start;
-        }
+        if (type == KeyValueResponseType.Set)
+            return revision + 1;
 
         return Volatile.Read(ref loadedGeneration);
     }
