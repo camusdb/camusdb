@@ -102,6 +102,31 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         Assert.AreEqual(0, await CountKeysAsync($"{dbId}/meta", $"{dbId}/"), "meta namespace must be physically purged");
     }
 
+    /// <summary>
+    /// Losing leadership right before the sweep must not turn into "nothing was due": the leadership
+    /// check waits out an election, so the sweep still runs and still reclaims.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task Gc_ReclaimsAfterLeadershipIsLostImmediatelyBeforeTheSweep()
+    {
+        CamusDBOptions options = Options with { OrphanRetentionMs = 1 };
+
+        (string dbName, _, CommandExecutor executor, string dbId, _) = await SetupDbWithRows(2, options);
+        await executor.DropDatabase(new DropDatabaseTicket(dbName));
+
+        Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present");
+
+        await Task.Delay(50);
+
+        await executor.StepDownAutoAnalyzeLeadershipForTestsAsync();
+
+        int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
+
+        Assert.GreaterOrEqual(reclaimed, 1, "a re-election must not be reported as nothing to reclaim");
+        Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "orphan record must be gone after reclaim");
+    }
+
     [Test]
     [NonParallelizable]
     public async Task Gc_LeavesUnexpiredDatabaseOrphan()

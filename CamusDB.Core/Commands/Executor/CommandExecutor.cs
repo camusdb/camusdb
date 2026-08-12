@@ -965,11 +965,29 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// completes, and returns the number of orphans reclaimed. Lets a test drive the GC deterministically
     /// (with a tiny <see cref="CamusDBOptions.OrphanRetentionMs"/>) instead of waiting for the timer.
     /// </summary>
+    /// <remarks>
+    /// <para><b>Waits for the node to finish starting before sweeping.</b> The sweep is gated on this
+    /// node leading the registry partition, and that check answers <c>false</c> <em>immediately</em>
+    /// — without its usual wait for an election — while the Raft manager is still initializing. The
+    /// sweep then returns 0, which a caller cannot tell apart from "nothing was due". Everything
+    /// before this point is reachable without the node being started: the orphan record is written and
+    /// read through ordinary KV paths.</para>
+    ///
+    /// <para>Nothing is needed for the election itself, which the leadership check already waits out.
+    /// The background sweep needs neither, because it runs on an interval and tries again next tick.</para>
+    /// </remarks>
     internal async Task<int> RunOrphanReclaimForTestsAsync()
     {
         if (snapshotRenewerStart is not null)
             await snapshotRenewerStart.ConfigureAwait(false);
-        return orphanReclaimer is null ? 0 : await orphanReclaimer.ReclaimDueAsync(CancellationToken.None).ConfigureAwait(false);
+
+        if (orphanReclaimer is null)
+            return 0;
+
+        if (sharedNode is not null)
+            await sharedNode.WaitUntilStartedAsync().ConfigureAwait(false);
+
+        return await orphanReclaimer.ReclaimDueAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>

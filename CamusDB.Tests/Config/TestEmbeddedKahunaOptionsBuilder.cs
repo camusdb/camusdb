@@ -223,7 +223,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void UnsetSharedMemoryFields_SizeProportionallyToMachineMemory()
     {
         // Unset shared-memory knobs are sized against the machine (respecting container limits)
-        // rather than left at the fixed baseline: block cache = 25% of RAM clamped to [320 MB, 8 GB],
+        // rather than left at the fixed baseline: block cache = 10% of RAM clamped to [320 MB, 2 GB],
         // memtable budget = a quarter of that clamped to [128 MB, 1 GB]. The expected values are
         // recomputed here from the same input the builder reads, so the assertion holds on any
         // machine — hardcoding the baseline is what made this test machine-dependent before.
@@ -231,7 +231,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
 
-        int expectedBlockCacheMb = (int)Math.Clamp(totalRam / 4 / OneMb, 320, 8192);
+        int expectedBlockCacheMb = (int)Math.Clamp(totalRam / 10 / OneMb, 320, 2048);
         int expectedMemtableMb   = (int)Math.Clamp(expectedBlockCacheMb / 4, 128, 1024);
 
         KahunaOptionsConfig kahuna = new();
@@ -251,12 +251,47 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     {
         // Guards the clamp bounds independently of the machine this runs on: a very small container
         // must still get the 320/128 MB floor, and a very large host must not hand RocksDB more than
-        // the 8 GB / 1 GB ceiling.
+        // the 2 GB / 1 GB ceiling — an unconfigured node usually shares a developer workstation or a
+        // CI container with the rest of the toolchain, so the ceiling matters more than the fraction.
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-clamps", kahuna, CamusDBOptions.Default);
 
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.InRange(320, 8192));
+        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.InRange(320, 2048));
         Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.InRange(128, 1024));
+
+        // The KV actor caches are the other half of the default footprint; their per-actor ceiling
+        // moved with the block cache, so pin it here too.
+        Assert.That(built.MaxBytesPerActor, Is.InRange(8L * 1024 * 1024, 2048L * 1024 * 1024));
+    }
+
+    [Test]
+    public void ActorCacheFloor_BoundsTheLayerNotEachActor()
+    {
+        // The per-actor byte budget used to carry a 64 MB floor, which the actor count multiplied:
+        // with one actor per CPU, a many-core machine claimed 64 MB x cores however little RAM it
+        // had — 1 GB of a 4 GB container, four times the share the layer was meant to take. The
+        // floor now bounds the layer as a whole, so raising the actor count splits a fixed budget
+        // instead of growing it.
+        const long OneMb = 1024L * 1024;
+        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
+
+        long expectedLayerBytes = Math.Max(totalRam / 16, 64L * OneMb);
+
+        EmbeddedKahunaOptions few = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/actor-floor-few", new KahunaOptionsConfig { KeyValueWorkers = 4 }, CamusDBOptions.Default);
+
+        EmbeddedKahunaOptions many = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/actor-floor-many", new KahunaOptionsConfig { KeyValueWorkers = 32 }, CamusDBOptions.Default);
+
+        Assert.That(few.MaxBytesPerActor * 4, Is.LessThanOrEqualTo(expectedLayerBytes));
+
+        // At 32 actors the layer may only exceed its budget through the 8 MB per-actor minimum, which
+        // exists so an individual cache stays large enough to be worth having.
+        Assert.That(many.MaxBytesPerActor * 32, Is.LessThanOrEqualTo(Math.Max(expectedLayerBytes, 32 * 8L * OneMb)));
+
+        // More actors must never hand each actor more memory.
+        Assert.That(many.MaxBytesPerActor, Is.LessThanOrEqualTo(few.MaxBytesPerActor));
     }
 
     [Test]

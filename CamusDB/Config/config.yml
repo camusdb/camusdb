@@ -366,22 +366,26 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # a no-op otherwise). One block cache + one write-buffer manager serve both databases,
 #   # bounding total RocksDB memory with a single budget instead of two.
 #   rocksdb_shared_memory: true                 # set false to give each database its own budget
-#   rocksdb_shared_memory_budget_mb: 2048       # total shared block-cache budget (MiB); unset => 25% of RAM
+#   rocksdb_shared_memory_budget_mb: 2048       # total shared block-cache budget (MiB); unset => 10% of RAM
 #   rocksdb_shared_memtable_budget_mb: 512      # memtable sub-budget (MiB), charged INSIDE the total budget
 #                                               # (not added to it); must be <= the total. Unset => a quarter of it
 #
 #   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized
 #   # from the machine's available memory at startup (container limits respected), not left at a fixed
-#   # value: block cache = 25% of RAM clamped to [320 MiB, 8 GiB]; memtable sub-budget = a quarter of
-#   # the block cache clamped to [128 MiB, 1 GiB]; the key/value actor caches together take 12.5% of
-#   # RAM, split across kahuna.key_value_workers actors (default: one per CPU) and clamped to
-#   # [64 MiB, 4 GiB] each, with max_entries_per_actor derived at ~512 B/entry, clamped to [50k, 4M].
-#   # That is roughly 40% of RAM across both cache layers -- a database server's buffer-pool
-#   # assumption. Setting a key explicitly always wins over the computed value.
+#   # value: block cache = 10% of RAM clamped to [320 MiB, 2 GiB]; memtable sub-budget = a quarter of
+#   # the block cache clamped to [128 MiB, 1 GiB]; the key/value actor caches together take 6.25% of
+#   # RAM (at least 64 MiB for the layer), split across kahuna.key_value_workers actors (default: one
+#   # per CPU) and clamped to [8 MiB, 2 GiB] each -- adding cores splits that budget further rather
+#   # than growing it -- with max_entries_per_actor derived at ~512 B/entry, clamped to [10k, 4M].
+#   # That is roughly 16% of RAM across both cache layers, and never more than 4 GiB in total however
+#   # large the machine is -- the defaults assume a shared developer workstation or CI container, not a
+#   # dedicated server. Setting a key explicitly always wins over the computed value.
 #   #
-#   # Worked example, 8 GiB machine, nothing set: block cache 2048 MiB, memtable 512 MiB, actor caches
-#   # 1 GiB total => ~3.5 GiB. To hand most of an 8 GiB machine to CamusDB, set all four together and
-#   # keep ~2.5 GiB for the CLR heap, RocksDB overhead outside the cache, and the OS:
+#   # Worked example, 8 GiB / 8-core machine, nothing set: block cache 819 MiB, memtable 204 MiB, actor
+#   # caches 64 MiB x 8 = 512 MiB => ~1.5 GiB. The same 8 GiB box with 32 cores still spends 512 MiB on
+#   # actor caches, at 16 MiB each. A dedicated database server should raise all four. To hand most of an
+#   # 8 GiB machine to CamusDB, set them together and keep ~2.5 GiB for the CLR heap, RocksDB overhead
+#   # outside the cache, and the OS:
 #   #   rocksdb_shared_memory_budget_mb: 3584
 #   #   rocksdb_shared_memtable_budget_mb: 896
 #   #   max_bytes_per_actor: 134217728          # 128 MiB PER ACTOR -- multiply by key_value_workers

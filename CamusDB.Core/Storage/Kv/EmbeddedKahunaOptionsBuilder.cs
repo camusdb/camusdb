@@ -323,12 +323,17 @@ public static class EmbeddedKahunaOptionsBuilder
     /// (and resolved a pipelining collapse to 3.4 tx/s that was pure read-I/O queueing).
     ///
     /// <para>Sizing policy, all against <see cref="GCMemoryInfo.TotalAvailableMemoryBytes"/> (which
-    /// respects container memory limits): RocksDB block cache = 25% of RAM clamped to [320 MB, 8 GB];
-    /// memtable budget = a quarter of that, clamped to [128 MB, 1 GB]; key/value actor caches = 12.5%
-    /// of RAM divided across the shard actors, clamped to [64 MB, 4 GB] per actor, with the per-actor
-    /// entry cap derived at an assumed ~512 B/entry, clamped to [50k, 4M]. Roughly 40% of RAM across
-    /// both cache layers at the defaults — sized as a database server's working assumption, like a
-    /// buffer pool. Every value remains overridable via the corresponding <c>kahuna.*</c> key.</para>
+    /// respects container memory limits): RocksDB block cache = 10% of RAM clamped to [320 MB, 2 GB];
+    /// memtable budget = a quarter of that, clamped to [128 MB, 1 GB]; key/value actor caches = 6.25%
+    /// of RAM (at least 64 MB for the layer as a whole) divided across the shard actors and clamped to
+    /// [8 MB, 2 GB] per actor, with the per-actor entry cap derived at an assumed ~512 B/entry, clamped
+    /// to [10k, 4M]. Roughly 16% of RAM across
+    /// both cache layers at the defaults, and never more than 4 GB in total however large the machine
+    /// is. The fractions and the ceilings are deliberately modest: an unconfigured node is far more
+    /// often a developer workstation or a CI container sharing the box with a compiler and an IDE than
+    /// a dedicated database server, and an over-eager default there costs the whole machine. A
+    /// dedicated server should raise all four keys explicitly — see the worked example in
+    /// <c>config.yml</c>. Every value remains overridable via the corresponding <c>kahuna.*</c> key.</para>
     ///
     /// <para>Runs after every explicit override has been applied, and touches only knobs whose
     /// config value is null — an operator's explicit setting always wins. Must also run after the
@@ -343,7 +348,7 @@ public static class EmbeddedKahunaOptionsBuilder
         const long OneMb = 1024L * 1024;
 
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
-            baseline.RocksDbSharedMemoryBudgetMb = (int)Math.Clamp(totalRam / 4 / OneMb, 320, 8192);
+            baseline.RocksDbSharedMemoryBudgetMb = (int)Math.Clamp(totalRam / 10 / OneMb, 320, 2048);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
             baseline.RocksDbSharedMemtableBudgetMb = (int)Math.Clamp(baseline.RocksDbSharedMemoryBudgetMb / 4, 128, 1024);
@@ -351,9 +356,22 @@ public static class EmbeddedKahunaOptionsBuilder
         int actorCount = Math.Max(1, baseline.KeyValueWorkers);
 
         if (kahuna.MaxBytesPerActor is null)
-            baseline.MaxBytesPerActor = Math.Clamp(totalRam / 8 / actorCount, 64L * OneMb, 4096L * OneMb);
+        {
+            // Budget the actor caches as a total and then split, instead of flooring each actor
+            // independently. A per-actor floor gets multiplied by the actor count — one per CPU by
+            // default — so on a machine with many cores relative to its RAM it silently overshoots
+            // the intended share of memory: a 64 MB floor across 16 actors claimed 1 GB of a 4 GB
+            // container, 25% of it, when the layer was meant to take 6.25%. The floor therefore
+            // applies to the whole layer; the per-actor minimum below only keeps an individual
+            // cache from shrinking to a size that cannot hold a useful working set.
+            long actorLayerBytes = Math.Max(totalRam / 16, 64L * OneMb);
+            baseline.MaxBytesPerActor = Math.Clamp(actorLayerBytes / actorCount, 8L * OneMb, 2048L * OneMb);
+        }
 
+        // Kahuna evicts when *either* cap is exceeded, so the smaller of the two binds. Keep the entry
+        // floor below what the byte floor implies (8 MB at ~512 B/entry is ~16k entries) — a floor
+        // above it would be dead, describing a cache larger than its own byte budget allows.
         if (kahuna.MaxEntriesPerActor is null)
-            baseline.MaxEntriesPerActor = (int)Math.Clamp(baseline.MaxBytesPerActor / 512, 50_000, 4_000_000);
+            baseline.MaxEntriesPerActor = (int)Math.Clamp(baseline.MaxBytesPerActor / 512, 10_000, 4_000_000);
     }
 }

@@ -105,14 +105,25 @@ took the same workload from 24.5 to 119.6 tx/s at 8 clients.
 
 | Key | Computed when unset | Clamp |
 |-----|---------------------|-------|
-| `rocksdb_shared_memory_budget_mb` | 25% of RAM | 320 MiB – 8 GiB |
+| `rocksdb_shared_memory_budget_mb` | 10% of RAM | 320 MiB – 2 GiB |
 | `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache | 128 MiB – 1 GiB |
-| `max_bytes_per_actor` | 12.5% of RAM ÷ `key_value_workers` | 64 MiB – 4 GiB per actor |
-| `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 50k – 4M |
+| `max_bytes_per_actor` | 6.25% of RAM (≥ 64 MiB for the layer) ÷ `key_value_workers` | 8 MiB – 2 GiB per actor |
+| `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 10k – 4M |
 
-That is roughly 40% of RAM across both cache layers. An explicit value always wins over the
-computed one. On an 8 GiB machine with none of them set: 2048 MiB block cache, 512 MiB memtable
-sub-budget, and 1 GiB of actor caches in total — about 3.5 GiB.
+That is roughly 16% of RAM across both cache layers, and never more than 4 GiB in total however
+large the machine is. The fractions and the ceilings are deliberately modest: an unconfigured node
+is far more often a developer workstation or a CI container sharing the box with a compiler and an
+IDE than a dedicated database server. An explicit value always wins over the computed one. On an
+8 GiB, 8-core machine with none of them set: 819 MiB block cache, 204 MiB memtable sub-budget, and
+64 MiB × 8 = 512 MiB of actor caches — about 1.5 GiB.
+
+A dedicated server should raise all four explicitly; the sizing above is a floor to build from, not
+a recommendation for a machine whose only job is CamusDB.
+
+Note that the 6.25% share and its 64 MiB floor bound the actor-cache layer *as a whole*, and are
+then divided by `key_value_workers`; only the 8 MiB per-actor minimum is per actor. Adding cores
+therefore splits the same budget more ways rather than growing it — a machine with many cores
+relative to its RAM does not end up with a multiple of the intended share.
 
 The RocksDB pair is shared: `rocksdb_shared_memory` (default on, and a no-op unless `storage` and
 `wal_storage` are both `rocksdb`) makes one block cache and one write-buffer manager serve both the
