@@ -559,6 +559,13 @@ public class ConfigDefinition
     public bool MaterializedViewRefreshEnabled { get; set; } = true;
 
     /// <summary>
+    /// How many times the background sweep may restart an interrupted materialized-view refresh
+    /// before giving up; 0 disables takeover and only reclaims the abandoned staging storage.
+    /// Default 3. Maps to <c>CamusDBOptions.MaterializedViewRefreshTakeoverAttempts</c>.
+    /// </summary>
+    public int MaterializedViewRefreshTakeoverAttempts { get; set; } = 3;
+
+    /// <summary>
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
     /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
     /// &gt; 0. Default 300 000 (5 min). Maps to <c>CamusDBOptions.BranchSnapshotHoldLeaseMs</c>.

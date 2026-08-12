@@ -263,6 +263,7 @@ public static class ConfigResolver
         MaxViewExpansionDepth = config.MaxViewExpansionDepth,
         MaterializedViewRefreshChunkRows = config.MaterializedViewRefreshChunkRows,
         MaterializedViewRefreshEnabled = config.MaterializedViewRefreshEnabled,
+        MaterializedViewRefreshTakeoverAttempts = config.MaterializedViewRefreshTakeoverAttempts,
         BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs,
 
             // Mirror the effective Kahuna PITR retention window (seconds) into the process-wide config so

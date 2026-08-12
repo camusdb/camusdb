@@ -49,9 +49,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <para><b>Failure is designed to be uneventful.</b> Everything before the swap touches only the
 /// staging relation, so a failed or abandoned refresh leaves the materialized view exactly as it was;
 /// the staging relation is destroyed on the way out, and a run that dies without getting that far
-/// leaves one behind that the next refresh of the same view sweeps. What is <em>not</em> implemented
-/// is resumption: a refresh interrupted by a crash or a leadership change is not picked up where it
-/// stopped, it simply has to be run again.</para>
+/// leaves one behind that the next refresh of the same view — or the background sweep — reclaims. An
+/// interrupted run is then <b>restarted</b>, not continued: see
+/// <see cref="TakeOverAbandonedRefreshAsync"/> for why picking up mid-scan is not the same thing.</para>
 /// </summary>
 internal sealed class MaterializedViewRefresher
 {
@@ -103,16 +103,9 @@ internal sealed class MaterializedViewRefresher
         // created so a refused refresh leaves nothing behind.
         RequireTargetPrivilege(database, viewName, view);
 
-        ViewDefinition definition = view.ViewDefinition
-            ?? throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Materialized view '{viewName}' has no stored definition and cannot be refreshed");
+        RequireDefinition(view, viewName);
 
         string viewTableId = view.Id!;
-
-        // Captured before anything is staged, so it covers the whole window in which the copied layout
-        // could go stale — the swap refuses to publish if the definition moved.
-        long metadataGeneration = view.MetadataGeneration;
 
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
 
@@ -130,88 +123,14 @@ internal sealed class MaterializedViewRefresher
         try
         {
             // Safe only because the fence is held: a run still in progress anywhere would still hold
-            // it, so whatever is found here belongs to one that is gone.
+            // it, so whatever is found here belongs to one that is gone. The user asked for this
+            // rebuild, so it simply subsumes the abandoned one rather than taking it over — which is
+            // also why the takeover counter starts again at zero.
             await ReclaimAbandonedRefreshAsync(executor, catalogs, database, viewTableId, logger).ConfigureAwait(false);
 
-            string stagingTableId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
-            string stagingName = MaterializedViewNaming.StagingRelationName(viewTableId, stagingTableId);
-
-            // Recorded before the relation exists. A record naming a relation that was never created is
-            // inert; a relation created with no record naming it is storage nothing can find.
-            await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
-            {
-                JobId = ObjectIdGenerator.Generate().ToString(),
-                ViewTableId = viewTableId,
-                ViewName = viewName,
-                StagingTableId = stagingTableId,
-                StagingName = stagingName,
-                ExpectedMetadataGeneration = metadataGeneration,
-                Owner = fenceId,
-                StartedAt = executor.ClusterNow(),
-            }).ConfigureAwait(false);
-
-            await executor.CreateRelationInDdlTransactionAsync(
-                database, BuildStagingTicket(database.Name, stagingName, view), stagingTableId,
-                validate: false).ConfigureAwait(false);
-
-            try
-            {
-                if (AfterStagingForTesting is not null)
-                    await AfterStagingForTesting().ConfigureAwait(false);
-
-                HLCTimestamp snapshot = executor.ClusterNow();
-                int rows = withNoData
-                    ? 0
-                    : await LoadAsync(executor, database, definition, stagingName, view, snapshot, ticket).ConfigureAwait(false);
-
-                // One replicated change publishes the rebuilt relation, records how stale it now is,
-                // and detaches the relation it replaced. Everything up to here was invisible.
-                await catalogs.SetMaterializedViewStateAsync(
-                    database,
-                    tableId: viewTableId,
-                    isPopulated: !withNoData,
-                    // How stale the contents are is a property of the SOURCE READ, so it keeps the
-                    // snapshot the rebuild pinned...
-                    refreshedAt: withNoData ? null : snapshot,
-                    swapToTableId: stagingTableId,
-                    // ...but when this change happened is now, not when the rebuild started. Stamping
-                    // the entry with the source snapshot would order it before operations that
-                    // preceded it, and — because the retired storage's orphan record takes its
-                    // DroppedAt from here — would spend a long rebuild's entire duration out of that
-                    // storage's retention window before it was even detached.
-                    publishHlc: executor.ClusterNow(),
-                    expectedMetadataGeneration: metadataGeneration).ConfigureAwait(false);
-
-                // The staging relation has become the materialized view, so nothing is left to own.
-                // Deleted after the swap, never before: a record removed while the relation it names
-                // is still separate storage would strand exactly what it exists to make findable.
-                await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
-
-                // No cache invalidation here on purpose: the replicated apply does it on every node,
-                // including this one. Doing it only at the proposer is what left followers answering
-                // from the contents the swap retired.
-                return rows;
-            }
-            catch (Exception)
-            {
-                // The swap never happened, so the materialized view still holds its previous contents
-                // and the only thing worth removing is the half-built relation. A failure to remove it
-                // must not replace the caller's real error: it costs storage, nothing more, and the
-                // next refresh of this view sweeps it.
-                try
-                {
-                    await executor.DropStagingRelationAsync(database, stagingName).ConfigureAwait(false);
-                }
-                catch (Exception cleanupError)
-                {
-                    logger.LogWarning(
-                        cleanupError,
-                        "REFRESH of materialized view '{ViewName}' failed and its staging relation could not be removed; it will be swept by the next refresh",
-                        viewName);
-                }
-
-                throw;
-            }
+            return await RunFencedRefreshAsync(
+                executor, catalogs, registry, database, view, viewName, withNoData,
+                takeoverAttempts: 0, ticket, fenceId, logger, CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -222,9 +141,145 @@ internal sealed class MaterializedViewRefresher
     }
 
     /// <summary>
+    /// Builds the new contents and publishes them, with the refresh fence already held by the caller
+    /// and nothing of an earlier attempt left to clean up.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the two things that can legitimately rebuild a materialized view: the user's
+    /// <c>REFRESH</c>, and a background takeover of a run that was interrupted. They differ only in
+    /// how authority was established and in what <paramref name="takeoverAttempts"/> records — the
+    /// build, the compare-and-swap and the ownership record must be identical, because a takeover that
+    /// published by a slightly different route would be a second, less-tested swap implementation.
+    /// </remarks>
+    /// <param name="takeoverAttempts">
+    /// Stamped onto this attempt's ownership record so a takeover of <em>this</em> run knows how many
+    /// restarts have already been spent. Zero for a refresh a user asked for.
+    /// </param>
+    private static async Task<int> RunFencedRefreshAsync(
+        CommandExecutor executor,
+        CatalogsManager catalogs,
+        DatabaseRegistry registry,
+        DatabaseDescriptor database,
+        TableSchema view,
+        string viewName,
+        bool withNoData,
+        int takeoverAttempts,
+        ExecuteSQLTicket ticket,
+        string fenceId,
+        ILogger<ICamusDB> logger,
+        CancellationToken cancellationToken)
+    {
+        ViewDefinition definition = RequireDefinition(view, viewName);
+        string viewTableId = view.Id!;
+
+        // Captured before anything is staged, so it covers the whole window in which the copied layout
+        // could go stale — the swap refuses to publish if the definition moved.
+        long metadataGeneration = view.MetadataGeneration;
+
+        string stagingTableId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
+        string stagingName = MaterializedViewNaming.StagingRelationName(viewTableId, stagingTableId);
+
+        // Recorded before the relation exists. A record naming a relation that was never created is
+        // inert; a relation created with no record naming it is storage nothing can find.
+        await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
+        {
+            JobId = ObjectIdGenerator.Generate().ToString(),
+            ViewTableId = viewTableId,
+            ViewName = viewName,
+            StagingTableId = stagingTableId,
+            StagingName = stagingName,
+            ExpectedMetadataGeneration = metadataGeneration,
+            Owner = fenceId,
+            StartedAt = executor.ClusterNow(),
+            WithNoData = withNoData,
+            TakeoverAttempts = takeoverAttempts,
+        }).ConfigureAwait(false);
+
+        await executor.CreateRelationInDdlTransactionAsync(
+            database, BuildStagingTicket(database.Name, stagingName, view), stagingTableId,
+            validate: false).ConfigureAwait(false);
+
+        try
+        {
+            if (AfterStagingForTesting is not null)
+                await AfterStagingForTesting().ConfigureAwait(false);
+
+            HLCTimestamp snapshot = executor.ClusterNow();
+            int rows = withNoData
+                ? 0
+                : await LoadAsync(
+                    executor, database, definition, stagingName, view, snapshot, ticket,
+                    cancellationToken).ConfigureAwait(false);
+
+            // One replicated change publishes the rebuilt relation, records how stale it now is,
+            // and detaches the relation it replaced. Everything up to here was invisible.
+            await catalogs.SetMaterializedViewStateAsync(
+                database,
+                tableId: viewTableId,
+                isPopulated: !withNoData,
+                // How stale the contents are is a property of the SOURCE READ, so it keeps the
+                // snapshot the rebuild pinned...
+                refreshedAt: withNoData ? null : snapshot,
+                swapToTableId: stagingTableId,
+                // ...but when this change happened is now, not when the rebuild started. Stamping
+                // the entry with the source snapshot would order it before operations that
+                // preceded it, and — because the retired storage's orphan record takes its
+                // DroppedAt from here — would spend a long rebuild's entire duration out of that
+                // storage's retention window before it was even detached.
+                publishHlc: executor.ClusterNow(),
+                expectedMetadataGeneration: metadataGeneration).ConfigureAwait(false);
+
+            // The staging relation has become the materialized view, so nothing is left to own.
+            // Deleted after the swap, never before: a record removed while the relation it names
+            // is still separate storage would strand exactly what it exists to make findable.
+            await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+            // No cache invalidation here on purpose: the replicated apply does it on every node,
+            // including this one. Doing it only at the proposer is what left followers answering
+            // from the contents the swap retired.
+            return rows;
+        }
+        catch (Exception)
+        {
+            // The swap never happened, so the materialized view still holds its previous contents
+            // and the only thing worth removing is the half-built relation. A failure to remove it
+            // must not replace the caller's real error: it costs storage, nothing more, and the
+            // next refresh of this view sweeps it.
+            try
+            {
+                await executor.DropStagingRelationAsync(database, stagingName).ConfigureAwait(false);
+            }
+            catch (Exception cleanupError)
+            {
+                logger.LogWarning(
+                    cleanupError,
+                    "REFRESH of materialized view '{ViewName}' failed and its staging relation could not be removed; it will be swept by the next refresh",
+                    viewName);
+            }
+
+            // The ownership record is deliberately left in place. It is what the sweep reads to find
+            // this run's storage if the drop above did not happen, and what tells it a rebuild was
+            // interrupted rather than never started.
+            throw;
+        }
+    }
+
+    /// <summary>The stored body a rebuild reads, or a corruption error naming the view that lost it.</summary>
+    private static ViewDefinition RequireDefinition(TableSchema view, string viewName)
+        => view.ViewDefinition
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Materialized view '{viewName}' has no stored definition and cannot be refreshed");
+
+    /// <summary>
     /// Streams the view body at <paramref name="snapshot"/> into the staging relation, committing
     /// every <see cref="CamusDBOptions.MaterializedViewRefreshChunkRows"/> rows.
     /// </summary>
+    /// <param name="cancellationToken">
+    /// Cancels a rebuild the engine started on its own behalf, so node shutdown does not wait for a
+    /// background takeover to finish scanning. Never cancelled for a user's <c>REFRESH</c>: that one
+    /// belongs to the caller, who is waiting for its answer.
+    /// </param>
     private static async Task<int> LoadAsync(
         CommandExecutor executor,
         DatabaseDescriptor database,
@@ -232,7 +287,8 @@ internal sealed class MaterializedViewRefresher
         string stagingName,
         TableSchema view,
         HLCTimestamp snapshot,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        CancellationToken cancellationToken)
     {
         NodeAst bodyAst = SQLParserProcessor.Parse(definition.Sql);
 
@@ -251,6 +307,8 @@ internal sealed class MaterializedViewRefresher
 
         await foreach (QueryResultRow row in source.Cursor.ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             // If the pin is lost the remaining rows would be read against a floor that has already
             // moved, so the drain stops rather than finishing with a result quietly missing history.
             source.ThrowIfSnapshotLost("this materialized view refresh");
@@ -381,6 +439,193 @@ internal sealed class MaterializedViewRefresher
 
         await executor.DropStagingRelationAsync(database, abandoned.StagingName).ConfigureAwait(false);
         await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Finishes what an interrupted refresh started: reclaims the storage the dead run was building
+    /// into and then <b>runs the rebuild again from the beginning</b>, so exactly one node completes
+    /// it. Returns whether a record was found and dealt with.
+    ///
+    /// <para><b>Restart, not resume.</b> Continuing from a progress cursor means re-running the body
+    /// at the pinned snapshot and skipping the first K rows, which is only correct if the body yields
+    /// rows in the same order on every execution. That holds for a single-relation scan and is not
+    /// promised for a join, an aggregate, or anything the planner may order differently — and a
+    /// resumed non-deterministic body silently produces a materialized view with duplicated and
+    /// missing rows. Rebuilding costs the work the dead run had already done; resuming would cost
+    /// correctness, on a class of query nobody can identify from the outside.</para>
+    ///
+    /// <para><b>The caller must hold the refresh fence</b>, which is what proves the run that wrote
+    /// the record is gone, and what keeps this the only rebuild in the cluster while it runs. It is
+    /// held for the whole restarted rebuild, not just for the reclamation — which means a user's
+    /// <c>REFRESH</c> issued mid-restart is refused with <c>RefreshAlreadyInProgress</c>. That is the
+    /// one place a sweep is allowed to turn a user statement away, and it is not the janitor case the
+    /// brief fence-acquire retry exists for: a rebuild really is running, it is the one that user's
+    /// view needs, and the message tells them to wait for it. The alternative — letting the two run
+    /// at once — is what the fence exists to prevent.</para>
+    ///
+    /// <para><b>Bounded.</b> Every restart is counted on the durable record before anything is
+    /// destroyed, so a rebuild that keeps failing gives up after
+    /// <see cref="CamusDBOptions.MaterializedViewRefreshTakeoverAttempts"/> attempts and leaves the
+    /// view holding its previous contents rather than looping forever behind a janitor nobody is
+    /// watching.</para>
+    ///
+    /// <para><b>It runs with the engine's authority, not a session's.</b> There is no caller to
+    /// authorize: the statement this continues was authorized when it was issued, possibly on a node
+    /// that no longer exists. A restart therefore performs no privilege check of its own — it can only
+    /// re-run a body already stored on the view, into the view that body belongs to, so it grants
+    /// nobody access to anything a user could not already reach through that view.</para>
+    /// </summary>
+    internal static async Task<bool> TakeOverAbandonedRefreshAsync(
+        CommandExecutor executor,
+        CatalogsManager catalogs,
+        DatabaseRegistry registry,
+        DatabaseDescriptor database,
+        string viewTableId,
+        string fenceId,
+        ILogger<ICamusDB> logger,
+        CancellationToken cancellationToken)
+    {
+        // Re-read under the fence. The listing that led here was taken before the fence was acquired,
+        // so it may name a run that has since finished.
+        MaterializedViewRefreshJob? abandoned =
+            await catalogs.TryGetRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+        if (abandoned is null)
+            return false;
+
+        TableSchema? view = await FindMaterializedViewByIdAsync(database, viewTableId).ConfigureAwait(false);
+
+        // The swap committed and only the record's removal was lost. What this record names is no
+        // longer staging storage — it is the materialized view's own key-space — so reclaiming it
+        // would destroy live contents, and restarting the rebuild would redo work that is already
+        // published. Drop the record and nothing else.
+        if (view is not null
+            && string.Equals(view.EffectiveStorageId, abandoned.StagingTableId, StringComparison.Ordinal))
+        {
+            await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+            return true;
+        }
+
+        int spent = abandoned.TakeoverAttempts;
+        int allowed = database.Options.MaterializedViewRefreshTakeoverAttempts;
+
+        bool restart =
+            view is not null
+            && database.Options.MaterializedViewRefreshEnabled
+            && spent < allowed
+            && !cancellationToken.IsCancellationRequested;
+
+        if (restart)
+        {
+            // Counted first, on the record that still owns the dead run's storage. Incrementing after
+            // the storage is dropped — or holding the count in memory — would reset it every time a
+            // takeover died the same way the run before it did, and the bound would never be reached.
+            abandoned.TakeoverAttempts = spent + 1;
+            await catalogs.PersistRefreshJobAsync(database, abandoned).ConfigureAwait(false);
+        }
+
+        logger.LogWarning(
+            "Reclaiming the staging relation of an unfinished materialized view refresh (job {JobId}) in database '{DatabaseName}'",
+            abandoned.JobId, database.Name);
+
+        await executor.DropStagingRelationAsync(database, abandoned.StagingName).ConfigureAwait(false);
+
+        if (!restart)
+        {
+            await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+            if (view is not null && spent >= allowed && allowed > 0)
+                logger.LogError(
+                    "Materialized view '{ViewName}' in database '{DatabaseName}' was left stale: its refresh was restarted {Attempts} times and never completed. Its previous contents are intact; issue REFRESH MATERIALIZED VIEW to try again.",
+                    view.Name, database.Name, spent);
+
+            return true;
+        }
+
+        // A restart is engine work, not a continuation of whoever's session started it — that session
+        // may have been on a node that no longer exists. Clearing the ambient scope says so explicitly
+        // rather than relying on the background sweep never having had one.
+        AuthorizationScope callerScope = AuthorizationContext.Current;
+        AuthorizationContext.Current = default;
+
+        try
+        {
+            int rows = await RunFencedRefreshAsync(
+                executor, catalogs, registry, database, view!, view!.Name ?? abandoned.ViewName,
+                abandoned.WithNoData, spent + 1, TakeoverTicket(executor, database, view!),
+                fenceId, logger, cancellationToken).ConfigureAwait(false);
+
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation(
+                    "Restarted the interrupted refresh of materialized view '{ViewName}' in database '{DatabaseName}' ({Rows} rows, attempt {Attempt} of {Allowed})",
+                    view!.Name, database.Name, rows, spent + 1, allowed);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Shutdown. The record this attempt wrote survives, so the next sweep — here or on
+            // whichever node is elected next — picks the view up again.
+        }
+        catch (Exception error)
+        {
+            // Never propagated: this is a janitor finishing somebody else's statement, and a failure
+            // here must not stop the sweep from reaching the other databases. The attempt is already
+            // counted, so a rebuild that fails every time still terminates.
+            logger.LogWarning(
+                error,
+                "Restarting the interrupted refresh of materialized view '{ViewName}' in database '{DatabaseName}' failed (attempt {Attempt} of {Allowed})",
+                view!.Name, database.Name, spent + 1, allowed);
+        }
+        finally
+        {
+            AuthorizationContext.Current = callerScope;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The statement context a restarted rebuild runs under. It names no caller and carries no
+    /// parameters — the body is read from the view's stored definition, which cannot reference a
+    /// placeholder — and its transaction is a read-only snapshot handle that the refresh path replaces
+    /// with its own pinned one before reading anything.
+    /// </summary>
+    private static ExecuteSQLTicket TakeoverTicket(
+        CommandExecutor executor, DatabaseDescriptor database, TableSchema view)
+        => new(
+            Transactions.KvTransaction.CreateSnapshotReadOnly(executor.ClusterNow()),
+            database.Name,
+            $"REFRESH MATERIALIZED VIEW {view.Name}",
+            parameters: null);
+
+    /// <summary>
+    /// Resolves a materialized view by its immutable id, under the schema lock.
+    /// </summary>
+    /// <remarks>
+    /// By id rather than by the name the job record carries, because a rename between the interrupted
+    /// run and this one would otherwise either miss the view or — worse — find a different relation
+    /// that has since taken the freed name. Null means it was dropped, which is the one case where
+    /// there is nothing left to rebuild.
+    /// </remarks>
+    private static async Task<TableSchema?> FindMaterializedViewByIdAsync(DatabaseDescriptor database, string viewTableId)
+    {
+        // The lock is taken and released before any KV write: the schema lock may not be held across
+        // one, and holding it for the length of a rebuild would block every DDL statement in the
+        // database behind a janitor.
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            foreach (TableSchema table in database.Schema.Tables.Values)
+            {
+                if (table.IsMaterializedView && string.Equals(table.Id, viewTableId, StringComparison.Ordinal))
+                    return table;
+            }
+
+            return null;
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
     }
 
     /// <summary>

@@ -60,4 +60,25 @@ public sealed class MaterializedViewRefreshJob
 
     /// <summary>When the attempt began, in cluster time.</summary>
     public HLCTimestamp StartedAt { get; set; }
+
+    /// <summary>
+    /// Whether the interrupted statement was <c>REFRESH … WITH NO DATA</c>, so a run restarted from
+    /// this record empties the materialized view instead of repopulating it.
+    ///
+    /// <para>It cannot be inferred from anything else: an empty staging relation looks identical to
+    /// one whose rebuild had not written a row yet, and guessing wrong either resurrects contents the
+    /// user asked to discard or discards contents they asked to rebuild.</para>
+    /// </summary>
+    public bool WithNoData { get; set; }
+
+    /// <summary>
+    /// How many times a background sweep has already restarted this refresh after finding it
+    /// abandoned. Bounded by <see cref="CamusDBOptions.MaterializedViewRefreshTakeoverAttempts"/>.
+    ///
+    /// <para>Durable, and incremented on the record that still owns the dead run's storage
+    /// <b>before</b> that storage is touched — a count kept only in memory, or written after the
+    /// destructive step, would reset every time a takeover itself died and turn a rebuild that fails
+    /// deterministically into an endless one.</para>
+    /// </summary>
+    public int TakeoverAttempts { get; set; }
 }

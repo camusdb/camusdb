@@ -1218,13 +1218,220 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
         // Fence free — the run is gone, so the record and its storage are reclaimed.
         Assert.AreEqual(1, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
         Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId),
-            "an abandoned run's record must be reclaimed without the view being refreshed or dropped");
+            "an abandoned run's record must be dealt with without the view being dropped or refreshed by hand");
 
         // The materialized view itself is untouched and still works.
         CollectionAssert.AreEqual(
             new List<long> { 1, 2, 3 },
             Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders ORDER BY id"), "id"));
         Assert.AreEqual(3, await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders"));
+    }
+
+    /// <summary>
+    /// A refresh that died with its process left the materialized view stale until somebody noticed
+    /// and typed <c>REFRESH</c> again. The sweep now finishes the job: it reclaims the dead run's
+    /// storage and <b>runs the rebuild again</b>, so exactly one node completes the work that was
+    /// asked for.
+    ///
+    /// <para>The assertion that matters is the fourth row. A sweep that only cleaned up would leave
+    /// the view holding the three rows it had before, and every other assertion here would still
+    /// pass — the row the source gained while the run was dead is the only evidence that the rebuild
+    /// actually re-ran.</para>
+    /// </summary>
+    [Test]
+    public async Task TheBackgroundSweepRestartsAnInterruptedRefreshInsteadOfOnlyCleaningUpAfterIt()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id FROM orders WHERE status = 'open'");
+
+        string viewTableId = database.Schema.Tables["open_orders"].Id!;
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+
+        // The source moves on while the interrupted run is dead. Only a genuine rebuild sees it.
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO orders (id, customer, total, status) VALUES (6, 'hooli', 60, 'open')");
+
+        await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
+        {
+            JobId = "crashed",
+            ViewTableId = viewTableId,
+            ViewName = "open_orders",
+            StagingTableId = "crashed1",
+            StagingName = MaterializedViewNaming.StagingRelationName(viewTableId, "crashed1"),
+        });
+
+        Assert.AreEqual(1, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
+
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId),
+            "a restarted refresh that completed owns nothing and must leave no record");
+
+        CollectionAssert.AreEqual(
+            new List<long> { 1, 2, 3, 6 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders ORDER BY id"), "id"),
+            "the sweep must re-run the interrupted rebuild, not merely reclaim its storage");
+
+        CollectionAssert.IsEmpty(
+            database.Schema.Tables.Keys.Where(MaterializedViewNaming.IsStagingRelation).ToList(),
+            "neither the dead run's staging relation nor the restart's may survive");
+    }
+
+    /// <summary>
+    /// A restart has to reproduce the statement that was interrupted, not a generic refresh:
+    /// <c>WITH NO DATA</c> empties the materialized view, and repopulating it instead would resurrect
+    /// contents the user asked to discard. Nothing else records that intent — an empty staging
+    /// relation is indistinguishable from one whose rebuild had not written a row yet.
+    /// </summary>
+    [Test]
+    public async Task ARestartedRefreshReproducesTheWithNoDataTheInterruptedStatementCarried()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id FROM orders WHERE status = 'open'");
+
+        string viewTableId = database.Schema.Tables["open_orders"].Id!;
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+
+        await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
+        {
+            JobId = "crashed",
+            ViewTableId = viewTableId,
+            ViewName = "open_orders",
+            StagingTableId = "crashed1",
+            StagingName = MaterializedViewNaming.StagingRelationName(viewTableId, "crashed1"),
+            WithNoData = true,
+        });
+
+        Assert.AreEqual(1, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId));
+
+        CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders"));
+
+        Assert.AreEqual(CamusDBErrorCodes.MaterializedViewNotPopulated, error!.Code,
+            "restarting a WITH NO DATA refresh must leave the view unpopulated, not repopulate it");
+    }
+
+    /// <summary>
+    /// The bound on takeover. A rebuild that fails the same way every time — a body that no longer
+    /// runs, a source that no longer satisfies a constraint — must not be retried forever by a janitor
+    /// nobody is watching; after the configured number of restarts the view is left stale and the
+    /// operator is told.
+    ///
+    /// <para>The count has to be <b>durable</b> and taken before the storage is touched, which is what
+    /// the intermediate assertion checks: the record the first restart leaves behind names its own new
+    /// staging relation and carries the incremented count, so the second sweep can see the attempt was
+    /// already spent even though nothing in this process remembers it.</para>
+    /// </summary>
+    [Test]
+    public async Task RestartingAnInterruptedRefreshGivesUpAfterTheConfiguredNumberOfAttempts()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await CreateDatabase(Options with { MaterializedViewRefreshTakeoverAttempts = 1 });
+
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id FROM orders WHERE status = 'open'");
+
+        string viewTableId = database.Schema.Tables["open_orders"].Id!;
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+
+        await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
+        {
+            JobId = "crashed",
+            ViewTableId = viewTableId,
+            ViewName = "open_orders",
+            StagingTableId = "crashed1",
+            StagingName = MaterializedViewNaming.StagingRelationName(viewTableId, "crashed1"),
+        });
+
+        // Every restart dies exactly where the run before it did.
+        MaterializedViewRefresher.AfterStagingForTesting = () =>
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "rebuild fails every time");
+
+        try
+        {
+            Assert.AreEqual(1, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
+
+            MaterializedViewRefreshJob? afterFirst = await catalogs.TryGetRefreshJobAsync(database, viewTableId);
+            Assert.IsNotNull(afterFirst, "a restart that failed still owns the storage it built into");
+            Assert.AreEqual(1, afterFirst!.TakeoverAttempts, "the attempt must be counted durably");
+            Assert.AreNotEqual("crashed1", afterFirst.StagingTableId,
+                "a restart is a fresh rebuild and must not inherit the dead run's half-built storage");
+
+            // The attempt is already spent, so this sweep only cleans up.
+            Assert.AreEqual(1, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
+        }
+        finally
+        {
+            MaterializedViewRefresher.AfterStagingForTesting = null;
+        }
+
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId),
+            "giving up must still release the storage the last restart was building into");
+
+        CollectionAssert.IsEmpty(
+            database.Schema.Tables.Keys.Where(MaterializedViewNaming.IsStagingRelation).ToList());
+
+        // Left stale, not broken: the contents from before the interrupted refresh are intact.
+        CollectionAssert.AreEqual(
+            new List<long> { 1, 2, 3 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders ORDER BY id"), "id"));
+    }
+
+    /// <summary>
+    /// The dangerous shape of an abandoned record: the swap committed and only the record's removal
+    /// was lost. What the record names is no longer staging storage — it is the materialized view's
+    /// own key-space — so a sweep that reclaimed it by id would destroy live contents, and one that
+    /// restarted the rebuild would redo work that is already published.
+    /// </summary>
+    [Test]
+    public async Task ARecordLeftBehindByACommittedSwapIsDroppedWithoutRebuildingOrDestroyingAnything()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id FROM orders WHERE status = 'open'");
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+
+        TableSchema view = database.Schema.Tables["open_orders"];
+        string viewTableId = view.Id!;
+        string publishedStorageId = view.EffectiveStorageId;
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+
+        // A row the published contents do not have: a needless rebuild would pick it up, and that is
+        // how this test tells "left alone" apart from "rebuilt to the same answer".
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO orders (id, customer, total, status) VALUES (6, 'hooli', 60, 'open')");
+
+        // The record the swap did not get to delete: it names the storage the view now reads.
+        await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
+        {
+            JobId = "swapped",
+            ViewTableId = viewTableId,
+            ViewName = "open_orders",
+            StagingTableId = publishedStorageId,
+            StagingName = MaterializedViewNaming.StagingRelationName(viewTableId, publishedStorageId),
+        });
+
+        Assert.AreEqual(1, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
+
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId),
+            "the record of a swap that completed must be removed");
+
+        Assert.AreEqual(publishedStorageId, database.Schema.Tables["open_orders"].EffectiveStorageId,
+            "the published key-space must not be swapped out");
+
+        CollectionAssert.AreEqual(
+            new List<long> { 1, 2, 3 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders ORDER BY id"), "id"),
+            "the published contents must survive intact and must not be rebuilt");
     }
 
     /// <summary>

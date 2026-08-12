@@ -979,13 +979,17 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// leader election inside the reclaimer; failures are logged and swallowed so startup never blocks.
     /// </summary>
     /// <summary>
-    /// Reclaims the staging storage of unfinished materialized-view refreshes in one database, and
-    /// returns how many were removed.
+    /// Takes over the unfinished materialized-view refreshes in one database — reclaiming what each
+    /// dead run was building into and restarting its rebuild — and returns how many it handled.
     /// </summary>
     /// <remarks>
     /// Gated on the refresh fence, per job: a rebuild that is still running holds it, so acquiring it
     /// is proof the run that wrote the record is gone. Nothing here is time-based, which is what keeps
     /// a slow but healthy rebuild safe from being collected out from under itself.
+    ///
+    /// <para>A restarted rebuild runs to completion <b>inside</b> this sweep, holding the fence, which
+    /// is what makes "exactly one node finishes it" true. One tick can therefore take as long as a
+    /// rebuild does; that only delays the next sweep, and the cancellation token ends it at shutdown.</para>
     /// </remarks>
     private async Task<int> ReclaimAbandonedRefreshesAsync(string databaseName, CancellationToken ct)
     {
@@ -1020,10 +1024,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
             try
             {
-                await Controllers.DDL.MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
-                    this, catalogs, database, job.ViewTableId, logger).ConfigureAwait(false);
-
-                reclaimed++;
+                if (await Controllers.DDL.MaterializedViewRefresher.TakeOverAbandonedRefreshAsync(
+                    this, catalogs, registry, database, job.ViewTableId, fenceId, logger, ct).ConfigureAwait(false))
+                    reclaimed++;
             }
             finally
             {

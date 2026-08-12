@@ -303,6 +303,7 @@ Some specifics worth knowing:
 | `max_view_expansion_depth` | 32 | Backstop on view-over-view nesting depth. |
 | `materialized_view_refresh_chunk_rows` | 10000 | Rows written per transaction while rebuilding a materialized view. |
 | `materialized_view_refresh_enabled` | true | Set false to refuse refreshes on a node that should not run bulk work. `WITH NO DATA` still works. |
+| `materialized_view_refresh_takeover_attempts` | 3 | How many times a refresh interrupted by a crash or a leadership change is restarted for you. 0 restarts none of them and only reclaims the abandoned storage. |
 
 All settings appear in `SHOW VARIABLES`.
 
@@ -407,6 +408,20 @@ materialized view.
 If a refresh fails, the materialized view is left exactly as it was — a failed rebuild is discarded,
 never partially published.
 
+Only one refresh of a given materialized view runs at a time, anywhere in the cluster: a second one
+is refused while the first is in flight, whichever node it was issued on.
+
+A refresh that is **interrupted** rather than failed — the process died, or the node lost leadership
+part-way — is picked up by a background sweep and **run again from the beginning**, up to
+`materialized_view_refresh_takeover_attempts` times. The sweep takes the same cluster fence a
+`REFRESH` takes, so exactly one node finishes the work and no rebuild is ever running twice. It is a
+restart, not a resume: continuing a half-finished scan would require the body to yield rows in the
+same order on every execution, which is true of a single-relation scan and not promised for a join or
+an aggregate — and resuming one of those would give you a materialized view with duplicated and
+missing rows. Until a restart completes, the view keeps serving its previous contents. When the
+attempts run out the view is left stale, an error is logged naming it, and it is yours to
+`REFRESH` again.
+
 ### Dependencies and lifecycle
 
 ```sql
@@ -468,14 +483,10 @@ unexpected:
   stored, but nothing enforces it yet. **All views are read-only.**
 - **Incremental refresh** (`REFRESH MATERIALIZED VIEW … CONCURRENTLY`), which would write only the
   rows that changed instead of rebuilding. The plain form works and does not block readers.
-- **Resuming an interrupted refresh.** A refresh that dies with the process, or whose node loses
-  leadership part-way, is not picked up where it stopped — run it again. The materialized view is
-  untouched in the meantime, so nothing is left inconsistent; the abandoned partial build is cleaned
-  up by the next refresh of the same materialized view.
-- **Fencing concurrent refreshes across nodes.** A second `REFRESH` of the same materialized view on
-  the *same* node is refused while one is running. Two nodes refreshing it simultaneously are not
-  coordinated: one of the two fails, and the materialized view ends up holding one run's complete
-  output — never a mixture of both.
+- **Resuming an interrupted refresh mid-scan.** An interrupted refresh is restarted from the
+  beginning rather than continued from where it stopped (see above) — the work the dead run did is
+  paid for again. The materialized view is untouched in the meantime, so nothing is left
+  inconsistent.
 - **Re-checking a nested view's grant at read time.** A view whose body reads another view has that
   inner reference checked when it is *created*, not on every read; a grant revoked afterwards does not
   break the outer view until it is replaced. The inner view still runs as its own owner, so this

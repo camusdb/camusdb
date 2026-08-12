@@ -104,6 +104,7 @@ public class ConfigReader
         "max_view_expansion_depth",
         "materialized_view_refresh_chunk_rows",
         "materialized_view_refresh_enabled",
+        "materialized_view_refresh_takeover_attempts",
         "branch_snapshot_hold_lease_ms",
         "spill_enabled",
         "spill_threshold_rows",

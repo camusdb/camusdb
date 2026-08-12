@@ -794,6 +794,26 @@ public sealed record CamusDBOptions
     public bool MaterializedViewRefreshEnabled { get; init; } = true;
 
     /// <summary>
+    /// How many times the background sweep may restart a materialized-view refresh that was
+    /// interrupted — by a crashed process, or by a node that lost leadership part-way — before it
+    /// gives up and leaves the view holding its previous contents.
+    ///
+    /// <para>A restart is a fresh rebuild, not a continuation: the interrupted run's partial output is
+    /// discarded and the body is read again at a new snapshot. Resuming mid-scan would require the
+    /// body's row order to be identical across executions, which the planner does not promise for a
+    /// join or an aggregate, and a resumed non-deterministic body produces a materialized view with
+    /// duplicated and missing rows.</para>
+    ///
+    /// <para>The cap is what keeps a rebuild that fails <i>deterministically</i> — a source relation
+    /// that no longer satisfies a constraint, say — from being retried forever by a janitor nobody is
+    /// watching. Set it to <c>0</c> to disable takeover entirely: the sweep then only reclaims the
+    /// abandoned staging storage, and the refresh must be issued again by hand.</para>
+    ///
+    /// Default: <c>3</c>.
+    /// </summary>
+    public int MaterializedViewRefreshTakeoverAttempts { get; init; } = 3;
+
+    /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
     /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
     /// Default: 500 ms.
