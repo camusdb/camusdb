@@ -579,6 +579,30 @@ public sealed record CamusDBOptions
     public int MaxSerializableTransactionLifetimeMs { get; init; } = 3_600_000;
 
     /// <summary>
+    /// Total wall-clock budget, in milliseconds, for retrying a single <c>COMMIT</c>, <c>ROLLBACK</c>,
+    /// or working-set close against the coordinator's non-terminal <c>MustRetry</c> — "the outcome is
+    /// not known yet; retry the same handle". Once the budget is exhausted the finalize surfaces
+    /// <see cref="CamusDBErrorCodes.TransactionFinalizeUnresolved"/> and the caller must retry the
+    /// <em>same</em> finalize; the business operation is never replayed, because the write may already
+    /// have committed.
+    ///
+    /// <para>This is a budget, not an attempt count, because the conditions behind <c>MustRetry</c> are
+    /// measured in time rather than in tries: a leadership flip mid-finalize, an in-progress drain, a
+    /// participant whose write was shed after ageing in the pre-dispatch queue, or a durable decision
+    /// not yet marked complete. Under CPU saturation each of those takes longer in wall-clock but not
+    /// more attempts, so a fixed attempt cap silently shrinks the real budget exactly when it is needed
+    /// most. It must comfortably exceed the storage layer's own transient-shedding threshold, otherwise
+    /// a single shed round consumes the whole budget and a recoverable in-doubt commit is reported as
+    /// an error.</para>
+    ///
+    /// <para><c>&lt;= 0</c> disables retrying: the finalize is attempted exactly once and any
+    /// <c>MustRetry</c> surfaces immediately.</para>
+    ///
+    /// Default: 15 000 ms (15 s).
+    /// </summary>
+    public int TransactionFinalizeRetryBudgetMs { get; init; } = 15_000;
+
+    /// <summary>
     /// How long, in milliseconds, an explicit (client-driven) transaction may sit idle — no
     /// statement issued against it — before the background reaper rolls it back and releases its
     /// locks. "Idle" is measured from the last time the client referenced the transaction (its

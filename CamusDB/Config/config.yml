@@ -98,6 +98,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # lock_wait_deadline_ms: 500              # per-operation Serializable conflict cap (> 0)
 # key_range_sharding: false               # opt tables into Kahuna key-range routing
 
+# Unresolved-finalize budget. A COMMIT/ROLLBACK can come back "outcome not known yet" (a leadership
+# flip mid-finalize, an in-progress drain, a participant write shed under load). That is not a
+# failure and the write may already have landed, so the same finalize is retried on the same handle
+# for this long before CADB0509 tells the client to retry it themselves. Raise it on saturated nodes,
+# where each of those conditions takes longer in wall-clock without taking more attempts.
+# transaction_finalize_retry_budget_ms: 15000  # total retry budget per finalize; <= 0 = attempt once
+
 # Abandoned explicit-transaction reaper. A client that opens a transaction (/start-transaction)
 # and never commits/rolls back would otherwise hold its locks indefinitely (a Serializable+RW
 # transaction's heartbeat renews them forever). The reaper rolls back any explicit transaction

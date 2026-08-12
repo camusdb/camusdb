@@ -261,8 +261,10 @@ internal sealed class DatabaseEvictor : IAsyncDisposable
 
         // An open transaction outlives the statement that started it, so the reference count above is
         // not enough on its own: between two statements of one transaction nobody holds a reference,
-        // yet disposing the manager would strand the transaction's locks and heartbeats.
-        if (descriptor.Transactions.HasActiveTransactions)
+        // yet disposing the manager would strand the transaction's locks and heartbeats. The same
+        // applies to a transaction whose commit or rollback came back unresolved — it holds no
+        // reference while the client is away, and it is exactly what the client will return to finish.
+        if (descriptor.Transactions.HasUnfinishedTransactions)
             return DatabaseEvictionOutcome.InUse;
 
         // DDL in flight. Its proposer released the schema lock while waiting for the replicated apply,

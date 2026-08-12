@@ -57,19 +57,40 @@ public sealed class KvTransactionsManager : IDisposable
     private const int MaxStartRetries = 32;
     private const int StartRetryDelayMs = 25;
 
-    // Bounded same-handle retry for commit/rollback when the coordinator returns the non-terminal
-    // MustRetry ("outcome not known yet, or transient work remains — retry with the same handle").
-    // On the best-effort path this is a leadership flip mid-finalize or an in-progress drain, both
-    // short-lived, so a capped exponential back-off (~2s across the attempts) resolves them without
-    // ever fabricating a terminal result. If it still has not resolved, the caller is told to retry
-    // the SAME finalize (CADB0509) — never to replay the business operation, which could double-apply.
-    private const int MaxFinalizeRetries = 12;
+    // Same-handle retry for commit/rollback when the coordinator returns the non-terminal MustRetry
+    // ("outcome not known yet, or transient work remains — retry with the same handle"). The retry is
+    // bounded by a wall-clock budget rather than an attempt count: every condition behind MustRetry —
+    // a leadership flip mid-finalize, an in-progress drain, a participant write shed after ageing in
+    // the storage layer's pre-dispatch queue, a durable decision not yet marked complete — is measured
+    // in time, and a saturated node makes each one take longer without taking more tries. An attempt
+    // cap therefore shrinks the effective budget exactly when the node most needs it, turning a
+    // recoverable in-doubt commit into a spurious error. Once the budget is spent the caller is told to
+    // retry the SAME finalize (CADB0509) — never to replay the business operation, which could
+    // double-apply.
     private const int FinalizeRetryBaseDelayMs = 25;
-    private const int FinalizeRetryMaxDelayMs = 250;
+    private const int FinalizeRetryMaxDelayMs = 500;
 
-    /// <summary>Capped exponential back-off for the finalize retry loop: 25, 50, 100, 200, 250, 250…</summary>
+    /// <summary>Capped exponential back-off for the finalize retry loop: 25, 50, 100, 200, 400, 500, 500…</summary>
     private static int FinalizeRetryDelayMs(int attempt) =>
         (int)Math.Min((long)FinalizeRetryBaseDelayMs << Math.Min(attempt, 16), FinalizeRetryMaxDelayMs);
+
+    /// <summary>
+    /// Waits out the back-off before the next same-handle finalize attempt, or reports that the retry
+    /// budget is spent. Returns <see langword="false"/> — without sleeping — when the next delay would
+    /// not leave room for another attempt inside
+    /// <see cref="CamusDBOptions.TransactionFinalizeRetryBudgetMs"/>, so the loop never overshoots the
+    /// budget by a whole back-off interval and a non-positive budget yields exactly one attempt.
+    /// </summary>
+    private async ValueTask<bool> DelayBeforeFinalizeRetryAsync(int attempt, ValueStopwatch elapsed, CancellationToken cancellationToken)
+    {
+        int delayMs = FinalizeRetryDelayMs(attempt);
+
+        if (elapsed.GetElapsedMilliseconds() + delayMs > options.TransactionFinalizeRetryBudgetMs)
+            return false;
+
+        await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
 
     /// <summary>
     /// Mints a local HLC timestamp without opening a Kahuna transaction. Used by the cheap
@@ -114,20 +135,26 @@ public sealed class KvTransactionsManager : IDisposable
     }
 
     /// <summary>
-    /// True while any transaction started here is still <see cref="KvTransactionStatus.Active"/>.
+    /// True while any transaction started here has not reached a terminal state — either still
+    /// <see cref="KvTransactionStatus.Active"/> or <see cref="KvTransactionStatus.Finalizing"/>.
     ///
     /// <para>Read by idle eviction, which must refuse to dispose a database whose transactions are
-    /// still running. Deliberately checks the status rather than the dictionary's count: a finalized
-    /// transaction can linger in the map until its untrack lands, and treating that as "busy" would
-    /// make a database with churn permanently un-evictable.</para>
+    /// still running. <c>Finalizing</c> counts as unfinished on purpose: a commit or rollback that
+    /// returned the coordinator's non-terminal <c>MustRetry</c> stays in that state, deliberately
+    /// tracked, because the client is told to retry the <em>same</em> finalize. Treating it as idle
+    /// would let eviction dispose the very transaction the caller is coming back to resolve.</para>
+    ///
+    /// <para>Deliberately checks the status rather than the dictionary's count: a finalized transaction
+    /// can linger in the map until its untrack lands, and treating that as "busy" would make a database
+    /// with churn permanently un-evictable.</para>
     /// </summary>
-    public bool HasActiveTransactions
+    public bool HasUnfinishedTransactions
     {
         get
         {
             foreach (KvTransaction tx in activeTransactions.Values)
             {
-                if (tx.Status == KvTransactionStatus.Active)
+                if (tx.Status is KvTransactionStatus.Active or KvTransactionStatus.Finalizing)
                     return true;
             }
 
@@ -645,6 +672,7 @@ public sealed class KvTransactionsManager : IDisposable
         ValueStopwatch commitTimer = ValueStopwatch.StartNew();
         using System.Diagnostics.Activity? commitSpan =
             Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.Commit);
+        int commitAttempts = 0;
         try
         {
             for (int attempt = 0; ; attempt++)
@@ -653,6 +681,7 @@ public sealed class KvTransactionsManager : IDisposable
                 // was folded server-side as the operation completed, so commit supplies only the routing
                 // handle.
                 commitRequestIssued = true;
+                commitAttempts++;
                 (result, string? anchor) = await kahuna.LocateAndCommitTransaction(tx.Handle, cancellationToken)
                     .ConfigureAwait(false);
 
@@ -662,10 +691,11 @@ public sealed class KvTransactionsManager : IDisposable
                 // an unknown Errored. No-op (stays null) on the best-effort path.
                 tx.CaptureRecordAnchor(anchor);
 
-                if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
+                if (result != KeyValueResponseType.MustRetry)
                     break;
 
-                await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
+                if (!await DelayBeforeFinalizeRetryAsync(attempt, commitTimer, cancellationToken).ConfigureAwait(false))
+                    break;
             }
 
             if (result == KeyValueResponseType.Committed)
@@ -709,7 +739,8 @@ public sealed class KvTransactionsManager : IDisposable
                 }
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionFinalizeUnresolved,
-                    $"Transaction {tx.UniqueId} commit outcome is not yet resolved after {MaxFinalizeRetries} retries; " +
+                    $"Transaction {tx.UniqueId} commit outcome is not yet resolved after {commitAttempts} attempts " +
+                    $"over {commitTimer.GetElapsedMilliseconds()} ms; " +
                     "retry COMMIT on the same transaction (do not re-run the operation)"
                 );
             }
@@ -786,15 +817,17 @@ public sealed class KvTransactionsManager : IDisposable
     {
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
         TransactionWorkingSet? snapshot = null;
+        ValueStopwatch closeTimer = ValueStopwatch.StartNew();
         for (int attempt = 0; ; attempt++)
         {
             (result, snapshot) = await kahuna.LocateAndCloseTransaction(
                 tx.CoordinatorKey, tx.TransactionId, cancellationToken).ConfigureAwait(false);
 
-            if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
+            if (result != KeyValueResponseType.MustRetry)
                 break;
 
-            await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
+            if (!await DelayBeforeFinalizeRetryAsync(attempt, closeTimer, cancellationToken).ConfigureAwait(false))
+                break;
         }
 
         if (result == KeyValueResponseType.Set && snapshot is not null)
@@ -877,13 +910,14 @@ public sealed class KvTransactionsManager : IDisposable
 
         // The coordinator rolls back from its own working set (staged writes and folded point locks);
         // the client supplies only the routing handle.
-        KeyValueResponseType result = await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+        (KeyValueResponseType result, int attempts, long retryElapsedMs) =
+            await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
 
         if (result == KeyValueResponseType.MustRetry)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionFinalizeUnresolved,
-                $"Transaction {tx.UniqueId} rollback outcome is not yet resolved after {MaxFinalizeRetries} retries; " +
-                "retry ROLLBACK on the same transaction"
+                $"Transaction {tx.UniqueId} rollback outcome is not yet resolved after {attempts} attempts " +
+                $"over {retryElapsedMs} ms; retry ROLLBACK on the same transaction"
             );
 
         // RolledBack, Aborted (a definite non-committing outcome — for a rollback request that is the
@@ -909,19 +943,26 @@ public sealed class KvTransactionsManager : IDisposable
     /// contract requires: rollback returns <c>MustRetry</c> until every intent-bearing release is
     /// acknowledged, and only then <c>RolledBack</c>.
     /// </summary>
-    private async Task<KeyValueResponseType> RollbackHandleWithRetryAsync(KvTransaction tx, CancellationToken cancellationToken)
+    private async Task<(KeyValueResponseType Result, int Attempts, long ElapsedMs)> RollbackHandleWithRetryAsync(
+        KvTransaction tx, CancellationToken cancellationToken)
     {
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        ValueStopwatch rollbackRetryTimer = ValueStopwatch.StartNew();
+        int attempts = 0;
+
         for (int attempt = 0; ; attempt++)
         {
+            attempts++;
             result = await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
 
-            if (result != KeyValueResponseType.MustRetry || attempt >= MaxFinalizeRetries)
+            if (result != KeyValueResponseType.MustRetry)
                 break;
 
-            await Task.Delay(FinalizeRetryDelayMs(attempt), cancellationToken).ConfigureAwait(false);
+            if (!await DelayBeforeFinalizeRetryAsync(attempt, rollbackRetryTimer, cancellationToken).ConfigureAwait(false))
+                break;
         }
-        return result;
+
+        return (result, attempts, rollbackRetryTimer.GetElapsedMilliseconds());
     }
 
     /// <summary>

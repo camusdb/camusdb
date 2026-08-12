@@ -446,6 +446,13 @@ public class ConfigDefinition
     public int MaxSerializableTransactionLifetimeMs { get; set; } = 3_600_000;
 
     /// <summary>
+    /// Total wall-clock budget in milliseconds for retrying one commit/rollback/close against the
+    /// coordinator's non-terminal <c>MustRetry</c> before surfacing CADB0509. &lt;= 0 attempts the
+    /// finalize once. Default 15 000 (15 s).
+    /// </summary>
+    public int TransactionFinalizeRetryBudgetMs { get; set; } = 15_000;
+
+    /// <summary>
     /// Idle timeout in milliseconds for explicit (client-driven) transactions before the background
     /// reaper rolls them back. &lt;= 0 disables the reaper. Default 300 000 (5 min).
     /// </summary>

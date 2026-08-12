@@ -272,6 +272,53 @@ public sealed class TestDatabaseIdleEviction : BaseTest
     }
 
     /// <summary>
+    /// A transaction whose commit came back unresolved is spared too, and can then be re-committed.
+    ///
+    /// <para>When the coordinator answers "the outcome is not known yet", the transaction is left
+    /// finalizing and tracked on purpose: the client is told to retry the <em>same</em> commit, so the
+    /// engine must still be holding it when they come back. Nothing references it in the meantime,
+    /// which makes it the longest-lived state in which a database looks idle while genuinely being in
+    /// the middle of something. The status is set here directly because reproducing the coordinator's
+    /// unresolved answer needs a fault-injected node; what eviction sees is identical either way.</para>
+    /// </summary>
+    [Test]
+    public async Task ADatabaseWithAnUnresolvedFinalizeIsRefusedAndTheCommitCanStillBeRetried()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options);
+        await CreateRobotsTableAsync(executor, dbname);
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.Insert(new InsertTicket(
+            txnState: txn,
+            databaseName: dbname,
+            tableName: TableName,
+            values: new()
+            {
+                new()
+                {
+                    { "id",   new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                    { "name", new(ColumnType.String, "Unresolved") },
+                    { "year", new(ColumnType.Integer64, 2026L) },
+                }
+            }));
+
+        txn.Status = KvTransactionStatus.Finalizing;
+
+        Assert.IsFalse(database.HasLiveUses, "Precondition: a client awaiting a finalize retry holds no reference");
+
+        Assert.AreEqual(
+            DatabaseEvictionOutcome.InUse,
+            executor.TryEvictDatabaseForTests(database.Id, EvictImmediately),
+            "A database whose transaction is mid-finalize must be refused");
+
+        // The half that matters: the retry the client was told to make still works.
+        await database.Transactions.CommitAsync(txn);
+
+        Assert.AreEqual(1, await CountRobotsAsync(executor, dbname),
+            "The commit that was protected from eviction must resolve on retry");
+    }
+
+    /// <summary>
     /// A descriptor used more recently than the window is spared. This is the check that makes the
     /// primitive safe against the resolve-then-reference gap: a caller that has just resolved a
     /// descriptor leaves it looking freshly used, so a window-respecting sweep cannot reach it.

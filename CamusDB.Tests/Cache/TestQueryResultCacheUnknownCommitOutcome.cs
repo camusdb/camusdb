@@ -50,9 +50,15 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
 {
     private const string DatabaseId = "testdb";
 
-    // Enough consecutive MustRetry responses to exhaust the bounded finalize retry loop, so the
-    // loop gives up while the outcome is still unknown.
-    private const int PersistentHiddenResponses = 13;
+    // These tests are about what the cache does with an unknown outcome, not about how long a finalize
+    // is retried, so they disable the retry budget: the finalize is attempted exactly once and a single
+    // hidden response is the whole loop. An injection count tied to however many attempts a budget
+    // happens to allow would stop exhausting the loop the moment that budget changed, and the tests
+    // would pass by committing cleanly instead of by leaving the outcome unknown.
+    private static readonly CamusDBOptions NoFinalizeRetries =
+        CamusDBOptions.Default with { TransactionFinalizeRetryBudgetMs = 0 };
+
+    private const int PersistentHiddenResponses = 1;
 
     /// <summary>
     /// Forwards the commit to the real node — so the write actually applies — and then replaces the
@@ -146,7 +152,7 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.MustRetry, PersistentHiddenResponses);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTransactionsManager mgr = new(hiddenCommit, NoFinalizeRetries, cache: cache);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-a");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-unresolved");
@@ -188,7 +194,7 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.MustRetry, PersistentHiddenResponses);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTransactionsManager mgr = new(hiddenCommit, NoFinalizeRetries, cache: cache);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-b");
 
         // A query in flight since before the write holds a token minted at the old generation.
@@ -224,7 +230,7 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.Errored, hideCount: 1);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTransactionsManager mgr = new(hiddenCommit, NoFinalizeRetries, cache: cache);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-c");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-errored");
@@ -279,7 +285,7 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
         AppliedThenHiddenCommitKahuna hiddenCommit =
             new(node.Kahuna, KeyValueResponseType.MustRetry, PersistentHiddenResponses);
 
-        KvTransactionsManager mgr = new(hiddenCommit, CamusDBOptions.Default, cache: cache);
+        KvTransactionsManager mgr = new(hiddenCommit, NoFinalizeRetries, cache: cache);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, DatabaseId, "unknown-e");
 
         string fp = await PublishEntryAsync(cache, store.RowKeySpace, "fp-resolved-later");

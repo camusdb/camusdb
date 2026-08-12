@@ -50,7 +50,7 @@ All codes not listed as retryable are permanent and must propagate to the caller
 | CADB0502  | `TransactionConflict`      | A shared or exclusive lock conflicted with a concurrent holder — or a commit returned a definite `Aborted`. In every case no write survived. | ✓ replay from `BEGIN` |
 | CADB0504  | `TransactionMustRetry`     | A **pre-write** transient: a routing failure during start (leader election / partition move) after the bounded start retries, or a lock-wait deadline / write conflict in the storage layer. **No data was written** when it is raised. | ✓ replay from `BEGIN` |
 | CADB0505  | `TransactionLifetimeExceeded` | The transaction was held open longer than `MaxSerializableTransactionLifetimeMs`. Its staged writes/locks are rolled back through the coordinator before this error is raised. | ✓ replay from `BEGIN` |
-| CADB0509  | `TransactionFinalizeUnresolved` | A `COMMIT`/`ROLLBACK` returned the coordinator's non-terminal `MustRetry` past the bounded finalize retries: the outcome is **not known yet** (leadership flip mid-finalize, an in-progress drain, or a durable decision not yet marked complete). | ↻ retry the **same** finalize — **do not** replay |
+| CADB0509  | `TransactionFinalizeUnresolved` | A `COMMIT`/`ROLLBACK` returned the coordinator's non-terminal `MustRetry` for the whole finalize retry budget (`transaction_finalize_retry_budget_ms`): the outcome is **not known yet** (leadership flip mid-finalize, an in-progress drain, a participant write shed under load, or a durable decision not yet marked complete). | ↻ retry the **same** finalize — **do not** replay |
 | CADB0300  | `DuplicateUniqueKeyValue`  | A unique-index constraint was violated.                                                           | ✗ no  |
 | CADB0301  | `NotNullViolation`         | A NOT NULL constraint was violated.                                                               | ✗ no  |
 | CADB0400  | `InvalidInput`             | Bad request (wrong type, missing field, `SET TRANSACTION` after statement, etc.).                | ✗ no  |
@@ -83,9 +83,15 @@ outcome is not known yet, or transient cleanup work remains — ask again on the
 coordinator is still draining operations that were in flight when finalize began, or (in durable mode)
 when a commit decision has been made but not yet fully acknowledged.
 
-CamusDB retries this automatically on the same transaction with a bounded, backing-off loop. If the
-outcome is *still* unresolved after that bound, `CommitAsync`/`RollbackAsync` throw **CADB0509
-`TransactionFinalizeUnresolved`** instead of guessing. When this happens:
+CamusDB retries this automatically on the same transaction with a backing-off loop bounded by a
+wall-clock budget — `transaction_finalize_retry_budget_ms`, 15 s by default. The bound is a duration
+rather than a number of attempts because every condition above resolves on its own schedule: a
+saturated node makes each one take longer without making it take more attempts, so an attempt cap
+would shrink the real budget exactly when the node most needs it. Raise the setting on nodes that run
+hot; lower it if you would rather take the unresolved answer sooner and retry it yourself.
+
+If the outcome is *still* unresolved when the budget runs out, `CommitAsync`/`RollbackAsync` throw
+**CADB0509 `TransactionFinalizeUnresolved`** instead of guessing. When this happens:
 
 - The transaction is left in the `Finalizing` state — **not** `Committed` and **not** `RolledBack`.
 - It stays tracked and its handle stays valid, so the *same* finalize can be resumed.

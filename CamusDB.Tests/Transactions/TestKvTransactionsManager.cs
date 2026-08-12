@@ -371,9 +371,16 @@ public sealed class TestKvTransactionsManager
         Assert.AreEqual(data, got!.Value.ToArray());
     }
 
-    // Enough consecutive MustRetry responses to exhaust the bounded finalize retry loop (attempts
-    // 0..MaxFinalizeRetries inclusive), so the loop gives up while every attempt is still MustRetry.
-    private const int PersistentMustRetryInjections = 13;
+    // The tests below are about what an unresolved finalize *means*, not about how long it is retried,
+    // so they disable the retry budget: the finalize is attempted exactly once and a single injected
+    // MustRetry is the whole loop. That keeps them deterministic and fast — an injection count tied to
+    // the number of attempts a budget happens to allow would silently stop exhausting the loop the
+    // moment the budget changed, and the tests would pass by committing instead of by giving up.
+    // The budget itself is covered by TestFinalizeRetryBudget.
+    private static readonly CamusDBOptions NoFinalizeRetries =
+        CamusDBOptions.Default with { TransactionFinalizeRetryBudgetMs = 0 };
+
+    private const int PersistentMustRetryInjections = 1;
 
     // commit MustRetry is NON-terminal: when LocateAndCommitTransaction keeps returning MustRetry past
     // the bounded finalize retries, CommitAsync must NOT fabricate a rollback. It throws the
@@ -389,7 +396,7 @@ public sealed class TestKvTransactionsManager
         await using EmbeddedKahuna __ = node;
 
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections);
-        KvTransactionsManager mgr = new(faultKahuna, CamusDBOptions.Default);
+        KvTransactionsManager mgr = new(faultKahuna, NoFinalizeRetries);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, "testdb", "fault-b");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
@@ -430,7 +437,7 @@ public sealed class TestKvTransactionsManager
         // First CommitAsync exhausts its bounded retries on injected MustRetry; the injections are then
         // spent, so the second CommitAsync on the same handle reaches the real coordinator and commits.
         CommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections);
-        KvTransactionsManager mgr = new(faultKahuna, CamusDBOptions.Default);
+        KvTransactionsManager mgr = new(faultKahuna, NoFinalizeRetries);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, "testdb", "fault-c");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
@@ -466,7 +473,7 @@ public sealed class TestKvTransactionsManager
         await using EmbeddedKahuna __ = node;
 
         RollbackFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections);
-        KvTransactionsManager mgr = new(faultKahuna, CamusDBOptions.Default);
+        KvTransactionsManager mgr = new(faultKahuna, NoFinalizeRetries);
         KvTableStore store = new(node.Kahuna, CamusDBOptions.Default, "testdb", "fault-d");
 
         TableSchema schema = SingleCol(ColumnType.Integer64);
@@ -506,7 +513,7 @@ public sealed class TestKvTransactionsManager
         const string anchor = "testdb:1:r/00000000000000000000dead";
         // MustRetry (with the anchor) for the whole first finalize loop, then Committed on resume.
         AnchorCommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections, anchor);
-        KvTransactionsManager mgr = new(faultKahuna, CamusDBOptions.Default);
+        KvTransactionsManager mgr = new(faultKahuna, NoFinalizeRetries);
 
         KvTransaction tx = await mgr.BeginAsync();
 
