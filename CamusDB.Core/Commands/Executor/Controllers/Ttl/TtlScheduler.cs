@@ -30,8 +30,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Ttl;
 /// well-defined, so the new leader continues it. Re-minting would re-scan everything the previous run
 /// had already checkpointed past, for no gain.</para>
 ///
-/// <para><b>Off by default.</b> With <see cref="CamusDBOptions.TtlEnabled"/> false neither loop starts
-/// and behavior is identical to an engine without TTL — an expired row is simply never collected.</para>
+/// <para><b>Off by default.</b> With <see cref="CamusDBOptions.TtlEnabled"/> false every tick no-ops
+/// and behavior is identical to an engine without TTL — an expired row is simply never collected. The
+/// loop itself still ticks so that enabling TTL at runtime (via a published configuration swap) starts
+/// collection without a restart.</para>
 /// </summary>
 internal sealed class TtlScheduler : IAsyncDisposable
 {
@@ -53,7 +55,14 @@ internal sealed class TtlScheduler : IAsyncDisposable
     /// </summary>
     private readonly Func<CancellationToken, Task<IReadOnlyList<(string Id, string Name)>>> discoverDatabases;
     private readonly ILogger<ICamusDB> logger;
-    private readonly CamusDBOptions options;
+
+    /// <summary>
+    /// Configuration for this engine; injected, never ambient. Swapped by <see cref="ApplyOptions"/>:
+    /// each tick pins the field where it reads it, so enabling TTL at runtime is honored at the next
+    /// tick without a restart.
+    /// </summary>
+    private CamusDBOptions options;
+
     private readonly CancellationTokenSource cts = new();
 
     private Task? loop;
@@ -124,12 +133,20 @@ internal sealed class TtlScheduler : IAsyncDisposable
         this.options = options;
     }
 
-    /// <summary>Starts the sweep loop. A no-op while row-level TTL is disabled.</summary>
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic and each
+    /// tick re-reads the enabled flag, so flipping <see cref="CamusDBOptions.TtlEnabled"/> on at
+    /// runtime starts sweeping at the next tick — the loop always runs and no-ops while disabled.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
+
+    /// <summary>
+    /// Starts the sweep loop. The loop always ticks (every <see cref="TickMs"/>) and re-checks
+    /// <see cref="CamusDBOptions.TtlEnabled"/> per tick, so TTL enabled at runtime begins work on an
+    /// engine where it was off at construction; while disabled a tick costs one cheap check.
+    /// </summary>
     public void Start()
     {
-        if (!options.TtlEnabled)
-            return;
-
         // Serialize concurrent Start calls: an unsynchronized `loop ??=` is check-then-act, and two
         // racing callers would each launch an independent loop for the process lifetime.
         lock (this)

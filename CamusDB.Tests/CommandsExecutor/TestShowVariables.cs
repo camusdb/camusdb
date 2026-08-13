@@ -99,6 +99,41 @@ internal sealed class TestShowVariables : BaseTest
         CollectionAssert.Contains(names, "kahuna.wal_sync_writes");
     }
 
+    // ── classification columns ────────────────────────────────────────────────
+
+    /// <summary>
+    /// "Can I change this now, and must the fleet agree?" is answerable from the SQL prompt: every
+    /// row carries the setting's declared mutability and scope, and the structurally node-defining
+    /// settings report themselves as restart-class.
+    /// </summary>
+    [Test]
+    public async Task ShowVariables_ReportsMutabilityAndScope()
+    {
+        (string db, DatabaseDescriptor _, CommandExecutor executor) = await CreateDatabase();
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, "SHOW VARIABLES");
+
+        foreach (QueryResultRow row in rows)
+        {
+            Assert.That(Cell(row, "mutability"), Is.EqualTo("runtime").Or.EqualTo("restart"), Cell(row, "variable"));
+            Assert.That(Cell(row, "scope"), Is.EqualTo("cluster").Or.EqualTo("node"), Cell(row, "variable"));
+        }
+
+        Assert.AreEqual("restart", Cell(Single(rows, "data_dir"), "mutability"));
+        Assert.AreEqual("node", Cell(Single(rows, "data_dir"), "scope"));
+
+        Assert.AreEqual("runtime", Cell(Single(rows, "max_mutations_per_transaction"), "mutability"));
+        Assert.AreEqual("cluster", Cell(Single(rows, "max_mutations_per_transaction"), "scope"));
+
+        Assert.AreEqual("runtime", Cell(Single(rows, "query_tracing_enabled"), "mutability"));
+        Assert.AreEqual("node", Cell(Single(rows, "query_tracing_enabled"), "scope"));
+
+        // The embedded storage node is built once from the kahuna.* section and never rebuilt, so
+        // the whole section is restart-class by rule.
+        Assert.AreEqual("restart", Cell(Single(rows, "kahuna.wal_sync_writes"), "mutability"));
+        Assert.AreEqual("node", Cell(Single(rows, "kahuna.wal_sync_writes"), "scope"));
+    }
+
     // ── effective values, not defaults ────────────────────────────────────────
 
     /// <summary>

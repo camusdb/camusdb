@@ -106,12 +106,26 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// should pass -1 so the background timer does not race with their assertions.
     /// Pass 0 to use <see cref="CamusDBOptions.QueryResultCacheSweepIntervalMs"/>.
     /// </param>
-    /// <summary>Configuration for the engine this cache serves; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
+    /// <summary>
+    /// Configuration for the engine this cache serves; injected, never ambient. Swapped by
+    /// <see cref="ApplyOptions"/>: the publish path reads the entry/byte bounds per call, so a
+    /// published change governs the next publish, and <see cref="ApplyOptions"/> trims the cache
+    /// down to the new bounds immediately.
+    /// </summary>
+    private CamusDBOptions options;
+
+    /// <summary>
+    /// True when the constructor was asked to read the sweep interval from configuration
+    /// (<c>sweepIntervalMs == 0</c>). Only such instances retune the timer on a configuration swap:
+    /// an explicit interval was a deliberate caller choice, and -1 (disabled, tests) must stay
+    /// disabled so manual <see cref="Sweep"/> calls never race a background timer.
+    /// </summary>
+    private readonly bool sweepIntervalFromOptions;
 
     public QueryResultCache(CamusDBOptions options, int sweepIntervalMs = -1)
     {
         this.options = options;
+        sweepIntervalFromOptions = sweepIntervalMs == 0;
 
         int interval = sweepIntervalMs > 0
             ? sweepIntervalMs
@@ -120,6 +134,47 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
                 : Timeout.Infinite;
 
         _sweepTimer = new Timer(_ => Sweep(), null, interval, interval);
+    }
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot, retunes the background sweep timer when
+    /// this instance reads its interval from configuration, and evicts LRU entries until the cache
+    /// fits the new entry/byte bounds. The trim is what makes a shrink real: without it a smaller
+    /// cap would only be enforced by future publishes, leaving the oversized population resident
+    /// until natural churn drained it.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next)
+    {
+        options = next;
+
+        if (sweepIntervalFromOptions)
+        {
+            int interval = next.QueryResultCacheSweepIntervalMs > 0
+                ? next.QueryResultCacheSweepIntervalMs
+                : Timeout.Infinite;
+            _sweepTimer.Change(interval, interval);
+        }
+
+        TrimToBounds();
+    }
+
+    /// <summary>
+    /// Evicts LRU entries until the cache is within the configured entry and byte caps, mirroring
+    /// the publish path's LRU-drain convention. Called on a configuration swap so lowering
+    /// <see cref="CamusDBOptions.QueryResultCacheMaxEntries"/> or
+    /// <see cref="CamusDBOptions.QueryResultCacheMaxBytes"/> actually frees memory.
+    /// </summary>
+    private void TrimToBounds()
+    {
+        lock (_lock)
+        {
+            while ((_entries.Count > options.QueryResultCacheMaxEntries
+                    || _totalBytes > options.QueryResultCacheMaxBytes)
+                   && _lruList.Count > 0)
+            {
+                EvictLruLocked();
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────

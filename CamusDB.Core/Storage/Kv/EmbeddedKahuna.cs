@@ -34,6 +34,21 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 {
     public const string SchemaChangeLogType = "SchemaChange";
 
+    /// <summary>
+    /// Raft log type carrying replicated cluster-setting changes. A separate consumer log type on
+    /// the same generic <c>OnReplicationReceived</c> hook the schema log rides — dispatch is by
+    /// <see cref="RaftLog.LogType"/>, so the two never see each other's entries.
+    /// </summary>
+    public const string ClusterSettingsLogType = "ClusterSettings";
+
+    /// <summary>
+    /// Prefix whose hash selects the single Raft partition that carries every cluster-settings log
+    /// entry, mirroring how <c>{db}/meta</c> selects a database's schema-log partition. One
+    /// partition means Raft commit order totally orders concurrent changes, which is what makes two
+    /// conflicting <c>SET</c>s converge identically on every node.
+    /// </summary>
+    private const string ClusterSettingsPrefix = "_system/settings";
+
     private readonly SchemaAckTracker schemaAcks = new();
 
     private ISchemaAckSender? schemaAckSender;
@@ -80,6 +95,22 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     // Stored so DisposeAsync can unregister them from Raft's event chains.
     private Func<int, RaftLog, Task<bool>>? _walRestoreLogHandler;
     private Action<int>? _walRestoreFinishedHandler;
+
+    // Settings-log twin of the schema WAL-restore buffer above, deliberately its own structures
+    // rather than a rekeying of the schema buffer: the schema buffer filters hard on
+    // SchemaChangeLogType, so without this a settings entry replayed from the WAL during restore —
+    // exactly the window a node that was down during a change catches up in — would be silently
+    // dropped. All settings traffic lives on one partition, so the buffer needs no per-partition
+    // keying; completion is tracked for the settings partition alone.
+    private readonly object _settingsRestoreLock = new();
+    private readonly List<byte[]> _settingsRestoreBuffer = new();
+    private bool _settingsRestoreCompleted;
+    private bool _settingsRestoreDrained;
+    private Func<int, RaftLog, Task<bool>>? _settingsRestoreLogHandler;
+    private Action<int>? _settingsRestoreFinishedHandler;
+
+    private readonly object settingsSubscriptionsSync = new();
+    private readonly List<ClusterSettingsSubscription> settingsSubscriptions = new();
 
     // Completes when StartAsync has finished electing leaders for every partition (system + all data
     // partitions). Background startup work fired from constructors — the database-registry load, the
@@ -170,6 +201,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
         WireWalRestoreBuffer();
+        WireSettingsRestoreBuffer();
     }
 
     /// <summary>
@@ -187,6 +219,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
         WireWalRestoreBuffer();
+        WireSettingsRestoreBuffer();
     }
 
     /// <summary>
@@ -1004,6 +1037,246 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         Raft.OnRestoreFinished += _walRestoreFinishedHandler;
     }
 
+    // ── Cluster-settings log ──────────────────────────────────────────────────────────────────
+    //
+    // A second consumer log type on the same generic Raft hooks the schema log rides. The shape
+    // mirrors the schema plumbing (propose-with-explicit-commit, local fan-out after quorum,
+    // late-subscriber WAL-restore buffer) but the machinery is deliberately separate: settings
+    // traffic lives on one fixed partition, has exactly one subscriber (the cluster-settings
+    // service), and must never perturb the heavily-exercised schema paths.
+
+    /// <summary>
+    /// Resolves the single Raft partition that carries every cluster-settings log entry — the same
+    /// prefix-hash routing the schema log uses, so ordering comes from one partition's commit
+    /// order. Unlike <see cref="SchemaLogPartition"/>, a resolution to the reserved partition 0
+    /// cannot throw here: the settings partition must exist in every deployment, so 0 is remapped
+    /// deterministically to partition 1 (which every layout has). The remap is a pure function of
+    /// values all nodes share — the fixed prefix and the shared partition layout — so every node
+    /// proposes onto the same partition.
+    /// </summary>
+    public int ClusterSettingsLogPartition()
+    {
+        int partitionId = Raft.GetPrefixPartitionKey(ClusterSettingsPrefix);
+        return partitionId == 0 ? 1 : partitionId;
+    }
+
+    /// <summary>
+    /// Whether this node currently leads the cluster-settings partition — the node that may
+    /// propose setting changes. Followers forward to the leader instead.
+    /// </summary>
+    public async Task<bool> AmIClusterSettingsLeaderAsync(CancellationToken cancellationToken = default)
+        => await Raft.AmILeader(ClusterSettingsLogPartition(), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Resolves the current leader endpoint of the cluster-settings partition.</summary>
+    public async Task<string> WaitForClusterSettingsLeaderAsync(CancellationToken cancellationToken = default)
+        => await Raft.WaitForLeader(ClusterSettingsLogPartition(), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Proposes one cluster-settings entry on the settings partition and applies it locally after
+    /// the quorum commit. Leader-only: callers that are not the settings leader get
+    /// <see cref="SchemaReplicationOutcome.NotLeader"/> back and must forward the request at the
+    /// command layer (over the authenticated internal route), mirroring how DDL forwards — there
+    /// is deliberately no raw-entry forwarding here.
+    /// </summary>
+    public async Task<SchemaReplicationResult> ReplicateClusterSettingsChangeAsync(
+        byte[] entry, CancellationToken cancellationToken = default)
+    {
+        int partitionId = ClusterSettingsLogPartition();
+        string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+
+        if (!await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
+
+        RaftReplicationResult proposal = await Raft.ReplicateLogs(
+            partitionId,
+            ClusterSettingsLogType,
+            entry,
+            autoCommit: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (!proposal.Success)
+            return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
+
+        (bool committed, RaftOperationStatus status, long commitLogId) =
+            await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+
+        if (committed && status == RaftOperationStatus.Success)
+        {
+            await InvokeLocalClusterSettingsApplyAsync(partitionId, entry).ConfigureAwait(false);
+            return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
+        }
+
+        await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+        return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
+    }
+
+    /// <summary>
+    /// Subscribes the cluster-settings service to committed and WAL-restored settings entries,
+    /// with the same late-subscriber catch-up the schema log has: entries restored before the
+    /// service registered are buffered by <see cref="WireSettingsRestoreBuffer"/> and replayed
+    /// here, then <paramref name="onRestoreFinished"/> fires exactly once. Without that replay a
+    /// node that was down during a change and received it during WAL restore would silently miss
+    /// it — the exact window the settings feature's catch-up guarantee covers.
+    /// </summary>
+    public IDisposable RegisterClusterSettingsApply(
+        Func<int, byte[], Task<bool>> onApply,
+        Func<int, byte[], Task<bool>> onRestore,
+        Func<Task>? onRestoreFinished = null)
+    {
+        ArgumentNullException.ThrowIfNull(onApply);
+        ArgumentNullException.ThrowIfNull(onRestore);
+
+        // Called inline rather than via Task.Run for the same starvation reason RegisterSchemaApply
+        // documents: Kommander awaits these from its Nixie actor thread.
+        Func<int, RaftLog, Task<bool>> applyHandler = async (partitionId, log) =>
+        {
+            if (log.LogType != ClusterSettingsLogType)
+                return true;
+
+            return await onApply(partitionId, log.LogData ?? []).ConfigureAwait(false);
+        };
+
+        Func<int, RaftLog, Task<bool>> restoreHandler = async (partitionId, log) =>
+        {
+            if (log.LogType != ClusterSettingsLogType)
+                return true;
+
+            return await onRestore(partitionId, log.LogData ?? []).ConfigureAwait(false);
+        };
+
+        Raft.OnReplicationReceived += applyHandler;
+        Raft.OnLogRestored += restoreHandler;
+
+        int settingsPartition = ClusterSettingsLogPartition();
+
+        // Mid-restore case: restore has not finished when the service subscribes; drain when it does.
+        Action<int>? restoreFinishedHandler = null;
+        if (onRestoreFinished is not null)
+        {
+            restoreFinishedHandler = (partitionId) =>
+            {
+                if (partitionId != settingsPartition)
+                    return;
+
+                List<byte[]>? buffered = DrainSettingsRestoreBuffer();
+                if (buffered is null)
+                    return;
+
+                _ = Task.Run(async () =>
+                {
+                    foreach (byte[] entry in buffered)
+                        await onRestore(settingsPartition, entry).ConfigureAwait(false);
+                    await onRestoreFinished().ConfigureAwait(false);
+                });
+            };
+            Raft.OnRestoreFinished += restoreFinishedHandler;
+        }
+
+        ClusterSettingsSubscription subscription = new(this, Raft, applyHandler, restoreHandler, restoreFinishedHandler);
+        lock (settingsSubscriptionsSync)
+            settingsSubscriptions.Add(subscription);
+
+        // Post-restore case (the common startup order): the settings partition already finished
+        // restoring — drain the buffer now and fire onRestoreFinished so the subscriber catches up.
+        bool alreadyCompleted;
+        lock (_settingsRestoreLock)
+            alreadyCompleted = _settingsRestoreCompleted && !_settingsRestoreDrained;
+
+        if (alreadyCompleted)
+        {
+            List<byte[]>? buffered = DrainSettingsRestoreBuffer();
+            if (buffered is not null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    foreach (byte[] entry in buffered)
+                        await onRestore(settingsPartition, entry).ConfigureAwait(false);
+
+                    if (onRestoreFinished is not null)
+                        await onRestoreFinished().ConfigureAwait(false);
+                });
+            }
+        }
+
+        return subscription;
+    }
+
+    /// <summary>
+    /// Consumes the buffered settings-restore entries exactly once; null when another subscriber
+    /// already drained them (the drain-once guard that keeps a re-subscribe from replaying).
+    /// </summary>
+    private List<byte[]>? DrainSettingsRestoreBuffer()
+    {
+        lock (_settingsRestoreLock)
+        {
+            if (_settingsRestoreDrained)
+                return null;
+
+            _settingsRestoreDrained = true;
+            List<byte[]> buffered = [.. _settingsRestoreBuffer];
+            _settingsRestoreBuffer.Clear();
+            return buffered;
+        }
+    }
+
+    /// <summary>
+    /// Buffers cluster-settings WAL-restore entries that fire before the settings service has
+    /// subscribed, exactly as <see cref="WireWalRestoreBuffer"/> does for the schema log. Wired
+    /// once from each constructor.
+    /// </summary>
+    private void WireSettingsRestoreBuffer()
+    {
+        _settingsRestoreLogHandler = (partitionId, log) =>
+        {
+            if (log.LogType != ClusterSettingsLogType || log.LogData is null)
+                return Task.FromResult(true);
+
+            lock (_settingsRestoreLock)
+            {
+                if (_settingsRestoreDrained)
+                    return Task.FromResult(true);
+
+                _settingsRestoreBuffer.Add(log.LogData);
+            }
+
+            return Task.FromResult(true);
+        };
+
+        // Completion is recorded for every partition rather than resolving the settings partition
+        // here: partition routing is not queryable until the node starts, and recording a boolean
+        // per event is harmless — the drain paths check the settings partition themselves.
+        _settingsRestoreFinishedHandler = (partitionId) =>
+        {
+            lock (_settingsRestoreLock)
+                _settingsRestoreCompleted = true;
+        };
+
+        Raft.OnLogRestored += _settingsRestoreLogHandler;
+        Raft.OnRestoreFinished += _settingsRestoreFinishedHandler;
+    }
+
+    /// <summary>
+    /// Fans one committed settings entry out to the local subscribers, exactly as
+    /// <see cref="InvokeLocalSchemaApplyAsync"/> does for schema deltas: the proposer applies
+    /// locally only after the quorum commit, through the same filtered handler live replication
+    /// uses.
+    /// </summary>
+    private async Task InvokeLocalClusterSettingsApplyAsync(int partitionId, byte[] entry)
+    {
+        List<ClusterSettingsSubscription> subscriptions;
+        lock (settingsSubscriptionsSync)
+            subscriptions = [.. settingsSubscriptions];
+
+        foreach (ClusterSettingsSubscription subscription in subscriptions)
+            await subscription.Apply(partitionId, entry).ConfigureAwait(false);
+    }
+
+    internal void RemoveSettingsSubscription(ClusterSettingsSubscription subscription)
+    {
+        lock (settingsSubscriptionsSync)
+            settingsSubscriptions.Remove(subscription);
+    }
+
     public async ValueTask DisposeAsync()
     {
         // Unregister all event handlers before stopping the node so Raft's delegate chains
@@ -1022,6 +1295,31 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             Raft.OnRestoreFinished -= _walRestoreFinishedHandler;
             _walRestoreFinishedHandler = null;
         }
+
+        if (_settingsRestoreLogHandler is not null)
+        {
+            Raft.OnLogRestored -= _settingsRestoreLogHandler;
+            _settingsRestoreLogHandler = null;
+        }
+
+        if (_settingsRestoreFinishedHandler is not null)
+        {
+            Raft.OnRestoreFinished -= _settingsRestoreFinishedHandler;
+            _settingsRestoreFinishedHandler = null;
+        }
+
+        // Same reference-release reasoning as the schema subscriptions below.
+        List<ClusterSettingsSubscription> settingsSubs;
+        lock (settingsSubscriptionsSync)
+        {
+            settingsSubs = [.. settingsSubscriptions];
+            settingsSubscriptions.Clear();
+        }
+        foreach (ClusterSettingsSubscription sub in settingsSubs)
+            sub.Dispose();
+
+        lock (_settingsRestoreLock)
+            _settingsRestoreBuffer.Clear();
 
         // Dispose all schema-apply subscriptions (unregisters OnReplicationReceived /
         // OnLogRestored / OnRestoreFinished handlers that capture DatabaseDescriptor objects).
@@ -1162,6 +1460,52 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
             disposed = true;
             owner.RemoveSchemaSubscription(this);
+            raft.OnReplicationReceived -= applyHandler;
+            raft.OnLogRestored -= restoreHandler;
+            if (restoreFinishedHandler is not null)
+                raft.OnRestoreFinished -= restoreFinishedHandler;
+        }
+    }
+
+    /// <summary>
+    /// Settings-log twin of <see cref="SchemaApplySubscription"/>: unhooks the Raft event handlers
+    /// on dispose, and lets the proposer's local apply reuse the same filtered handler live
+    /// replication uses by synthesizing a <see cref="RaftLog"/> of the settings log type.
+    /// </summary>
+    internal sealed class ClusterSettingsSubscription : IDisposable
+    {
+        private readonly EmbeddedKahuna owner;
+        private readonly IRaft raft;
+        private readonly Func<int, RaftLog, Task<bool>> applyHandler;
+        private readonly Func<int, RaftLog, Task<bool>> restoreHandler;
+        private readonly Action<int>? restoreFinishedHandler;
+        private bool disposed;
+
+        public ClusterSettingsSubscription(
+            EmbeddedKahuna owner,
+            IRaft raft,
+            Func<int, RaftLog, Task<bool>> applyHandler,
+            Func<int, RaftLog, Task<bool>> restoreHandler,
+            Action<int>? restoreFinishedHandler = null
+        )
+        {
+            this.owner = owner;
+            this.raft = raft;
+            this.applyHandler = applyHandler;
+            this.restoreHandler = restoreHandler;
+            this.restoreFinishedHandler = restoreFinishedHandler;
+        }
+
+        public Task<bool> Apply(int partitionId, byte[] entry)
+            => applyHandler(partitionId, new() { LogType = ClusterSettingsLogType, LogData = entry });
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            owner.RemoveSettingsSubscription(this);
             raft.OnReplicationReceived -= applyHandler;
             raft.OnLogRestored -= restoreHandler;
             if (restoreFinishedHandler is not null)

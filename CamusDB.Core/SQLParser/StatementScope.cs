@@ -42,7 +42,10 @@ public static class StatementScope
         NodeType.CreateUser or NodeType.CreateUserIfNotExists or
         NodeType.AlterUser or
         NodeType.DropUser or NodeType.DropUserIfExists or
-        NodeType.Grant or NodeType.Revoke;
+        NodeType.Grant or NodeType.Revoke or
+        // Cluster settings are server-level: they name their key in the SQL, touch only the shared
+        // _system/settings keyspace (via the replicated settings log), and return no descriptor.
+        NodeType.SetClusterSetting or NodeType.ResetClusterSetting;
 
     /// <summary>
     /// True for schema DDL: statements that change what objects a database contains, run inside their
@@ -96,5 +99,7 @@ public static class StatementScope
             // Per-process metrics; there is no database to read them from.
             NodeType.ShowEngineStats or
             // Per-process configuration; likewise not read from any database.
-            NodeType.ShowVariables;
+            NodeType.ShowVariables or
+            // The cluster-wide settings overlay; not read from any database either.
+            NodeType.ShowClusterSettings;
 }

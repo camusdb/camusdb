@@ -40,9 +40,32 @@ public sealed record DatabaseDescriptor : IDisposable
     /// <summary>
     /// Configuration of the engine this database belongs to. Carried here so per-table and per-scan
     /// code — which always has a descriptor in hand — reads its engine's settings without threading
-    /// options through every call, and without reaching for a process-wide value.
+    /// options through every call, and without reaching for a process-wide value. Swapped in place
+    /// by <see cref="ApplyOptions"/> when the engine publishes a new snapshot; readers pin it once
+    /// per operation, so an in-flight operation keeps the record it started with.
     /// </summary>
-    public CamusDBOptions Options { get; }
+    public CamusDBOptions Options { get; private set; }
+
+    /// <summary>
+    /// Forwards a newly published configuration snapshot to this database and everything long-lived
+    /// it owns: the transactions manager and every already-opened table store, each of which
+    /// captured the record at construction. Only table descriptors whose lazy open has completed
+    /// are touched — one still opening captures the descriptor's current options when it finishes,
+    /// which is this same snapshot or a newer one.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next)
+    {
+        Options = next;
+        Transactions.ApplyOptions(next);
+
+        foreach (KeyValuePair<string, AsyncLazy<TableDescriptor>> table in TableDescriptors)
+        {
+            // IsStarted first: reading AsyncLazy.Task starts the factory, and a swap must never
+            // force-open a table that nothing has asked for.
+            if (table.Value.IsStarted && table.Value.Task.IsCompletedSuccessfully)
+                table.Value.Task.Result.Store.ApplyOptions(next);
+        }
+    }
 
     private volatile string _name;
 

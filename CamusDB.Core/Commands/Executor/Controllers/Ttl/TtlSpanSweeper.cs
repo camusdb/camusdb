@@ -41,7 +41,14 @@ internal sealed class TtlSpanSweeper
     private readonly TtlSpanCoordinator coordinator;
     private readonly RowDeleter rowDeleter;
     private readonly Func<int> foregroundLoad;
-    private readonly CamusDBOptions options;
+
+    /// <summary>
+    /// Configuration for this engine; injected, never ambient. Swapped by <see cref="ApplyOptions"/>:
+    /// per-use reads (TTL settings resolution, the load-pause threshold) pick the new snapshot up at
+    /// their next read, so a runtime change is honored without a restart.
+    /// </summary>
+    private CamusDBOptions options;
+
     private readonly ILogger<ICamusDB> logger;
 
     /// <summary>
@@ -68,6 +75,12 @@ internal sealed class TtlSpanSweeper
         this.options = options;
         this.logger = logger;
     }
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic; each read
+    /// site pins the field once per use, so a span batch in flight keeps the snapshot it started with.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
 
     /// <summary>
     /// Sweeps one span to completion (or until it loses the span, is cancelled, or is paused by load).

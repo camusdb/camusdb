@@ -428,6 +428,31 @@ public enum NodeType
     ShowVariables,
 
     /// <summary>
+    /// <c>SET CLUSTER SETTING &lt;name&gt; = &lt;value&gt;</c>. <c>leftAst</c> = the setting-name
+    /// identifier; <c>rightAst</c> = the value literal. Server-level mutation: it validates against
+    /// the resulting configuration, replicates through the settings log (or applies locally in
+    /// standalone mode), and opens no database and no transaction. Superuser-gated.
+    /// </summary>
+    SetClusterSetting,
+
+    /// <summary>
+    /// <c>RESET CLUSTER SETTING &lt;name&gt;</c>. <c>leftAst</c> = the setting-name identifier.
+    /// Drops the cluster overlay entry so each node's local chain (file, environment, command line,
+    /// built-in default) resolves the key again — deliberately not "write the built-in default",
+    /// which would leave the cluster overriding every file with a value nobody chose.
+    /// </summary>
+    ResetClusterSetting,
+
+    /// <summary>
+    /// <c>SHOW CLUSTER SETTINGS [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, or
+    /// null. Lists the overlay entries the cluster currently carries — name and value text — as
+    /// distinct from <see cref="ShowVariables"/>, which reports this node's full effective
+    /// configuration with the cluster layer already merged in. Dispatched before any database is
+    /// opened. Superuser-gated like the other configuration surfaces.
+    /// </summary>
+    ShowClusterSettings,
+
+    /// <summary>
     /// <c>CREATE VIEW name [(cols)] AS query [WITH [LOCAL|CASCADED] CHECK OPTION]</c>.
     /// <c>leftAst</c> = view name, <c>rightAst</c> = the body SELECT, <c>extendedOne</c> = the
     /// optional column-alias list, <c>yytext</c> = <c>"local"</c>/<c>"cascaded"</c> or null.

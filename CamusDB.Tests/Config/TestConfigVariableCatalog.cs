@@ -45,35 +45,18 @@ internal sealed class TestConfigVariableCatalog
     /// </summary>
     private static readonly HashSet<string> NotFileConfigurable = new(StringComparer.Ordinal)
     {
-        // Read from the environment only, never from a file.
+        // Read from the environment only, never from a file: the master switch and the values that
+        // are secrets (key material or credentials have no business in a config file).
         "authentication_enabled",
         "access_token_server_key",
-        "access_token_ttl",
         "bootstrap_superuser",
         "bootstrap_superuser_password",
         "node_secret",
 
-        // Internal tunables with no YAML surface.
-        "authentication_cache_max_entries",
-        "authentication_cache_ttl",
-        "borrowed_decode",
-        "default_decision_durability",
-        "default_read_validation",
-        "fence_lease_ms",
-        "fence_lease_renew_interval_ms",
+        // A test-only override with no production use; a file key would only invite one.
         "force_spill_threshold_rows",
-        "hash_join_max_build_rows",
-        "index_scan_fetch_batch_size",
-        "keyspace_purge_batch_size",
-        "lock_tracing_enabled",
-        "login_kdf_max_concurrency",
-        "login_max_attempts_per_minute",
-        "login_rate_limit_max_entries",
-        "net_weight",
-        "password_hash_iterations",
-        "query_tracing_enabled",
-        "slot_backed_decode",
-        "spill_max_frame_bytes",
+
+        // A read-only mirror of kahuna.pitr_window_seconds, which is the configurable key.
         "pitr_window_seconds",
     };
 

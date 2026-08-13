@@ -46,18 +46,27 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
     private readonly DatabaseDropper databaseDropper;
     private readonly ILogger<ICamusDB> logger;
 
-    /// <summary>Configuration for this engine; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
-    private readonly int intervalMs;
+    /// <summary>
+    /// Configuration for this engine; injected, never ambient. Swapped by <see cref="ApplyOptions"/>:
+    /// the loop pins the field once per iteration, so a published change takes effect at the next
+    /// wake-up.
+    /// </summary>
+    private CamusDBOptions options;
+
     private readonly CancellationTokenSource cts = new();
     private Task? loop;
+
+    /// <summary>
+    /// How long the loop sleeps between re-checks while the reclaim interval is non-positive
+    /// (disabled). Short enough that enabling the interval at runtime starts sweeping promptly.
+    /// </summary>
+    private const int DisabledProbeMs = 5_000;
 
     public OrphanReclaimer(
         EmbeddedKahuna sharedNode,
         DatabaseRegistry registry,
         DatabaseDropper databaseDropper,
         ILogger<ICamusDB> logger,
-        int intervalMs,
         CamusDBOptions options)
     {
         this.options = options;
@@ -65,15 +74,28 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         this.registry = registry;
         this.databaseDropper = databaseDropper;
         this.logger = logger;
-        this.intervalMs = intervalMs;
     }
 
-    /// <summary>Starts the background reclaim loop. A non-positive interval disables the loop entirely.</summary>
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic; the loop
+    /// pins the field once per iteration, so a shortened interval takes effect only after the
+    /// currently running delay elapses — accepted, the loop is never interrupted mid-sleep.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
+
+    /// <summary>
+    /// Starts the background reclaim loop. The loop always runs — while the interval is non-positive
+    /// it sleeps a short probe interval and re-checks, so an interval configured at runtime starts
+    /// reclamation on an engine where it was disabled at construction.
+    /// </summary>
     public void Start()
     {
-        if (intervalMs <= 0)
-            return;
-        loop ??= ReclaimLoopAsync(cts.Token);
+        // Serialize concurrent Start calls: an unsynchronized `loop ??=` is check-then-act, and two
+        // racing callers would each launch an independent reclaim loop for the process lifetime.
+        lock (this)
+        {
+            loop ??= ReclaimLoopAsync(cts.Token);
+        }
     }
 
     private async Task ReclaimLoopAsync(CancellationToken ct)
@@ -84,6 +106,15 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         {
             try
             {
+                // Pin one snapshot per iteration so a runtime configuration change re-arms the loop.
+                int intervalMs = options.OrphanReclaimIntervalMs;
+
+                if (intervalMs <= 0)
+                {
+                    await Task.Delay(DisabledProbeMs, ct).ConfigureAwait(false);
+                    continue;
+                }
+
                 await Task.Delay(intervalMs, ct).ConfigureAwait(false);
                 await ReclaimDueAsync(ct).ConfigureAwait(false);
             }

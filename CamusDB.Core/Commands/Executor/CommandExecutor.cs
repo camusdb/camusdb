@@ -12,6 +12,7 @@ using CamusDB.Core.Auth;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Config;
 using CamusDB.Core.CommandsValidator;
 using Kahuna;
 using Kahuna.Shared.KeyValue;
@@ -153,11 +154,27 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Configuration for this engine. Held here and handed to everything this executor constructs, so
     /// a component never reaches for a process-wide value and two executors can be configured
     /// independently in one process.
+    ///
+    /// <para>When the engine was built with a <see cref="CamusDBOptionsHolder"/>, a published swap
+    /// replaces this reference and fans out to the controllers, open databases, and table stores via
+    /// <see cref="ApplyOptions"/>; each read site pins the field once per operation, so an in-flight
+    /// statement keeps the snapshot it started with. Without a holder the field never changes and the
+    /// engine is configured for life — the behavior every existing test relies on.</para>
     /// </summary>
-    private readonly CamusDBOptions options;
+    private CamusDBOptions options;
 
     /// <summary>Configuration for this engine, for the controllers and stores it owns.</summary>
     internal CamusDBOptions Options => options;
+
+    /// <summary>Unhooks this executor from the options holder on dispose; null when none was given.</summary>
+    private readonly IDisposable? optionsSubscription;
+
+    /// <summary>
+    /// The runtime cluster-settings pipeline behind <c>SET/RESET CLUSTER SETTING</c> and
+    /// <c>SHOW CLUSTER SETTINGS</c>. Null on engines composed without one (most tests), where the
+    /// statements are rejected with a clear error rather than silently applying to nothing.
+    /// </summary>
+    private readonly ClusterSettingsService? clusterSettings;
 
     /// <summary>
     /// Parses SQL through this executor's shared parser cache. Exists for transports (HTTP/gRPC)
@@ -206,6 +223,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <param name="isClusterMode">True when this process is a Raft cluster node; false for standalone.</param>
     /// <param name="cache">Optional query result cache. When non-null, DML commits drive the publish-gate invalidation
     /// protocol and DDL operations call <see cref="IQueryResultCache.InvalidateByTableId"/> after each successful commit.</param>
+    /// <param name="optionsHolder">Optional swappable source of configuration snapshots. When
+    /// supplied, its current snapshot overrides <paramref name="options"/> and every subsequent
+    /// <see cref="CamusDBOptionsHolder.Publish"/> is fanned out to this engine's controllers, open
+    /// databases, and table stores. When null the engine keeps <paramref name="options"/> for life.</param>
     public CommandExecutor(
         CommandValidator validator,
         CatalogsManager catalogs,
@@ -215,15 +236,19 @@ public sealed class CommandExecutor : IAsyncDisposable
         ISchemaDdlForwarder? schemaDdlForwarder = null,
         DatabaseRegistry? registry = null,
         bool isClusterMode = false,
-        IQueryResultCache? cache = null)
+        IQueryResultCache? cache = null,
+        CamusDBOptionsHolder? optionsHolder = null,
+        ClusterSettingsService? clusterSettings = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
         this.logger = logger;
-        this.options = options;
+        this.options = optionsHolder?.Current ?? options;
+        options = this.options;
         this.schemaDdlForwarder = schemaDdlForwarder;
         this.isClusterMode = isClusterMode;
         this.sharedNode = sharedNode;
+        this.clusterSettings = clusterSettings;
 
         if (registry is not null)
         {
@@ -305,7 +330,105 @@ public sealed class CommandExecutor : IAsyncDisposable
         // itself elects a single sweeping node by registry-partition leadership.
         if (sharedNode is not null)
             snapshotRenewerStart = StartSnapshotHoldRenewerAsync(sharedNode);
+
+        // Subscribed last, after every component the fan-out touches exists. The callback runs
+        // inline under the holder's publish lock, so it must stay cheap: swap references, nothing
+        // more.
+        if (optionsHolder is not null)
+            optionsSubscription = optionsHolder.Subscribe(ApplyOptions);
     }
+
+    /// <summary>
+    /// Fans a newly published configuration snapshot out to this engine: the executor's own field,
+    /// the controllers that captured the record at construction, and every open database (which
+    /// forwards to its transactions manager and opened table stores). Reference assignment is
+    /// atomic and each read site pins its snapshot once per operation, so an in-flight statement
+    /// keeps the configuration it started with and the change takes effect at the next boundary.
+    ///
+    /// <para>Components deliberately not reached here hold restart-class settings only — their
+    /// values are baked into something built once (the embedded node, the auth service's KDF
+    /// throttle, the metrics collector) and honestly require a restart, which is what their
+    /// <see cref="Config.ConfigSettingAttribute"/> classification declares. The TTL span
+    /// coordinator is also deliberately skipped: its span-lease duration and renew cadence are
+    /// what keeps two nodes from working one span concurrently, and changing lease timing under
+    /// an active span would let a claim lapse (or outlive its renewal) mid-sweep — those two
+    /// values stay fixed for the coordinator's lifetime.</para>
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next)
+    {
+        options = next;
+
+        validator.ApplyOptions(next);
+        queryExecutor.ApplyOptions(next);
+        schemaQuerier.ApplyOptions(next);
+        tableCreator.ApplyOptions(next);
+        tableAnalyzer.ApplyOptions(next);
+        databaseOpener.ApplyOptions(next);
+        databaseDroper.ApplyOptions(next);
+
+        // Background schedulers are constructed asynchronously after the registry opens, so they
+        // may not exist yet; a swap published before they start is picked up at construction,
+        // because they are built from this executor's already-swapped options field.
+        orphanReclaimer?.ApplyOptions(next);
+        autoAnalyzeScheduler?.ApplyOptions(next);
+        ttlScheduler?.ApplyOptions(next);
+        ttlSweeper?.ApplyOptions(next);
+
+        // The parser cache latched its TTL/cap/sweep cadence at construction; retune swaps them and
+        // trims an over-cap population immediately.
+        sqlParserCache.Retune(
+            next.SqlParserCacheTtlSeconds,
+            next.SqlParserCacheMaxEntries,
+            next.SqlParserCacheSweepSeconds);
+
+        // The compiled-regex cache keys entries by match timeout, so a timeout change strands the
+        // old entries as unreachable garbage that still counts against the cap — drop them.
+        RegexMatcher.EvictEntriesCompiledUnderOtherTimeouts(next.RegexMatchTimeoutMs);
+
+        foreach (KeyValuePair<string, Nito.AsyncEx.AsyncLazy<DatabaseDescriptor>> database in databaseDescriptors.Descriptors)
+        {
+            // IsStarted first: reading AsyncLazy.Task starts the factory, and a configuration swap
+            // must never force-open a database nothing has asked for.
+            if (database.Value.IsStarted && database.Value.Task.IsCompletedSuccessfully)
+                database.Value.Task.Result.ApplyOptions(next);
+        }
+    }
+
+    /// <summary>
+    /// Executes <c>SET CLUSTER SETTING</c> / <c>RESET CLUSTER SETTING</c> through the settings
+    /// pipeline: key and value validation (against the resulting configuration) happen there,
+    /// before anything replicates. Engines composed without the service reject the statement
+    /// rather than silently applying to nothing.
+    /// </summary>
+    private async Task ExecuteClusterSettingChange(NodeAst ast)
+    {
+        if (clusterSettings is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Cluster settings are not available on this engine");
+
+        string key = ast.leftAst!.yytext!;
+
+        if (ast.nodeType == NodeType.SetClusterSetting)
+            await clusterSettings.SetAsync(key, ClusterSettingValueText(ast.rightAst!)).ConfigureAwait(false);
+        else
+            await clusterSettings.ResetAsync(key).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Renders a <c>SET CLUSTER SETTING</c> value literal as the scalar text the configuration
+    /// file would carry — the one spelling the overlay parser accepts, so a value read from
+    /// <c>SHOW VARIABLES</c> pastes back unchanged. Bare identifiers pass through for the
+    /// enum-valued settings (<c>read_committed</c>, <c>adaptive</c>, …).
+    /// </summary>
+    private static string ClusterSettingValueText(NodeAst value) => value.nodeType switch
+    {
+        NodeType.String => Controllers.DML.SQLExecutorBaseCreator.UnquoteStringLiteral(value.yytext!),
+        NodeType.Integer or NodeType.Float or NodeType.Bool or NodeType.Identifier => value.yytext!,
+        _ => throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Unsupported value literal for SET CLUSTER SETTING: {value.nodeType}"),
+    };
 
     private async Task StartSnapshotHoldRenewerAsync(EmbeddedKahuna node)
     {
@@ -333,7 +456,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Physically reclaim deferred-dropped databases/tables past their retention window, on the
         // elected node. Kick one immediate sweep so orphans already expired during downtime are cleaned
         // promptly rather than waiting a full interval.
-        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options.OrphanReclaimIntervalMs, options)
+        OrphanReclaimer reclaimer = new(node, registry, databaseDroper, logger, options)
         {
             // Wired here because reclaiming staging storage needs the database opener and the
             // refresher, neither of which the reclaimer should own.
@@ -344,7 +467,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         _ = ReclaimExpiredOrphansOnStartupAsync(reclaimer);
 
         // Keep optimizer statistics fresh in the background. Leader-elected on the same registry key
-        // so exactly one node analyzes each table; disabled entirely unless AutoAnalyzeEnabled is set.
+        // so exactly one node analyzes each table; while AutoAnalyzeEnabled is off the loop idles on a
+        // short probe so a runtime enable starts sweeping without a restart.
         AutoAnalyzeScheduler analyzeScheduler = new(
             node,
             registry.RegistryBucket,
@@ -352,13 +476,13 @@ public sealed class CommandExecutor : IAsyncDisposable
             DiscoverStaleTablesAsync,
             () => ForegroundLoadProbe?.Invoke() ?? 0,
             logger,
-            options.AutoAnalyzeCheckIntervalMs,
             options);
         analyzeScheduler.Start();
         autoAnalyzeScheduler = analyzeScheduler;
 
         // Row-level TTL. Planning is elected on the same registry key so exactly one node mints a run
-        // per table; the span work itself runs on every node. Disabled entirely unless TtlEnabled is set.
+        // per table; the span work itself runs on every node. While TtlEnabled is off each tick no-ops,
+        // so a runtime enable starts collection at the next tick without a restart.
         TtlSpanCoordinator ttlCoordinatorInstance = new(
             node.Kahuna,
             $"ttl:{node.Raft.GetLocalNodeId()}",
@@ -3476,6 +3600,17 @@ public sealed class CommandExecutor : IAsyncDisposable
             return;
         }
 
+        // Changing configuration fleet-wide is gated harder still in effect: several of these knobs
+        // bound memory, concurrency and background work, so a non-superuser who could SET one has a
+        // denial-of-service lever on every node. Reading the overlay follows SHOW VARIABLES' bar so
+        // the whole configuration surface is consistent.
+        if (ast.nodeType is NodeType.SetClusterSetting or NodeType.ResetClusterSetting or NodeType.ShowClusterSettings)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Cluster settings require a superuser");
+            return;
+        }
+
         // Server-level introspection: any authenticated caller may run these.
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
             or NodeType.ShowOrphanDatabases or NodeType.ShowGrants)
@@ -4074,6 +4209,15 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (ast.nodeType is NodeType.Grant or NodeType.Revoke)
             return await Grant(sqlExecutor.CreateGrantTicket(ast)).ConfigureAwait(false);
 
+        // Cluster settings are server-level: the change validates against the resulting
+        // configuration, replicates through the settings log (or applies locally in standalone
+        // mode), and opens no database and no transaction.
+        if (ast.nodeType is NodeType.SetClusterSetting or NodeType.ResetClusterSetting)
+        {
+            await ExecuteClusterSettingChange(ast).ConfigureAwait(false);
+            return default;
+        }
+
         DatabaseDescriptor database = await databaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
@@ -4648,6 +4792,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (ast.nodeType is NodeType.Grant or NodeType.Revoke)
         {
             await Grant(sqlExecutor.CreateGrantTicket(ast)).ConfigureAwait(false);
+            return default;
+        }
+
+        // Server-level like the statements above, and reachable through this endpoint for the same
+        // reason: clients route no-rows statements to whichever endpoint they use for non-SELECT SQL.
+        if (ast.nodeType is NodeType.SetClusterSetting or NodeType.ResetClusterSetting)
+        {
+            await ExecuteClusterSettingChange(ast).ConfigureAwait(false);
             return default;
         }
 
@@ -5515,6 +5667,22 @@ public sealed class CommandExecutor : IAsyncDisposable
             return (null!, schemaQuerier.ShowVariables(options, UnquoteLikePattern(ast.leftAst?.yytext)));
         }
 
+        // SHOW CLUSTER SETTINGS lists the overlay entries the cluster currently carries — what SET
+        // CLUSTER SETTING has changed and RESET has not yet dropped. It opens no database and no
+        // transaction; the per-key effect on this node is what SHOW VARIABLES reports.
+        if (ast.nodeType == NodeType.ShowClusterSettings)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowClusterSettingsSchema;
+
+            if (clusterSettings is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Cluster settings are not available on this engine");
+
+            return (null!, schemaQuerier.ShowClusterSettings(clusterSettings.List(), UnquoteLikePattern(ast.leftAst?.yytext)));
+        }
+
         // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.
         if (ast.nodeType == NodeType.ShowOrphanDatabases)
         {
@@ -6092,6 +6260,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Unhook from the options holder first: a swap published mid-shutdown must not fan out into
+        // components this method is about to dispose.
+        optionsSubscription?.Dispose();
+
         // Stop the snapshot-hold renewer first. Await its deferred start so the renewer instance is
         // observed (or its start fault surfaces) before disposal, avoiding a lost background loop.
         if (snapshotRenewerStart is not null)

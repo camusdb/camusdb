@@ -56,7 +56,8 @@ internal sealed class ParsedSqlCacheEntry
 /// <b>Max-entries cap policy:</b> when the dictionary already holds <see cref="_maxEntries"/>
 /// entries, new statements are <em>not</em> cached until the background sweep reclaims expired entries.
 /// This is intentionally the simplest possible policy — allocation-free, contention-free, and sufficient
-/// to bound memory against floods of unique ad-hoc SQL.
+/// to bound memory against floods of unique ad-hoc SQL. The TTL, cap, and sweep cadence can be swapped
+/// at runtime via <see cref="Retune"/>, which also trims an over-cap population.
 /// </para>
 /// <para>
 /// <b>Lifecycle:</b> the background sweep task starts lazily on the first <see cref="Store"/>
@@ -68,9 +69,12 @@ public sealed class SqlParserCache : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, ParsedSqlCacheEntry> _cache = new();
 
-    private readonly long _ttlMs;
-    private readonly int _maxEntries;
-    private readonly int _sweepSeconds;
+    // Not readonly: Retune swaps these at runtime. _ttlMs is read/written via Volatile so a torn
+    // read of the 64-bit value is impossible on 32-bit runtimes; the ints are atomic by themselves.
+    private long _ttlMs;
+    private volatile int _maxEntries;
+    private volatile int _sweepSeconds;
+
     private readonly ILogger? _logger;
 
     // Background sweeper state — one per instance, started lazily on first Store() call.
@@ -91,12 +95,15 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// <summary>Current number of live entries in the cache.</summary>
     public int Count => _cache.Count;
 
+    /// <summary>Volatile view of the sliding TTL so a concurrent <see cref="Retune"/> is never torn.</summary>
+    private long TtlMs => Volatile.Read(ref _ttlMs);
+
     /// <summary>
     /// Returns <see langword="true"/> when the cache is active (TTL &gt; 0).
     /// When <see langword="false"/> every <see cref="TryGet"/> returns a miss and every
     /// <see cref="Store"/> is a no-op; parsing behaviour is identical to pre-cache.
     /// </summary>
-    public bool IsEnabled => _ttlMs > 0;
+    public bool IsEnabled => TtlMs > 0;
 
     // ── Construction ───────────────────────────────────────────────────────────
 
@@ -124,6 +131,42 @@ public sealed class SqlParserCache : IAsyncDisposable
         _sweepSeconds = sweepSeconds > 0 ? sweepSeconds : 60;
     }
 
+    /// <summary>
+    /// Applies a newly published configuration to a live cache: swaps the TTL, entry cap, and sweep
+    /// cadence, then trims to the new cap. The sweep loop reads <c>_sweepSeconds</c> at the top of
+    /// each iteration, so a new cadence takes effect after the currently running delay elapses; a
+    /// disposed cache's sweeper is never resurrected (this method starts nothing).
+    ///
+    /// <para>When the new cap is smaller than the current population, entries are removed in
+    /// ascending <see cref="ParsedSqlCacheEntry.ExpirationTicks"/> order — the entries that would
+    /// die soonest go first. There is no LRU order to honor (the insert policy is
+    /// stop-inserting-when-full), so nearest-expiry is the only defensible eviction order.</para>
+    /// </summary>
+    internal void Retune(int ttlSeconds, int maxEntries, int sweepSeconds)
+    {
+        Volatile.Write(ref _ttlMs, (long)ttlSeconds * 1000);
+        _maxEntries = maxEntries;
+        _sweepSeconds = sweepSeconds > 0 ? sweepSeconds : 60;
+
+        if (maxEntries <= 0 || _cache.Count <= maxEntries)
+            return;
+
+        // Snapshot, order by nearest expiry, and remove until at/below the cap. Concurrent stores
+        // may race this trim; the cap is a bound on growth, not an exact invariant, and the next
+        // Store re-checks it anyway.
+        List<KeyValuePair<string, ParsedSqlCacheEntry>> snapshot = new(_cache);
+        snapshot.Sort(static (a, b) => a.Value.ExpirationTicks.CompareTo(b.Value.ExpirationTicks));
+
+        foreach (KeyValuePair<string, ParsedSqlCacheEntry> pair in snapshot)
+        {
+            if (_cache.Count <= maxEntries)
+                break;
+
+            if (_cache.TryRemove(pair.Key, out _))
+                Interlocked.Increment(ref _evictions);
+        }
+    }
+
     // ── Lookup ─────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -133,7 +176,8 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// </summary>
     public bool TryGet(string sql, out NodeAst? ast)
     {
-        if (_ttlMs <= 0)
+        long ttlMs = TtlMs;
+        if (ttlMs <= 0)
         {
             ast = null;
             Interlocked.Increment(ref _misses);
@@ -145,7 +189,7 @@ public sealed class SqlParserCache : IAsyncDisposable
             long now = Environment.TickCount64;
             if (entry.ExpirationTicks >= now)
             {
-                entry.ExpirationTicks = now + _ttlMs;
+                entry.ExpirationTicks = now + ttlMs;
                 ast = entry.Ast;
                 Interlocked.Increment(ref _hits);
                 return true;
@@ -166,7 +210,7 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// Inserts a successfully-parsed AST into the cache using the configured TTL.
     /// No-op when the cache is disabled or when the max-entries cap is reached.
     /// </summary>
-    public void Store(string sql, NodeAst ast) => Store(sql, ast, _ttlMs);
+    public void Store(string sql, NodeAst ast) => Store(sql, ast, TtlMs);
 
     /// <summary>
     /// Inserts a successfully-parsed AST with an explicit TTL in milliseconds.
@@ -178,7 +222,8 @@ public sealed class SqlParserCache : IAsyncDisposable
         if (ttlMs <= 0)
             return;  // disabled — no-op
 
-        if (_maxEntries > 0 && _cache.Count >= _maxEntries)
+        int maxEntries = _maxEntries;
+        if (maxEntries > 0 && _cache.Count >= maxEntries)
             return;  // cap reached — skip silently; sweep will make room
 
         long expiresAt = Environment.TickCount64 + ttlMs;

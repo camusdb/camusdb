@@ -56,7 +56,15 @@ public sealed class CommandValidator
     /// rather than reading a process-wide value.
     /// </summary>
     /// <summary>Configuration of the engine whose commands this validates.</summary>
-    private readonly CamusDBOptions options;
+    private CamusDBOptions options;
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic and the
+    /// record itself stays immutable; readers pin the field once at the top of an operation, so an
+    /// in-flight operation keeps the snapshot it started with and a change takes effect at the
+    /// next operation boundary.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
 
     public CommandValidator(CamusDBOptions options)
     {

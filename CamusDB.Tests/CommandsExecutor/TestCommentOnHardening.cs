@@ -233,6 +233,8 @@ internal sealed class TestCommentOnHardening : BaseTest
             NodeType.CreateDatabaseRelink,
             NodeType.DropDatabase, NodeType.DropDatabaseIfExists,
             NodeType.RenameDatabase, NodeType.CommentOnDatabase,
+            // Cluster settings mutate server-level state (the replicated overlay), never a database.
+            NodeType.SetClusterSetting, NodeType.ResetClusterSetting,
         })
         {
             Assert.IsTrue(StatementScope.IsDatabaseScopedMutation(nodeType), $"{nodeType} must be database-scoped");
@@ -241,7 +243,7 @@ internal sealed class TestCommentOnHardening : BaseTest
 
         // Server-level introspection needs no context database, but is not a mutation either: a
         // transport that treated it as one would open a transaction it must never commit.
-        foreach (NodeType nodeType in new[] { NodeType.ShowEngineStats, NodeType.ShowVariables })
+        foreach (NodeType nodeType in new[] { NodeType.ShowEngineStats, NodeType.ShowVariables, NodeType.ShowClusterSettings })
         {
             Assert.IsFalse(StatementScope.IsDatabaseScopedMutation(nodeType), $"{nodeType} mutates nothing");
             Assert.IsTrue(StatementScope.AllowsEmptyContextDatabase(nodeType), $"{nodeType} must not need a context database");

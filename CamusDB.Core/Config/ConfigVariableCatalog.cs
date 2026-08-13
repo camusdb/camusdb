@@ -19,12 +19,16 @@ namespace CamusDB.Core.Config;
 /// <param name="Type">Coarse type label: <c>bool</c>, <c>int</c>, <c>long</c>, <c>double</c>, <c>string</c>, <c>enum</c>, <c>duration_ms</c>, or <c>list</c>.</param>
 /// <param name="Default">The built-in default rendered the same way, or null when the default is unset.</param>
 /// <param name="Source">Which layer supplied <paramref name="Value"/>.</param>
+/// <param name="Mutability">Whether a change takes effect live (<c>runtime</c>) or requires a restart.</param>
+/// <param name="Scope">Whether the fleet must agree on the value (<c>cluster</c>) or it is per-node.</param>
 public sealed record ConfigVariable(
     string Name,
     string? Value,
     string Type,
     string? Default,
-    ConfigValueSource Source);
+    ConfigValueSource Source,
+    ConfigMutability Mutability,
+    ConfigScope Scope);
 
 /// <summary>
 /// Renders a <see cref="CamusDBOptions"/> instance as the flat, YAML-named list of settings behind
@@ -108,7 +112,8 @@ public static class ConfigVariableCatalog
                 property.PropertyType,
                 property.GetValue(options),
                 property.GetValue(CamusDBOptions.Default),
-                options.ValueSources));
+                options.ValueSources,
+                Classification(property)));
         }
 
         foreach (PropertyInfo property in typeof(KahunaOptionsConfig).GetProperties(BindingFlags.Public | BindingFlags.Instance))
@@ -121,7 +126,8 @@ public static class ConfigVariableCatalog
                 property.PropertyType,
                 property.GetValue(options.Kahuna),
                 property.GetValue(CamusDBOptions.Default.Kahuna),
-                options.ValueSources));
+                options.ValueSources,
+                KahunaClassification));
         }
 
         variables.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
@@ -129,12 +135,33 @@ public static class ConfigVariableCatalog
         return variables;
     }
 
+    /// <summary>
+    /// The declared classification of an options property, read from its
+    /// <see cref="ConfigSettingAttribute"/>. Throwing on an unattributed property is deliberate:
+    /// the classification is operator-facing, so a setting without one must fail loudly (and the
+    /// classification test fails the build first) rather than default to something plausible.
+    /// </summary>
+    private static ConfigSettingAttribute Classification(PropertyInfo property)
+        => property.GetCustomAttribute<ConfigSettingAttribute>()
+           ?? throw new InvalidOperationException(
+               $"Setting '{property.Name}' carries no [ConfigSetting] classification; every settable " +
+               "CamusDBOptions property must declare mutability and scope");
+
+    /// <summary>
+    /// Every <c>kahuna.*</c> key is restart-class and node-scoped by rule rather than per-property
+    /// attribution: the embedded node is constructed once from these values before anything else
+    /// starts and is never rebuilt, so no key in the section can honestly claim runtime mutability.
+    /// </summary>
+    private static readonly ConfigSettingAttribute KahunaClassification =
+        new(ConfigMutability.Restart, ConfigScope.Node);
+
     private static ConfigVariable Describe(
         string name,
         Type declaredType,
         object? value,
         object? defaultValue,
-        IReadOnlyDictionary<string, ConfigValueSource> sources)
+        IReadOnlyDictionary<string, ConfigValueSource> sources,
+        ConfigSettingAttribute classification)
     {
         string? formatted = Format(value);
 
@@ -146,7 +173,9 @@ public static class ConfigVariableCatalog
             formatted,
             TypeLabel(declaredType),
             Format(defaultValue),
-            sources.TryGetValue(name, out ConfigValueSource source) ? source : ConfigValueSource.Default);
+            sources.TryGetValue(name, out ConfigValueSource source) ? source : ConfigValueSource.Default,
+            classification.Mutability,
+            classification.Scope);
     }
 
     /// <summary>

@@ -150,6 +150,23 @@ internal static class RegexMatcher
         GetOrCompile(pattern, opts, TimeoutMs, CacheMaxEntries);
     }
 
+    /// <summary>
+    /// Drops cached instances compiled under a match timeout other than <paramref name="currentTimeoutMs"/>.
+    /// The timeout is part of the cache key, so after a runtime timeout change the old entries are
+    /// permanently unreachable — no lookup will ever ask for them again — yet they still count against
+    /// <see cref="CamusDBOptions.RegexCacheMaxEntries"/> and could pin the cache full forever. Called
+    /// on every published configuration swap; a no-op when the timeout did not change. Queries racing
+    /// this eviction simply recompile on their next call — a full cache never fails a query.
+    /// </summary>
+    internal static void EvictEntriesCompiledUnderOtherTimeouts(int currentTimeoutMs)
+    {
+        foreach ((string pattern, RegexOptions opts, int timeoutMs) key in Cache.Keys)
+        {
+            if (key.timeoutMs != currentTimeoutMs)
+                Cache.TryRemove(key, out _);
+        }
+    }
+
     private static Regex GetOrCompile(string pattern, RegexOptions opts, int timeoutMs, int cacheMaxEntries)
     {
         // CultureInvariant is always forced; callers may or may not include it already.

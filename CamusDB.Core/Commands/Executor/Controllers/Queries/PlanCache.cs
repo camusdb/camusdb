@@ -31,7 +31,10 @@ internal sealed class PlanCache
         public Slot(string key, PlanCacheEntry entry) { Key = key; Entry = entry; }
     }
 
-    private readonly int _maxEntries;
+    // Not readonly: SetMaxEntries swaps the cap at runtime. Mutated and read under _lock on the
+    // Put/trim paths; volatile so no stale cap is observed if a read ever happens outside it.
+    private volatile int _maxEntries;
+
     private readonly object _lock = new();
     private readonly Dictionary<string, LinkedListNode<Slot>> _map;
     private readonly LinkedList<Slot> _lru = new();
@@ -43,6 +46,9 @@ internal sealed class PlanCache
     public long Hits    => _hits;
     public long Misses  => _misses;
     public long Evictions => _evictions;
+
+    /// <summary>Current number of cached plans; for tests and diagnostics.</summary>
+    public int Count { get { lock (_lock) return _map.Count; } }
 
     public PlanCache(int maxEntries = 512)
     {
@@ -108,12 +114,32 @@ internal sealed class PlanCache
             LinkedListNode<Slot> node = _lru.AddFirst(new Slot(key, entry));
             _map[key] = node;
 
-            while (_lru.Count > _maxEntries && _lru.Last is { } tail)
-            {
-                _map.Remove(tail.Value.Key);
-                _lru.RemoveLast();
-                _evictions++;
-            }
+            EvictOverCapacityLocked();
+        }
+    }
+
+    /// <summary>
+    /// Swaps the entry cap at runtime and immediately trims the LRU tail down to it, so lowering
+    /// the cap actually frees memory rather than only constraining future inserts. Evictions are
+    /// counted exactly as Put-path evictions are.
+    /// </summary>
+    public void SetMaxEntries(int maxEntries)
+    {
+        lock (_lock)
+        {
+            _maxEntries = maxEntries;
+            EvictOverCapacityLocked();
+        }
+    }
+
+    /// <summary>Evicts LRU-tail entries while the cache is over its cap. Callers must hold <c>_lock</c>.</summary>
+    private void EvictOverCapacityLocked()
+    {
+        while (_lru.Count > _maxEntries && _lru.Last is { } tail)
+        {
+            _map.Remove(tail.Value.Key);
+            _lru.RemoveLast();
+            _evictions++;
         }
     }
 

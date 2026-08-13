@@ -30,10 +30,27 @@ internal sealed class QueryExecutor
     private readonly ILogger<ICamusDB> logger;
 
     /// <summary>Configuration for this engine; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
+    private CamusDBOptions options;
 
     /// <summary>Configuration of the engine this executor belongs to.</summary>
     internal CamusDBOptions Options => options;
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot and forwards it to the planners that
+    /// captured their own copy at construction. Each query pins the planner's snapshot once when
+    /// it plans, so an in-flight query keeps the configuration it started with and the new value
+    /// takes effect for the next query.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next)
+    {
+        options = next;
+        queryPlanner.ApplyOptions(next);
+        queryJoinExecutor.ApplyOptions(next);
+
+        // The plan cache latched its cap at construction; re-cap it (trimming immediately when the
+        // cap shrank) so a runtime change bounds memory now, not only on future inserts.
+        PlanCache.SetMaxEntries(next.PlanCacheMaxEntries);
+    }
 
     private readonly QueryPlanner queryPlanner;
 

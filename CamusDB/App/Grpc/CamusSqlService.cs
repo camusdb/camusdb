@@ -131,7 +131,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             // SHOW DATABASES / BRANCHES / ANCESTORS need no db context or transaction.
             if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases
-                or NodeType.ShowEngineStats or NodeType.ShowVariables)
+                or NodeType.ShowEngineStats or NodeType.ShowVariables or NodeType.ShowClusterSettings)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
@@ -784,7 +784,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         CacheMetadataHolder cacheMeta = new();
 
         if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases
-                or NodeType.ShowEngineStats or NodeType.ShowVariables)
+                or NodeType.ShowEngineStats or NodeType.ShowVariables or NodeType.ShowClusterSettings)
         {
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: resolved.Database, sql: sql,

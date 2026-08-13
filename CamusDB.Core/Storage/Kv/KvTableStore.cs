@@ -61,7 +61,15 @@ public sealed class KvTableStore
     private readonly IKahuna kahuna;
 
     /// <summary>Configuration for the engine this store belongs to; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
+    private CamusDBOptions options;
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic and the
+    /// record itself stays immutable; readers pin the field once at the top of an operation, so an
+    /// in-flight operation keeps the snapshot it started with and a change takes effect at the
+    /// next operation boundary.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
     private readonly ILogger logger;
     private readonly string dbId;
     private readonly string dbName;

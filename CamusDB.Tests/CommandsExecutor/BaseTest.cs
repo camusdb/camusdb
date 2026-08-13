@@ -142,6 +142,23 @@ public abstract class BaseTest
     }
 
     /// <summary>
+    /// An engine wired to a swappable options holder, for tests that exercise runtime
+    /// configuration change. Engines built without a holder (every other factory here) keep their
+    /// configuration for life, which is the isolation the rest of the suite relies on.
+    /// </summary>
+    protected CommandExecutor CreateCommandExecutor(
+        CamusDBOptions options,
+        CamusDB.Core.Config.CamusDBOptionsHolder holder,
+        CamusDB.Core.Config.ClusterSettingsService? clusterSettings = null)
+    {
+        CommandValidator validator = new(options);
+        CatalogsManager catalogsManager = new(logger);
+        return new(validator, catalogsManager, logger, options,
+                   sharedNode: testNode!, registry: sharedRegistry!, isClusterMode: false,
+                   optionsHolder: holder, clusterSettings: clusterSettings);
+    }
+
+    /// <summary>
     /// Creates a fresh database, tracks it for automatic cleanup after each test.
     /// </summary>
     protected async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabase()
@@ -161,7 +178,7 @@ public abstract class BaseTest
         CamusDBOptions options)
         => CreateDatabaseWith(CreateCommandExecutor(options));
 
-    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabaseWith(
+    protected async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabaseWith(
         CommandExecutor executor)
     {
         string dbname = Guid.NewGuid().ToString("n");

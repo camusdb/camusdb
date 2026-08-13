@@ -30,7 +30,15 @@ public sealed class QueryPlanner
     /// descriptor passed to each call, so one planner cannot silently plan under two different
     /// configurations.
     /// </summary>
-    private readonly CamusDBOptions _options;
+    private CamusDBOptions _options;
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic and the
+    /// record itself stays immutable; readers pin the field once at the top of an operation, so an
+    /// in-flight operation keeps the snapshot it started with and a change takes effect at the
+    /// next operation boundary.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => _options = next;
     private readonly PlanCache? _cache;
 
     public QueryPlanner(CamusDBOptions options, StatisticsManager? stats = null) : this(stats, null, options) { }

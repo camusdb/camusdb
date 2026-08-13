@@ -50,10 +50,20 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
     private readonly Func<int> foregroundLoad;
     private readonly ILogger<ICamusDB> logger;
 
-    /// <summary>Configuration for the engine this scheduler serves; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
-    private readonly int intervalMs;
+    /// <summary>
+    /// Configuration for the engine this scheduler serves; injected, never ambient. Swapped by
+    /// <see cref="ApplyOptions"/>: each loop iteration and each sweep pins the field once, so a
+    /// published change takes effect at the next iteration boundary.
+    /// </summary>
+    private CamusDBOptions options;
+
     private readonly CancellationTokenSource cts = new();
+
+    /// <summary>
+    /// How long the loop sleeps between re-checks while auto-analyze is disabled or its interval is
+    /// non-positive. Short enough that flipping the setting on at runtime starts sweeping promptly.
+    /// </summary>
+    private const int DisabledProbeMs = 5_000;
 
     // Per-node in-flight claim: at most one analyze per table on this node at a time (keyed
     // "{dbId}:{tableId}"). Prevents the timer loop and the forced-sweep test seam from overlapping.
@@ -68,7 +78,6 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
         Func<CancellationToken, Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>>> discoverStale,
         Func<int> foregroundLoad,
         ILogger<ICamusDB> logger,
-        int intervalMs,
         CamusDBOptions options)
     {
         this.options = options;
@@ -78,15 +87,23 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
         this.discoverStale = discoverStale;
         this.foregroundLoad = foregroundLoad;
         this.logger = logger;
-        this.intervalMs = intervalMs;
     }
 
-    /// <summary>Starts the sweep loop. Disabled entirely when auto-analyze is off or the interval is non-positive.</summary>
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic; the loop
+    /// pins the field once per iteration, so a change is honored at the next wake-up. A shortened
+    /// interval therefore takes effect only after the currently running delay elapses — the loop is
+    /// never interrupted mid-sleep, which is an accepted property of the design.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
+
+    /// <summary>
+    /// Starts the sweep loop. The loop always runs — while auto-analyze is disabled (or its interval
+    /// is non-positive) it merely sleeps a short probe interval and re-checks, so a setting flipped
+    /// on at runtime starts work on an engine where it was off at construction.
+    /// </summary>
     public void Start()
     {
-        if (!options.AutoAnalyzeEnabled || intervalMs <= 0)
-            return;
-
         // Serialize concurrent Start calls: an unsynchronized `loop ??=` is check-then-act, and
         // two racing callers would each launch an independent sweep loop for the process lifetime.
         lock (this)
@@ -103,6 +120,17 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
         {
             try
             {
+                // Pin one snapshot per iteration; the enabled flag and interval are re-read every
+                // wake-up so a runtime configuration change re-arms the loop without a restart.
+                CamusDBOptions pinned = options;
+                int intervalMs = pinned.AutoAnalyzeCheckIntervalMs;
+
+                if (!pinned.AutoAnalyzeEnabled || intervalMs <= 0)
+                {
+                    await Task.Delay(intervalMs > 0 ? Math.Min(DisabledProbeMs, intervalMs) : DisabledProbeMs, ct).ConfigureAwait(false);
+                    continue;
+                }
+
                 await Task.Delay(intervalMs, ct).ConfigureAwait(false);
                 await RunSweepAsync(ct).ConfigureAwait(false);
             }

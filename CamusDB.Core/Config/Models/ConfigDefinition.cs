@@ -603,6 +603,135 @@ public class ConfigDefinition
     /// </summary>
     public int SpillMergeFanIn { get; set; } = 16;
 
+    /// <summary>
+    /// Enables per-step query-execution trace log lines. Off by default — each query emits one line
+    /// per plan step executed. Maps to <c>CamusDBOptions.QueryTracingEnabled</c>.
+    /// </summary>
+    public bool QueryTracingEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Enables per-lock-acquisition debug log lines. Off by default — a busy workload emits one line
+    /// per lock acquired. Maps to <c>CamusDBOptions.LockTracingEnabled</c>.
+    /// </summary>
+    public bool LockTracingEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Drop-intent fence lease, in milliseconds. Must be &gt; 0 and comfortably above
+    /// <see cref="FenceLeaseRenewIntervalMs"/>. Default 30 000. Maps to <c>CamusDBOptions.FenceLeaseMs</c>.
+    /// </summary>
+    public int FenceLeaseMs { get; set; } = 30_000;
+
+    /// <summary>
+    /// How often a fence holder renews its drop-intent lease, in milliseconds. Must be &gt; 0 and
+    /// strictly under <see cref="FenceLeaseMs"/> — a renew interval at or above the lease lets a live
+    /// holder's lease lapse under it. Default 10 000. Maps to
+    /// <c>CamusDBOptions.FenceLeaseRenewIntervalMs</c>.
+    /// </summary>
+    public int FenceLeaseRenewIntervalMs { get; set; } = 10_000;
+
+    /// <summary>
+    /// Max keys the non-transactional DROP DATABASE keyspace purge scans/deletes per batch. Must be
+    /// &gt;= 1. Default 512. Maps to <c>CamusDBOptions.KeyspacePurgeBatchSize</c>.
+    /// </summary>
+    public int KeyspacePurgeBatchSize { get; set; } = 512;
+
+    /// <summary>
+    /// Row ids buffered from a non-covering index scan before one batched row fetch. Must be &gt;= 1
+    /// (1 degrades to per-entry fetching). Default 64. Maps to
+    /// <c>CamusDBOptions.IndexScanFetchBatchSize</c>.
+    /// </summary>
+    public int IndexScanFetchBatchSize { get; set; } = 64;
+
+    /// <summary>
+    /// Rows the hash-join build phase may materialise before degrading to nested-loop, applied only
+    /// while spill is disabled. Must be &gt;= 1. Default 1 000 000. Maps to
+    /// <c>CamusDBOptions.HashJoinMaxBuildRows</c>.
+    /// </summary>
+    public int HashJoinMaxBuildRows { get; set; } = 1_000_000;
+
+    /// <summary>
+    /// Weight per byte shipped over the network in the planner's network cost model; 0 disables
+    /// network costing. Must be &gt;= 0. Default 0.01. Maps to <c>CamusDBOptions.NetWeight</c>.
+    /// </summary>
+    public double NetWeight { get; set; } = 0.01;
+
+    /// <summary>
+    /// Slot-backed (lazy) query decode; <c>false</c> is the eager kill-switch / A/B baseline.
+    /// Default true. Maps to <c>CamusDBOptions.SlotBackedDecode</c>.
+    /// </summary>
+    public bool SlotBackedDecode { get; set; } = true;
+
+    /// <summary>
+    /// Borrowed (zero-copy) decode policy: <c>adaptive</c>, <c>force_eager</c>, or
+    /// <c>force_borrowed</c>. Default <c>adaptive</c>. Maps to <c>CamusDBOptions.BorrowedDecode</c>.
+    /// </summary>
+    public string BorrowedDecode { get; set; } = "adaptive";
+
+    /// <summary>
+    /// Upper bound on a single spill-run record's declared payload length, in bytes, checked before
+    /// the reader allocates for it. Must be &gt; 0. Default 268 435 456 (256 MiB). Maps to
+    /// <c>CamusDBOptions.SpillMaxFrameBytes</c>.
+    /// </summary>
+    public int SpillMaxFrameBytes { get; set; } = 256 * 1024 * 1024;
+
+    /// <summary>
+    /// Default read-set validation when a transaction omits one: <c>none</c> or
+    /// <c>track_and_validate</c>. Default <c>none</c>. Maps to
+    /// <c>CamusDBOptions.DefaultReadValidation</c>.
+    /// </summary>
+    public string DefaultReadValidation { get; set; } = "none";
+
+    /// <summary>
+    /// Default commit-decision durability when a transaction omits one: <c>best_effort</c> or
+    /// <c>durable</c>. Default <c>best_effort</c>. Maps to
+    /// <c>CamusDBOptions.DefaultDecisionDurability</c>.
+    /// </summary>
+    public string DefaultDecisionDurability { get; set; } = "best_effort";
+
+    /// <summary>
+    /// PBKDF2-HMAC-SHA256 iteration count for hashing user passwords. The value in force is stored
+    /// with each credential, so raising it later never invalidates existing hashes. Must be &gt;= 1.
+    /// Default 600 000 (OWASP's floor). Maps to <c>CamusDBOptions.PasswordHashIterations</c>.
+    /// </summary>
+    public int PasswordHashIterations { get; set; } = 600_000;
+
+    /// <summary>
+    /// Concurrent password-verification (PBKDF2) operations allowed across all logins. Must be
+    /// &gt;= 1. Default 8. Maps to <c>CamusDBOptions.LoginKdfMaxConcurrency</c>.
+    /// </summary>
+    public int LoginKdfMaxConcurrency { get; set; } = 8;
+
+    /// <summary>
+    /// Login attempts per normalized account per rolling minute before rejection. Must be &gt;= 1.
+    /// Default 20. Maps to <c>CamusDBOptions.LoginMaxAttemptsPerMinute</c>.
+    /// </summary>
+    public int LoginMaxAttemptsPerMinute { get; set; } = 20;
+
+    /// <summary>
+    /// Upper bound on the login rate-limiter's tracked (account, source) keys. Must be &gt;= 1.
+    /// Default 100 000. Maps to <c>CamusDBOptions.LoginRateLimitMaxEntries</c>.
+    /// </summary>
+    public int LoginRateLimitMaxEntries { get; set; } = 100_000;
+
+    /// <summary>
+    /// Maximum staleness, in milliseconds, of a per-node authorization cache hit; 0 forces an
+    /// authoritative lookup on every request. Must be &gt;= 0. Default 1 000. Maps to
+    /// <c>CamusDBOptions.AuthenticationCacheTtl</c>.
+    /// </summary>
+    public long AuthenticationCacheTtl { get; set; } = 1_000;
+
+    /// <summary>
+    /// Upper bound on the per-node authenticated-principal cache size. Must be &gt;= 1.
+    /// Default 10 000. Maps to <c>CamusDBOptions.AuthenticationCacheMaxEntries</c>.
+    /// </summary>
+    public int AuthenticationCacheMaxEntries { get; set; } = 10_000;
+
+    /// <summary>
+    /// Absolute access-token lifetime, in milliseconds. Must be &gt; 0. Default 900 000 (15 min).
+    /// Maps to <c>CamusDBOptions.AccessTokenTtl</c>.
+    /// </summary>
+    public long AccessTokenTtl { get; set; } = 15 * 60 * 1000;
+
     /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
     public KahunaOptionsConfig Kahuna { get; set; } = new();
 
@@ -695,6 +824,46 @@ public class ConfigDefinition
             _ => throw Invalid(
                 "'default_transaction_priority' must be one of 'background', 'low', 'normal', 'high', " +
                 "'critical', got '" + DefaultTransactionPriority + "'"),
+        };
+    }
+
+    /// <summary>Parses <see cref="BorrowedDecode"/> to the engine enum.</summary>
+    public BorrowedDecodePolicy ParseBorrowedDecode()
+    {
+        return BorrowedDecode switch
+        {
+            "adaptive" => BorrowedDecodePolicy.Adaptive,
+            "force_eager" => BorrowedDecodePolicy.ForceEager,
+            "force_borrowed" => BorrowedDecodePolicy.ForceBorrowed,
+            _ => throw Invalid(
+                "'borrowed_decode' must be 'adaptive', 'force_eager' or 'force_borrowed', got '" +
+                BorrowedDecode + "'"),
+        };
+    }
+
+    /// <summary>Parses <see cref="DefaultReadValidation"/> to the Kahuna enum.</summary>
+    public ReadValidation ParseDefaultReadValidation()
+    {
+        return DefaultReadValidation switch
+        {
+            "none" => ReadValidation.None,
+            "track_and_validate" => ReadValidation.TrackAndValidate,
+            _ => throw Invalid(
+                "'default_read_validation' must be 'none' or 'track_and_validate', got '" +
+                DefaultReadValidation + "'"),
+        };
+    }
+
+    /// <summary>Parses <see cref="DefaultDecisionDurability"/> to the Kahuna enum.</summary>
+    public DecisionDurability ParseDefaultDecisionDurability()
+    {
+        return DefaultDecisionDurability switch
+        {
+            "best_effort" => DecisionDurability.BestEffort,
+            "durable" => DecisionDurability.Durable,
+            _ => throw Invalid(
+                "'default_decision_durability' must be 'best_effort' or 'durable', got '" +
+                DefaultDecisionDurability + "'"),
         };
     }
 
@@ -889,6 +1058,85 @@ public class ConfigDefinition
 
         if (SpillMergeFanIn <= 0)
             throw Invalid($"'spill_merge_fan_in' must be > 0, got {SpillMergeFanIn}");
+
+        if (SpillMaxFrameBytes <= 0)
+            throw Invalid($"'spill_max_frame_bytes' must be > 0, got {SpillMaxFrameBytes}");
+
+        if (FenceLeaseMs <= 0)
+            throw Invalid($"'fence_lease_ms' must be > 0, got {FenceLeaseMs}");
+
+        if (FenceLeaseRenewIntervalMs <= 0)
+            throw Invalid($"'fence_lease_renew_interval_ms' must be > 0, got {FenceLeaseRenewIntervalMs}");
+
+        // A renew interval at or above the lease lets a live fence holder's lease lapse under it: the
+        // drop-intent fence frees while its owner is still purging, and a concurrent RELINK/GC can act
+        // on an id whose keyspace is mid-destruction.
+        if (FenceLeaseRenewIntervalMs >= FenceLeaseMs)
+            throw Invalid(
+                $"'fence_lease_renew_interval_ms' ({FenceLeaseRenewIntervalMs}) must be < " +
+                $"'fence_lease_ms' ({FenceLeaseMs})");
+
+        if (KeyspacePurgeBatchSize < 1)
+            throw Invalid($"'keyspace_purge_batch_size' must be >= 1, got {KeyspacePurgeBatchSize}");
+
+        if (IndexScanFetchBatchSize < 1)
+            throw Invalid($"'index_scan_fetch_batch_size' must be >= 1, got {IndexScanFetchBatchSize}");
+
+        if (HashJoinMaxBuildRows < 1)
+            throw Invalid($"'hash_join_max_build_rows' must be >= 1, got {HashJoinMaxBuildRows}");
+
+        if (NetWeight < 0)
+            throw Invalid($"'net_weight' must be >= 0 (0 disables network costing), got {NetWeight}");
+
+        if (PasswordHashIterations < 1)
+            throw Invalid($"'password_hash_iterations' must be >= 1, got {PasswordHashIterations}");
+
+        if (LoginKdfMaxConcurrency < 1)
+            throw Invalid($"'login_kdf_max_concurrency' must be >= 1, got {LoginKdfMaxConcurrency}");
+
+        if (LoginMaxAttemptsPerMinute < 1)
+            throw Invalid($"'login_max_attempts_per_minute' must be >= 1, got {LoginMaxAttemptsPerMinute}");
+
+        if (LoginRateLimitMaxEntries < 1)
+            throw Invalid($"'login_rate_limit_max_entries' must be >= 1, got {LoginRateLimitMaxEntries}");
+
+        if (AuthenticationCacheTtl < 0)
+            throw Invalid(
+                "'authentication_cache_ttl' must be >= 0 ms (0 = authoritative lookup on every request), got " +
+                AuthenticationCacheTtl);
+
+        if (AuthenticationCacheMaxEntries < 1)
+            throw Invalid($"'authentication_cache_max_entries' must be >= 1, got {AuthenticationCacheMaxEntries}");
+
+        if (AccessTokenTtl <= 0)
+            throw Invalid($"'access_token_ttl' must be > 0 ms, got {AccessTokenTtl}");
+
+        // Each refreshed row costs one mutation per index plus the row itself, so a chunk size at
+        // or near the mutation cap fails on any indexed materialized view — and it fails mid-
+        // refresh, at a distance from the setting that caused it. Require a 2x margin.
+        if (MaxMutationsPerTransaction > 0 && (long)MaterializedViewRefreshChunkRows * 2 > MaxMutationsPerTransaction)
+            throw Invalid(
+                $"'materialized_view_refresh_chunk_rows' ({MaterializedViewRefreshChunkRows}) must be at most half of " +
+                $"'max_mutations_per_transaction' ({MaxMutationsPerTransaction}); each refreshed row costs one mutation " +
+                "per index, so a chunk near the cap fails on any indexed materialized view");
+
+        // The storage layer sheds a participant write that ages past ~1 s in its pre-dispatch
+        // queue and answers MustRetry; a finalize budget that cannot absorb at least two shed
+        // rounds reports a recoverable in-doubt commit as an error. Non-positive disables retrying
+        // and is exempt (an explicit single-attempt choice).
+        const int StorageTransientSheddingThresholdMs = 1_000;
+        if (TransactionFinalizeRetryBudgetMs > 0 && TransactionFinalizeRetryBudgetMs < StorageTransientSheddingThresholdMs * 2)
+            throw Invalid(
+                $"'transaction_finalize_retry_budget_ms' ({TransactionFinalizeRetryBudgetMs}) must be >= " +
+                $"{StorageTransientSheddingThresholdMs * 2} ms (2x the storage layer's ~{StorageTransientSheddingThresholdMs} ms " +
+                "transient-shedding threshold), or a single shed round consumes the whole budget; " +
+                "set it <= 0 to disable retrying entirely");
+
+        // The three enum-valued strings validate by parsing, so file and statement reject the same
+        // spellings for the same reason.
+        ParseBorrowedDecode();
+        ParseDefaultReadValidation();
+        ParseDefaultDecisionDurability();
 
         Kahuna.Validate();
         Diagnostics.Validate();

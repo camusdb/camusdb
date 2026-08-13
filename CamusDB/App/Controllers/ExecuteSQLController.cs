@@ -164,7 +164,7 @@ public sealed class ExecuteSQLController : CommandsController
             // database context or transaction.
             if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
                                    or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats
-                                   or NodeType.ShowVariables)
+                                   or NodeType.ShowVariables or NodeType.ShowClusterSettings)
             {
                 QuerySchemaHolder schemaHolder = new();
                 ExecuteSQLTicket ticket = new(
@@ -356,7 +356,7 @@ public sealed class ExecuteSQLController : CommandsController
             // context or transaction.
             if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
                                    or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats
-                                   or NodeType.ShowVariables)
+                                   or NodeType.ShowVariables or NodeType.ShowClusterSettings)
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,

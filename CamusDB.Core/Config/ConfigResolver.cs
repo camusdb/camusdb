@@ -216,6 +216,28 @@ public static class ConfigResolver
         DatabaseIdleEvictionMs = config.DatabaseIdleEvictionMs,
 
         EngineMetricsEnabled = config.EngineMetricsEnabled,
+        QueryTracingEnabled = config.QueryTracingEnabled,
+        LockTracingEnabled = config.LockTracingEnabled,
+
+        FenceLeaseMs = config.FenceLeaseMs,
+        FenceLeaseRenewIntervalMs = config.FenceLeaseRenewIntervalMs,
+        KeyspacePurgeBatchSize = config.KeyspacePurgeBatchSize,
+        IndexScanFetchBatchSize = config.IndexScanFetchBatchSize,
+        HashJoinMaxBuildRows = config.HashJoinMaxBuildRows,
+        NetWeight = config.NetWeight,
+        SlotBackedDecode = config.SlotBackedDecode,
+        BorrowedDecode = config.ParseBorrowedDecode(),
+        SpillMaxFrameBytes = config.SpillMaxFrameBytes,
+        DefaultReadValidation = config.ParseDefaultReadValidation(),
+        DefaultDecisionDurability = config.ParseDefaultDecisionDurability(),
+
+        PasswordHashIterations = config.PasswordHashIterations,
+        LoginKdfMaxConcurrency = config.LoginKdfMaxConcurrency,
+        LoginMaxAttemptsPerMinute = config.LoginMaxAttemptsPerMinute,
+        LoginRateLimitMaxEntries = config.LoginRateLimitMaxEntries,
+        AuthenticationCacheTtl = TimeSpan.FromMilliseconds(config.AuthenticationCacheTtl),
+        AuthenticationCacheMaxEntries = config.AuthenticationCacheMaxEntries,
+        AccessTokenTtl = TimeSpan.FromMilliseconds(config.AccessTokenTtl),
 
         DefaultIsolationLevel = config.ParseDefaultIsolationLevel(),
         DefaultTransactionLocking = config.ParseDefaultTransactionLocking(),

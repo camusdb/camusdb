@@ -28,7 +28,15 @@ internal sealed class SchemaQuerier
     private readonly CatalogsManager catalogs;
 
     /// <summary>Configuration for this engine; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
+    private CamusDBOptions options;
+
+    /// <summary>
+    /// Swaps in a newly published configuration snapshot. Reference assignment is atomic and the
+    /// record itself stays immutable; readers pin the field once at the top of an operation, so an
+    /// in-flight operation keeps the snapshot it started with and a change takes effect at the
+    /// next operation boundary.
+    /// </summary>
+    internal void ApplyOptions(CamusDBOptions next) => options = next;
 
     public SchemaQuerier(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger, CamusDBOptions options)
     {
@@ -709,14 +717,47 @@ internal sealed class SchemaQuerier
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
-                { "variable", new ColumnValue(ColumnType.String, variable.Name) },
-                { "value",    Text(variable.Value) },
-                { "type",     new ColumnValue(ColumnType.String, variable.Type) },
-                { "default",  Text(variable.Default) },
-                { "source",   new ColumnValue(ColumnType.String, SourceLabel(variable.Source)) },
+                { "variable",   new ColumnValue(ColumnType.String, variable.Name) },
+                { "value",      Text(variable.Value) },
+                { "type",       new ColumnValue(ColumnType.String, variable.Type) },
+                { "default",    Text(variable.Default) },
+                { "source",     new ColumnValue(ColumnType.String, SourceLabel(variable.Source)) },
+                { "mutability", new ColumnValue(ColumnType.String, MutabilityLabel(variable.Mutability)) },
+                { "scope",      new ColumnValue(ColumnType.String, ScopeLabel(variable.Scope)) },
             });
         }
     }
+
+    /// <summary>
+    /// Lists the runtime cluster-settings overlay: the entries <c>SET CLUSTER SETTING</c> put in
+    /// force fleet-wide and no <c>RESET</c> has dropped. Values are the stored scalar text, so a
+    /// row pastes straight back into a <c>SET</c> statement or a configuration file.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowClusterSettings(
+        IReadOnlyList<(string Key, string Value)> entries, string? pattern)
+    {
+        await Task.CompletedTask;
+
+        foreach ((string key, string value) in entries)
+        {
+            if (pattern is not null && !LikeMatch(key, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "setting", new ColumnValue(ColumnType.String, key) },
+                { "value",   new ColumnValue(ColumnType.String, value) },
+            });
+        }
+    }
+
+    /// <summary>Spells a mutability class the way an operator reads it: can this change live or not.</summary>
+    private static string MutabilityLabel(ConfigMutability mutability)
+        => mutability == ConfigMutability.Runtime ? "runtime" : "restart";
+
+    /// <summary>Spells a scope the way an operator reads it: must the fleet agree, or is it per-node.</summary>
+    private static string ScopeLabel(ConfigScope scope)
+        => scope == ConfigScope.Cluster ? "cluster" : "node";
 
     /// <summary>Renders an optional string, an unset setting becoming SQL NULL rather than empty.</summary>
     private static ColumnValue Text(string? value)
@@ -731,6 +772,9 @@ internal sealed class SchemaQuerier
         ConfigValueSource.ConfigFile => "config",
         ConfigValueSource.Environment => "env",
         ConfigValueSource.CommandLine => "cli",
+        // A replicated cluster setting overrode every local layer for this key — the row an
+        // operator needs to be self-explanatory on a node whose behavior contradicts its own YAML.
+        ConfigValueSource.Cluster => "cluster",
         _ => "default",
     };
 

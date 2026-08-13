@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Config;
 using CamusDB.Core.Config.Models;
 using CamusDB.Core.Transactions;
 
@@ -39,6 +40,7 @@ public sealed record CamusDBOptions
     /// declared after <see cref="Default"/> would still be null while <see cref="Default"/>'s own
     /// initializer runs, leaving the shared defaults with a null data directory.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public string DataDirectory { get; init; } = Path.GetFullPath("Data");
 
     /// <summary>
@@ -55,17 +57,20 @@ public sealed record CamusDBOptions
     ///              but in-memory deltas are lost on a crash.
     /// Any positive value caps flush frequency to roughly once per interval per table.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int StatsFlushIntervalMs { get; init; } = 5000;
 
     /// <summary>
     /// Row count threshold below which ANALYZE performs a full scan; above it, rows are
     /// sampled by reading the first N rows in storage order. 0 = always full scan.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int StatsAnalyzeSampleRows { get; init; } = 100_000;
 
     /// <summary>
     /// Number of equi-depth histogram buckets ANALYZE builds per column.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int StatsHistogramBuckets { get; init; } = 100;
 
     // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────
@@ -79,45 +84,53 @@ public sealed record CamusDBOptions
     /// the common way that happens. Set false to restore manual-only ANALYZE — the scheduler then never
     /// runs and nothing else changes.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public bool AutoAnalyzeEnabled { get; init; } = true;
 
     /// <summary>
     /// Interval between auto-analyze staleness sweeps, in milliseconds. Only the schema/registry
     /// leader sweeps, so a table is analyzed once per cluster. <c>&lt;= 0</c> also disables the loop.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int AutoAnalyzeCheckIntervalMs { get; init; } = 60_000;
 
     /// <summary>
     /// Staleness fraction (CockroachDB's <c>fraction_stale_rows</c>): a table is stale once its
     /// mutations since the last ANALYZE reach <c>fraction · rowCount + minStaleRows</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public double AutoAnalyzeFractionStaleRows { get; init; } = 0.20;
 
     /// <summary>
     /// Absolute floor of mutations before a table is ever considered stale (CockroachDB's
     /// <c>min_stale_rows</c>) — stops tiny tables and light churn from re-analyzing constantly.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public long AutoAnalyzeMinStaleRows { get; init; } = 500;
 
     /// <summary>Maximum background analyses running at once on this node. Keep small (1–2).</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int AutoAnalyzeMaxConcurrent { get; init; } = 1;
 
     /// <summary>
     /// Scan-rate cap for a background analyze, in rows/second — the primary CPU/IO throttle that
     /// keeps a background scan from saturating a core or the KV read path. <c>&lt;= 0</c> disables throttling.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int AutoAnalyzeMaxRowsPerSecond { get; init; } = 50_000;
 
     /// <summary>
     /// Reservoir sample size per orderable column for background histograms — the memory bound.
     /// Peak memory is a function of this, not table size.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int AutoAnalyzeHistogramSampleRows { get; init; } = 10_000;
 
     /// <summary>
     /// HyperLogLog precision (index bits) for background NDV sketches; register count is
     /// <c>2^precision</c>. 11 ⇒ ~2 KB/column, ~2.3% error. Valid range 4..16.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int AutoAnalyzeHllPrecision { get; init; } = 11;
 
     /// <summary>
@@ -125,6 +138,7 @@ public sealed record CamusDBOptions
     /// exceeds this, the scheduler skips starting (and cancels a running) background analyze this
     /// sweep and retries when the node is quieter. <c>&lt;= 0</c> disables load-based backoff.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int AutoAnalyzeLoadPauseThreshold { get; init; } = 16;
 
     /// <summary>
@@ -132,6 +146,7 @@ public sealed record CamusDBOptions
     /// (leadership) and foreground load. Smaller reacts faster to a lost lease or a load surge but adds
     /// per-batch overhead; larger amortizes the (async) leadership probe. Clamped to at least 1.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int AutoAnalyzeOwnershipCheckRows { get; init; } = 1000;
 
     // Row-level TTL. Per-table tuning (which column expires, how often, batch sizes, rate limits)
@@ -147,6 +162,7 @@ public sealed record CamusDBOptions
     /// forever. Set false to stop the sweep node-wide — expired rows are then never collected.
     /// Equivalent in role to CockroachDB's <c>sql.ttl.job.enabled</c> cluster setting.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public bool TtlEnabled { get; init; } = true;
 
     /// <summary>
@@ -154,12 +170,14 @@ public sealed record CamusDBOptions
     /// runs. Matches CockroachDB's default, which moved from <c>@hourly</c> to <c>@daily</c>. Only the
     /// <c>@macro</c> forms are accepted for now (see <see cref="Catalogs.Models.TtlCron"/>).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public string TtlDefaultJobCron { get; init; } = "@daily";
 
     /// <summary>
     /// Fallback for <c>ttl_select_batch_size</c>: rows read per batch while scanning a span for
     /// expired rows. Larger amortizes the round-trip; smaller shortens the read transaction.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlDefaultSelectBatchSize { get; init; } = 500;
 
     /// <summary>
@@ -169,18 +187,21 @@ public sealed record CamusDBOptions
     /// <see cref="MaxMutationsPerTransaction"/>. A short delete transaction is also what keeps
     /// foreground writers from queueing behind the sweep's exclusive locks.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlDefaultDeleteBatchSize { get; init; } = 100;
 
     /// <summary>
     /// Fallback for <c>ttl_select_rate_limit</c>, in rows/second. <c>0</c> means <b>unlimited</b>, not
     /// "stopped" — the scan is already bounded by the delete rate downstream of it.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlDefaultSelectRateLimit { get; init; } = 0;
 
     /// <summary>
     /// Fallback for <c>ttl_delete_rate_limit</c>, in rows/second — the primary throttle on the sweep's
     /// write load. <c>0</c> means unlimited.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlDefaultDeleteRateLimit { get; init; } = 100;
 
     /// <summary>
@@ -190,12 +211,14 @@ public sealed record CamusDBOptions
     /// Over-splitting lets work-stealing absorb that skew without coupling TTL to <c>ANALYZE</c>
     /// freshness. Rounded up to the next power of 16 so spans align on hex-digit boundaries.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlSpansPerTable { get; init; } = 64;
 
     /// <summary>
     /// Spans one node processes concurrently. Keep small: each span holds a Kahuna session and issues
     /// exclusive-lock deletes, and the point of the sweep is to be invisible to foreground traffic.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int TtlMaxConcurrentSpansPerNode { get; init; } = 1;
 
     /// <summary>
@@ -204,6 +227,7 @@ public sealed record CamusDBOptions
     /// rather than only at span start. <c>&lt;= 0</c> disables load-based backoff. CamusDB extension —
     /// CockroachDB has no equivalent.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int TtlLoadPauseThreshold { get; init; } = 16;
 
     /// <summary>
@@ -211,12 +235,14 @@ public sealed record CamusDBOptions
     /// crashes stops renewing, the lease lapses, and another worker reclaims the span and resumes from
     /// its checkpoint — so a dead node costs one lease period, not a stalled run.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlSpanLeaseMs { get; init; } = 30_000;
 
     /// <summary>
     /// How often a span's owner re-stamps its lease. Must be well under <see cref="TtlSpanLeaseMs"/> so
     /// replication lag or a delayed tick cannot let a live owner's lease lapse under it.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TtlSpanLeaseRenewIntervalMs { get; init; } = 10_000;
 
     /// <summary>
@@ -225,6 +251,7 @@ public sealed record CamusDBOptions
     /// keys regardless of how large a database (or branch overlay) is — a full database drop can span
     /// every table and row. Kept modest so the purge never materialises an entire keyspace at once.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int KeyspacePurgeBatchSize { get; init; } = 512;
 
     /// <summary>
@@ -235,6 +262,7 @@ public sealed record CamusDBOptions
     /// automatic reclamation — orphans are kept until an explicit <c>DROP ... FORCE</c> / manual purge.
     /// Default is 7 days. Surfaced as <c>expires_at</c> by <c>SHOW ORPHAN DATABASES/TABLES</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public long OrphanRetentionMs { get; init; } = 7L * 24 * 60 * 60 * 1000;
 
     /// <summary>
@@ -247,6 +275,7 @@ public sealed record CamusDBOptions
     /// error, so a script probing a fleet behaves uniformly). Default on; the flag exists as an
     /// escape hatch for benchmarking the measurement overhead itself.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public bool EngineMetricsEnabled { get; init; } = true;
 
     /// <summary>
@@ -255,6 +284,7 @@ public sealed record CamusDBOptions
     /// single elected node (registry-partition leader). A value <c>&lt;= 0</c> disables the loop
     /// entirely (used by tests that drive a sweep manually). Default is 5 minutes.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int OrphanReclaimIntervalMs { get; init; } = 5 * 60 * 1000;
 
     /// <summary>
@@ -273,6 +303,7 @@ public sealed record CamusDBOptions
     /// on. Values below a second are for tests that drive the sweep deliberately, not for
     /// deployment.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int DatabaseIdleEvictionMs { get; init; } = 15 * 60 * 1000;
 
     /// <summary>
@@ -284,6 +315,7 @@ public sealed record CamusDBOptions
     /// the fence, so a long operation (a large keyspace purge) is never interrupted. Keep it comfortably
     /// longer than a typical fenced operation and longer than the renew interval. Default is 30 seconds.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int FenceLeaseMs { get; init; } = 30_000;
 
     /// <summary>
@@ -291,6 +323,7 @@ public sealed record CamusDBOptions
     /// (see <see cref="FenceLeaseMs"/>). Must be well under the lease so replication lag or a delayed
     /// tick cannot let a still-live holder's lease lapse. Default is a third of the lease.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int FenceLeaseRenewIntervalMs { get; init; } = 10_000;
 
     /// <summary>
@@ -301,6 +334,7 @@ public sealed record CamusDBOptions
     /// leader-owned renewer); if renewal stops, the hold lapses after one lease and the branch's
     /// frozen view can be reclaimed. Chosen coarse so lease renewals are not a hot Raft path.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int BranchSnapshotHoldLeaseMs { get; init; } = 300_000;
 
     /// <summary>
@@ -311,6 +345,7 @@ public sealed record CamusDBOptions
     /// default; this is an upper bound on recoverability — actual reach is still limited by which backups
     /// survive in the chain.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int PitrWindowSeconds { get; init; } = 3600;
 
     /// <summary>
@@ -324,6 +359,7 @@ public sealed record CamusDBOptions
     /// </para>
     /// Default: <c>300</c> (5 minutes), matching Kahuna's script-cache TTL.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int SqlParserCacheTtlSeconds { get; init; } = 300;
 
     /// <summary>
@@ -336,6 +372,7 @@ public sealed record CamusDBOptions
     /// </para>
     /// Default: <c>2048</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int SqlParserCacheMaxEntries { get; init; } = 2048;
 
     /// <summary>
@@ -343,6 +380,7 @@ public sealed record CamusDBOptions
     /// Must be &gt; 0.
     /// Default: <c>60</c> seconds.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int SqlParserCacheSweepSeconds { get; init; } = 60;
 
     /// <summary>
@@ -352,6 +390,7 @@ public sealed record CamusDBOptions
     /// hash join once it exceeds <see cref="SpillEffectiveThreshold"/>, so this cap does not apply.
     /// Default: 1_000_000 rows.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int HashJoinMaxBuildRows { get; init; } = 1_000_000;
 
     /// <summary>
@@ -377,6 +416,7 @@ public sealed record CamusDBOptions
     /// Default off. Set via <c>key_range_sharding</c> in <c>config.yml</c>; the
     /// <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable overrides YAML when set.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public bool KeyRangeShardingEnabled { get; init; }
 
     /// <summary>
@@ -387,6 +427,7 @@ public sealed record CamusDBOptions
     /// Default: 1 (single-partition / single-node). Tests that do not set this explicitly
     /// keep the single-node behaviour (NetworkFactor = 0).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public int ClusterPartitionCount { get; init; } = 1;
 
     /// <summary>
@@ -399,6 +440,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: 0.01 (100 bytes × 0.01 = 1.0 cost unit per remote row).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public double NetWeight { get; init; } = 0.01;
 
     /// <summary>
@@ -417,6 +459,7 @@ public sealed record CamusDBOptions
     /// fills those in for it. Turning it on also changes which keys a read touches, which changes
     /// what an optimistic transaction folds into its read set.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public bool CostBasedAccessPathEnabled { get; init; } = true;
 
     /// <summary>
@@ -428,6 +471,7 @@ public sealed record CamusDBOptions
     /// <c>JoinEnumerator.MaxTablesForEnumeration</c> always fall back to the heuristic
     /// regardless of this flag. Set via <c>cost_based_join_order_enabled</c> in <c>config.yml</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public bool CostBasedJoinOrderEnabled { get; init; } = true;
 
     /// <summary>
@@ -450,12 +494,14 @@ public sealed record CamusDBOptions
     /// Set via <c>plan_cache_enabled</c> in <c>config.yml</c>. The cache size is bounded by
     /// <see cref="PlanCacheMaxEntries"/>; set either to 0 to disable.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool PlanCacheEnabled { get; init; } = false;
 
     /// <summary>
     /// Maximum number of entries held by the per-process plan cache (LRU eviction when the
     /// limit is exceeded). Set via <c>plan_cache_max_entries</c> in <c>config.yml</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int PlanCacheMaxEntries { get; init; } = 512;
 
     /// <summary>
@@ -467,6 +513,7 @@ public sealed record CamusDBOptions
     /// serializable unless it overrides this. Set to <see cref="CamusIsolationLevel.ReadCommitted"/>
     /// (via <c>default_isolation_level: read_committed</c> in <c>config.yml</c>) to opt out.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public CamusIsolationLevel DefaultIsolationLevel { get; init; } = CamusIsolationLevel.Serializable;
 
     /// <summary>
@@ -485,6 +532,7 @@ public sealed record CamusDBOptions
     /// read-set validation combined with the predicate locks that keep it phantom-free. Serializable is
     /// intentionally not weakened to lock-free.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking DefaultTransactionLocking { get; init; } = global::Kahuna.Shared.KeyValue.KeyValueTransactionLocking.Pessimistic;
 
     /// <summary>
@@ -503,6 +551,7 @@ public sealed record CamusDBOptions
     /// conflicts ignore priority entirely. Use it to decide who waits at the door, not to make
     /// background work cheap while it runs.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public global::Kahuna.Shared.KeyValue.TransactionPriority DefaultTransactionPriority { get; init; } = global::Kahuna.Shared.KeyValue.TransactionPriority.Normal;
 
     /// <summary>
@@ -521,6 +570,7 @@ public sealed record CamusDBOptions
     /// and nothing ever queues. The node clamps whatever is asked for here to its own
     /// <c>kahuna.max_admission_wait_ms</c>, so an operator's ceiling always wins.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TransactionAdmissionWaitMs { get; init; }
 
     /// <summary>
@@ -531,6 +581,7 @@ public sealed record CamusDBOptions
     /// to additionally validate its read set at commit even while pessimistic. Optimistic transactions
     /// always validate their read set regardless of this value.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public global::Kahuna.Shared.KeyValue.ReadValidation DefaultReadValidation { get; init; } = global::Kahuna.Shared.KeyValue.ReadValidation.None;
 
     /// <summary>
@@ -543,6 +594,7 @@ public sealed record CamusDBOptions
     /// anchor from the first confirmed persistent write, so no client-side anchor plumbing is needed.
     /// Durable mode rejects a transaction that confirmed any ephemeral modification.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public global::Kahuna.Shared.KeyValue.DecisionDurability DefaultDecisionDurability { get; init; } = global::Kahuna.Shared.KeyValue.DecisionDurability.BestEffort;
 
     /// <summary>
@@ -561,6 +613,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: 150 000 ms (150 s).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int RangeLockExpiresMs { get; init; } = 150_000;
 
     /// <summary>
@@ -576,6 +629,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: 3 600 000 ms (1 hour).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxSerializableTransactionLifetimeMs { get; init; } = 3_600_000;
 
     /// <summary>
@@ -600,6 +654,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: 15 000 ms (15 s).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TransactionFinalizeRetryBudgetMs { get; init; } = 15_000;
 
     /// <summary>
@@ -621,6 +676,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> disables retrying: the call is attempted once and any <c>MustRetry</c>
     /// surfaces immediately. Default: 10 000 ms (10 s).</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int SequenceRetryBudgetMs { get; init; } = 10_000;
 
     /// <summary>
@@ -651,6 +707,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: 300 000 ms (5 minutes).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int TransactionIdleTimeoutMs { get; init; } = 300_000;
 
     /// <summary>
@@ -664,6 +721,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: 30 000 ms (30 s).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int TransactionReaperIntervalMs { get; init; } = 30_000;
 
     /// <summary>
@@ -679,12 +737,14 @@ public sealed record CamusDBOptions
     ///
     /// Default: 50.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int LockEscalationThreshold { get; init; } = 50;
 
     /// <summary>
     /// Maximum concurrently in-flight operations the server executes per <c>CamusSql.BatchExecute</c>
     /// duplex stream before applying backpressure. Bounds one client's fan-out. Default: 64.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int GrpcBatchMaxInFlight { get; init; } = 64;
 
     /// <summary>
@@ -693,12 +753,14 @@ public sealed record CamusDBOptions
     /// <see cref="CamusDBErrorCodes.PreparedStatementLimitExceeded"/> rather than evicting an
     /// existing handle, so a client's live handles never stop working underneath it. Default: 512.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int GrpcMaxPreparedStatementsPerStream { get; init; } = 512;
 
     /// <summary>
     /// Maximum live REST prepared statements one principal may hold on this node. <c>0</c> =
     /// unbounded. Default: 512.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int RestMaxPreparedStatementsPerPrincipal { get; init; } = 512;
 
     /// <summary>
@@ -706,6 +768,7 @@ public sealed record CamusDBOptions
     /// unbounded. Guards a single node against a fleet of clients each holding its per-principal
     /// cap. Default: 8192.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int RestMaxPreparedStatements { get; init; } = 8192;
 
     /// <summary>
@@ -718,11 +781,13 @@ public sealed record CamusDBOptions
     /// never close what they prepared. Expiry is also checked on lookup, so an entry that outlives
     /// its timeout between sweeps is never executed. Default: 600000 (10 minutes).</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int PreparedStatementIdleTimeoutMs { get; init; } = 600_000;
 
     /// <summary>
     /// Interval between REST prepared-statement reaper sweeps, in milliseconds. Default: 60000.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int PreparedStatementSweepIntervalMs { get; init; } = 60_000;
 
     /// <summary>
@@ -736,12 +801,14 @@ public sealed record CamusDBOptions
     /// make it fit. Default: 65536 (64 KiB), which is far above any realistic parameterized
     /// statement.</para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int MaxPreparedStatementBytes { get; init; } = 65_536;
 
     /// <summary>
     /// Total retained prepared-statement text this node will hold for REST clients, in bytes.
     /// <c>0</c> = unlimited. Default: 67108864 (64 MiB).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public long RestMaxPreparedStatementBytes { get; init; } = 64L * 1024 * 1024;
 
     /// <summary>
@@ -749,12 +816,14 @@ public sealed record CamusDBOptions
     /// Matters most when authentication is disabled, since every caller then shares one anonymous
     /// principal. Default: 8388608 (8 MiB).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public long RestMaxPreparedStatementBytesPerPrincipal { get; init; } = 8L * 1024 * 1024;
 
     /// <summary>
     /// Retained prepared-statement text one <c>BatchExecute</c> stream may hold, in bytes.
     /// <c>0</c> = unlimited. Default: 8388608 (8 MiB).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public long GrpcMaxPreparedStatementBytesPerStream { get; init; } = 8L * 1024 * 1024;
 
     /// <summary>
@@ -778,6 +847,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>20_000</c> (matches Spanner's historical default).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxMutationsPerTransaction { get; init; } = 20_000;
 
     /// <summary>
@@ -790,6 +860,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>32</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxViewExpansionDepth { get; init; } = 32;
 
     /// <summary>
@@ -803,6 +874,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>10_000</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaterializedViewRefreshChunkRows { get; init; } = 10_000;
 
     /// <summary>
@@ -812,6 +884,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>true</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool MaterializedViewRefreshEnabled { get; init; } = true;
 
     /// <summary>
@@ -832,6 +905,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>3</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaterializedViewRefreshTakeoverAttempts { get; init; } = 3;
 
     /// <summary>
@@ -839,6 +913,7 @@ public sealed record CamusDBOptions
     /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
     /// Default: 500 ms.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int LockWaitDeadlineMs { get; init; } = 500;
 
     /// <summary>
@@ -852,6 +927,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> — limit is disabled (no length enforcement).</para>
     /// Default: <c>64</c> (matches MySQL / PostgreSQL identifier limits).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxIdentifierLength { get; init; } = 64;
 
     /// <summary>
@@ -861,6 +937,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> — limit is disabled.</para>
     /// Default: <c>512</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxColumnsPerTable { get; init; } = 512;
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -877,6 +954,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>false</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool SpillEnabled { get; init; } = false;
 
     /// <summary>
@@ -889,6 +967,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>500_000</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int SpillThresholdRows { get; init; } = 500_000;
 
     /// <summary>
@@ -900,6 +979,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>16</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int SpillMergeFanIn { get; init; } = 16;
 
     /// <summary>
@@ -922,6 +1002,7 @@ public sealed record CamusDBOptions
     /// See BENCH-RESULTS.md → "Slot-backed decode (A/B)" and "Slot-direct response sinks".
     /// </para>
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool SlotBackedDecode { get; init; } = true;
 
     /// <summary>
@@ -945,6 +1026,7 @@ public sealed record CamusDBOptions
     /// on <see cref="CamusDB.Core.Storage.Kv.RowEncoder.RowDecodeState.BorrowedDecode"/>; each accessed
     /// cell materializes at most once (the row caches it), so borrowed never re-decodes a cell.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public BorrowedDecodePolicy BorrowedDecode { get; init; } = BorrowedDecodePolicy.Adaptive;
 
     /// <summary>
@@ -958,6 +1040,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>256 MiB</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int SpillMaxFrameBytes { get; init; } = 256 * 1024 * 1024;
 
     /// <summary>
@@ -967,6 +1050,7 @@ public sealed record CamusDBOptions
     ///
     /// Operators read this via <see cref="SpillEffectiveThreshold"/>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int? ForceSpillThresholdRows { get; init; } = null;
 
     /// <summary>
@@ -982,6 +1066,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> — limit is disabled.</para>
     /// Default: <c>64</c> (matches MySQL's per-table secondary-index cap).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxIndexesPerTable { get; init; } = 64;
 
     /// <summary>
@@ -992,6 +1077,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> — limit is disabled.</para>
     /// Default: <c>32</c> (matches SQL Server's key+included column ceiling).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxIndexColumns { get; init; } = 32;
 
     /// <summary>
@@ -1003,6 +1089,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> — limit is disabled.</para>
     /// Default: <c>4096</c> (4 KiB); tune against Kahuna's preferred value/batch sizes.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxIndexIncludeTupleBytes { get; init; } = 4096;
 
     /// <summary>
@@ -1012,6 +1099,7 @@ public sealed record CamusDBOptions
     /// <para><c>&lt;= 0</c> — limit is disabled.</para>
     /// Default: <c>10000</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxTablesPerDatabase { get; init; } = 10_000;
 
     /// <summary>
@@ -1022,6 +1110,7 @@ public sealed record CamusDBOptions
     /// stored count and can be upgraded on next login in the enforcement phase). OWASP's current
     /// PBKDF2-HMAC-SHA256 floor is 600,000.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public int PasswordHashIterations { get; init; } = 600_000;
 
     /// <summary>
@@ -1032,6 +1121,7 @@ public sealed record CamusDBOptions
     /// refuses to start with auth enabled and an empty catalog unless a bootstrap secret is supplied
     /// (fail-closed — never an open admin window).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public bool AuthenticationEnabled { get; init; } = false;
 
     /// <summary>
@@ -1041,10 +1131,12 @@ public sealed record CamusDBOptions
     /// exactly one superuser via a transactional create-if-absent; once any user exists the bootstrap
     /// values are ignored with a warning.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public string BootstrapSuperuser { get; init; } = "";
 
     /// <summary>Bootstrap superuser cleartext password from the external secret. Empty when unset. Used
     /// once at first start and never persisted in cleartext — see <see cref="BootstrapSuperuser"/>.</summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public string BootstrapSuperuserPassword { get; init; } = "";
 
     /// <summary>
@@ -1053,6 +1145,7 @@ public sealed record CamusDBOptions
     /// from an external secret/environment, never stored in the catalog. When empty (auth disabled or
     /// unconfigured) tokens are not issued. A future key id enables rotation.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public string AccessTokenServerKey { get; init; } = "";
 
     /// <summary>
@@ -1060,6 +1153,7 @@ public sealed record CamusDBOptions
     /// token initially; re-login is the refresh. Expired tokens are rejected with
     /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public TimeSpan AccessTokenTtl { get; init; } = TimeSpan.FromMinutes(15);
 
     /// <summary>
@@ -1068,6 +1162,7 @@ public sealed record CamusDBOptions
     /// epochs against the catalog, so a revoke on another node takes effect within this bound. Set to
     /// zero to force an authoritative lookup on every request (immediate revocation, higher cost).
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public TimeSpan AuthenticationCacheTtl { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
@@ -1076,14 +1171,17 @@ public sealed record CamusDBOptions
     /// deliberately expensive. Excess logins queue briefly; sustained saturation surfaces as
     /// <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int LoginKdfMaxConcurrency { get; init; } = 8;
 
     /// <summary>Maximum failed-or-succeeded login attempts per normalized account per rolling minute
     /// before further attempts are rejected with <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.</summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int LoginMaxAttemptsPerMinute { get; init; } = 20;
 
     /// <summary>Upper bound on the per-node authenticated-principal cache size, so random/invalid token
     /// ids cannot grow it without bound.</summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int AuthenticationCacheMaxEntries { get; init; } = 10_000;
 
     /// <summary>
@@ -1091,6 +1189,7 @@ public sealed record CamusDBOptions
     /// purges expired windows and, if still full, fails login closed — so a flood of unique account or
     /// source values cannot grow memory without bound.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int LoginRateLimitMaxEntries { get; init; } = 100_000;
 
     /// <summary>
@@ -1100,6 +1199,7 @@ public sealed record CamusDBOptions
     /// <c>true</c> (secure by default); set false only for a trusted network where TLS is terminated
     /// elsewhere.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool RequireTlsWhenAuthEnabled { get; init; } = true;
 
     /// <summary>
@@ -1109,6 +1209,7 @@ public sealed record CamusDBOptions
     /// internal routes are refused (fail-closed) — they must be configured before a cluster runs with
     /// auth on.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public string NodeSecret { get; init; } = "";
 
     /// <summary>
@@ -1124,6 +1225,7 @@ public sealed record CamusDBOptions
     ///
     /// Default: <c>64</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int IndexScanFetchBatchSize { get; init; } = 64;
 
     /// <summary>
@@ -1131,6 +1233,7 @@ public sealed record CamusDBOptions
     /// (default), no lock-trace messages are emitted regardless of the host logging configuration.
     /// Enable only for targeted diagnostics — a busy workload emits one line per lock acquired.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool LockTracingEnabled { get; init; } = false;
 
     /// <summary>
@@ -1138,6 +1241,7 @@ public sealed record CamusDBOptions
     /// <c>false</c> (default), no step-trace messages are emitted. Enable only for targeted
     /// diagnostics — each query emits one line per plan step executed.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public bool QueryTracingEnabled { get; init; } = false;
 
     /// <summary>
@@ -1148,6 +1252,7 @@ public sealed record CamusDBOptions
     /// guard against ReDoS on pathological patterns.
     /// Set via <c>regex_match_timeout_ms</c> in <c>config.yml</c>. Default: <c>250</c> ms.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int RegexMatchTimeoutMs { get; init; } = 250;
 
     /// <summary>
@@ -1157,6 +1262,7 @@ public sealed record CamusDBOptions
     /// one-off patterns while never failing a query because the cache is full.
     /// Set via <c>regex_cache_max_entries</c> in <c>config.yml</c>. Default: <c>1024</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int RegexCacheMaxEntries { get; init; } = 1024;
 
     /// <summary>
@@ -1192,6 +1298,7 @@ public sealed record CamusDBOptions
     /// bookkeeping or cache memory is incurred. Set via <c>query_result_cache_enabled</c> in
     /// <c>config.yml</c>.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public bool QueryResultCacheEnabled { get; init; } = true;
 
     /// <summary>
@@ -1199,18 +1306,23 @@ public sealed record CamusDBOptions
     /// Entries that survive this interval without an invalidating write are expired by the
     /// background sweep. Default: 5 000 ms.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheDefaultTtlMs { get; init; } = 5_000;
 
     /// <summary>Maximum number of entries the cache may hold (LRU eviction when exceeded). Default: 1 024.</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheMaxEntries { get; init; } = 1_024;
 
     /// <summary>Maximum total bytes across all cached entries. Default: 64 MiB.</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public long QueryResultCacheMaxBytes { get; init; } = 64 * 1024 * 1024;
 
     /// <summary>Maximum bytes for a single cache entry. Results larger than this are bypassed. Default: 1 MiB.</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public long QueryResultCacheMaxEntryBytes { get; init; } = 1 * 1024 * 1024;
 
     /// <summary>Maximum rows in a single cache entry. Results larger than this are bypassed. Default: 10 000.</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheMaxEntryRows { get; init; } = 10_000;
 
     /// <summary>
@@ -1218,28 +1330,34 @@ public sealed record CamusDBOptions
     /// When exceeded, the implementation must either promote to a coarser range or bypass
     /// — never store an entry with an incomplete dependency set. Default: 4 096.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheMaxDeps { get; init; } = 4_096;
 
     /// <summary>Maximum point-key dependencies per entry before promotion or bypass. Default: 2 048.</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheMaxPointDeps { get; init; } = 2_048;
 
     /// <summary>Maximum range dependencies per entry before promotion or bypass. Default: 256.</summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheMaxRanges { get; init; } = 256;
 
     /// <summary>
     /// How long, in milliseconds, a waiter in the single-flight gate may block before giving up
     /// and executing the query independently. Default: 250 ms.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheSingleFlightWaitMs { get; init; } = 250;
 
     /// <summary>
     /// Maximum number of keys probed during strict validation before the entry is treated as
     /// invalid and recomputed. Default: 10 000.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheStrictValidationMaxKeys { get; init; } = 10_000;
 
     /// <summary>
     /// How often, in milliseconds, the background sweep removes expired entries. Default: 10 000 ms.
     /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int QueryResultCacheSweepIntervalMs { get; init; } = 10_000;
 }

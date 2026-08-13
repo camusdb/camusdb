@@ -80,6 +80,11 @@ Console.WriteLine();
 // step exists. Finding no file at all is normal for a freshly installed tool and is not an error.
 (ConfigDefinition config, ConfigLocation configLocation) = ConfigLocator.Load(opts.ConfigPath);
 
+// The boot-time YAML text, captured once so runtime cluster-setting changes re-resolve against the
+// configuration this node actually started with. Re-reading the file at apply time would silently
+// fold in any edits made since boot, turning a SET into a partial config reload nobody asked for.
+string bootConfigYaml = configLocation.Path is null ? "" : File.ReadAllText(configLocation.Path);
+
 // CLI > env > YAML > default — only explicitly provided flags override YAML.
 ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
 
@@ -89,6 +94,18 @@ ConfigResolver.ApplyEffectiveDefaults(config);
 
 config.Validate();
 CamusDBOptions camusOptions = ConfigResolver.ApplyToCamusDBConfig(config);
+
+// Rebuilds the local layers (file text captured above, then CLI flags, then context-dependent
+// defaults) as a fresh definition. The cluster-settings overlay is applied on top of this and the
+// result re-validated and re-resolved, so a runtime change flows through the same chain a boot
+// does and cluster-beats-local falls out of the ordering.
+Func<ConfigDefinition> baseDefinitionFactory = () =>
+{
+    ConfigDefinition definition = new ConfigReader().Read(bootConfigYaml);
+    ConfigResolver.ApplyCliOverrides(definition, opts.ToOverrides());
+    ConfigResolver.ApplyEffectiveDefaults(definition);
+    return definition;
+};
 
 // A layered lookup makes "which configuration is this node running?" unanswerable from the console
 // unless the resolved source is stated, and that is the first question asked whenever a setting
@@ -109,37 +126,51 @@ Directory.CreateDirectory(camusOptions.DataDirectory);
 // These are applied after Resolve, so their provenance has to be recorded here rather than in the
 // resolver: without it they would report as built-in defaults, which for a value the operator set in
 // the environment is exactly the wrong answer.
-Dictionary<string, CamusDB.Core.Config.ConfigValueSource> authValueSources =
-    new(camusOptions.ValueSources, StringComparer.OrdinalIgnoreCase);
-
-void RecordIfSetFromEnvironment(string environmentVariable, string variableName)
+// Factored into a function because it runs twice per lifetime kind: once here at boot, and again
+// on every runtime cluster-setting re-resolution — the environment layer must survive a re-resolve
+// or a SET would silently strip the node's auth policy.
+Func<CamusDBOptions, CamusDBOptions> applyEnvironmentSecrets = resolved =>
 {
-    if (Environment.GetEnvironmentVariable(environmentVariable) is not null)
-        authValueSources[variableName] = CamusDB.Core.Config.ConfigValueSource.Environment;
-}
+    Dictionary<string, CamusDB.Core.Config.ConfigValueSource> valueSources =
+        new(resolved.ValueSources, StringComparer.OrdinalIgnoreCase);
 
-RecordIfSetFromEnvironment("CAMUSDB_AUTH_ENABLED", "authentication_enabled");
-RecordIfSetFromEnvironment("CAMUSDB_AUTH_TOKEN_KEY", "access_token_server_key");
-RecordIfSetFromEnvironment("CAMUSDB_BOOTSTRAP_USER", "bootstrap_superuser");
-RecordIfSetFromEnvironment("CAMUSDB_BOOTSTRAP_PASSWORD", "bootstrap_superuser_password");
-RecordIfSetFromEnvironment("CAMUSDB_NODE_SECRET", "node_secret");
+    void RecordIfSetFromEnvironment(string environmentVariable, string variableName)
+    {
+        if (Environment.GetEnvironmentVariable(environmentVariable) is not null)
+            valueSources[variableName] = CamusDB.Core.Config.ConfigValueSource.Environment;
+    }
 
-camusOptions = camusOptions with
-{
-    AuthenticationEnabled = string.Equals(
-        Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase),
-    AccessTokenServerKey =
-        Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? camusOptions.AccessTokenServerKey,
-    BootstrapSuperuser =
-        Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "",
-    BootstrapSuperuserPassword =
-        Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "",
-    NodeSecret =
-        Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "",
-    ValueSources = authValueSources,
+    RecordIfSetFromEnvironment("CAMUSDB_AUTH_ENABLED", "authentication_enabled");
+    RecordIfSetFromEnvironment("CAMUSDB_AUTH_TOKEN_KEY", "access_token_server_key");
+    RecordIfSetFromEnvironment("CAMUSDB_BOOTSTRAP_USER", "bootstrap_superuser");
+    RecordIfSetFromEnvironment("CAMUSDB_BOOTSTRAP_PASSWORD", "bootstrap_superuser_password");
+    RecordIfSetFromEnvironment("CAMUSDB_NODE_SECRET", "node_secret");
+
+    return resolved with
+    {
+        AuthenticationEnabled = string.Equals(
+            Environment.GetEnvironmentVariable("CAMUSDB_AUTH_ENABLED"), "true", StringComparison.OrdinalIgnoreCase),
+        AccessTokenServerKey =
+            Environment.GetEnvironmentVariable("CAMUSDB_AUTH_TOKEN_KEY") ?? resolved.AccessTokenServerKey,
+        BootstrapSuperuser =
+            Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_USER") ?? "",
+        BootstrapSuperuserPassword =
+            Environment.GetEnvironmentVariable("CAMUSDB_BOOTSTRAP_PASSWORD") ?? "",
+        NodeSecret =
+            Environment.GetEnvironmentVariable("CAMUSDB_NODE_SECRET") ?? "",
+        ValueSources = valueSources,
+    };
 };
 
+camusOptions = applyEnvironmentSecrets(camusOptions);
+
 CamusDBConfig.SetAmbient(camusOptions);
+
+// The swappable source of configuration snapshots. Seeded with the scrubbed record (the bootstrap
+// password never enters the holder — the seeding path takes it from the local variable); every
+// runtime cluster-setting change publishes a new record here, which fans out to the executor's
+// controllers and keeps the ambient value in sync.
+CamusDB.Core.Config.CamusDBOptionsHolder optionsHolder = new(camusOptions with { BootstrapSuperuserPassword = "" });
 
 // Diagnostics are opt-in and standalone-only this phase: enable the Core Meter/ActivitySource gate
 // only for a standalone node with diagnostics turned on. When false, every ServerDiagnostics record
@@ -273,6 +304,33 @@ if (config.IsClusterMode)
         return new HttpSchemaDdlForwarder(new HttpClient(), resolver, resolverLogger);
     });
 
+    // Same peer-endpoint resolution as the DDL forwarder above, for forwarding a cluster-setting
+    // change from a non-leader node to the settings-partition leader. Unlike the DDL forwarder it
+    // attaches the node secret, without which an auth-enabled receiving node refuses /internal/*.
+    builder.Services.AddSingleton<CamusDB.Core.Config.IClusterSettingsForwarder>(services =>
+    {
+        Dictionary<string, Uri> peerEndpointMap = [];
+        if (config.HttpPeers.Count == config.Peers.Count && config.HttpPeers.Count > 0)
+        {
+            for (int i = 0; i < config.Peers.Count; i++)
+                peerEndpointMap[config.Peers[i]] = new Uri($"http://{config.HttpPeers[i]}");
+        }
+
+        int httpPort = config.HttpPort;
+        ILogger<ICamusDB> resolverLogger = services.GetRequiredService<ILogger<ICamusDB>>();
+        Func<string, Uri> resolver = raftEndpoint =>
+        {
+            if (peerEndpointMap.TryGetValue(raftEndpoint, out Uri? mapped))
+                return mapped;
+
+            string host = raftEndpoint.Contains(':') ? raftEndpoint.Split(':')[0] : raftEndpoint;
+            return new Uri($"http://{host}:{httpPort}");
+        };
+
+        return new HttpClusterSettingsForwarder(
+            new HttpClient(), resolver, camusOptions.NodeSecret, resolverLogger);
+    });
+
     builder.Services.AddSingleton<CommandExecutor>(services =>
         new CommandExecutor(
             services.GetRequiredService<CommandValidator>(),
@@ -282,7 +340,9 @@ if (config.IsClusterMode)
             services.GetRequiredService<EmbeddedKahuna>(),
             services.GetRequiredService<ISchemaDdlForwarder>(),
             isClusterMode: true,
-            cache: queryResultCache
+            cache: queryResultCache,
+            optionsHolder: services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>(),
+            clusterSettings: services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>()
         ));
 }
 else
@@ -304,17 +364,37 @@ else
             services.GetRequiredService<CamusDBOptions>(),
             services.GetRequiredService<EmbeddedKahuna>(),
             isClusterMode: false,
-            cache: queryResultCache
+            cache: queryResultCache,
+            optionsHolder: services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>(),
+            clusterSettings: services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>()
         ));
 }
 
-// The resolved configuration for this engine. Registered as the instance every component takes by
-// constructor, so nothing needs to reach for a process-wide value.
+// The swappable holder is the source of truth for the current configuration snapshot; the
+// CamusDBOptions registration below resolves from it per activation, so transient/per-request
+// consumers (controllers, gRPC services, the auth middleware) always see the latest published
+// snapshot while singletons keep the snapshot they were constructed with — restart-class by
+// construction, exactly what their classification declares.
 //
-// The bootstrap password is stripped from the injected copy: it is a one-shot startup secret used to
-// seed the first user, and the seeding path still reads it from the ambient value, which is cleared
-// immediately afterwards. Keeping it out of the long-lived instance means no component can retain it.
-builder.Services.AddSingleton(camusOptions with { BootstrapSuperuserPassword = "" });
+// The bootstrap password never enters the holder: it is a one-shot startup secret used to seed the
+// first user, and the seeding path takes it from the startup local. No resolved component can
+// retain it.
+builder.Services.AddSingleton(optionsHolder);
+builder.Services.AddTransient<CamusDBOptions>(services =>
+    services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>().Current);
+
+// Owns the replicated runtime-settings overlay: validates and proposes changes, applies committed
+// changes from the settings log, persists the load-time checkpoint, and publishes merged snapshots
+// through the holder. In standalone mode the same pipeline runs with no replication.
+builder.Services.AddSingleton<CamusDB.Core.Config.ClusterSettingsService>(services =>
+    new CamusDB.Core.Config.ClusterSettingsService(
+        services.GetRequiredService<EmbeddedKahuna>(),
+        services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>(),
+        baseDefinitionFactory,
+        postResolve: resolved => applyEnvironmentSecrets(resolved) with { BootstrapSuperuserPassword = "" },
+        isClusterMode: config.IsClusterMode,
+        forwarder: services.GetService<CamusDB.Core.Config.IClusterSettingsForwarder>(),
+        logger: services.GetRequiredService<ILogger<ICamusDB>>()));
 
 builder.Services.AddSingleton<CommandValidator>();
 builder.Services.AddSingleton<CatalogsManager>();
@@ -493,6 +573,14 @@ if (config.IsClusterMode)
 
 await sharedNode.StartAsync();
 
+// Load the persisted cluster-settings overlay and publish the merged configuration NOW — after the
+// store is readable, before the executor below is resolved — so everything the executor constructs
+// (schedulers, caches, table stores) is built from the merged snapshot and never holds a boot-only
+// value. This is the whole boot-window hazard reduced to an ordering constraint.
+CamusDB.Core.Config.ClusterSettingsService clusterSettingsService =
+    app.Services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>();
+await clusterSettingsService.StartAsync();
+
 SpillFileManager.AcquireInstanceLock(camusOptions.DataDirectory);
 SpillFileManager.RunStartupSweep(camusOptions.DataDirectory);
 
@@ -514,10 +602,11 @@ await commandExecutor.EnsureBootstrapSuperuserAsync(
     camusOptions.BootstrapSuperuser,
     camusOptions.BootstrapSuperuserPassword);
 
-// The bootstrap password was only needed to seed the first hash — drop it from process memory. Both
-// holders are cleared: the ambient value and this scope's own copy.
+// The bootstrap password was only needed to seed the first hash — drop it from process memory.
+// Only this scope's copy still carries it: the holder was seeded scrubbed, and the settings
+// service's boot publish already replaced the ambient value with the scrubbed merged snapshot
+// (re-installing the boot record here would undo any overlay the cluster carries).
 camusOptions = camusOptions with { BootstrapSuperuserPassword = "" };
-CamusDBConfig.SetAmbient(camusOptions);
 
 // Give the background auto-analyze scheduler a foreground-load signal so it backs off under load:
 // explicit transactions plus in-flight autocommit data requests.

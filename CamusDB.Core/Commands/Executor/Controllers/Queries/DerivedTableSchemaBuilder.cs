@@ -146,11 +146,23 @@ internal static class DerivedTableSchemaBuilder
     // real one. Both are NULL for a setting that is genuinely unset, which is distinct from empty.
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowVariablesSchema =
     [
-        new("variable", ColumnType.String),
-        new("value",    ColumnType.String),
-        new("type",     ColumnType.String),
-        new("default",  ColumnType.String),
-        new("source",   ColumnType.String),
+        new("variable",   ColumnType.String),
+        new("value",      ColumnType.String),
+        new("type",       ColumnType.String),
+        new("default",    ColumnType.String),
+        new("source",     ColumnType.String),
+        new("mutability", ColumnType.String),
+        new("scope",      ColumnType.String),
+    ];
+
+    // SHOW CLUSTER SETTINGS: one row per overlay entry the cluster currently carries — the keys a
+    // SET CLUSTER SETTING changed and no RESET has dropped. Values are the scalar text the overlay
+    // stores (the same spelling config.yml would use); each key's effective per-node value, with
+    // provenance, is SHOW VARIABLES' job.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowClusterSettingsSchema =
+    [
+        new("setting", ColumnType.String),
+        new("value",   ColumnType.String),
     ];
 
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowOrphanTablesSchema =

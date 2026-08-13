@@ -71,6 +71,8 @@ stat    : select_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
         | set_transaction_stmt { $$.n = $1.n; }
+        | set_cluster_setting_stmt { $$.n = $1.n; }
+        | reset_cluster_setting_stmt { $$.n = $1.n; }
         | analyze_stmt { $$.n = $1.n; }
         | evict_cache_stmt { $$.n = $1.n; }
         | comment_stmt { $$.n = $1.n; }
@@ -321,6 +323,52 @@ set_transaction_stmt
                      null, null, null, null, null, null, "Serializable");
       }
     ;
+
+/* SET CLUSTER SETTING <name> = <value>
+ * RESET CLUSTER SETTING <name>
+ *
+ * CLUSTER and SETTING are matched as plain identifiers, not keywords, so both stay usable as
+ * column and table names; the words are validated in the action like SHOW ENGINE STATS. No
+ * conflict with SET TRANSACTION (disambiguated by the reserved TTRANSACTION token) or with
+ * ALTER TABLE ... RESET (TRESET there never starts a statement).
+ *
+ * Node layout: leftAst = setting-name identifier (dotted names like kahuna.x parse as one
+ * qualified identifier, so they reach the executor and get the accurate restart-class rejection
+ * instead of a syntax error); rightAst = the value literal (String/Integer/Float/Bool, or a bare
+ * identifier so enum spellings like read_committed need no quotes).
+ */
+set_cluster_setting_stmt
+    : TSET TIDENTIFIER TIDENTIFIER any_identifier TEQUALS cluster_setting_value
+      {
+          if (!string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($3.s, "setting", System.StringComparison.OrdinalIgnoreCase))
+              throw new CamusDB.Core.CamusDBException(
+                  CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                  "Expected: SET CLUSTER SETTING <name> = <value>");
+          $$.n = new(NodeType.SetClusterSetting, $4.n, $6.n, null, null, null, null, null, null);
+      }
+    ;
+
+reset_cluster_setting_stmt
+    : TRESET TIDENTIFIER TIDENTIFIER any_identifier
+      {
+          if (!string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) ||
+              !string.Equals($3.s, "setting", System.StringComparison.OrdinalIgnoreCase))
+              throw new CamusDB.Core.CamusDBException(
+                  CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                  "Expected: RESET CLUSTER SETTING <name>");
+          $$.n = new(NodeType.ResetClusterSetting, $4.n, null, null, null, null, null, null, null);
+      }
+    ;
+
+cluster_setting_value : string { $$.n = $1.n; }
+                      | int { $$.n = $1.n; }
+                      | float { $$.n = $1.n; }
+                      | bool { $$.n = $1.n; }
+                      | identifier { $$.n = $1.n; }
+                      | TMINUS TDIGIT { $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, string.Concat("-", $2.s)); }
+                      | TMINUS TFLOAT { $$.n = new(NodeType.Float, null, null, null, null, null, null, null, string.Concat("-", $2.s)); }
+                      ;
 
 create_table_stmt : TCREATE TTABLE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateTableRelink, $3.n, $6.n, null, null, null, null, null, null); }
                   | TCREATE TTABLE any_identifier LPAREN create_table_item_list RPAREN opt_table_comment opt_table_settings { $$.n = new(NodeType.CreateTable, $3.n, $5.n, null, $7.n, $8.n, null, null, null); }
@@ -657,25 +705,36 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TORPHAN TDATABASES { $$.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS { $$.n = new(NodeType.ShowGrants, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS TFOR any_identifier { $$.n = new(NodeType.ShowGrants, $4.n, null, null, null, null, null, null, null); }
-          /* ENGINE and STATS are matched as plain identifiers, not keywords, so both remain usable as
-             column and table names. The words are validated here instead, the same way EVICT CACHE is. */
+          /* ENGINE STATS and CLUSTER SETTINGS are matched as plain identifiers, not keywords, so
+             all four words remain usable as column and table names. The two statements share ONE
+             two-identifier production dispatched on the words — a second production with the same
+             token shape would be a reduce/reduce conflict, the same constraint SET TRANSACTION
+             LOCKING/PRIORITY documents. */
           | TSHOW TIDENTIFIER TIDENTIFIER
           {
-            if (!string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowEngineStats, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "settings", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowClusterSettings, null, null, null, null, null, null, null, null);
+            else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>']");
-            $$.n = new(NodeType.ShowEngineStats, null, null, null, null, null, null, null, null);
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'] or SHOW CLUSTER SETTINGS [LIKE '<pattern>']");
           }
           | TSHOW TIDENTIFIER TIDENTIFIER TLIKE string
           {
-            if (!string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowEngineStats, $5.n, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "settings", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowClusterSettings, $5.n, null, null, null, null, null, null, null);
+            else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>']");
-            $$.n = new(NodeType.ShowEngineStats, $5.n, null, null, null, null, null, null, null);
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'] or SHOW CLUSTER SETTINGS [LIKE '<pattern>']");
           }
           /* VARIABLES is likewise a plain identifier rather than a keyword, so it stays usable as a
              column and table name. */
