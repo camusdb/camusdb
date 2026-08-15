@@ -325,8 +325,11 @@ public class TestGrpcSqlService : BaseTest
         Assert.That(msgs[0].PayloadCase, Is.EqualTo(QueryStreamMessage.PayloadOneofCase.Schema));
         Assert.That(msgs.Skip(1).All(m => m.PayloadCase == QueryStreamMessage.PayloadOneofCase.Row), Is.True);
 
+        // Spelled out rather than compared against the schema the engine built: this pins what the
+        // wire carries, so a column added to or renamed in SHOW VARIABLES has to be acknowledged here
+        // as a deliberate change to a client-visible contract.
         CollectionAssert.AreEqual(
-            new[] { "variable", "value", "type", "default", "source" },
+            new[] { "variable", "value", "type", "default", "source", "mutability", "scope" },
             msgs[0].Schema.Columns.Select(c => c.Name).ToList());
     }
 

@@ -234,6 +234,18 @@ internal sealed class MaterializedViewRefresher
             // is still separate storage would strand exactly what it exists to make findable.
             await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
 
+            // The rows were counted while they were written, but under the staging relation's id —
+            // which the swap has just retired. Move those counts onto the view, whose own were
+            // evicted by the same apply because they described the contents this replaced. Skipping
+            // this leaves the view costed by fallback constants, and unable to look stale to the
+            // background collector, so it would stay uncosted until someone ran ANALYZE by hand.
+            //
+            // After the swap and after the job record is gone: the refresh is already published and
+            // durable at this point, so a failure here must not undo any of it. Statistics are
+            // advisory, so the worst case is the behavior that existed before this ran at all.
+            await AdoptRefreshStatisticsAsync(
+                executor, database, viewName, stagingTableId, rows, logger).ConfigureAwait(false);
+
             // No cache invalidation here on purpose: the replicated apply does it on every node,
             // including this one. Doing it only at the proposer is what left followers answering
             // from the contents the swap retired.
@@ -631,6 +643,43 @@ internal sealed class MaterializedViewRefresher
         finally
         {
             database.Schema.ReleaseLock();
+        }
+    }
+
+    /// <summary>
+    /// Hands the counts measured during the population to the materialized view now that it owns the
+    /// key-space they describe.
+    ///
+    /// <para>Deliberately failure-tolerant: it runs after the swap has been published and the job
+    /// record deleted, so the refresh has already succeeded and nothing here may undo it. A failure
+    /// leaves the view with no statistics — which is exactly where it stood before, and which
+    /// <c>ANALYZE</c> repairs.</para>
+    /// </summary>
+    private static async Task AdoptRefreshStatisticsAsync(
+        CommandExecutor executor,
+        DatabaseDescriptor database,
+        string viewName,
+        string stagingTableId,
+        int rows,
+        ILogger<ICamusDB> logger)
+    {
+        try
+        {
+            // Opened after the swap, so this is the view bound to its new key-space — the descriptor
+            // the apply evicted is not reused.
+            TableDescriptor view = await executor.OpenTableWithDescriptor(
+                database, new OpenTableTicket(database.Name, viewName)).ConfigureAwait(false);
+
+            await executor.Statistics.AdoptRefreshedRelationAsync(
+                database, stagingTableId, view, rows).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Publishing refreshed statistics for materialized view '{ViewName}' failed; it will be "
+                + "costed without them until an ANALYZE runs",
+                viewName);
         }
     }
 

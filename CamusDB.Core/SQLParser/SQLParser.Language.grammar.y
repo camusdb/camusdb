@@ -705,6 +705,25 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TORPHAN TDATABASES { $$.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS { $$.n = new(NodeType.ShowGrants, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS TFOR any_identifier { $$.n = new(NodeType.ShowGrants, $4.n, null, null, null, null, null, null, null); }
+          /* STATISTICS is likewise matched as a plain identifier, so the word stays usable as a
+             column and table name. The TFOR in third position keeps this production distinct from
+             the two-identifier ENGINE STATS / CLUSTER SETTINGS shape below, so neither conflicts. */
+          | TSHOW TIDENTIFIER TFOR any_identifier
+          {
+            if (!string.Equals($2.s, "statistics", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: SHOW STATISTICS FOR [TABLE] <table>");
+            $$.n = new(NodeType.ShowStatistics, $4.n, null, null, null, null, null, null, null);
+          }
+          | TSHOW TIDENTIFIER TFOR TTABLE any_identifier
+          {
+            if (!string.Equals($2.s, "statistics", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: SHOW STATISTICS FOR [TABLE] <table>");
+            $$.n = new(NodeType.ShowStatistics, $5.n, null, null, null, null, null, null, null);
+          }
           /* ENGINE STATS and CLUSTER SETTINGS are matched as plain identifiers, not keywords, so
              all four words remain usable as column and table names. The two statements share ONE
              two-identifier production dispatched on the words — a second production with the same

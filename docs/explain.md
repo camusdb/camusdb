@@ -54,7 +54,9 @@ than silently treated as a plain `EXPLAIN`.
 `estimated_rows` / `estimated_cost` come from the cost model. Estimates use table statistics —
 row counts, per-column min/max, and (after `ANALYZE`) equi-depth histograms and distinct-value
 counts — when available, and fall back to fixed defaults otherwise, so the exact numbers depend
-on what statistics have been collected and will differ between deployments. `estimated_cost` also
+on what statistics have been collected and will differ between deployments. When an estimate looks
+wrong, [`SHOW STATISTICS FOR <table>`](show-statistics.md) shows the inputs that produced it and
+whether they were collected at all. `estimated_cost` also
 includes a network term (`NetworkFactor`) for range-sharded deployments; it is 0 on a single node.
 Single-table estimates are accurate; join-node estimates are accurate when the cost-based
 join-order flag is on and otherwise remain heuristic. `(LOGICAL)` and `(PHYSICAL)` currently

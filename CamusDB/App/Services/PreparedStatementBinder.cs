@@ -49,6 +49,7 @@ public static class PreparedStatementBinder
         NodeType.ShowOrphanTables or
         NodeType.ShowOrphanDatabases or
         NodeType.ShowIndexes or
+        NodeType.ShowStatistics or
         NodeType.ShowGrants;
 
     /// <summary>

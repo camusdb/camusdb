@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Config;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics.Models;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 
@@ -336,6 +337,161 @@ internal sealed class SchemaQuerier
                 { "Index_type", new ColumnValue(ColumnType.String, "ORDERED") }
             });
         }
+    }
+
+    /// <summary>
+    /// Renders <c>SHOW STATISTICS FOR &lt;table&gt;</c> from a snapshot the caller already took.
+    ///
+    /// <para>The snapshot is passed in rather than fetched here so this class keeps its narrow
+    /// dependencies (catalogs and options) and the statistics read stays where it can be awaited
+    /// before the first row is yielded — a failure surfaces as a statement error rather than
+    /// mid-stream.</para>
+    ///
+    /// <para>The <c>table</c> row is emitted even when <paramref name="view"/> is null. A table that
+    /// has never been written to or analyzed genuinely has no statistics, and an all-NULL row says
+    /// so; returning no rows at all would be indistinguishable from a filter that matched nothing.</para>
+    ///
+    /// <para>Schema elements still being built (a column or index not yet public) are skipped, for
+    /// the same reason <see cref="ShowColumns"/> and <see cref="ShowIndexes"/> skip them: an element
+    /// no query can use yet must not become visible through a side channel.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowStatistics(TableDescriptor table, TableStatisticsView? view)
+    {
+        await Task.CompletedTask;
+
+        ColumnValue tableName = new(ColumnType.String, table.Name);
+        ColumnValue lastAnalyzed = view is null || view.LastAnalyzedAt.IsNull()
+            ? ColumnValue.Null
+            : new ColumnValue(ColumnType.String, view.LastAnalyzedAt.ToString());
+        ColumnValue staleMutations = view is null
+            ? ColumnValue.Null
+            : new ColumnValue(ColumnType.Integer64, view.MutationsSinceAnalyze);
+
+        yield return StatisticsRow(
+            tableName, "table", ColumnValue.Null,
+            estimatedRows: OptionalCount(view?.RowCount),
+            distinctCount: ColumnValue.Null,
+            minValue: ColumnValue.Null,
+            maxValue: ColumnValue.Null,
+            histogramBuckets: ColumnValue.Null,
+            lastAnalyzed, staleMutations);
+
+        if (view is null)
+            yield break;
+
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (!SchemaElementStateRules.IsReadable(column))
+                continue;
+
+            bool hasMinMax = view.ColumnStats.TryGetValue(column.Name, out ColumnMinMax? minMax);
+            bool hasNdv = view.ColumnNdv.TryGetValue(column.Name, out long ndv);
+            bool hasHistogram = view.Histograms.TryGetValue(column.Name, out ColumnHistogram? histogram);
+
+            // A column nothing has been observed for produces no row: an all-NULL row per column
+            // would bury the columns that do carry estimates.
+            if (!hasMinMax && !hasNdv && !hasHistogram)
+                continue;
+
+            yield return StatisticsRow(
+                tableName, "column", new ColumnValue(ColumnType.String, column.Name),
+                estimatedRows: ColumnValue.Null,
+                distinctCount: hasNdv ? new ColumnValue(ColumnType.Integer64, ndv) : ColumnValue.Null,
+                minValue: RenderBound(minMax?.Min),
+                maxValue: RenderBound(minMax?.Max),
+                histogramBuckets: hasHistogram
+                    ? new ColumnValue(ColumnType.Integer64, histogram!.Buckets.Count)
+                    : ColumnValue.Null,
+                lastAnalyzed, staleMutations);
+        }
+
+        foreach (string signature in view.KeyNdv.Keys.OrderBy(static k => k, StringComparer.Ordinal))
+        {
+            yield return StatisticsRow(
+                tableName, "key", new ColumnValue(ColumnType.String, signature),
+                estimatedRows: ColumnValue.Null,
+                distinctCount: new ColumnValue(ColumnType.Integer64, view.KeyNdv[signature]),
+                minValue: ColumnValue.Null,
+                maxValue: ColumnValue.Null,
+                histogramBuckets: ColumnValue.Null,
+                lastAnalyzed, staleMutations);
+        }
+
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes.OrderBy(static i => i.Key, StringComparer.Ordinal))
+        {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index.Value))
+                continue;
+
+            yield return StatisticsRow(
+                tableName, "index", new ColumnValue(ColumnType.String, index.Key),
+                estimatedRows: view.IndexEntryCounts.TryGetValue(index.Key, out long entries)
+                    ? OptionalCount(entries)
+                    : ColumnValue.Null,
+                distinctCount: ColumnValue.Null,
+                minValue: ColumnValue.Null,
+                maxValue: ColumnValue.Null,
+                histogramBuckets: ColumnValue.Null,
+                lastAnalyzed, staleMutations);
+        }
+    }
+
+    private static QueryResultRow StatisticsRow(
+        ColumnValue table,
+        string kind,
+        ColumnValue target,
+        ColumnValue estimatedRows,
+        ColumnValue distinctCount,
+        ColumnValue minValue,
+        ColumnValue maxValue,
+        ColumnValue histogramBuckets,
+        ColumnValue lastAnalyzed,
+        ColumnValue staleMutations)
+        => new(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "table", table },
+            { "kind", new ColumnValue(ColumnType.String, kind) },
+            { "target", target },
+            { "estimated_rows", estimatedRows },
+            { "distinct_count", distinctCount },
+            { "min_value", minValue },
+            { "max_value", maxValue },
+            { "histogram_buckets", histogramBuckets },
+            { "last_analyzed", lastAnalyzed },
+            { "stale_mutations", staleMutations },
+        });
+
+    /// <summary>A negative or absent count means "never recorded", which renders as NULL, not as a number.</summary>
+    private static ColumnValue OptionalCount(long? count)
+        => count is null || count < 0 ? ColumnValue.Null : new ColumnValue(ColumnType.Integer64, count.Value);
+
+    /// <summary>
+    /// Renders a statistics bound as the SQL literal that would have produced it, reusing
+    /// <see cref="ColumnValue"/>'s own formatters for dates and UUIDs so this never drifts from how
+    /// the same value prints elsewhere.
+    ///
+    /// <para>Types with no ordering (<c>Bool</c>) and types whose payload a bound does not carry
+    /// (<c>Bytes</c>, arrays) render as NULL: min/max is only tracked for ordered scalars, so a
+    /// bound of those types holds no value to show.</para>
+    /// </summary>
+    private static ColumnValue RenderBound(ScalarBound? bound)
+    {
+        if (bound is null)
+            return ColumnValue.Null;
+
+        return bound.Type switch
+        {
+            ColumnType.Integer64 => new ColumnValue(ColumnType.String, bound.LongValue.ToString(CultureInfo.InvariantCulture)),
+            ColumnType.Float64 => new ColumnValue(ColumnType.String, bound.FloatValue.ToString(CultureInfo.InvariantCulture)),
+            ColumnType.Float32 => new ColumnValue(ColumnType.String, ((float)bound.FloatValue).ToString(CultureInfo.InvariantCulture)),
+            ColumnType.String or ColumnType.Id => bound.StrValue is null
+                ? ColumnValue.Null
+                : new ColumnValue(ColumnType.String, bound.StrValue),
+            ColumnType.Date or ColumnType.DateTime => new ColumnValue(
+                ColumnType.String, new ColumnValue(bound.Type, bound.LongValue).IsoValue!),
+            ColumnType.Uuid => new ColumnValue(
+                ColumnType.String, new ColumnValue(ColumnType.Uuid, bound.UuidHigh, bound.LongValue).UuidValue!),
+            _ => ColumnValue.Null,
+        };
     }
 
     internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table)

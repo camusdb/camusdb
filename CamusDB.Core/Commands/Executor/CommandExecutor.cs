@@ -3804,6 +3804,9 @@ public sealed class CommandExecutor : IAsyncDisposable
             or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,
         NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
             or NodeType.ShowDatabase or NodeType.ShowOrphanTables => Privilege.Select,
+        // Statistics report bounds drawn from real column values, so reading them is a read of the
+        // table's data — the same bar as selecting from it, and deliberately not a superuser gate.
+        NodeType.ShowStatistics => Privilege.Select,
         // Creating a view or materialized view creates a relation, so it needs the same privilege
         // creating a table does — and is checked at database scope for the same reason: the object
         // does not exist yet, so it cannot be a per-table grant target.
@@ -5894,6 +5897,45 @@ public sealed class CommandExecutor : IAsyncDisposable
                     PinSchemaVersion(database, table, ticket.TxnState);
 
                     return (database, schemaQuerier.ShowIndexes(table));
+                }
+
+            case NodeType.ShowStatistics:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowStatisticsSchema;
+
+                    string statisticsTarget = ast.leftAst!.yytext!;
+
+                    // A non-materialized view stores no rows, so it has no statistics of its own —
+                    // the estimates a plan over it uses belong to the tables its body reads. Caught
+                    // here because the table-open path would otherwise reject it as "cannot be
+                    // written to", which is both wrong (this is a read) and unhelpful.
+                    //
+                    // Privilege first, and through the view's own check: nothing opens a view, so the
+                    // chokepoint that guards every other relation never runs for one. Explaining that
+                    // a name is a view before checking the grant would answer "does this object
+                    // exist, and what is it?" for a caller who may not read it at all.
+                    if (database.Schema.Views.TryGetValue(statisticsTarget, out Catalogs.Models.ViewSchema? viewDefinition))
+                    {
+                        Controllers.ViewAuthorization.Require(
+                            database, statisticsTarget, viewDefinition, Privilege.Select);
+
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ViewDoesntExist,
+                            $"'{statisticsTarget}' is a view and has no statistics of its own; "
+                            + "ask for the statistics of the tables its definition reads");
+                    }
+
+                    TableDescriptor table = await tableOpener.Open(database, statisticsTarget).ConfigureAwait(false);
+                    PinSchemaVersion(database, table, ticket.TxnState);
+
+                    // Read before returning the stream: a snapshot taken here fails as a statement
+                    // error, while one taken lazily inside the projection would fail mid-result.
+                    Statistics.Models.TableStatisticsView? statisticsView = await statisticsManager
+                        .ReadForDisplayAsync(database, table, CancellationToken.None)
+                        .ConfigureAwait(false);
+
+                    return (database, schemaQuerier.ShowStatistics(table, statisticsView));
                 }
 
             case NodeType.ShowCreateTable:

@@ -525,4 +525,18 @@ public enum NodeType
 
     /// <summary><c>SHOW CREATE MATERIALIZED VIEW name</c>.</summary>
     ShowCreateMaterializedView,
+
+    /// <summary>
+    /// <c>SHOW STATISTICS FOR [TABLE] name</c>. <c>leftAst</c> = the table name node.
+    ///
+    /// <para>Reports the optimizer's advisory statistics for one table — row count, per-column
+    /// min/max, histogram bucket counts, distinct-value counts and analyze staleness — as the
+    /// answering node sees them. Table-scoped, so unlike <see cref="ShowEngineStats"/> it needs an
+    /// open database and resolves its target through the normal table-open path.</para>
+    ///
+    /// <para>Node-local by nature: statistics are cached per node and a node's live counters include
+    /// mutations it has not flushed yet, so two nodes may legitimately report different values for
+    /// the same table.</para>
+    /// </summary>
+    ShowStatistics,
 }

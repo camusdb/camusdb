@@ -79,6 +79,27 @@ internal static class DerivedTableSchemaBuilder
         new("Index_type", ColumnType.String),
     ];
 
+    /// <summary>
+    /// One row per statistics target, discriminated by <c>kind</c>, so the table-level counters, the
+    /// per-column estimates, the composite-key estimates and the per-index entry counts arrive as one
+    /// result instead of four statements. Columns that do not apply to a row's <c>kind</c> are NULL —
+    /// as are those a value has simply never been collected for, which is why <c>last_analyzed</c>
+    /// is worth reading before trusting any of it.
+    /// </summary>
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowStatisticsSchema =
+    [
+        new("table",             ColumnType.String),
+        new("kind",              ColumnType.String),
+        new("target",            ColumnType.String),
+        new("estimated_rows",    ColumnType.Integer64),
+        new("distinct_count",    ColumnType.Integer64),
+        new("min_value",         ColumnType.String),
+        new("max_value",         ColumnType.String),
+        new("histogram_buckets", ColumnType.Integer64),
+        new("last_analyzed",     ColumnType.String),
+        new("stale_mutations",   ColumnType.Integer64),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateTableSchema =
     [
         new("Table",        ColumnType.String),

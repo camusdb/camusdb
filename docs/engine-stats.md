@@ -10,7 +10,8 @@ SHOW ENGINE STATS LIKE 'raft.executor%';
 ```
 
 This is engine introspection, not table statistics — for the optimizer's view of your data see
-[`ANALYZE`](automatic-analyze.md) and [the query planner guide](query-planner.md).
+[`SHOW STATISTICS FOR <table>`](show-statistics.md), [`ANALYZE`](automatic-analyze.md) and
+[the query planner guide](query-planner.md).
 
 ## What it is for
 

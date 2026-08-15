@@ -871,6 +871,250 @@ public sealed class StatisticsManager
     public Task LoadByIdAsync(DatabaseDescriptor database, string tableId)
         => EnsureLoadedAsync(database, tableId, tableId);
 
+    /// <summary>
+    /// Moves the statistics measured while a materialized-view refresh populated its staging relation
+    /// onto the view itself, and publishes them.
+    ///
+    /// <para>A refresh writes rows into a staging relation with its own id, then swaps that key-space
+    /// under the view while the view keeps its identity — "a refresh replaces what a materialized view
+    /// holds; it does not replace the materialized view". The swap's apply evicts the view's
+    /// statistics, correctly: they describe rows that are no longer there. But the counts the
+    /// population just measured are recorded under the staging id, which the swap retires, so without
+    /// this the view emerges from a refresh knowing nothing about itself — the planner costs it with
+    /// fallback constants, and because its mutation counter is zero against an unknown row count,
+    /// automatic ANALYZE never finds it stale either, so it can stay that way indefinitely.</para>
+    ///
+    /// <para><b>Histograms and distinct-value counts are deliberately not carried over.</b> The
+    /// staging relation never had any (only ANALYZE builds them) and the view's own described the
+    /// retired contents. Publishing absolutely — which erases them from the persisted blob along with
+    /// the analyze timestamp — is the honest outcome: exact counts, no distributions, and a table that
+    /// correctly reports itself as never analyzed so the background collector picks it up.</para>
+    ///
+    /// <para>Runs on the node that performed the refresh, after the swap has been applied. Other nodes
+    /// evicted their copy during the same apply and reload from the blob this publishes.</para>
+    /// </summary>
+    /// <param name="sourceTableId">The staging relation's id — where the population's counts landed.</param>
+    /// <param name="target">The materialized view, already swapped onto the new key-space.</param>
+    /// <param name="refreshedRowCount">Rows the refresh wrote, used when the population tracked no
+    /// entry at all (a <c>WITH NO DATA</c> rebuild writes nothing, and its answer is 0 rows — not
+    /// "unknown").</param>
+    public async Task AdoptRefreshedRelationAsync(
+        DatabaseDescriptor database,
+        string sourceTableId,
+        TableDescriptor target,
+        long refreshedRowCount)
+    {
+        _cache.TryRemove(CacheKey(database.Id, sourceTableId), out Entry? source);
+
+        Entry adopted = new() { Loaded = true };
+
+        if (source is not null)
+        {
+            adopted.RowCount = Math.Max(0, Interlocked.Read(ref source.RowCount));
+            adopted.MutationsSinceAnalyze = Math.Max(0, Interlocked.Read(ref source.MutationsSinceAnalyze));
+
+            foreach (KeyValuePair<string, long> kv in source.IndexEntries)
+                adopted.IndexEntries[kv.Key] = kv.Value;
+
+            lock (source.ColumnStatsLock)
+            {
+                foreach (KeyValuePair<string, ColumnMinMax> kv in source.ColumnStats)
+                    adopted.ColumnStats[kv.Key] = new ColumnMinMax { Min = kv.Value.Min, Max = kv.Value.Max };
+            }
+        }
+        else
+        {
+            // Nothing was tracked — a rebuild that wrote no rows. Its row count is known and exact.
+            adopted.RowCount = Math.Max(0, refreshedRowCount);
+            adopted.MutationsSinceAnalyze = Math.Max(0, refreshedRowCount);
+        }
+
+        // The rebuild reconciled the true counts by construction, exactly as a completed ANALYZE scan
+        // does, so the next flush writes this view absolutely instead of adding a delta onto whatever
+        // the blob still holds for the contents the swap retired.
+        adopted.ForceAbsoluteFlush = 1;
+
+        // Replace outright rather than merge: any entry created here between the swap and now came
+        // from a reader touching the freshly-evicted slot, and holds nothing this does not.
+        _cache[CacheKey(database.Id, target.Id)] = adopted;
+
+        await FlushAsync(database, target).ConfigureAwait(false);
+
+        await DiscardRetiredRelationStatisticsAsync(database, sourceTableId).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Best-effort delete of the persisted statistics of a relation that no longer exists — the
+    /// staging relation of a completed refresh, whose blob a debounced flush may have written while
+    /// the rebuild ran. Failure is logged and ignored: an orphaned advisory blob costs a key, while
+    /// throwing here would fail a refresh that has already published successfully.
+    /// </summary>
+    private async Task DiscardRetiredRelationStatisticsAsync(DatabaseDescriptor database, string tableId)
+    {
+        KvTransaction? tx = null;
+
+        try
+        {
+            tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+                priority: TransactionPriority.Background).ConfigureAwait(false);
+
+            await DropTableStatsAsync(database, tableId, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Discarding retired statistics for relation {TableId} failed", tableId);
+
+            if (tx is not null)
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Returns an immutable snapshot of everything known about one table's statistics, for
+    /// introspection rather than costing.
+    ///
+    /// <para><b>Why this exists instead of composing the getters above:</b> every one of them returns
+    /// null while the entry is unloaded, and the load they trigger runs in the background. Composing
+    /// them would make an introspection statement report "no statistics" on its first call and real
+    /// values on the second, which is worse than reporting nothing at all.</para>
+    ///
+    /// <para><b>Cache-neutral by design.</b> A table this node already tracks is answered from the
+    /// live entry — free, and strictly fresher, since it includes mutations not yet flushed. A table
+    /// with <b>no</b> entry is answered by a point read of the persisted blob that <b>creates no
+    /// entry</b>, for the same reason <see cref="IsStaleWithoutCachingAsync"/> avoids one: making
+    /// every inspected table resident turns introspection into unbounded memory growth across a
+    /// fleet of databases. Do not "simplify" this onto <see cref="LoadByIdAsync"/> for every table.</para>
+    ///
+    /// <para>An entry that exists but has not finished its background load is <b>awaited</b> rather
+    /// than skipped. Its counters at that moment are unmerged deltas, and the persisted blob does not
+    /// contain them either — a table written to but not yet flushed would otherwise report nothing at
+    /// all, which is exactly the case a reader is most likely to be checking. Awaiting costs no extra
+    /// residency because the entry is already there.</para>
+    ///
+    /// <para>Returns null when the table has no statistics anywhere, and also when the blob could not
+    /// be read or decoded — statistics are advisory, so an unreadable blob is "nothing known", never
+    /// a failed statement.</para>
+    /// </summary>
+    public async Task<TableStatisticsView?> ReadForDisplayAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        CancellationToken cancellationToken)
+    {
+        string cacheKey = CacheKey(database.Id, table.Id);
+
+        if (_cache.TryGetValue(cacheKey, out Entry? cached))
+        {
+            if (!cached.Loaded)
+                await EnsureLoadedAsync(database, table.Id, table.Name).ConfigureAwait(false);
+
+            // Re-read: the entry can be dropped (table dropped, cache evicted) while the load runs,
+            // in which case the persisted read below is the right answer rather than a stale object.
+            //
+            // Still unloaded means the load failed and was logged. Its counters are then deltas
+            // measured from an unmerged base, so reporting them would show a confidently wrong small
+            // number; fall through to the blob, which is a correct base missing only this node's
+            // recent writes, and to NULLs if that fails too.
+            if (_cache.TryGetValue(cacheKey, out Entry? loaded) && loaded.Loaded)
+                return SnapshotEntry(loaded);
+        }
+
+        TableStatistics? persisted;
+
+        try
+        {
+            persisted = await ReadPersistedStatisticsAsync(
+                database.Kahuna, database.Id, table.Id, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Statistics read for display failed for table {Table}", table.Name);
+            return null;
+        }
+
+        return persisted is null ? null : FromPersisted(persisted);
+    }
+
+    /// <summary>
+    /// Copies a live entry under its lock. <see cref="ColumnMinMax"/> is rebuilt rather than shared
+    /// because the live instances are updated in place by DML; histograms are shared because ANALYZE
+    /// replaces them wholesale and never edits buckets.
+    /// </summary>
+    private static TableStatisticsView SnapshotEntry(Entry entry)
+    {
+        Dictionary<string, ColumnMinMax> columnStats = new(StringComparer.Ordinal);
+        Dictionary<string, ColumnHistogram> histograms = new(StringComparer.Ordinal);
+        Dictionary<string, long> columnNdv = new(StringComparer.Ordinal);
+        Dictionary<string, long> keyNdv = new(StringComparer.Ordinal);
+        Kommander.Time.HLCTimestamp lastAnalyzedAt;
+
+        lock (entry.ColumnStatsLock)
+        {
+            foreach (KeyValuePair<string, ColumnMinMax> kv in entry.ColumnStats)
+                columnStats[kv.Key] = new ColumnMinMax { Min = kv.Value.Min, Max = kv.Value.Max };
+
+            if (entry.Histograms is not null)
+            {
+                foreach (KeyValuePair<string, ColumnHistogram> kv in entry.Histograms)
+                    histograms[kv.Key] = kv.Value;
+            }
+
+            if (entry.ColumnNdv is not null)
+            {
+                foreach (KeyValuePair<string, long> kv in entry.ColumnNdv)
+                    columnNdv[kv.Key] = kv.Value;
+            }
+
+            if (entry.KeyNdv is not null)
+            {
+                foreach (KeyValuePair<string, long> kv in entry.KeyNdv)
+                    keyNdv[kv.Key] = kv.Value;
+            }
+
+            lastAnalyzedAt = entry.LastAnalyzedAt;
+        }
+
+        long rowCount = Interlocked.Read(ref entry.RowCount);
+
+        return new TableStatisticsView
+        {
+            RowCount = rowCount >= 0 ? rowCount : null,
+            IndexEntryCounts = new Dictionary<string, long>(entry.IndexEntries, StringComparer.Ordinal),
+            ColumnStats = columnStats,
+            Histograms = histograms,
+            ColumnNdv = columnNdv,
+            KeyNdv = keyNdv,
+            MutationsSinceAnalyze = Math.Max(0, Interlocked.Read(ref entry.MutationsSinceAnalyze)),
+            LastAnalyzedAt = lastAnalyzedAt,
+            FromLocalCache = true,
+        };
+    }
+
+    /// <summary>Projects a persisted blob into the same view shape, for tables this node does not track.</summary>
+    private static TableStatisticsView FromPersisted(TableStatistics persisted) => new()
+    {
+        RowCount = persisted.RowCount >= 0 ? persisted.RowCount : null,
+        IndexEntryCounts = persisted.IndexEntryCounts is null
+            ? new Dictionary<string, long>(StringComparer.Ordinal)
+            : new Dictionary<string, long>(persisted.IndexEntryCounts, StringComparer.Ordinal),
+        ColumnStats = persisted.ColumnStats is null
+            ? new Dictionary<string, ColumnMinMax>(StringComparer.Ordinal)
+            : new Dictionary<string, ColumnMinMax>(persisted.ColumnStats, StringComparer.Ordinal),
+        Histograms = persisted.Histograms is null
+            ? new Dictionary<string, ColumnHistogram>(StringComparer.Ordinal)
+            : new Dictionary<string, ColumnHistogram>(persisted.Histograms, StringComparer.Ordinal),
+        ColumnNdv = persisted.ColumnNdv is null
+            ? new Dictionary<string, long>(StringComparer.Ordinal)
+            : new Dictionary<string, long>(persisted.ColumnNdv, StringComparer.Ordinal),
+        KeyNdv = persisted.KeyNdv is null
+            ? new Dictionary<string, long>(StringComparer.Ordinal)
+            : new Dictionary<string, long>(persisted.KeyNdv, StringComparer.Ordinal),
+        MutationsSinceAnalyze = Math.Max(0, persisted.MutationsSinceAnalyze),
+        LastAnalyzedAt = persisted.LastAnalyzedAt,
+        FromLocalCache = false,
+    };
+
     // ─────────────────────────────────────────────────────────────────────────
     // Internal tracking helpers
     // ─────────────────────────────────────────────────────────────────────────

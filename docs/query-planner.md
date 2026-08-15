@@ -648,7 +648,8 @@ flagged passes and remain on by default.
 
 **Files:** `Statistics/StatisticsManager.cs`, `Statistics/Models/*`, `Controllers/TableAnalyzer.cs`.
 Persisted to Kahuna meta KV at `{dbId}:stats:{tableId}` via `MetaJsonContext`; advisory — a missing or
-stale value never throws, it just falls back. Statistics come in two flavours:
+stale value never throws, it just falls back. Everything described in this section is readable from a
+SQL console with [`SHOW STATISTICS FOR <table>`](show-statistics.md). Statistics come in two flavours:
 
 - **Incrementally maintained on DML** (cheap, always current-ish): `RowCount`, per-index entry counts,
   per-column min/max (`ColumnMinMax` of typed `ScalarBound`). Flushed on a debounced cadence

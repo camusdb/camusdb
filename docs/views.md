@@ -392,7 +392,10 @@ SHOW COLUMNS FROM customer_totals;
 ```
 
 Indexes are kept across refreshes. Backup and point-in-time recovery, database branching, TTL and
-the query planner's statistics all treat it as the relation it is.
+the query planner's statistics all treat it as the relation it is. A refresh carries the row and
+index counts it measured onto the view, so the planner costs it correctly straight away; the
+histograms an `ANALYZE` built are dropped at the same moment, because they describe the contents the
+refresh replaced. [`SHOW STATISTICS FOR <view>`](show-statistics.md) reports what it currently holds.
 
 The one thing you cannot do is write to it:
 

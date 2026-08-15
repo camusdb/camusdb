@@ -9,12 +9,12 @@ SHOW VARIABLES LIKE 'ttl_%';
 ```
 
 ```
-variable                          value   type   default  source
-────────────────────────────────  ──────  ─────  ───────  ───────
-ttl_default_delete_batch_size     100     int    100      default
-ttl_default_job_cron              @daily  string @daily   default
-ttl_enabled                       false   bool   true     config
-ttl_span_lease_ms                 30000   int    30000    default
+variable                          value   type   default  source   mutability  scope
+────────────────────────────────  ──────  ─────  ───────  ───────  ──────────  ───────
+ttl_default_delete_batch_size     100     int    100      default  runtime     cluster
+ttl_default_job_cron              @daily  string @daily   default  runtime     cluster
+ttl_enabled                       false   bool   true     config   runtime     cluster
+ttl_span_lease_ms                 30000   int    30000    default  runtime     cluster
 ```
 
 ## Effective values, not file contents
@@ -35,7 +35,9 @@ overrode shows the override. What you see is what the node is running.
 | `value`    | The effective value. SQL `NULL` when the setting is genuinely unset — distinct from an empty string. |
 | `type`     | `bool`, `int`, `long`, `double`, `string`, `enum`, `duration_ms`, or `list`. |
 | `default`  | What the setting would be if nothing overrode it. A value differing from `default` is one somebody configured. |
-| `source`   | Which layer supplied the value: `default`, `config`, `env`, or `cli` (precedence runs cli > env > config > default). |
+| `source`   | Which layer supplied the value: `default`, `config`, `env`, `cli`, or `cluster` (precedence runs cluster > cli > env > config > default). |
+| `mutability` | `runtime` if a new value takes effect without restarting the node, `restart` if the component that reads it latches the value when it is constructed. This is a claim about the reader, not a preference: a `restart` key can be changed, but the running node keeps obeying the old value until it is restarted. |
+| `scope`    | `cluster` when every node must agree — a per-node disagreement would change user-visible transaction behavior — and `node` when per-node divergence is the point, such as tracing or local cache sizes. |
 
 Values are rendered the way `config.yml` spells them, so a value read here can be pasted back into a
 file unchanged: lowercase booleans, invariant numerics with no digit separators or unit suffixes
@@ -93,10 +95,17 @@ With authentication disabled, as on a single-node development instance, any call
 
 ## There is no `SET`
 
-`SHOW VARIABLES` is read-only. There is no `SET GLOBAL <variable>` and no session variable
-namespace: configuration is fixed when a component is constructed, so a runtime setter would not
-change the behavior of anything already running. To change a setting, edit the configuration and
-restart the node.
+`SHOW VARIABLES` is read-only, and there is no `SET GLOBAL <variable>` or session variable namespace.
+Settings are changed cluster-wide with `SET CLUSTER SETTING <name> = <value>` (and reverted with
+`RESET CLUSTER SETTING <name>`), which is superuser-gated — see
+[runtime cluster settings](runtime-cluster-settings.md).
+
+Whether such a change takes effect immediately is what the `mutability` column reports. A `runtime`
+setting is re-read by the component that uses it, so a new value applies without a restart. A
+`restart` setting is latched when its component is constructed: the overlay accepts the new value and
+`SHOW VARIABLES` will show it, but the running node keeps obeying the old one until it restarts.
+Editing `config.yml` — the local layer — always requires a restart, and a cluster setting overrides
+that file until it is reset.
 
 `SET TRANSACTION …` is unrelated — it adjusts the in-flight transaction's isolation, locking, and
 priority, and does not touch configuration. The `default_*` variables shown here are only the
@@ -105,4 +114,6 @@ fallback used when a transaction does not state its own.
 ## See also
 
 - [Configuration](configuration.md) — the file format, the precedence chain, and the CLI mapping.
+- [Runtime cluster settings](runtime-cluster-settings.md) — changing a setting fleet-wide with
+  `SET CLUSTER SETTING`, and what `mutability` and `scope` mean for whether it takes hold.
 - [Engine statistics](engine-stats.md) — `SHOW ENGINE STATS`, the runtime-metrics counterpart.

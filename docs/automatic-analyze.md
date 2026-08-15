@@ -9,6 +9,10 @@ This document describes how it works and how to tune it. For the statistics them
 planner consumes them, see [`docs/query-planner.md`](./query-planner.md). Manual `ANALYZE TABLE` is
 unchanged and remains the authoritative way to force a refresh.
 
+To see what a table's statistics currently are — including how stale they have become and whether
+this job has refreshed them yet — use
+[`SHOW STATISTICS FOR <table>`](./show-statistics.md).
+
 > **Status:** the feature is **on by default** (`auto_analyze_enabled = true`). Set it to `false` in
 > `config.yml` to go back to manual-only `ANALYZE`.
 
