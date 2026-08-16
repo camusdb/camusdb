@@ -198,11 +198,11 @@ internal sealed class ExplainExecutor
     /// for the whole plan (reported on the root node only; zero for inner nodes).
     ///
     /// KNOWN LIMITATION — join plans are not supported:
-    /// <see cref="QueryExecutor.ExecuteQueryPlan"/> runs only the linear <see cref="QueryPlan.Steps"/>
-    /// pipeline. <see cref="QueryPlanStepAdapter"/> emits no step for join nodes
-    /// (NestedLoopJoinNode, IndexNestedLoopJoinNode, DerivedTableScanNode), so executing a join
-    /// plan through this path silently runs only the left-side scan and reports wrong counts.
-    /// Rather than produce misleading stats, this method throws for join queries.
+    /// <see cref="QueryExecutor.ExecuteQueryPlan"/> executes only single-table plan trees; join
+    /// node types (NestedLoopJoinNode, IndexNestedLoopJoinNode, HashJoinNode, MergeJoinNode,
+    /// DerivedTableScanNode) execute through <see cref="QueryJoinExecutor"/>, which does not
+    /// carry per-node runtime stats. Rather than produce misleading stats, this method throws
+    /// for join queries.
     /// Full join instrumentation requires carrying stats through QueryJoinExecutor (deferred).
     /// </summary>
     public async IAsyncEnumerable<QueryResultRow> ExplainAnalyzeQuery(

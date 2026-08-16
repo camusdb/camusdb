@@ -198,6 +198,15 @@ public sealed class TableSchema
     /// </summary>
     private TableSchemaHistory? currentVersionHistory;
 
+    /// <summary>
+    /// Serializes lazy schema-history loads so concurrent decoders (parallel scan workers)
+    /// requesting the same missing version perform one KV read, and so the published
+    /// <see cref="SchemaHistory"/> list is replaced by copy-on-write swap — never mutated in
+    /// place — keeping lock-free readers safe. DDL writers mutate the list under the schema
+    /// semaphore and are unaffected.
+    /// </summary>
+    private readonly SemaphoreSlim historyLoadSemaphore = new(1, 1);
+
     private TableSchemaHistory GetCurrentVersionHistory()
     {
         TableSchemaHistory? cached = currentVersionHistory;
@@ -240,25 +249,52 @@ public sealed class TableSchema
         if (version == Version && Columns is not null)
             return GetCurrentVersionHistory();
 
-        if (SchemaHistory is not null)
+        // Read a local snapshot of the list reference: the load path below never mutates a
+        // published list in place (copy-on-write swap), so iterating a snapshot is safe even
+        // while another decoder is loading a different version concurrently.
+        List<TableSchemaHistory>? snapshot = SchemaHistory;
+        if (snapshot is not null)
         {
-            foreach (TableSchemaHistory history in SchemaHistory)
+            foreach (TableSchemaHistory history in snapshot)
             {
                 if (history.Version == version)
                     return history;
             }
         }
 
-        TableSchemaHistory? loaded = SchemaHistoryLoader is not null
-            ? await SchemaHistoryLoader(txId, version).ConfigureAwait(false)
-            : null;
-
-        if (loaded is not null)
+        // Parallel scan decoders can request the same missing version at once; serialize the
+        // load so the KV read happens once and the list update is a single atomic swap.
+        await historyLoadSemaphore.WaitAsync().ConfigureAwait(false);
+        try
         {
-            SchemaHistory ??= [];
-            SchemaHistory.Add(loaded);
-            SchemaHistory.Sort(static (a, b) => a.Version.CompareTo(b.Version));
-            return loaded;
+            snapshot = SchemaHistory;
+            if (snapshot is not null)
+            {
+                foreach (TableSchemaHistory history in snapshot)
+                {
+                    if (history.Version == version)
+                        return history;
+                }
+            }
+
+            TableSchemaHistory? loaded = SchemaHistoryLoader is not null
+                ? await SchemaHistoryLoader(txId, version).ConfigureAwait(false)
+                : null;
+
+            if (loaded is not null)
+            {
+                // Copy-on-write: readers outside the semaphore may be iterating the current
+                // list, so publish a new sorted list instead of mutating in place.
+                List<TableSchemaHistory> next = snapshot is null ? new(1) : new(snapshot);
+                next.Add(loaded);
+                next.Sort(static (a, b) => a.Version.CompareTo(b.Version));
+                SchemaHistory = next;
+                return loaded;
+            }
+        }
+        finally
+        {
+            historyLoadSemaphore.Release();
         }
 
         throw new CamusDBException(

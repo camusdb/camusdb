@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Threading.Channels;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
@@ -113,8 +114,39 @@ internal sealed class QueryScanner
         long scanStart = System.Diagnostics.Stopwatch.GetTimestamp();
         long rowsScanned = 0, rowsReturned = 0;
 
+        int parallelism = plan.Database.Options.MaxQueryParallelism;
+
         try
         {
+            if (parallelism > 1)
+            {
+                // Parallel decode pipeline: one producer streams the scan (identical fetch to the
+                // sequential path below), fixed-size chunks decode concurrently, and chunks are
+                // consumed in dispatch order — so rows arrive here in exactly the sequential
+                // scan's order. Filtering and all bookkeeping stay on this single consumer
+                // thread: expression evaluation and the dependency collector are not thread-safe.
+                await foreach ((ObjectIdValue rowId, QueryRow queryRow) in ScanAndDecodeInParallel(plan, parallelism).ConfigureAwait(false))
+                {
+                    rowsScanned++;
+                    if (scanStats is not null)
+                    {
+                        scanStats.KvScanEntries++;
+                        scanStats.RowsRead++;
+                    }
+
+                    // Record the point dep for every fetched row — catches updates to non-indexed columns.
+                    deps?.RecordPoint(table.Store.RowPointKey(rowId));
+
+                    if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                    {
+                        rowsReturned++;
+                        yield return new QueryResultRow(rowId, queryRow);
+                    }
+                }
+
+                yield break;
+            }
+
             // Read-set folding follows the transaction (KvTransaction.FoldReads), not the plan shape:
             // an optimistic transaction folds this scan's rows so its commit validates them, exactly
             // as a point read would — isolation must not depend on which plan answered the predicate.
@@ -160,6 +192,179 @@ internal sealed class QueryScanner
                 Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Scanned, rowsScanned);
             Diagnostics.ServerDiagnostics.RecordQueryRows(
                 Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Returned, rowsReturned);
+        }
+    }
+
+    /// <summary>
+    /// Rows per decode chunk in the parallel scan pipeline. Large enough to amortize task
+    /// dispatch and per-chunk decode-plan construction, small enough that read-ahead memory
+    /// (at most ~3× parallelism chunks in flight) stays modest.
+    /// </summary>
+    private const int ParallelDecodeChunkSize = 64;
+
+    /// <summary>
+    /// Fetch-and-decode pipeline for a full primary-row scan when
+    /// <see cref="CamusDBOptions.MaxQueryParallelism"/> &gt; 1. One producer enumerates
+    /// <c>ScanRows</c> exactly like the sequential path (single transaction use, identical
+    /// bounds and row limit), groups rows into chunks, and dispatches each chunk to the thread
+    /// pool for decoding; the consumer awaits chunk tasks in dispatch order, so the emitted row
+    /// order is byte-identical to the sequential scan for every plan shape. Parallelism is
+    /// capped by a semaphore; the bounded channel caps read-ahead so a stalled consumer stalls
+    /// the producer instead of buffering the table.
+    ///
+    /// Two deliberate constraints: each chunk decodes with its own
+    /// <see cref="RowEncoder.RowDecodeState"/> (the per-scan decode-plan cache is not
+    /// thread-safe), and borrowed (KV-byte-pinning) decode is never used because rows outlive
+    /// the scan iteration inside chunk buffers — the same reason retaining operators disable it
+    /// in <see cref="ShouldUseBorrowedDecode"/>. Residual-filter evaluation stays on the
+    /// consumer thread; expression evaluation is not thread-safe.
+    /// </summary>
+    private static async IAsyncEnumerable<(ObjectIdValue rowId, QueryRow row)> ScanAndDecodeInParallel(
+        QueryPlan plan,
+        int parallelism)
+    {
+        TableDescriptor table = plan.Table;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        int visibilityVersion = plan.TableSchemaVersion;
+        CamusDBOptions options = plan.Database.Options;
+        IReadOnlySet<string>? requiredColumns = plan.ScanRequiredColumns;
+        bool slotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null;
+
+        using CancellationTokenSource cts = new();
+
+        // Deliberately not disposed with `using`: a straggler decode task releases its slot in
+        // a finally that can run after this iterator has exited on an early break.
+        SemaphoreSlim decodeSlots = new(parallelism, parallelism);
+
+        // In-order queue of chunk decode tasks. Order of insertion is scan order, and the
+        // consumer awaits strictly in that order — this is what preserves sequential output
+        // order without a reorder buffer.
+        Channel<Task<(ObjectIdValue rowId, QueryRow row)[]>> chunks =
+            Channel.CreateBounded<Task<(ObjectIdValue rowId, QueryRow row)[]>>(
+                new BoundedChannelOptions(parallelism * 2) { SingleReader = true, SingleWriter = true });
+
+        Task producer = ProduceAsync();
+
+        try
+        {
+            await foreach (Task<(ObjectIdValue rowId, QueryRow row)[]> chunkTask in
+                chunks.Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
+            {
+                (ObjectIdValue rowId, QueryRow row)[] decoded = await chunkTask.ConfigureAwait(false);
+
+                foreach ((ObjectIdValue rowId, QueryRow row) item in decoded)
+                    yield return item;
+            }
+
+            // The channel completing with an exception already rethrows above; this await
+            // surfaces a producer fault that raced channel completion.
+            await producer.ConfigureAwait(false);
+        }
+        finally
+        {
+            cts.Cancel();
+
+            // Early exit: observe abandoned chunk tasks so a decode fault after the consumer
+            // stopped never surfaces as an unobserved task exception.
+            while (chunks.Reader.TryRead(out Task<(ObjectIdValue rowId, QueryRow row)[]>? pending))
+                _ = pending.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
+
+            try
+            {
+                await producer.ConfigureAwait(false);
+            }
+            catch
+            {
+                // The consumer is exiting; the fault (if any) was already thrown from the
+                // channel read or is being discarded with the abandoned scan.
+            }
+        }
+
+        async Task ProduceAsync()
+        {
+            try
+            {
+                List<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> chunk = new(ParallelDecodeChunkSize);
+
+                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+                    plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cts.Token).ConfigureAwait(false))
+                {
+                    if (data.Length == 0)
+                        continue;
+
+                    chunk.Add((rowId, data));
+
+                    if (chunk.Count >= ParallelDecodeChunkSize)
+                    {
+                        await DispatchAsync(chunk).ConfigureAwait(false);
+                        chunk = new(ParallelDecodeChunkSize);
+                    }
+                }
+
+                if (chunk.Count > 0)
+                    await DispatchAsync(chunk).ConfigureAwait(false);
+
+                chunks.Writer.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                chunks.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                chunks.Writer.TryComplete(ex);
+            }
+        }
+
+        async Task DispatchAsync(List<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> chunk)
+        {
+            // The slot is released by the decode task itself, so at most `parallelism` chunks
+            // decode concurrently while the producer keeps fetching the next page.
+            await decodeSlots.WaitAsync(cts.Token).ConfigureAwait(false);
+
+            // No cancellation token on purpose: once dispatched, the task always runs and always
+            // releases its slot; cancellation is handled by the producer stopping dispatch.
+            Task<(ObjectIdValue rowId, QueryRow row)[]> task = Task.Run(() => DecodeChunkAsync(chunk));
+
+            await chunks.Writer.WriteAsync(task, cts.Token).ConfigureAwait(false);
+        }
+
+        async Task<(ObjectIdValue rowId, QueryRow row)[]> DecodeChunkAsync(
+            List<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> chunk)
+        {
+            try
+            {
+                RowEncoder.RowDecodeState decodeState = new()
+                {
+                    SlotBackedDecode = slotBackedDecode,
+                    BorrowedDecode = false,
+                };
+
+                var decoded = new (ObjectIdValue rowId, QueryRow row)[chunk.Count];
+
+                for (int i = 0; i < chunk.Count; i++)
+                {
+                    (ObjectIdValue rowId, ReadOnlyMemory<byte> data) = chunk[i];
+
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema,
+                        txId,
+                        rowId,
+                        data,
+                        options,
+                        requiredColumns,
+                        visibilityVersion,
+                        decodeState).ConfigureAwait(false);
+
+                    decoded[i] = (rowId, row);
+                }
+
+                return decoded;
+            }
+            finally
+            {
+                decodeSlots.Release();
+            }
         }
     }
 

@@ -1229,6 +1229,23 @@ public sealed record CamusDBOptions
     public int IndexScanFetchBatchSize { get; init; } = 64;
 
     /// <summary>
+    /// Maximum number of concurrent span workers a single full primary-row table scan may use.
+    /// The scan keyspace is divided into disjoint row-id spans (uniform over the ObjectId
+    /// timestamp segment, the same partitioning the TTL sweeper uses) and each worker streams
+    /// and decodes one span into a bounded buffer while earlier spans are being consumed, so
+    /// row order — and therefore every result — is identical to the sequential scan.
+    ///
+    /// <para>A value of <c>1</c> (the default) disables parallelism and executes the scan on
+    /// the pull pipeline exactly as before. Values above 1 trade memory (one bounded row buffer
+    /// per span) and Kahuna read concurrency for scan wall-clock. Read per statement from the
+    /// database's live options snapshot, so a runtime change applies to the next query.</para>
+    ///
+    /// Default: <c>1</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int MaxQueryParallelism { get; init; } = 1;
+
+    /// <summary>
     /// Enables per-lock-acquisition debug log lines (<c>LogLevel.Debug</c>). When <c>false</c>
     /// (default), no lock-trace messages are emitted regardless of the host logging configuration.
     /// Enable only for targeted diagnostics — a busy workload emits one line per lock acquired.

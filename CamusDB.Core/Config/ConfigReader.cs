@@ -132,6 +132,7 @@ public class ConfigReader
         "fence_lease_renew_interval_ms",
         "keyspace_purge_batch_size",
         "index_scan_fetch_batch_size",
+        "max_query_parallelism",
         "hash_join_max_build_rows",
         "net_weight",
         "slot_backed_decode",

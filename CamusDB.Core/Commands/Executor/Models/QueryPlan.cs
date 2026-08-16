@@ -26,13 +26,19 @@ public sealed class QueryPlan
     /// <summary>Physical plan tree root (outermost operator).</summary>
     public PhysicalPlanNode Root { get; internal set; } = null!;
 
-    /// <summary>Legacy linear steps derived from <see cref="Root"/>.</summary>
+    /// <summary>
+    /// Legacy linear steps derived from <see cref="Root"/>. Execution walks the tree directly;
+    /// this list remains only for consumers that pattern-match the flattened shape
+    /// (scan-limit and index-only detection in the planner, borrowed-decode eligibility in the
+    /// scanner). Do not add new consumers — read <see cref="Root"/> instead.
+    /// </summary>
 	public List<QueryPlanStep> Steps { get; } = new();
 
     /// <summary>
     /// Physical plan nodes corresponding 1-to-1 with <see cref="Steps"/> (same DFS order).
     /// Populated by <see cref="Controllers.Queries.QueryPlanStepAdapter"/> alongside <see cref="Steps"/>.
-    /// Used by the executor to update per-node runtime stats during EXPLAIN ANALYZE.
+    /// The scan leaf is element 0 — scan operators use that slot to publish per-scan runtime
+    /// stats during EXPLAIN ANALYZE.
     /// </summary>
     public List<PhysicalPlanNode> StepNodes { get; } = new();
 
@@ -149,10 +155,5 @@ public sealed class QueryPlan
 		Table = table;
 		Ticket = ticket;
         TableSchemaVersion = table.Schema.Version;
-	}
-
-	public void AddStep(QueryPlanStep step)
-	{
-		Steps.Add(step);
 	}    
 }

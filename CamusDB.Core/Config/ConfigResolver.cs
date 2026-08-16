@@ -223,6 +223,7 @@ public static class ConfigResolver
         FenceLeaseRenewIntervalMs = config.FenceLeaseRenewIntervalMs,
         KeyspacePurgeBatchSize = config.KeyspacePurgeBatchSize,
         IndexScanFetchBatchSize = config.IndexScanFetchBatchSize,
+        MaxQueryParallelism = config.MaxQueryParallelism,
         HashJoinMaxBuildRows = config.HashJoinMaxBuildRows,
         NetWeight = config.NetWeight,
         SlotBackedDecode = config.SlotBackedDecode,

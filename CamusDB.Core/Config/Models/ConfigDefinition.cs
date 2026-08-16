@@ -643,6 +643,12 @@ public class ConfigDefinition
     public int IndexScanFetchBatchSize { get; set; } = 64;
 
     /// <summary>
+    /// Concurrent span workers per full primary-row table scan. Must be &gt;= 1; 1 disables
+    /// parallel scanning. Default 1. Maps to <c>CamusDBOptions.MaxQueryParallelism</c>.
+    /// </summary>
+    public int MaxQueryParallelism { get; set; } = 1;
+
+    /// <summary>
     /// Rows the hash-join build phase may materialise before degrading to nested-loop, applied only
     /// while spill is disabled. Must be &gt;= 1. Default 1 000 000. Maps to
     /// <c>CamusDBOptions.HashJoinMaxBuildRows</c>.
@@ -1081,6 +1087,9 @@ public class ConfigDefinition
 
         if (IndexScanFetchBatchSize < 1)
             throw Invalid($"'index_scan_fetch_batch_size' must be >= 1, got {IndexScanFetchBatchSize}");
+
+        if (MaxQueryParallelism < 1)
+            throw Invalid($"'max_query_parallelism' must be >= 1, got {MaxQueryParallelism}");
 
         if (HashJoinMaxBuildRows < 1)
             throw Invalid($"'hash_join_max_build_rows' must be >= 1, got {HashJoinMaxBuildRows}");

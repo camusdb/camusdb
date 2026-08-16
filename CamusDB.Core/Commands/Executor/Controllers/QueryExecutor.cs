@@ -450,6 +450,9 @@ internal sealed class QueryExecutor
 
     private IAsyncEnumerable<QueryResultRow> ExecuteQueryPlanInternal(QueryPlan plan)
     {
+        if (plan.Root is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Query plan root is null");
+
         bool collectStats = plan.CollectRuntimeStats;
         if (collectStats)
         {
@@ -457,111 +460,129 @@ internal sealed class QueryExecutor
                 stepNode.Stats = new();
         }
 
-        for (int i = 0; i < plan.Steps.Count; i++)
+        IAsyncEnumerable<QueryResultRow> cursor = ExecutePlanNode(plan, plan.Root, collectStats);
+        plan.DataCursor = cursor;
+        return cursor;
+    }
+
+    /// <summary>
+    /// Recursively composes the execution cursor for a single-table physical plan subtree.
+    /// This walks <see cref="QueryPlan.Root"/> directly (the same tree the join executor and
+    /// EXPLAIN consume) instead of the flattened <see cref="QueryPlan.Steps"/> list, so operators
+    /// that exist only as tree nodes (e.g. future exchange/gather operators) can execute without
+    /// a step-list encoding. <see cref="FilterNode"/> produces no operator of its own: row
+    /// filtering runs inside the scan via <see cref="QueryPlan.ExecutionFilter"/>. Join node
+    /// types never reach this method — multi-source plans execute through
+    /// <see cref="QueryJoinExecutor"/>.
+    /// </summary>
+    private IAsyncEnumerable<QueryResultRow> ExecutePlanNode(QueryPlan plan, PhysicalPlanNode node, bool collectStats)
+    {
+        // Row filtering is evaluated inside the scan leaf (QueryPlan.ExecutionFilter); the
+        // filter node contributes no operator, matching the step list which emits no step for it.
+        if (node is FilterNode)
         {
-            QueryPlanStep step = plan.Steps[i];
-            if (options.QueryTracingEnabled)
-                Log.LogExecutingQueryStep(logger, step.Type);
+            if (node.Input is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Filter node has no input");
 
-            switch (step.Type)
-            {
-                case QueryPlanStepType.QueryFromIndex:
-                    plan.DataCursor = QueryUsingIndex(plan, step.Index, step.LookupKey, step.ColumnValue);
-                    break;
-
-                case QueryPlanStepType.RangeScanFromIndex:
-                    plan.DataCursor = QueryUsingRangeIndex(plan, step.Index, step.FromBound, step.FromInclusive, step.ToBound, step.ToInclusive);
-                    break;
-
-                case QueryPlanStepType.FullScanFromIndex:
-                    plan.DataCursor = queryScanner.ScanUsingIndex(plan, queryFilterer, step.Index);
-                    break;
-
-                case QueryPlanStepType.FullScanFromTableIndex:
-                    plan.DataCursor = queryScanner.ScanUsingTableIndex(plan, queryFilterer);
-                    break;
-
-                case QueryPlanStepType.SortBy:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    plan.DataCursor = querySorter.SortResultset(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database));
-                    break;
-
-                case QueryPlanStepType.ReduceToProjections:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    plan.DataCursor = queryProjector.ProjectResultset(plan.Ticket, plan.DataCursor);
-                    break;
-
-                case QueryPlanStepType.Distinct:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    // Route to streaming (adjacent-key) or hash dedup based on plan node flag.
-                    {
-                        DistinctNode distinctNode = (DistinctNode)plan.StepNodes[i];
-                        plan.DataCursor = distinctNode.IsStreaming
-                            ? queryDistincter.StreamingDistinctRows(plan.DataCursor)
-                            : queryDistincter.DistinctResultset(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database));
-                    }
-                    break;
-
-                case QueryPlanStepType.Aggregate:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    // Route to streaming (adjacent-key) or hash aggregation based on plan node flag.
-                    {
-                        AggregateNode aggNode = (AggregateNode)plan.StepNodes[i];
-                        plan.DataCursor = aggNode.IsStreamingGroupBy
-                            ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database))
-                            : queryAggregator.AggregateResultset(plan.Ticket, plan.DataCursor, QueryExecutionContext.For(plan.Database));
-                    }
-                    break;
-
-                case QueryPlanStepType.HavingFilter:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    plan.DataCursor = queryFilterer.FilterHavingResultset(plan.Database, plan.Ticket, plan.DataCursor);
-                    break;
-
-                case QueryPlanStepType.Limit:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    plan.DataCursor = queryLimiter.LimitResultset(plan.Ticket, plan.DataCursor);
-                    break;
-
-                case QueryPlanStepType.SemiJoinProbe:
-                    if (plan.DataCursor is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
-
-                    SemiJoinNode semiJoinNode = (SemiJoinNode)plan.StepNodes[i];
-                    plan.DataCursor = semiJoinExecutor.ExecuteAsync(plan.DataCursor, semiJoinNode, plan.Ticket);
-                    break;
-
-                case QueryPlanStepType.InListScanFromIndex:
-                    plan.DataCursor = QueryUsingInListIndex(plan, (IndexInListScanNode)plan.StepNodes[i]);
-                    break;
-
-                default:
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Unknown query plan step: " + step.Type);
-            }
-
-            if (collectStats && i < plan.StepNodes.Count && plan.DataCursor is not null)
-            {
-                PlanNodeStats nodeStats = plan.StepNodes[i].Stats!;
-                plan.DataCursor = CountRowsEmitted(plan.DataCursor, nodeStats);
-            }
+            return ExecutePlanNode(plan, node.Input, collectStats);
         }
 
-        if (plan.DataCursor is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+        IAsyncEnumerable<QueryResultRow>? input = node.Input is null ? null : ExecutePlanNode(plan, node.Input, collectStats);
 
-        return plan.DataCursor;
+        IAsyncEnumerable<QueryResultRow> cursor;
+
+        switch (node)
+        {
+            case TableScanNode tableScan when tableScan.Source == TableScanSource.PrimaryRows:
+                Trace(QueryPlanStepType.FullScanFromTableIndex);
+                cursor = queryScanner.ScanUsingTableIndex(plan, queryFilterer);
+                break;
+
+            case TableScanNode tableScan when tableScan.Source == TableScanSource.ForcedIndex:
+                Trace(QueryPlanStepType.FullScanFromIndex);
+                cursor = queryScanner.ScanUsingIndex(plan, queryFilterer, tableScan.Index);
+                break;
+
+            case IndexLookupNode indexLookup:
+                Trace(QueryPlanStepType.QueryFromIndex);
+                cursor = QueryUsingIndex(plan, indexLookup.Index, indexLookup.LookupKey, columnValue: null);
+                break;
+
+            case IndexRangeScanNode rangeScan:
+                Trace(QueryPlanStepType.RangeScanFromIndex);
+                cursor = QueryUsingRangeIndex(plan, rangeScan.Index, rangeScan.FromBound, rangeScan.FromInclusive, rangeScan.ToBound, rangeScan.ToInclusive);
+                break;
+
+            case IndexInListScanNode inListScan:
+                Trace(QueryPlanStepType.InListScanFromIndex);
+                cursor = QueryUsingInListIndex(plan, inListScan);
+                break;
+
+            case SortNode:
+                Trace(QueryPlanStepType.SortBy);
+                cursor = querySorter.SortResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database));
+                break;
+
+            case AggregateNode aggregateNode:
+                Trace(QueryPlanStepType.Aggregate);
+                cursor = aggregateNode.IsStreamingGroupBy
+                    ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database))
+                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database));
+                break;
+
+            case HavingFilterNode:
+                Trace(QueryPlanStepType.HavingFilter);
+                cursor = queryFilterer.FilterHavingResultset(plan.Database, plan.Ticket, RequireInput(input));
+                break;
+
+            case DistinctNode distinctNode:
+                Trace(QueryPlanStepType.Distinct);
+                cursor = distinctNode.IsStreaming
+                    ? queryDistincter.StreamingDistinctRows(RequireInput(input))
+                    : queryDistincter.DistinctResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database));
+                break;
+
+            case ProjectNode:
+                Trace(QueryPlanStepType.ReduceToProjections);
+                cursor = queryProjector.ProjectResultset(plan.Ticket, RequireInput(input));
+                break;
+
+            case LimitNode:
+                Trace(QueryPlanStepType.Limit);
+                cursor = queryLimiter.LimitResultset(plan.Ticket, RequireInput(input));
+                break;
+
+            case SemiJoinNode semiJoinNode:
+                Trace(QueryPlanStepType.SemiJoinProbe);
+                cursor = semiJoinExecutor.ExecuteAsync(RequireInput(input), semiJoinNode, plan.Ticket);
+                break;
+
+            default:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Unsupported plan node in single-table execution: " + node.GetType().Name);
+        }
+
+        // Stats are initialized only for nodes present in StepNodes, so nodes without a step
+        // (filter) are never wrapped — same coverage as the retired step-list walk.
+        if (collectStats && node.Stats is not null)
+            cursor = CountRowsEmitted(cursor, node.Stats);
+
+        return cursor;
+
+        void Trace(QueryPlanStepType stepType)
+        {
+            if (options.QueryTracingEnabled)
+                Log.LogExecutingQueryStep(logger, stepType);
+        }
+
+        static IAsyncEnumerable<QueryResultRow> RequireInput(IAsyncEnumerable<QueryResultRow>? input)
+        {
+            if (input is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
+
+            return input;
+        }
     }
 
     private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(
