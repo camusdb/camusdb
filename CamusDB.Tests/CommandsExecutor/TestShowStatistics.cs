@@ -9,6 +9,7 @@ using NUnit.Framework;
 using Nito.AsyncEx;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -285,7 +286,18 @@ internal sealed class TestShowStatistics : BaseTest
         Assert.Greater(Number(yearRow, "histogram_buckets") ?? 0, 0, "ANALYZE must build a histogram");
         Assert.AreEqual("2000", Text(yearRow, "min_value"));
         Assert.AreEqual("2019", Text(yearRow, "max_value"));
-        Assert.IsNotNull(Text(Single(after, "table"), "last_analyzed"), "the analyze timestamp must be recorded");
+        string? lastAnalyzed = Text(Single(after, "table"), "last_analyzed");
+        Assert.IsNotNull(lastAnalyzed, "the analyze timestamp must be recorded");
+
+        // The column answers "how old are these statistics?", so it must render as a wall-clock
+        // instant a reader can compare against now — not as the raw HLC the value is stored as.
+        Assert.IsTrue(
+            DateTimeOffset.TryParseExact(
+                lastAnalyzed, "yyyy-MM-ddTHH:mm:ss.fff'Z'", CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTimeOffset analyzedAt),
+            $"last_analyzed must be UTC ISO-8601, was '{lastAnalyzed}'");
+        Assert.Less((DateTimeOffset.UtcNow - analyzedAt).Duration(), TimeSpan.FromMinutes(5),
+            "the rendered instant must be the time of the ANALYZE, not an unrelated epoch");
     }
 
     /// <summary>

@@ -88,6 +88,13 @@ public sealed class SqlParserCache : IAsyncDisposable
     private long _misses;
     private long _evictions;
 
+    // Counters as of the last line the sweep loop logged, so an idle cache stops repeating itself.
+    // Touched only by the single sweep task, hence no synchronization.
+    private long _loggedHits = -1;
+    private long _loggedMisses = -1;
+    private long _loggedEvictions = -1;
+    private int _loggedCount = -1;
+
     public long Hits => Interlocked.Read(ref _hits);
     public long Misses => Interlocked.Read(ref _misses);
     public long Evictions => Interlocked.Read(ref _evictions);
@@ -110,7 +117,10 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// <summary>
     /// Creates a new cache instance.
     /// </summary>
-    /// <param name="logger">Optional logger; receives a <c>Debug</c> line after each sweep.</param>
+    /// <param name="logger">
+    /// Optional logger; receives a <c>Debug</c> line after a sweep whose counters differ from the
+    /// previously logged ones, so an idle cache does not repeat an identical line every interval.
+    /// </param>
     /// <param name="ttlSeconds">
     /// Sliding TTL in seconds. <c>0</c> or negative disables the cache entirely (every parse
     /// re-lexes from scratch). Maps to <see cref="CamusDBOptions.SqlParserCacheTtlSeconds"/>.
@@ -274,8 +284,33 @@ public sealed class SqlParserCache : IAsyncDisposable
             Sweep();
 
             if (_logger is not null)
-                Log.LogParserCacheSweep(_logger, Count, Hits, Misses, Evictions);
+                LogSweepIfChanged();
         }
+    }
+
+    /// <summary>
+    /// Emits the sweep line only when a counter moved since the last one emitted.
+    /// </summary>
+    /// <remarks>
+    /// The counters are cumulative, so an unchanged tuple means no lookup, insert or eviction
+    /// happened during the whole interval — a line that says nothing but repeats forever on an
+    /// idle server, drowning the debug log. Suppressing the repeats keeps every line meaningful:
+    /// a line appearing at all now means the cache saw traffic since the previous one.
+    /// </remarks>
+    private void LogSweepIfChanged()
+    {
+        int count = Count;
+        long hits = Hits, misses = Misses, evictions = Evictions;
+
+        if (count == _loggedCount && hits == _loggedHits && misses == _loggedMisses && evictions == _loggedEvictions)
+            return;
+
+        _loggedCount = count;
+        _loggedHits = hits;
+        _loggedMisses = misses;
+        _loggedEvictions = evictions;
+
+        Log.LogParserCacheSweep(_logger!, count, hits, misses, evictions);
     }
 
     /// <summary>

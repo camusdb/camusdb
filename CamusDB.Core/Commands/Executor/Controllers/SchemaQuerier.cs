@@ -354,6 +354,12 @@ internal sealed class SchemaQuerier
     /// <para>Schema elements still being built (a column or index not yet public) are skipped, for
     /// the same reason <see cref="ShowColumns"/> and <see cref="ShowIndexes"/> skip them: an element
     /// no query can use yet must not become visible through a side channel.</para>
+    ///
+    /// <para><c>last_analyzed</c> renders the physical component of the recorded HLC as UTC
+    /// ISO-8601, not the raw <c>HLC(n:l:c)</c> form. The value answers "how old are these
+    /// statistics?", which a reader judges against wall-clock time; the logical component carries
+    /// no meaning for that question. It is a display-only rendering — nothing consumes it as a
+    /// timestamp the way <c>fork_timestamp</c> is consumed, which is why that column stays HLC.</para>
     /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ShowStatistics(TableDescriptor table, TableStatisticsView? view)
     {
@@ -362,7 +368,7 @@ internal sealed class SchemaQuerier
         ColumnValue tableName = new(ColumnType.String, table.Name);
         ColumnValue lastAnalyzed = view is null || view.LastAnalyzedAt.IsNull()
             ? ColumnValue.Null
-            : new ColumnValue(ColumnType.String, view.LastAnalyzedAt.ToString());
+            : new ColumnValue(ColumnType.String, IsoFromUnixMs(view.LastAnalyzedAt.L));
         ColumnValue staleMutations = view is null
             ? ColumnValue.Null
             : new ColumnValue(ColumnType.Integer64, view.MutationsSinceAnalyze);

@@ -116,6 +116,8 @@ crosses the threshold, why it never is.
 Bounds print as the literal that produced them: dates as ISO-8601, UUIDs in canonical form, numbers
 in invariant culture.
 
+`last_analyzed` prints as UTC ISO-8601 with millisecond precision (`2026-08-15T09:33:13.289Z`).
+
 String bounds are **ordinal**, matching the byte order the indexes themselves use. A value like
 `"árbol"` therefore sorts *above* `"zebra"` rather than before it, exactly as it does in an index
 scan. Bounds are only tracked for ordered types, so a boolean column reports none.

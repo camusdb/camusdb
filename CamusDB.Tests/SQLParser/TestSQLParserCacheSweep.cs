@@ -6,15 +6,17 @@
  * file that was distributed with this source code.
  */
 
+using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Tests.SQLParser;
 
 /// <summary>
-/// PC2.1 acceptance tests — background sweep and max-entries cap.
+/// Coverage for the background sweep, the max-entries cap, and the sweep's logging cadence.
 /// Each test owns its own <see cref="SqlParserCache"/> instance so tests are fully
 /// independent and require no [NonParallelizable] attribute.
 /// </summary>
@@ -185,5 +187,49 @@ public class TestSQLParserCacheSweep
 
         Assert.That(cache.Evictions, Is.GreaterThan(before),
             "Eviction counter must increment when the sweep removes an entry");
+    }
+
+    // ── Sweep logging cadence ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// The sweep line reports cumulative counters, so on an idle server it would otherwise repeat
+    /// an identical line every interval forever. It must be emitted only when something moved.
+    /// </summary>
+    [Test]
+    public async Task SweepLogging_IdleCache_DoesNotRepeatAnIdenticalLine()
+    {
+        CountingLogger logger = new();
+        await using SqlParserCache cache = new(logger, ttlSeconds: 300, maxEntries: 2048, sweepSeconds: 1);
+
+        SQLParserProcessor.Parse("SELECT id FROM t WHERE x = 1", cache);   // starts the sweeper
+
+        // Long enough for several sweeps; only the first has anything new to say.
+        await Task.Delay(3500);
+        Assert.That(logger.Count, Is.EqualTo(1),
+            "an idle cache must log the sweep once, not once per interval");
+
+        // Traffic moves the counters, so the next sweep is worth a line again.
+        SQLParserProcessor.Parse("SELECT id FROM t WHERE x = 2", cache);
+
+        await Task.Delay(2500);
+        Assert.That(logger.Count, Is.EqualTo(2),
+            "a sweep following real cache activity must still be logged");
+    }
+
+    /// <summary>Counts <c>Debug</c> lines; the sweep is the only thing the cache logs.</summary>
+    private sealed class CountingLogger : ILogger
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Interlocked.Increment(ref _count);
     }
 }
