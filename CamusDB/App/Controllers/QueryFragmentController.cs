@@ -72,7 +72,7 @@ public sealed class QueryFragmentController : CommandsController
             {
                 await JsonSerializer.SerializeAsync(
                     Response.Body,
-                    new QueryFragmentWireLine { RowIdHex = row.RowIdHex, Data = row.Data, Cells = row.CellsJson },
+                    new QueryFragmentWireLine { RowIdHex = row.RowIdHex, Data = row.Data, Cells = row.CellsJson, Stats = row.Stats, Matches = row.MatchIndices },
                     cancellationToken: cancellationToken);
                 await Response.Body.WriteAsync(newline, cancellationToken);
             }

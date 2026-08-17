@@ -94,13 +94,112 @@ public sealed class QueryFragmentRequest
 
     /// <summary>Columns the remote must decode (filter columns included); null = all columns.</summary>
     public string[]? RequiredColumns { get; set; }
+
+    /// <summary>
+    /// When true the executing node appends one terminal <see cref="QueryFragmentRow.Stats"/>
+    /// frame after the last row, carrying the span's scan actuals for <c>EXPLAIN (ANALYZE)</c>.
+    /// Opt-in on purpose: normal queries pay nothing, and a peer running an older build simply
+    /// ignores the unknown JSON field and sends no frame — the coordinator then reports the
+    /// span's remote actuals as unknown rather than failing. Not part of the format-version
+    /// contract for exactly that reason.
+    /// </summary>
+    public bool WantStats { get; set; }
+
+    /// <summary>
+    /// When set: the fragment is a broadcast-join probe over this span (see
+    /// <see cref="QueryFragmentJoinSpec"/>). Mutually exclusive with
+    /// <see cref="AggregatesJson"/>; the top-level <see cref="FilterJson"/> stays empty in
+    /// join mode (the probe filter travels inside the spec) so a peer on an older build —
+    /// which would ignore this unknown field and misread the request as a plain row fragment
+    /// — rejects it outright and the coordinator falls back to a local probe.
+    /// </summary>
+    public QueryFragmentJoinSpec? Join { get; set; }
 }
+
+/// <summary>
+/// Everything a peer needs to run one span of a broadcast hash-join probe: the coordinator's
+/// build rows (small by the broadcast threshold), the key columns for both sides, and the
+/// predicates to evaluate at the data. The fragment scans its probe span, applies the probe
+/// filter, hashes each survivor's key against a table rebuilt from <see cref="BuildRows"/>,
+/// evaluates the full ON predicate on each candidate pair, and ships one frame per probe row
+/// that matched: the probe row's raw bytes plus the <b>indices into <see cref="BuildRows"/></b>
+/// of its matches (<see cref="QueryFragmentRow.MatchIndices"/>).
+///
+/// <para>Shipping indices rather than joined rows is the design's core: the coordinator merges
+/// the probe row with its <i>own</i> in-memory build rows through the standard
+/// <c>QueryRowMerger</c> path, so output is byte-identical to a fully local join; a probe row
+/// ships once no matter how many matches it has; and each frame is group-atomic (a mid-stream
+/// failure resumes locally after the last delivered probe row with no duplicated or lost
+/// pairs). Equal-key build rows appear in <see cref="BuildRows"/> in the coordinator's bucket
+/// order, so the remote's rebuilt buckets preserve match order exactly.</para>
+/// </summary>
+public sealed class QueryFragmentJoinSpec
+{
+    /// <summary>
+    /// Which side of the hash join was built (and therefore shipped). False — the standard
+    /// shape — means the build is the join's <b>right</b> source: build rows ship with bare
+    /// column names, the probe rows are the left side and are qualified with
+    /// <see cref="ProbeAlias"/> before key extraction and merging. True means the build is
+    /// the <b>left</b> subtree: build rows ship already qualified, probe rows are the right
+    /// source read bare (keys via <see cref="BuildKeyColumns"/>), and the merge qualifies the
+    /// probe side. Both shapes must reproduce the coordinator's own probe exactly — same key
+    /// columns, same merge argument order.
+    /// </summary>
+    public bool BuildIsLeft { get; set; }
+
+    /// <summary>The probe table's effective alias (left alias normally; right alias when <see cref="BuildIsLeft"/>).</summary>
+    public string ProbeAlias { get; set; } = "";
+
+    /// <summary>Left-side key columns, qualified (<c>alias.column</c>) — read from qualified left rows.</summary>
+    public string[] ProbeKeyColumns { get; set; } = [];
+
+    /// <summary>The right source's effective alias, used to qualify bare right rows when merging.</summary>
+    public string BuildAlias { get; set; } = "";
+
+    /// <summary>Right-side key columns, unqualified — read from bare right rows.</summary>
+    public string[] BuildKeyColumns { get; set; } = [];
+
+    /// <summary>
+    /// The build side, one wire-encoded cells object per row (name → <c>ColumnValueWireCodec</c>
+    /// value), in the coordinator's bucket enumeration order. NULL-keyed rows are already
+    /// excluded (inner-join semantics), so every entry is probe-matchable.
+    /// </summary>
+    public string[] BuildRows { get; set; } = [];
+
+    /// <summary>
+    /// The full ON predicate, evaluated remotely on each merged candidate pair — exactly the
+    /// re-check the coordinator performs locally, carrying any non-equi residual conjuncts.
+    /// Must be shippable (no subqueries, placeholders, or volatile functions) or the
+    /// coordinator does not broadcast at all.
+    /// </summary>
+    public string OnPredicateJson { get; set; } = "";
+
+    /// <summary>
+    /// The probe side's pushed-down scan filter, evaluated remotely on the qualified probe row
+    /// before hashing; null when the probe scan is unfiltered. Lives here rather than in the
+    /// request's top-level <c>FilterJson</c> — see <see cref="QueryFragmentRequest.Join"/>.
+    /// </summary>
+    public string? ProbeFilterJson { get; set; }
+}
+
+/// <summary>
+/// Scan actuals for one executed fragment, shipped as a terminal frame when the coordinator
+/// asked for them (<see cref="QueryFragmentRequest.WantStats"/>): how many rows the remote
+/// scan examined and how many survived the residual filter and were shipped. Purely
+/// observational — the coordinator uses them for <c>EXPLAIN (ANALYZE)</c> attribution and
+/// never for correctness decisions.
+/// </summary>
+public sealed record QueryFragmentScanStats(long RowsScanned, long RowsShipped);
 
 /// <summary>
 /// One fragment result frame. Row fragments carry <see cref="RowIdHex"/> + <see cref="Data"/>
 /// (raw KV row bytes; the coordinator re-decodes through the same path as local spans).
 /// Aggregate fragments carry <see cref="CellsJson"/> — a JSON object of output-name →
 /// wire-encoded <c>ColumnValue</c> (see <c>ColumnValueWireCodec</c>) holding the span's
-/// partial aggregate states.
+/// partial aggregate states. Broadcast-join probe fragments additionally carry
+/// <see cref="MatchIndices"/> — the matched build rows' indices into
+/// <see cref="QueryFragmentJoinSpec.BuildRows"/>, in match order. A frame with
+/// <see cref="Stats"/> set is the optional terminal stats frame (see
+/// <see cref="QueryFragmentScanStats"/>) and carries no row data.
 /// </summary>
-public sealed record QueryFragmentRow(string? RowIdHex, byte[]? Data, string? CellsJson = null);
+public sealed record QueryFragmentRow(string? RowIdHex, byte[]? Data, string? CellsJson = null, QueryFragmentScanStats? Stats = null, int[]? MatchIndices = null);

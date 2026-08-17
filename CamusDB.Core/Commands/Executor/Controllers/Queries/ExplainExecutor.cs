@@ -297,6 +297,31 @@ internal sealed class ExplainExecutor
                 { "kv_lookups",        stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvPointLookups) : ColumnValue.Null },
                 { "kv_scan_entries",   stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvScanEntries) : ColumnValue.Null },
             });
+
+            // A gather that ran carries per-span actuals: one gather-span row per placement
+            // span, so ANALYZE attributes rows to the span (and node) that produced them
+            // rather than reporting only the merged stream.
+            if (physNode is GatherNode { SpanExecutions: { } spanExecutions })
+            {
+                foreach (GatherSpanExecution span in spanExecutions)
+                {
+                    yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        { "stage",           new ColumnValue(ColumnType.String, "analyze") },
+                        { "node",            new ColumnValue(ColumnType.String, "gather-span") },
+                        { "detail",          new ColumnValue(ColumnType.String, DescribeGatherSpan(span)) },
+                        { "estimated_rows",  ColumnValue.Null },
+                        { "estimated_cost",  ColumnValue.Null },
+                        { "actual_rows",     new ColumnValue(ColumnType.Integer64, span.RowsDelivered) },
+                        { "rows_read",       span.RemoteRowsScanned is { } remoteScanned
+                            ? new ColumnValue(ColumnType.Integer64, remoteScanned)
+                            : ColumnValue.Null },
+                        { "actual_time_ms",  ColumnValue.Null },
+                        { "kv_lookups",      ColumnValue.Null },
+                        { "kv_scan_entries", ColumnValue.Null },
+                    });
+                }
+            }
         }
 
         // Emit one trailing plan-info row with shape and schema-dep metadata when available.
@@ -320,6 +345,39 @@ internal sealed class ExplainExecutor
                 { "kv_scan_entries", ColumnValue.Null },
             });
         }
+    }
+
+    /// <summary>
+    /// Renders one span's execution actuals for the ANALYZE <c>gather-span</c> row. The mode
+    /// distinguishes the three ways a span can run — local from the start, remote to
+    /// completion, remote that failed and resumed locally — because "rows_delivered" alone
+    /// cannot: after a fallback the delivered count mixes shipped rows with locally resumed
+    /// ones, and <c>rows_shipped</c> is what says how far the remote got.
+    /// </summary>
+    private static string DescribeGatherSpan(GatherSpanExecution span)
+    {
+        System.Text.StringBuilder detail = new();
+        detail.Append(System.Globalization.CultureInfo.InvariantCulture, $"partition {span.PartitionId}: mode=");
+
+        if (!span.DispatchedRemotely)
+            detail.Append("local");
+        else if (span.FellBackToLocal)
+            detail.Append("remote-fallback");
+        else
+            detail.Append("remote");
+
+        if (span.RemoteEndpoint is not null)
+            detail.Append(System.Globalization.CultureInfo.InvariantCulture, $", node={span.RemoteEndpoint}");
+
+        detail.Append(System.Globalization.CultureInfo.InvariantCulture, $", rows_delivered={span.RowsDelivered}");
+
+        if (span.DispatchedRemotely)
+            detail.Append(System.Globalization.CultureInfo.InvariantCulture, $", rows_shipped={span.RemoteRowsShipped}");
+
+        if (span.RemoteRowsScanned is { } remoteScanned)
+            detail.Append(System.Globalization.CultureInfo.InvariantCulture, $", remote_rows_scanned={remoteScanned}");
+
+        return detail.ToString();
     }
 
     private static bool ContainsGather(PhysicalPlanNode node)

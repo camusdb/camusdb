@@ -148,6 +148,29 @@ internal sealed class SelectStatementExecutor
     internal void ApplyOptions(CamusDBOptions next) => options = next;
 
     /// <summary>
+    /// Collects the engine-maintained (non-meter) counter rows <c>SHOW ENGINE STATS</c> merges
+    /// with the meter snapshot: the TTL scheduler's totals and — only when distributed query
+    /// execution is enabled, per the statement's all-or-nothing rule — the
+    /// <c>distributed.*</c> counters.
+    /// </summary>
+    private IReadOnlyList<EngineMetricRow>? BuildEngineCounterRows()
+    {
+        IReadOnlyList<EngineMetricRow>? ttlRows = backgroundSchedulers?.TtlMetricRows();
+
+        IReadOnlyList<EngineMetricRow>? distributedRows = options.DistributedQueryExecutionEnabled
+            ? DistributedQueryMetricsReporter.Build(queryExecutor.DistributedMetrics)
+            : null;
+
+        if (ttlRows is null)
+            return distributedRows;
+
+        if (distributedRows is null)
+            return ttlRows;
+
+        return [.. ttlRows, .. distributedRows];
+    }
+
+    /// <summary>
     /// Execute a SQL statement that returns rows
     /// </summary>
     /// <param name="ticket"></param>
@@ -184,7 +207,7 @@ internal sealed class SelectStatementExecutor
                 engineMetrics,
                 UnquoteLikePattern(ast.leftAst?.yytext),
                 LocalNodeLabel(),
-                backgroundSchedulers?.TtlMetricRows()));
+                BuildEngineCounterRows()));
         }
 
         // SHOW VARIABLES reports the configuration this engine was constructed with. Node-local for the
@@ -924,7 +947,7 @@ internal sealed class SelectStatementExecutor
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Unsupported query-fragment format version {request.FormatVersion} (this node speaks {QueryFragmentRequest.CurrentFormatVersion})");
 
-        if (string.IsNullOrEmpty(request.FilterJson) && request.AggregatesJson is null)
+        if (string.IsNullOrEmpty(request.FilterJson) && request.AggregatesJson is null && request.Join is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "A row fragment must carry a residual filter; unfiltered spans are scanned by the coordinator");
@@ -962,26 +985,59 @@ internal sealed class SelectStatementExecutor
             ? new HashSet<string>(request.RequiredColumns, StringComparer.Ordinal)
             : null;
 
-        if (request.AggregatesJson is not null)
-        {
-            NodeAst[] projections = request.AggregatesJson.Select(NodeAstWireCodec.Deserialize).ToArray();
-            NodeAst[]? groupBy = request.GroupByJson?.Select(NodeAstWireCodec.Deserialize).ToArray();
+        Interlocked.Increment(ref queryExecutor.DistributedMetrics.FragmentsServed);
+        long shippedOut = 0;
 
-            await foreach (QueryFragmentRow partial in queryExecutor.ExecuteFragmentAggregate(
-                database, table, projections, groupBy, filter, fromRowId, untilRowId,
-                request.SchemaVersion, requiredColumns, snapshotTx, cancellationToken).ConfigureAwait(false))
+        try
+        {
+            if (request.Join is not null)
             {
-                yield return partial;
+                await foreach (QueryFragmentRow probeRow in queryExecutor.JoinExecutor.ExecuteFragmentJoinProbe(
+                    database, table, request.Join, fromRowId, untilRowId,
+                    request.SchemaVersion, requiredColumns, snapshotTx,
+                    wantStats: request.WantStats, cancellationToken).ConfigureAwait(false))
+                {
+                    if (probeRow.Stats is null)
+                        shippedOut++;
+
+                    yield return probeRow;
+                }
+
+                yield break;
             }
 
-            yield break;
-        }
+            if (request.AggregatesJson is not null)
+            {
+                NodeAst[] projections = request.AggregatesJson.Select(NodeAstWireCodec.Deserialize).ToArray();
+                NodeAst[]? groupBy = request.GroupByJson?.Select(NodeAstWireCodec.Deserialize).ToArray();
 
-        await foreach (QueryFragmentRow row in queryExecutor.ExecuteFragmentScan(
-            database, table, filter!, fromRowId, untilRowId, request.MaxRows, request.MaxSurvivors,
-            request.SchemaVersion, requiredColumns, snapshotTx, cancellationToken).ConfigureAwait(false))
+                await foreach (QueryFragmentRow partial in queryExecutor.ExecuteFragmentAggregate(
+                    database, table, projections, groupBy, filter, fromRowId, untilRowId,
+                    request.SchemaVersion, requiredColumns, snapshotTx, cancellationToken).ConfigureAwait(false))
+                {
+                    shippedOut++;
+                    yield return partial;
+                }
+
+                yield break;
+            }
+
+            await foreach (QueryFragmentRow row in queryExecutor.ExecuteFragmentScan(
+                database, table, filter!, fromRowId, untilRowId, request.MaxRows, request.MaxSurvivors,
+                request.SchemaVersion, requiredColumns, snapshotTx,
+                wantStats: request.WantStats, cancellationToken).ConfigureAwait(false))
+            {
+                // Stats frames are protocol bookkeeping, not shipped data.
+                if (row.Stats is null)
+                    shippedOut++;
+
+                yield return row;
+            }
+        }
+        finally
         {
-            yield return row;
+            if (shippedOut > 0)
+                Interlocked.Add(ref queryExecutor.DistributedMetrics.RowsShippedOut, shippedOut);
         }
     }
 

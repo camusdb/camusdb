@@ -203,6 +203,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         internal int ExecutedCount { get { lock (executed) return executed.Count; } }
 
+        /// <summary>Executed fragments that were broadcast-join probes (request carried a join spec).</summary>
+        internal int ExecutedJoinCount { get { lock (executed) return executed.Count(r => r.Join is not null); } }
+
         private long rowsReturned;
 
         /// <summary>Total survivor rows shipped across all fragment executions since the last reset.</summary>
@@ -246,7 +249,10 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             await foreach (CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row in
                 target.Executor.ExecuteQueryFragment(decoded, cancellationToken).ConfigureAwait(false))
             {
-                Interlocked.Increment(ref rowsReturned);
+                // Terminal stats frames are protocol bookkeeping, not shipped survivors.
+                if (row.Stats is null)
+                    Interlocked.Increment(ref rowsReturned);
+
                 string rowJson = System.Text.Json.JsonSerializer.Serialize(row);
                 yield return System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow>(rowJson)!;
             }

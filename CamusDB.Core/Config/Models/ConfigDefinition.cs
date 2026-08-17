@@ -655,6 +655,13 @@ public class ConfigDefinition
     public int MaxQueryParallelism { get; set; } = 1;
 
     /// <summary>
+    /// Largest hash-join build side (rows) eligible for broadcast to remote probe fragments.
+    /// Must be &gt;= 0; 0 disables broadcast joins. Default 10 000. Maps to
+    /// <c>CamusDBOptions.BroadcastJoinMaxBuildRows</c>.
+    /// </summary>
+    public int BroadcastJoinMaxBuildRows { get; set; } = 10_000;
+
+    /// <summary>
     /// Rows the hash-join build phase may materialise before degrading to nested-loop, applied only
     /// while spill is disabled. Must be &gt;= 1. Default 1 000 000. Maps to
     /// <c>CamusDBOptions.HashJoinMaxBuildRows</c>.
@@ -1096,6 +1103,9 @@ public class ConfigDefinition
 
         if (MaxQueryParallelism < 1)
             throw Invalid($"'max_query_parallelism' must be >= 1, got {MaxQueryParallelism}");
+
+        if (BroadcastJoinMaxBuildRows < 0)
+            throw Invalid($"'broadcast_join_max_build_rows' must be >= 0 (0 disables broadcast joins), got {BroadcastJoinMaxBuildRows}");
 
         if (HashJoinMaxBuildRows < 1)
             throw Invalid($"'hash_join_max_build_rows' must be >= 1, got {HashJoinMaxBuildRows}");

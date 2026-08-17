@@ -272,6 +272,56 @@ public sealed class TestClusterGatherScan
                 "At least one span must have executed as a remote fragment on its leader " +
                 "(every node cannot lead every span)");
 
+            // ── EXPLAIN (ANALYZE) per-span actuals ──────────────────────────────────────
+            // ANALYZE renders one gather-span row per placement span with the rows that span
+            // delivered; remote spans additionally report rows shipped and — via the stats
+            // frame the fragment protocol returns on request — the remote scanned count.
+            bool sawRemoteSpanActuals = false;
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                List<QueryResultRow> spanAnalyze = await RunSql(node, db,
+                    "EXPLAIN (ANALYZE) SELECT id, num FROM readings WHERE num >= 50 AND num < 150");
+
+                List<QueryResultRow> spanRows = spanAnalyze
+                    .Where(r => r.Row["node"].StrValue == "gather-span")
+                    .ToList();
+
+                Assert.GreaterOrEqual(spanRows.Count, 2,
+                    $"Node {node.Index}: ANALYZE must render one gather-span row per placement span. Got: "
+                    + string.Join(" | ", spanAnalyze.Select(r => r.Row["node"].StrValue + ": " + r.Row["detail"].StrValue)));
+
+                // A remote span contributes only survivors; a local span contributes every
+                // scanned row (its filter runs above the exchange). Fleet totals therefore sit
+                // between all-remote (100 survivors) and all-local (200 scanned rows).
+                long delivered = spanRows.Sum(r => r.Row["actual_rows"].LongValue);
+                Assert.That(delivered, Is.InRange(100L, 200L),
+                    $"Node {node.Index}: per-span delivered rows must lie between the filtered and scanned totals");
+
+                foreach (QueryResultRow spanRow in spanRows)
+                {
+                    string detail = spanRow.Row["detail"].StrValue!;
+
+                    if (!detail.Contains("mode=remote,"))
+                        continue;
+
+                    sawRemoteSpanActuals = true;
+                    StringAssert.Contains("node=", detail,
+                        "A remote span must name the peer that executed it");
+                    StringAssert.Contains("rows_shipped=", detail,
+                        "A remote span must report how many survivors were shipped");
+                    StringAssert.Contains("remote_rows_scanned=", detail,
+                        "A remote span must carry the peer's scanned count from the stats frame");
+                    Assert.IsFalse(spanRow.Row["rows_read"].Type == ColumnType.Null,
+                        "A remote span's rows_read column must carry the remote scanned count");
+                    Assert.GreaterOrEqual(spanRow.Row["rows_read"].LongValue, spanRow.Row["actual_rows"].LongValue,
+                        "A remote span must have scanned at least as many rows as it shipped");
+                }
+            }
+
+            Assert.IsTrue(sawRemoteSpanActuals,
+                "At least one node's ANALYZE must show a span executed remotely with shipped/scanned actuals");
+
             // ── Survivor-capped LIMIT pushdown ──────────────────────────────────────────
             // A filtered LIMIT stops each remote span after limit survivors: correct prefix
             // results, and the transport ships at most spans × limit rows instead of every
@@ -401,6 +451,42 @@ public sealed class TestClusterGatherScan
                     "SELECT id, num FROM readings WHERE num >= 50 AND num < 150");
                 Assert.AreEqual(100, fallbackFiltered.Count,
                     $"Node {node.Index}: results must be exact when remote fragments fail and spans fall back to local scans");
+            }
+
+            // ── SHOW ENGINE STATS distributed counters ──────────────────────────────────
+            // Every phase above dispatched, served, shipped, merged partials, and fell back,
+            // so fleet-wide totals of every distributed.* counter must be positive — and
+            // present at all, which is what proves the counters are wired into the statement.
+            Dictionary<string, long> fleet = new();
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                List<QueryResultRow> statRows = await RunSql(node, db,
+                    "SHOW ENGINE STATS LIKE 'distributed.%'");
+
+                Assert.AreEqual(6, statRows.Count,
+                    $"Node {node.Index}: SHOW ENGINE STATS must report all six distributed.* counters");
+
+                foreach (QueryResultRow statRow in statRows)
+                {
+                    string metric = statRow.Row["metric"].StrValue!;
+                    fleet[metric] = fleet.GetValueOrDefault(metric) + statRow.Row["count"].LongValue;
+                }
+            }
+
+            foreach (string metric in new[]
+                     {
+                         "distributed.fragments_dispatched",
+                         "distributed.fragments_served",
+                         "distributed.fragment_fallbacks",
+                         "distributed.rows_shipped_in",
+                         "distributed.rows_shipped_out",
+                         "distributed.partial_aggregate_gathers",
+                     })
+            {
+                Assert.Greater(fleet.GetValueOrDefault(metric), 0L,
+                    $"Fleet-wide {metric} must be positive after the phases above. Got: "
+                    + string.Join(", ", fleet.Select(kv => kv.Key + "=" + kv.Value)));
             }
         }
         finally

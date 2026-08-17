@@ -17,8 +17,11 @@ using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
+using Microsoft.Extensions.Logging;
+using System.Threading.Channels;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -73,12 +76,25 @@ internal sealed class QueryJoinExecutor
 
     private readonly PlanCache? _planCache;
 
-    public QueryJoinExecutor(QueryExecutor queryExecutor, CamusDBOptions options, StatisticsManager? stats = null, PlanCache? planCache = null)
+    /// <summary>Engine logger; null only in tests that build the executor bare (broadcast then stays off).</summary>
+    private readonly ILogger<ICamusDB>? logger;
+
+    /// <summary>Node-to-node fragment channel; null in standalone mode. Required for broadcast joins.</summary>
+    private readonly IQueryFragmentTransport? fragmentTransport;
+
+    /// <summary>Coordinator-side distributed counters; null only in tests that build the executor bare.</summary>
+    private readonly DistributedQueryMetrics? distributedMetrics;
+
+    public QueryJoinExecutor(QueryExecutor queryExecutor, CamusDBOptions options, StatisticsManager? stats = null, PlanCache? planCache = null,
+        ILogger<ICamusDB>? logger = null, IQueryFragmentTransport? fragmentTransport = null, DistributedQueryMetrics? distributedMetrics = null)
     {
         this.queryExecutor = queryExecutor;
         _stats = stats;
         _options = options;
         _planCache = planCache;
+        this.logger = logger;
+        this.fragmentTransport = fragmentTransport;
+        this.distributedMetrics = distributedMetrics;
         derivedTableExecutor = new DerivedTableExecutor(queryExecutor, this);
     }
 
@@ -915,6 +931,640 @@ internal sealed class QueryJoinExecutor
         return types;
     }
 
+    // ── Broadcast Hash Join ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Everything the broadcast probe needs beyond the join node itself: the probe leaf's
+    /// identity and placement, the build rows flattened into an indexable array (in bucket
+    /// enumeration order — remote match indices point into it), and the reusable fragment
+    /// join spec with the build rows already wire-encoded once.
+    /// </summary>
+    private sealed class BroadcastJoinPlan
+    {
+        public required TableDescriptor ProbeTable { get; init; }
+
+        public required string ProbeAlias { get; init; }
+
+        public required IReadOnlySet<string>? ProbeRequiredColumns { get; init; }
+
+        public required int ProbeSchemaVersion { get; init; }
+
+        public required NodeAst? ProbeFilter { get; init; }
+
+        public required TablePlacement Placement { get; init; }
+
+        public required IReadOnlyList<IReadOnlyDictionary<string, ColumnValue>> FlatBuildRows { get; init; }
+
+        public required QueryFragmentJoinSpec Spec { get; init; }
+    }
+
+    /// <summary>One probe row crossing a broadcast span channel; null <see cref="Matches"/> means "probe on the consumer" (local span or fallback), non-null means the remote already filtered, probed, and ON-checked.</summary>
+    private readonly record struct BroadcastProbeItem(ObjectIdValue RowId, QueryRow Row, int[]? Matches);
+
+    /// <summary>
+    /// Decides whether this hash join's probe runs as broadcast fragments, and prepares the
+    /// shipping plan when it does. Every condition falls back to the standard local probe —
+    /// declining is never an error. Gates: distributed execution on, a transport, a positive
+    /// broadcast cap the build's <b>actual</b> row count fits under, a plain primary-row base
+    /// table on the probe side (the left leaf when the right side was built; the right table
+    /// source when the left subtree was built), a transaction whose reads need no session
+    /// folding and takes no exclusive predicate locks, no dependency collector, shippable ON
+    /// and probe-filter predicates, and a multi-span key-range placement with at least one
+    /// non-local leader (an all-local placement gains nothing from shipping the build).
+    /// </summary>
+    private BroadcastJoinPlan? TryPrepareBroadcastJoin(
+        HashJoinNode joinNode,
+        QueryPlan plan,
+        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable,
+        HashJoinBuildSide buildSide)
+    {
+        if (fragmentTransport is null || logger is null)
+            return null;
+
+        CamusDBOptions liveOptions = plan.Database.Options;
+
+        if (!liveOptions.DistributedQueryExecutionEnabled || liveOptions.BroadcastJoinMaxBuildRows <= 0)
+            return null;
+
+        // The probe side must be a plain primary-row base table so its keyspace can be
+        // span-fragmented: the left scan leaf when the right side was built, or the right
+        // table source when the left subtree was built (a derived right source cannot be
+        // span-scanned remotely).
+        TableDescriptor probeTable;
+        string probeAlias;
+        NodeAst? probeFilter;
+        IReadOnlySet<string>? probeRequired;
+
+        if (buildSide == HashJoinBuildSide.Right)
+        {
+            if (joinNode.Input is not TableScanNode { Source: TableScanSource.PrimaryRows, BoundSource: { } probeSource } probeScan)
+                return null;
+
+            probeTable = probeSource.Table;
+            probeAlias = probeSource.Alias;
+            probeFilter = probeScan.ExecutionFilter;
+            probeRequired = probeScan.RequiredColumns ?? GetRequiredColumnsForAlias(plan, probeAlias);
+        }
+        else
+        {
+            if (joinNode.BuildSource.Table is not { } rightSource)
+                return null;
+
+            probeTable = rightSource.Table;
+            probeAlias = rightSource.Alias;
+            probeFilter = joinNode.BuildExecutionFilter;
+            probeRequired = GetRequiredColumnsForAlias(plan, probeAlias);
+        }
+
+        if (plan.Ticket.TxnState.FoldReads || plan.Ticket.ExclusivePredicateLocks || plan.DepCollector is not null)
+            return null;
+
+        if (joinNode.OnPredicate is null || !FragmentFilterShippability.IsShippable(joinNode.OnPredicate))
+            return null;
+
+        if (probeFilter is not null && !FragmentFilterShippability.IsShippable(probeFilter))
+            return null;
+
+        EmbeddedKahuna kahuna = plan.Database.Kahuna;
+        if (!kahuna.IsClusterMode)
+            return null;
+
+        TablePlacement placement = kahuna.GetPlacement(probeTable.Store.RowKeySpace);
+        if (!placement.IsKeyRange || placement.Spans.Count < 2 || placement.AllLeadersLocal)
+            return null;
+
+        foreach (PlacementSpan span in placement.Spans)
+        {
+            if (!GatherNode.TryParseRowIdBound(span.StartKey, out _) || !GatherNode.TryParseRowIdBound(span.EndKey, out _))
+                return null;
+        }
+
+        // Flatten the build in bucket enumeration order. Inter-bucket order is irrelevant
+        // (buckets only group equal keys); what matters is that equal-key rows keep their
+        // bucket order, so the remote's rebuilt buckets match this coordinator's exactly and
+        // match indices reproduce the same merge order.
+        int buildCount = 0;
+        foreach (List<IReadOnlyDictionary<string, ColumnValue>> bucket in hashTable.Values)
+            buildCount += bucket.Count;
+
+        if (buildCount == 0 || buildCount > liveOptions.BroadcastJoinMaxBuildRows)
+            return null;
+
+        List<IReadOnlyDictionary<string, ColumnValue>> flat = new(buildCount);
+        string[] encoded = new string[buildCount];
+
+        foreach (List<IReadOnlyDictionary<string, ColumnValue>> bucket in hashTable.Values)
+        {
+            foreach (IReadOnlyDictionary<string, ColumnValue> row in bucket)
+            {
+                encoded[flat.Count] = QueryExecutor.EncodeCells(row);
+                flat.Add(row);
+            }
+        }
+
+        return new BroadcastJoinPlan
+        {
+            ProbeTable = probeTable,
+            ProbeAlias = probeAlias,
+            ProbeRequiredColumns = probeRequired,
+            ProbeSchemaVersion = GetTableSchemaVersionForAlias(plan, probeAlias),
+            ProbeFilter = probeFilter,
+            Placement = placement,
+            FlatBuildRows = flat,
+            Spec = new QueryFragmentJoinSpec
+            {
+                BuildIsLeft = buildSide == HashJoinBuildSide.Left,
+                ProbeAlias = probeAlias,
+                ProbeKeyColumns = joinNode.ProbeKeyColumns.ToArray(),
+                BuildAlias = joinNode.BuildSource.Alias,
+                BuildKeyColumns = joinNode.BuildKeyColumns.ToArray(),
+                BuildRows = encoded,
+                OnPredicateJson = NodeAstWireCodec.Serialize(joinNode.OnPredicate),
+                ProbeFilterJson = probeFilter is not null ? NodeAstWireCodec.Serialize(probeFilter) : null,
+            },
+        };
+    }
+
+    /// <summary>
+    /// The broadcast probe: one worker per placement span — remote spans ship the build and
+    /// receive only matched probe rows (raw bytes + match indices), local spans and fallbacks
+    /// stream unfiltered probe rows — drained strictly in span order so output is
+    /// byte-identical to the sequential probe (spans partition the row keyspace, and the
+    /// coordinator merges every pair against its <b>own</b> build dictionaries; the remote
+    /// only ever contributes indices). Filtering, probing, merging, and ON evaluation all run
+    /// on this consumer thread — the filterer and lazily built layouts are not thread-safe —
+    /// while workers do the fetch and decode. A remote failure resumes that span locally
+    /// after the last delivered probe row; frames are per probe row, so nothing is duplicated
+    /// or lost mid-bucket.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ExecuteBroadcastHashProbe(
+        HashJoinNode joinNode,
+        QueryPlan plan,
+        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable,
+        BroadcastJoinPlan broadcast)
+    {
+        TableDescriptor table = broadcast.ProbeTable;
+        DatabaseDescriptor database = plan.Database;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        HLCTimestamp readTs = plan.Ticket.TxnState.ReadTimestamp;
+        CamusDBOptions options = database.Options;
+        QueryTicket ticket = plan.Ticket;
+        string rightAlias = joinNode.BuildSource.Alias;
+        IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
+        IReadOnlyList<PlacementSpan> spans = broadcast.Placement.Spans;
+
+        // The session must exist before workers read tx.TransactionId concurrently.
+        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
+
+        using CancellationTokenSource cts = new();
+
+        var channels = new Channel<BroadcastProbeItem>[spans.Count];
+        var workers = new Task[spans.Count];
+
+        for (int i = 0; i < spans.Count; i++)
+        {
+            channels[i] = Channel.CreateBounded<BroadcastProbeItem>(
+                new BoundedChannelOptions(256) { SingleReader = true, SingleWriter = true });
+
+            PlacementSpan span = spans[i];
+
+            // Bounds were validated during preparation; a failure here means the placement
+            // snapshot changed shape underneath us — fail closed via the channel.
+            if (!GatherNode.TryParseRowIdBound(span.StartKey, out ObjectIdValue? fromRowId)
+                || !GatherNode.TryParseRowIdBound(span.EndKey, out ObjectIdValue? untilRowId))
+            {
+                channels[i].Writer.TryComplete(new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Placement span boundary is not a row-id key: " + (span.StartKey ?? span.EndKey)));
+                workers[i] = Task.CompletedTask;
+                continue;
+            }
+
+            bool remote = !span.LeaderIsLocal && span.LeaderEndpoint is not null;
+
+            workers[i] = remote
+                ? RunRemoteProbeSpanAsync(channels[i].Writer, span, fromRowId, untilRowId)
+                : RunLocalProbeSpanAsync(channels[i].Writer, fromRowId, untilRowId, afterRowId: null);
+        }
+
+        // Shared merge state, consumer-thread only. The two build sides differ only in which
+        // argument of the merge the probe row occupies and where its keys are read from:
+        // build-right probes are qualified left rows (keys via ProbeKeyColumns, merged as the
+        // left argument); build-left probes are bare right rows (keys via BuildKeyColumns,
+        // merged as the right argument, qualified by the merge itself).
+        bool buildIsLeft = broadcast.Spec.BuildIsLeft;
+        IReadOnlyList<string> localProbeKeys = buildIsLeft ? joinNode.BuildKeyColumns : probeKeys;
+        RowLayout? qualifiedProbeLayout = null;
+        RowLayout? joinLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
+
+        try
+        {
+            for (int i = 0; i < spans.Count; i++)
+            {
+                await foreach (BroadcastProbeItem item in channels[i].Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
+                {
+                    qualifiedProbeLayout ??= QueryRowMerger.BuildQualifiedLayout(item.Row.Layout, broadcast.ProbeAlias);
+                    IReadOnlyDictionary<string, ColumnValue> qualifiedProbe = QueryRowMerger.QualifyRowAsQueryRow(item.Row, qualifiedProbeLayout);
+
+                    // Key extraction reads the same view the standard probe reads: the
+                    // qualified row for a left-side probe, the bare row for a right-side one.
+                    IReadOnlyDictionary<string, ColumnValue> keySource = buildIsLeft ? item.Row : qualifiedProbe;
+
+                    if (item.Matches is null)
+                    {
+                        // Local span (or fallback): the standard probe, on this thread.
+                        if (broadcast.ProbeFilter is not null
+                            && !await queryFilterer.MeetWhereAsync(broadcast.ProbeFilter, qualifiedProbe, ticket, database).ConfigureAwait(false))
+                            continue;
+
+                        ColumnValue[] probeKeyValues = new ColumnValue[localProbeKeys.Count];
+                        bool hasNull = false;
+
+                        for (int k = 0; k < localProbeKeys.Count; k++)
+                        {
+                            if (!keySource.TryGetValue(localProbeKeys[k], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                            { hasNull = true; break; }
+                            probeKeyValues[k] = kv;
+                        }
+
+                        if (hasNull) continue;
+
+                        if (!hashTable.TryGetValue(new CompositeColumnValue(probeKeyValues), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                            continue;
+
+                        foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
+                        {
+                            QueryRow merged = MergePair(buildRow, item.Row, qualifiedProbe);
+
+                            if (!await queryFilterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, database).ConfigureAwait(false))
+                                continue;
+
+                            yield return new QueryResultRow(default(ObjectIdValue), merged);
+                        }
+                    }
+                    else
+                    {
+                        // Remote span: filter, probe, and ON check already ran at the data —
+                        // re-running would double-evaluate. Merge against our own build rows.
+                        foreach (int matchIndex in item.Matches)
+                        {
+                            if ((uint)matchIndex >= (uint)broadcast.FlatBuildRows.Count)
+                                throw new CamusDBException(
+                                    CamusDBErrorCodes.InvalidInternalOperation,
+                                    $"Broadcast join fragment returned match index {matchIndex} outside the shipped build ({broadcast.FlatBuildRows.Count} rows)");
+
+                            yield return new QueryResultRow(
+                                default(ObjectIdValue),
+                                MergePair(broadcast.FlatBuildRows[matchIndex], item.Row, qualifiedProbe));
+                        }
+                    }
+                }
+
+                await workers[i].ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            cts.Cancel();
+
+            foreach (Channel<BroadcastProbeItem> channel in channels)
+            {
+                while (channel.Reader.TryRead(out _)) { }
+            }
+
+            foreach (Task worker in workers)
+            {
+                try
+                {
+                    await worker.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Consumer is exiting; a worker fault was either already thrown from its
+                    // channel or belongs to an abandoned span.
+                }
+            }
+        }
+
+        // The merge argument order is the standard probe's for each build side: build-right
+        // merges (qualified probe, bare build); build-left merges (qualified build, bare
+        // probe). The lazily built layout/ordinal-map pair is shared for the whole gather —
+        // consumer-thread only.
+        QueryRow MergePair(
+            IReadOnlyDictionary<string, ColumnValue> buildRow,
+            QueryRow bareProbe,
+            IReadOnlyDictionary<string, ColumnValue> qualifiedProbe)
+        {
+            if (buildIsLeft)
+            {
+                joinLayout      ??= QueryRowMerger.BuildJoinLayout(buildRow, bareProbe, rightAlias);
+                rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(bareProbe, rightAlias, joinLayout);
+                return QueryRowMerger.MergeRowsAsQueryRow(buildRow, bareProbe, joinLayout, rightOrdinalMap);
+            }
+
+            joinLayout      ??= QueryRowMerger.BuildJoinLayout(qualifiedProbe, buildRow, rightAlias);
+            rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(buildRow, rightAlias, joinLayout);
+            return QueryRowMerger.MergeRowsAsQueryRow(qualifiedProbe, buildRow, joinLayout, rightOrdinalMap);
+        }
+
+        async Task RunRemoteProbeSpanAsync(
+            ChannelWriter<BroadcastProbeItem> writer,
+            PlacementSpan span,
+            ObjectIdValue? fromRowId,
+            ObjectIdValue? untilRowId)
+        {
+            // Probe rows already delivered from this span; frames are per probe row (all of a
+            // row's matches ship together), so resuming locally AFTER this row on failure
+            // duplicates and loses nothing.
+            ObjectIdValue? lastEmitted = null;
+            long shippedThisSpan = 0;
+
+            if (distributedMetrics is not null)
+                Interlocked.Increment(ref distributedMetrics.FragmentsDispatched);
+
+            try
+            {
+                QueryFragmentRequest request = new()
+                {
+                    FragmentId = Guid.NewGuid().ToString("n"),
+                    DatabaseName = database.Name,
+                    DatabaseId = database.Id,
+                    TableName = table.Name,
+                    TableId = table.Id,
+                    SchemaVersion = broadcast.ProbeSchemaVersion,
+                    FromRowIdHex = fromRowId?.ToString(),
+                    UntilRowIdHex = untilRowId?.ToString(),
+                    ReadTsNode = readTs.N,
+                    ReadTsPhysical = readTs.L,
+                    ReadTsCounter = readTs.C,
+                    RequiredColumns = broadcast.ProbeRequiredColumns?.ToArray(),
+                    Join = broadcast.Spec,
+                };
+
+                RowEncoder.RowDecodeState decodeState = new();
+
+                await foreach (QueryFragmentRow fragmentRow in fragmentTransport!
+                    .ExecuteFragmentAsync(span.LeaderEndpoint!, request, cts.Token).ConfigureAwait(false))
+                {
+                    if (fragmentRow.Stats is not null)
+                        continue;
+
+                    if (fragmentRow.MatchIndices is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInternalOperation,
+                            "Broadcast join fragment returned a frame without match indices");
+
+                    ObjectIdValue rowId = ObjectId.ToValue(fragmentRow.RowIdHex);
+
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema,
+                        txId,
+                        rowId,
+                        fragmentRow.Data,
+                        options,
+                        broadcast.ProbeRequiredColumns,
+                        broadcast.ProbeSchemaVersion,
+                        decodeState).ConfigureAwait(false);
+
+                    await writer.WriteAsync(new BroadcastProbeItem(rowId, row, fragmentRow.MatchIndices), cts.Token).ConfigureAwait(false);
+                    lastEmitted = rowId;
+                    shippedThisSpan++;
+                }
+
+                writer.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                Log.LogRemoteFragmentFellBackToLocal(logger!, span.LeaderEndpoint!, ex.Message);
+                database.Kahuna.InvalidatePlacement(table.Store.RowKeySpace);
+
+                if (distributedMetrics is not null)
+                    Interlocked.Increment(ref distributedMetrics.FragmentFallbacks);
+
+                await RunLocalProbeSpanAsync(writer, fromRowId, untilRowId, afterRowId: lastEmitted).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (distributedMetrics is not null && shippedThisSpan > 0)
+                    Interlocked.Add(ref distributedMetrics.RowsShippedIn, shippedThisSpan);
+            }
+        }
+
+        async Task RunLocalProbeSpanAsync(
+            ChannelWriter<BroadcastProbeItem> writer,
+            ObjectIdValue? fromRowId,
+            ObjectIdValue? untilRowId,
+            ObjectIdValue? afterRowId)
+        {
+            try
+            {
+                RowEncoder.RowDecodeState decodeState = new();
+
+                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+                    plan.Ticket.TxnState,
+                    afterRowId: afterRowId,
+                    cancellationToken: cts.Token,
+                    untilRowId: untilRowId,
+                    fromRowId: fromRowId).ConfigureAwait(false))
+                {
+                    if (data.Length == 0)
+                        continue;
+
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema,
+                        txId,
+                        rowId,
+                        data,
+                        options,
+                        broadcast.ProbeRequiredColumns,
+                        broadcast.ProbeSchemaVersion,
+                        decodeState).ConfigureAwait(false);
+
+                    await writer.WriteAsync(new BroadcastProbeItem(rowId, row, null), cts.Token).ConfigureAwait(false);
+                }
+
+                writer.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                writer.TryComplete(ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Serves a peer coordinator's broadcast-join probe fragment: rebuilds the buckets from
+    /// the shipped build rows (each keeping its index into the shipped array), scans the probe
+    /// span at the fragment's snapshot, and for each probe row that passes the probe filter
+    /// and has at least one candidate whose merged pair satisfies the full ON predicate,
+    /// ships one frame — the probe row's raw bytes plus its match indices. Runs through this
+    /// class rather than the scan path because match semantics must be exactly the local hash
+    /// probe's: same key comparer, same NULL-key exclusion, same merged-row ON evaluation via
+    /// <see cref="QueryRowMerger"/>.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryFragmentRow> ExecuteFragmentJoinProbe(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        QueryFragmentJoinSpec join,
+        ObjectIdValue? fromRowId,
+        ObjectIdValue? untilRowId,
+        int schemaVersion,
+        IReadOnlySet<string>? requiredColumns,
+        KvTransaction snapshotTx,
+        bool wantStats = false,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        // Which columns key which side depends on the shipped build side: a right-side build
+        // ships bare rows keyed by BuildKeyColumns and probes qualified left rows via
+        // ProbeKeyColumns; a left-side build ships qualified rows keyed by ProbeKeyColumns
+        // and probes bare right rows via BuildKeyColumns — exactly the coordinator's own
+        // key-extraction rules for each shape.
+        string[] bucketKeyColumns = join.BuildIsLeft ? join.ProbeKeyColumns : join.BuildKeyColumns;
+        string[] probeKeyColumns = join.BuildIsLeft ? join.BuildKeyColumns : join.ProbeKeyColumns;
+
+        // Rebuild the buckets in shipped order so equal-key rows keep the coordinator's
+        // bucket order — match indices must reproduce the coordinator's merge order exactly.
+        Dictionary<CompositeColumnValue, List<(int Index, Dictionary<string, ColumnValue> Row)>> buckets =
+            new(CompositeColumnValueComparer.Instance);
+
+        for (int i = 0; i < join.BuildRows.Length; i++)
+        {
+            Dictionary<string, ColumnValue> buildRow = QueryExecutor.ParseCells(join.BuildRows[i]);
+
+            ColumnValue[] keyValues = new ColumnValue[bucketKeyColumns.Length];
+            bool hasNull = false;
+
+            for (int k = 0; k < bucketKeyColumns.Length; k++)
+            {
+                if (!buildRow.TryGetValue(bucketKeyColumns[k], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                { hasNull = true; break; }
+                keyValues[k] = kv;
+            }
+
+            if (hasNull)
+                continue;
+
+            CompositeColumnValue key = new(keyValues);
+            if (!buckets.TryGetValue(key, out List<(int Index, Dictionary<string, ColumnValue> Row)>? bucket))
+            { bucket = []; buckets[key] = bucket; }
+
+            bucket.Add((i, buildRow));
+        }
+
+        NodeAst onPredicate = NodeAstWireCodec.Deserialize(join.OnPredicateJson);
+        NodeAst? probeFilter = join.ProbeFilterJson is null ? null : NodeAstWireCodec.Deserialize(join.ProbeFilterJson);
+
+        QueryTicket ticket = new(
+            txnState: snapshotTx,
+            databaseName: database.Name,
+            tableName: table.Name,
+            index: null,
+            projection: null,
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null);
+
+        RowEncoder.RowDecodeState decodeState = new();
+        RowLayout? qualifiedLayout = null;
+        RowLayout? joinLayout = null;
+        Dictionary<string, int>? rightOrdinalMap = null;
+        List<int> matches = [];
+        long scanned = 0, shipped = 0;
+
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+            snapshotTx,
+            cancellationToken: cancellationToken,
+            untilRowId: untilRowId,
+            fromRowId: fromRowId).ConfigureAwait(false))
+        {
+            if (data.Length == 0)
+                continue;
+
+            scanned++;
+
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                table.Schema,
+                snapshotTx.TransactionId,
+                rowId,
+                data,
+                database.Options,
+                requiredColumns,
+                schemaVersion,
+                decodeState).ConfigureAwait(false);
+
+            qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, join.ProbeAlias);
+            IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
+
+            if (probeFilter is not null
+                && !await queryFilterer.MeetWhereAsync(probeFilter, qualified, ticket, database).ConfigureAwait(false))
+                continue;
+
+            // Same key-source rule as the coordinator: qualified row for a left-side probe,
+            // bare row for a right-side one.
+            IReadOnlyDictionary<string, ColumnValue> keySource = join.BuildIsLeft ? row : qualified;
+
+            ColumnValue[] probeKeyValues = new ColumnValue[probeKeyColumns.Length];
+            bool hasNull = false;
+
+            for (int k = 0; k < probeKeyColumns.Length; k++)
+            {
+                if (!keySource.TryGetValue(probeKeyColumns[k], out ColumnValue? kv) || kv.Type == ColumnType.Null)
+                { hasNull = true; break; }
+                probeKeyValues[k] = kv;
+            }
+
+            if (hasNull)
+                continue;
+
+            if (!buckets.TryGetValue(new CompositeColumnValue(probeKeyValues), out List<(int Index, Dictionary<string, ColumnValue> Row)>? bucket))
+                continue;
+
+            matches.Clear();
+
+            foreach ((int index, Dictionary<string, ColumnValue> buildRow) in bucket)
+            {
+                QueryRow merged;
+
+                if (join.BuildIsLeft)
+                {
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(buildRow, row, join.BuildAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(row, join.BuildAlias, joinLayout);
+                    merged = QueryRowMerger.MergeRowsAsQueryRow(buildRow, row, joinLayout, rightOrdinalMap);
+                }
+                else
+                {
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(qualified, buildRow, join.BuildAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(buildRow, join.BuildAlias, joinLayout);
+                    merged = QueryRowMerger.MergeRowsAsQueryRow(qualified, buildRow, joinLayout, rightOrdinalMap);
+                }
+
+                if (await queryFilterer.MeetWhereAsync(onPredicate, merged, ticket, database).ConfigureAwait(false))
+                    matches.Add(index);
+            }
+
+            if (matches.Count == 0)
+                continue;
+
+            shipped++;
+            yield return new QueryFragmentRow(rowId.ToString(), data.ToArray(), MatchIndices: matches.ToArray());
+        }
+
+        if (wantStats)
+            yield return new QueryFragmentRow(null, null, null, new QueryFragmentScanStats(scanned, shipped));
+    }
+
     // ── Hash Join ─────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -1081,6 +1731,21 @@ internal sealed class QueryJoinExecutor
 
         if (buildSide == HashJoinBuildSide.Right)
         {
+            // Broadcast probe: decided here, after the build exists, so it gates on the
+            // build's ACTUAL row count — never a cardinality estimate (interior-node
+            // estimates are constants on multi-way joins). When eligible, the small build
+            // side is shipped to each remote probe span's leader and only matched probe
+            // rows come back; otherwise the standard sequential probe below runs unchanged.
+            BroadcastJoinPlan? broadcast = TryPrepareBroadcastJoin(joinNode, plan, hashTable, HashJoinBuildSide.Right);
+
+            if (broadcast is not null)
+            {
+                await foreach (QueryResultRow row in ExecuteBroadcastHashProbe(joinNode, plan, hashTable, broadcast).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
             // Standard path: probe = left subtree, build = right source.
             // Hash table rows are unqualified; MergeRowsAsQueryRow qualifies them with rightAlias.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
@@ -1130,6 +1795,19 @@ internal sealed class QueryJoinExecutor
         }
         else
         {
+            // Same broadcast opportunity with the sides flipped: the built (left) side is the
+            // small one, so it ships and the RIGHT table's spans probe remotely. This is the
+            // shape real statistics usually produce (small side planned left / built).
+            BroadcastJoinPlan? broadcast = TryPrepareBroadcastJoin(joinNode, plan, hashTable, HashJoinBuildSide.Left);
+
+            if (broadcast is not null)
+            {
+                await foreach (QueryResultRow row in ExecuteBroadcastHashProbe(joinNode, plan, hashTable, broadcast).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
             // Build-left path: build = left subtree (stored qualified in hash table),
             // probe = right source (scanned unqualified).
             // MergeRowsAsQueryRow(leftQualifiedBuildRow, rightUnqualifiedProbeRow, rightAlias) is the

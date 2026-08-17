@@ -134,6 +134,7 @@ public class ConfigReader
         "keyspace_purge_batch_size",
         "index_scan_fetch_batch_size",
         "max_query_parallelism",
+        "broadcast_join_max_build_rows",
         "hash_join_max_build_rows",
         "net_weight",
         "slot_backed_decode",

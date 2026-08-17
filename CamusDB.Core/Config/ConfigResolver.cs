@@ -224,6 +224,7 @@ public static class ConfigResolver
         KeyspacePurgeBatchSize = config.KeyspacePurgeBatchSize,
         IndexScanFetchBatchSize = config.IndexScanFetchBatchSize,
         MaxQueryParallelism = config.MaxQueryParallelism,
+        BroadcastJoinMaxBuildRows = config.BroadcastJoinMaxBuildRows,
         HashJoinMaxBuildRows = config.HashJoinMaxBuildRows,
         NetWeight = config.NetWeight,
         SlotBackedDecode = config.SlotBackedDecode,

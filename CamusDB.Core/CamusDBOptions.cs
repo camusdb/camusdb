@@ -1264,6 +1264,23 @@ public sealed record CamusDBOptions
     public int MaxQueryParallelism { get; init; } = 1;
 
     /// <summary>
+    /// Largest hash-join build side (in rows) that may be broadcast to remote probe-span
+    /// fragments when distributed query execution is enabled. The decision is made at
+    /// execution time, after the build hash table exists, so it gates on the build's
+    /// <b>actual</b> row count — never on a cardinality estimate. <c>0</c> disables broadcast
+    /// joins entirely.
+    ///
+    /// <para>Node-scoped on purpose: broadcasting is a coordinator-local strategy choice
+    /// (results are identical either way), so per-node divergence changes performance, not
+    /// semantics. Read per statement from the database's live options snapshot, so a runtime
+    /// change applies to the next query.</para>
+    ///
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int BroadcastJoinMaxBuildRows { get; init; } = 10_000;
+
+    /// <summary>
     /// Enables per-lock-acquisition debug log lines (<c>LogLevel.Debug</c>). When <c>false</c>
     /// (default), no lock-trace messages are emitted regardless of the host logging configuration.
     /// Enable only for targeted diagnostics — a busy workload emits one line per lock acquired.

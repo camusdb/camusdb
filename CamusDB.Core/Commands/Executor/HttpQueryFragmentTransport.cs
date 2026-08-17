@@ -31,6 +31,17 @@ public sealed class QueryFragmentWireLine
     /// <summary>Partial-aggregate cells (see <see cref="Models.Queries.QueryFragmentRow.CellsJson"/>).</summary>
     public string? Cells { get; set; }
 
+    /// <summary>Broadcast-join match indices (see <see cref="Models.Queries.QueryFragmentRow.MatchIndices"/>).</summary>
+    public int[]? Matches { get; set; }
+
+    /// <summary>
+    /// Terminal scan-actuals frame, sent only when the request asked for stats
+    /// (<see cref="Models.Queries.QueryFragmentRequest.WantStats"/>). Optional by design: a
+    /// peer on an older build never sends one, and the coordinator treats its absence as
+    /// "actuals unknown".
+    /// </summary>
+    public QueryFragmentScanStats? Stats { get; set; }
+
     public string? Error { get; set; }
 }
 
@@ -106,6 +117,12 @@ public sealed class HttpQueryFragmentTransport : IQueryFragmentTransport
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Query fragment on '{targetRaftEndpoint}' failed mid-stream: {parsed.Error}");
 
+            if (parsed.Stats is not null)
+            {
+                yield return new QueryFragmentRow(null, null, null, parsed.Stats);
+                continue;
+            }
+
             if (parsed.Cells is not null)
             {
                 yield return new QueryFragmentRow(null, null, parsed.Cells);
@@ -117,7 +134,7 @@ public sealed class HttpQueryFragmentTransport : IQueryFragmentTransport
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Query fragment on '{targetRaftEndpoint}' returned an incomplete row frame");
 
-            yield return new QueryFragmentRow(parsed.RowIdHex, parsed.Data);
+            yield return new QueryFragmentRow(parsed.RowIdHex, parsed.Data, MatchIndices: parsed.Matches);
         }
     }
 }

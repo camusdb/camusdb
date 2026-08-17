@@ -91,4 +91,59 @@ public sealed class TestDistributedQueryGating : BaseTest
 
         await database.Transactions.CommitAsync(queryTx);
     }
+
+    /// <summary>
+    /// The binding invariant of the distributed-execution feature: with the flag off the
+    /// feature has NO plan surface at all — no gather, no distribution row — so plans read
+    /// exactly as they did before the feature existed. A separate engine is built for this
+    /// on purpose: the fixture's engine carries the flag on, and a setting changed after
+    /// construction would be a silent no-op, not a test.
+    /// </summary>
+    [Test]
+    public async Task FlagOff_PlansCarryNoDistributedSurface()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await CreateDatabase(Options with { DistributedQueryExecutionEnabled = false });
+
+        CreateTableTicket tableTicket = new(
+            databaseName: dbname,
+            tableName: "items",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("num", ColumnType.Integer64, notNull: true),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false);
+
+        await executor.CreateTable(tableTicket);
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        await executor.Insert(new InsertTicket(
+            txnState: txn, databaseName: dbname, tableName: "items",
+            values: new() { new() {
+                { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                { "num", new(ColumnType.Integer64, 1L) },
+            }}));
+        await database.Transactions.CommitAsync(txn);
+
+        KvTransaction queryTx = await database.Transactions.BeginAsync();
+
+        (_, IAsyncEnumerable<QueryResultRow> explainCursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+            txnState: queryTx, database: dbname, sql: "EXPLAIN SELECT id, num FROM items WHERE num >= 0", parameters: null));
+        List<QueryResultRow> explain = await explainCursor.ToListAsync();
+
+        Assert.IsFalse(
+            explain.Any(r => r.Row.Values.Any(v => v.StrValue?.Contains("gather") == true)),
+            "Flag off: no plan may contain a gather");
+        Assert.IsFalse(
+            explain.Any(r => r.Row.Values.Any(v => v.StrValue == "distribution" || v.StrValue?.StartsWith("distributed=") == true)),
+            "Flag off: EXPLAIN must not emit a distribution row — the feature has zero surface. Got: "
+            + string.Join(" | ", explain.Select(r => string.Join(",", r.Row.Values.Select(v => v.StrValue)))));
+
+        await database.Transactions.CommitAsync(queryTx);
+    }
 }

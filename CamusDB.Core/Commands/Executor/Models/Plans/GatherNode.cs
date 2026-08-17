@@ -34,10 +34,57 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// which ANALYZE disables (it replaces instrumented scanning, so ANALYZE reports the
 /// row-gather strategy it actually executed).</para>
 /// </summary>
+/// <summary>
+/// Execution actuals for one gather span, filled in while the gather runs and rendered by
+/// <c>EXPLAIN (ANALYZE)</c> as a <c>gather-span</c> row. Thread-safety is by ownership, not
+/// locks: every field except <see cref="RowsDelivered"/> is written only by that span's
+/// worker, <see cref="RowsDelivered"/> only by the single consumer thread, and the whole
+/// object is read only after the cursor has fully drained.
+/// </summary>
+public sealed class GatherSpanExecution
+{
+    /// <summary>The Kahuna partition that owned the span in the placement snapshot.</summary>
+    public required int PartitionId { get; init; }
+
+    /// <summary>True when the span was sent to a peer as a fragment (even if it later fell back).</summary>
+    public bool DispatchedRemotely { get; set; }
+
+    /// <summary>The peer the fragment was sent to; null for spans executed locally from the start.</summary>
+    public string? RemoteEndpoint { get; set; }
+
+    /// <summary>True when the remote fragment failed and the span resumed locally.</summary>
+    public bool FellBackToLocal { get; set; }
+
+    /// <summary>
+    /// Rows this span contributed across the exchange. Not uniform on purpose: a remotely
+    /// executed span contributes only filter survivors (the residual filter ran at the data),
+    /// while a locally scanned span contributes every scanned row (its filter runs above the
+    /// exchange, on the consumer). Comparing the two is exactly what shows the shipping win.
+    /// </summary>
+    public long RowsDelivered { get; set; }
+
+    /// <summary>Survivor rows received from the remote fragment before it completed or failed.</summary>
+    public long RemoteRowsShipped { get; set; }
+
+    /// <summary>
+    /// Rows the remote fragment scanned, from its terminal stats frame; null when the peer did
+    /// not report (older build, or the stream failed before the frame arrived).
+    /// </summary>
+    public long? RemoteRowsScanned { get; set; }
+}
+
 public sealed class GatherNode : PhysicalPlanNode
 {
     /// <summary>The placement snapshot the planner sliced against (advisory; see class doc).</summary>
     public TablePlacement Placement { get; }
+
+    /// <summary>
+    /// Per-span execution actuals, index-aligned with <see cref="TablePlacement.Spans"/>.
+    /// Populated only when the plan collects runtime stats (<c>EXPLAIN (ANALYZE)</c>) — plan
+    /// trees are rebuilt per execution, so this never leaks across statements — and read only
+    /// after the gather's cursor has fully drained.
+    /// </summary>
+    public GatherSpanExecution[]? SpanExecutions { get; set; }
 
     /// <summary>
     /// Per-span cap on filter-surviving rows (<c>limit + offset</c>), when the plan shape

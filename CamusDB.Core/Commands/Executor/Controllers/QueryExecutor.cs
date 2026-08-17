@@ -85,6 +85,14 @@ internal sealed class QueryExecutor
     /// <summary>Node-to-node fragment channel; null in standalone mode. See <see cref="QueryScanner"/>.</summary>
     private readonly IQueryFragmentTransport? fragmentTransport;
 
+    /// <summary>
+    /// Distributed-execution counters for <c>SHOW ENGINE STATS</c>. Owned here because both
+    /// roles record into it: the coordinator side (gather dispatch, fallbacks, partial-merge
+    /// aggregation, via <see cref="QueryScanner"/> and this class) and the serving side
+    /// (peer fragments, via <c>SelectStatementExecutor.ExecuteQueryFragment</c>).
+    /// </summary>
+    internal DistributedQueryMetrics DistributedMetrics { get; } = new();
+
     public QueryExecutor(ILogger<ICamusDB> logger, CamusDBOptions options, StatisticsManager? stats = null, IKahuna? kahuna = null, IQueryFragmentTransport? fragmentTransport = null)
     {
         this.logger = logger;
@@ -94,9 +102,16 @@ internal sealed class QueryExecutor
         PlanCache = new PlanCache(options.PlanCacheMaxEntries);
         queryPlanner = new QueryPlanner(stats, PlanCache, options);
         queryAggregator = new QueryAggregator(stats);
-        queryJoinExecutor = new QueryJoinExecutor(this, options, stats, PlanCache);
-        this.queryScanner = new(logger, fragmentTransport);
+        queryJoinExecutor = new QueryJoinExecutor(this, options, stats, PlanCache, logger, fragmentTransport, DistributedMetrics);
+        this.queryScanner = new(logger, fragmentTransport, DistributedMetrics);
     }
+
+    /// <summary>
+    /// The join executor, exposed for the fragment-serving path: a broadcast-join probe
+    /// fragment executes through the join machinery (hash comparer, row merger, ON predicate
+    /// evaluation), not the single-table scan path.
+    /// </summary>
+    internal QueryJoinExecutor JoinExecutor => queryJoinExecutor;
 
     /// <param name="metaOut">
     /// Optional holder populated with cache resolution metadata after the returned cursor is
@@ -640,6 +655,7 @@ internal sealed class QueryExecutor
         int schemaVersion,
         IReadOnlySet<string>? requiredColumns,
         KvTransaction snapshotTx,
+        bool wantStats = false,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (maxSurvivors is <= 0)
@@ -664,7 +680,7 @@ internal sealed class QueryExecutor
             BorrowedDecode = true,
         };
 
-        long survivors = 0;
+        long scanned = 0, survivors = 0;
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
             snapshotTx,
@@ -675,6 +691,8 @@ internal sealed class QueryExecutor
         {
             if (data.Length == 0)
                 continue;
+
+            scanned++;
 
             QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                 table.Schema,
@@ -692,9 +710,14 @@ internal sealed class QueryExecutor
 
                 survivors++;
                 if (maxSurvivors is not null && survivors >= maxSurvivors.Value)
-                    yield break;
+                    break;
             }
         }
+
+        // Terminal stats frame, only on request (see QueryFragmentRequest.WantStats): the
+        // coordinator's EXPLAIN (ANALYZE) attributes this span's remote scan work from it.
+        if (wantStats)
+            yield return new QueryFragmentRow(null, null, null, new QueryFragmentScanStats(scanned, survivors));
     }
 
     /// <summary>
@@ -743,7 +766,7 @@ internal sealed class QueryExecutor
     }
 
     /// <summary>Encodes one value row as the fragment wire cells object (name → wire value).</summary>
-    private static string EncodeCells(IReadOnlyDictionary<string, ColumnValue> row)
+    internal static string EncodeCells(IReadOnlyDictionary<string, ColumnValue> row)
     {
         using MemoryStream stream = new();
         using (System.Text.Json.Utf8JsonWriter writer = new(stream))
@@ -834,6 +857,8 @@ internal sealed class QueryExecutor
 
         await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
 
+        Interlocked.Increment(ref DistributedMetrics.PartialAggregateGathers);
+
         string? filterJson = filter is not null ? NodeAstWireCodec.Serialize(filter) : null;
         string[] aggregatesJson = partialPlan.ShipProjections.Select(NodeAstWireCodec.Serialize).ToArray();
         string[]? groupByJson = partialPlan.ShipGroupBy?.Select(NodeAstWireCodec.Serialize).ToArray();
@@ -921,6 +946,8 @@ internal sealed class QueryExecutor
         async Task<List<Dictionary<string, ColumnValue>>> ComputeRemotePartialsAsync(
             PlacementSpan span, ObjectIdValue? fromRowId, ObjectIdValue? untilRowId)
         {
+            Interlocked.Increment(ref DistributedMetrics.FragmentsDispatched);
+
             try
             {
                 QueryFragmentRequest request = new()
@@ -955,6 +982,9 @@ internal sealed class QueryExecutor
                     partials.Add(ParseCells(row.CellsJson));
                 }
 
+                if (partials.Count > 0)
+                    Interlocked.Add(ref DistributedMetrics.RowsShippedIn, partials.Count);
+
                 return partials;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -963,6 +993,8 @@ internal sealed class QueryExecutor
                 // recomputes locally from scratch — nothing partial was consumed.
                 Log.LogRemoteFragmentFellBackToLocal(logger, span.LeaderEndpoint ?? "?", ex.Message);
                 database.Kahuna.InvalidatePlacement(table.Store.RowKeySpace);
+
+                Interlocked.Increment(ref DistributedMetrics.FragmentFallbacks);
 
                 return await ComputeLocalPartialsAsync(fromRowId, untilRowId).ConfigureAwait(false);
             }
@@ -984,16 +1016,18 @@ internal sealed class QueryExecutor
             return partials;
         }
 
-        static Dictionary<string, ColumnValue> ParseCells(string cellsJson)
-        {
-            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(cellsJson);
+    }
 
-            Dictionary<string, ColumnValue> cells = new(StringComparer.OrdinalIgnoreCase);
-            foreach (System.Text.Json.JsonProperty property in doc.RootElement.EnumerateObject())
-                cells[property.Name] = ColumnValueWireCodec.Read(property.Value);
+    /// <summary>Decodes a fragment wire cells object (name → wire value) back into a value row.</summary>
+    internal static Dictionary<string, ColumnValue> ParseCells(string cellsJson)
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(cellsJson);
 
-            return cells;
-        }
+        Dictionary<string, ColumnValue> cells = new(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Text.Json.JsonProperty property in doc.RootElement.EnumerateObject())
+            cells[property.Name] = ColumnValueWireCodec.Read(property.Value);
+
+        return cells;
     }
 
     /// <summary>

@@ -32,10 +32,14 @@ internal sealed class QueryScanner
     /// </summary>
     private readonly IQueryFragmentTransport? fragmentTransport;
 
-    public QueryScanner(ILogger<ICamusDB> logger, IQueryFragmentTransport? fragmentTransport = null)
+    /// <summary>Coordinator-side distributed counters; null only in tests that build the scanner bare.</summary>
+    private readonly DistributedQueryMetrics? distributedMetrics;
+
+    public QueryScanner(ILogger<ICamusDB> logger, IQueryFragmentTransport? fragmentTransport = null, DistributedQueryMetrics? distributedMetrics = null)
     {
         this.logger = logger;
         this.fragmentTransport = fragmentTransport;
+        this.distributedMetrics = distributedMetrics;
     }
 
     /// <summary>
@@ -487,6 +491,18 @@ internal sealed class QueryScanner
         var channels = new Channel<(ObjectIdValue rowId, QueryRow row, bool preFiltered)>[spans.Count];
         var workers = new Task[spans.Count];
 
+        // Per-span actuals for EXPLAIN (ANALYZE) only: each entry is written solely by its
+        // span's worker (RowsDelivered solely by this consumer thread) and read after the
+        // cursor drains, so no synchronization is needed.
+        GatherSpanExecution[]? spanExecutions = null;
+        if (plan.CollectRuntimeStats)
+        {
+            spanExecutions = new GatherSpanExecution[spans.Count];
+            for (int i = 0; i < spans.Count; i++)
+                spanExecutions[i] = new GatherSpanExecution { PartitionId = spans[i].PartitionId };
+            gather.SpanExecutions = spanExecutions;
+        }
+
         for (int i = 0; i < spans.Count; i++)
         {
             channels[i] = Channel.CreateBounded<(ObjectIdValue rowId, QueryRow row, bool preFiltered)>(
@@ -511,7 +527,7 @@ internal sealed class QueryScanner
                 && span.LeaderEndpoint is not null;
 
             workers[i] = remote
-                ? RunRemoteSpanAsync(channels[i].Writer, span, fromRowId, untilRowId, shippableFilterJson!)
+                ? RunRemoteSpanAsync(channels[i].Writer, span, fromRowId, untilRowId, shippableFilterJson!, spanExecutions?[i])
                 : RunLocalSpanAsync(channels[i].Writer, fromRowId, untilRowId, afterRowId: null);
         }
 
@@ -526,6 +542,9 @@ internal sealed class QueryScanner
                 {
                     yield return item;
                     emitted++;
+
+                    if (spanExecutions is not null)
+                        spanExecutions[i].RowsDelivered++;
 
                     if (maxRows is not null && emitted >= maxRows.Value)
                         yield break;
@@ -562,11 +581,22 @@ internal sealed class QueryScanner
             PlacementSpan span,
             ObjectIdValue? fromRowId,
             ObjectIdValue? untilRowId,
-            string filterJson)
+            string filterJson,
+            GatherSpanExecution? spanExecution)
         {
             // Rows already delivered to the channel from this span; a mid-stream failure
             // resumes locally AFTER this row, so nothing is duplicated or lost.
             ObjectIdValue? lastEmitted = null;
+            long shippedThisSpan = 0;
+
+            if (distributedMetrics is not null)
+                Interlocked.Increment(ref distributedMetrics.FragmentsDispatched);
+
+            if (spanExecution is not null)
+            {
+                spanExecution.DispatchedRemotely = true;
+                spanExecution.RemoteEndpoint = span.LeaderEndpoint;
+            }
 
             try
             {
@@ -587,6 +617,7 @@ internal sealed class QueryScanner
                     MaxSurvivors = gather.MaxSurvivors,
                     FilterJson = filterJson,
                     RequiredColumns = requiredColumns?.ToArray(),
+                    WantStats = spanExecution is not null,
                 };
 
                 RowEncoder.RowDecodeState decodeState = new()
@@ -598,6 +629,15 @@ internal sealed class QueryScanner
                 await foreach (QueryFragmentRow fragmentRow in fragmentTransport!
                     .ExecuteFragmentAsync(span.LeaderEndpoint!, request, cts.Token).ConfigureAwait(false))
                 {
+                    // Terminal stats frame (sent only when WantStats was requested): actuals
+                    // for EXPLAIN (ANALYZE), never row data.
+                    if (fragmentRow.Stats is { } fragmentStats)
+                    {
+                        if (spanExecution is not null)
+                            spanExecution.RemoteRowsScanned = fragmentStats.RowsScanned;
+                        continue;
+                    }
+
                     ObjectIdValue rowId = ObjectId.ToValue(fragmentRow.RowIdHex);
 
                     QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
@@ -612,6 +652,10 @@ internal sealed class QueryScanner
 
                     await writer.WriteAsync((rowId, row, true), cts.Token).ConfigureAwait(false);
                     lastEmitted = rowId;
+                    shippedThisSpan++;
+
+                    if (spanExecution is not null)
+                        spanExecution.RemoteRowsShipped = shippedThisSpan;
                 }
 
                 writer.Complete();
@@ -629,7 +673,18 @@ internal sealed class QueryScanner
                 Log.LogRemoteFragmentFellBackToLocal(logger, span.LeaderEndpoint!, ex.Message);
                 plan.Database.Kahuna.InvalidatePlacement(table.Store.RowKeySpace);
 
+                if (distributedMetrics is not null)
+                    Interlocked.Increment(ref distributedMetrics.FragmentFallbacks);
+
+                if (spanExecution is not null)
+                    spanExecution.FellBackToLocal = true;
+
                 await RunLocalSpanAsync(writer, fromRowId, untilRowId, afterRowId: lastEmitted).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (distributedMetrics is not null && shippedThisSpan > 0)
+                    Interlocked.Add(ref distributedMetrics.RowsShippedIn, shippedThisSpan);
             }
         }
 
