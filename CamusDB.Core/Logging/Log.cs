@@ -89,6 +89,9 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Information, Message = "Executing step {Type}")]
     public static partial void LogExecutingQueryStep(ILogger logger, QueryPlanStepType type);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Remote query fragment on {Endpoint} failed; resuming span locally: {Reason}")]
+    public static partial void LogRemoteFragmentFellBackToLocal(ILogger logger, string endpoint, string reason);
+
     // DML
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Row with rowid {RowId} deleted")]

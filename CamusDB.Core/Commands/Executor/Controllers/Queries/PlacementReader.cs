@@ -75,23 +75,45 @@ internal sealed class PlacementReader
     /// <summary>
     /// Returns the fraction of a scan's output rows that cross a network boundary.
     ///
-    /// Model (approximate/cached):
-    ///   - Sharding off OR partitions ≤ 1 → 0.0 (everything local, NetworkFactor = 0).
-    ///   - Otherwise → <c>(N-1)/N</c> where N = <see cref="CamusDBOptions.ClusterPartitionCount"/>.
-    ///     This treats all non-local partitions as equally likely to hold any given row
-    ///     and the executing node as leader of exactly one partition. It is a rough
-    ///     approximation; precise per-range partition assignment requires reading Kahuna's
-    ///     internal range-map (deferred to a future Kahuna API).
+    /// <para><b>Cluster mode:</b> read from the live placement snapshot
+    /// (<see cref="Storage.Kv.EmbeddedKahuna.GetPlacement"/>): the fraction of the scanned
+    /// key space's spans whose partition leader is not this node (unknown leaders count as
+    /// remote). The key space is the one the leaf actually scans — the index bucket for index
+    /// scans, the row bucket otherwise. The snapshot is TTL-cached and advisory; staleness
+    /// mis-costs a plan, never breaks one.</para>
     ///
-    /// Staleness contract: reflects the startup partition count, not live Raft state.
+    /// <para><b>Standalone:</b> there is no cluster to read, so the declared-topology
+    /// approximation is kept: <c>(N-1)/N</c> with N =
+    /// <see cref="CamusDBOptions.ClusterPartitionCount"/>. This is what lets single-node
+    /// planner tests and cost experiments model a sharded layout that does not physically
+    /// exist yet; a real cluster ignores the declared count in favor of the live map.</para>
+    ///
+    /// Only called for Partitioned scan leaves (sharding on) — the caller gates on
+    /// <see cref="DataDistributionKind.Partitioned"/>, so the sharding-off answer stays 0.
     /// </summary>
-    public static double GetRemoteFraction(CamusDBOptions options)
+    public static double GetRemoteFraction(
+        DatabaseDescriptor database,
+        TableDescriptor? table,
+        PhysicalPlanNode node,
+        CamusDBOptions options)
     {
         if (!options.KeyRangeShardingEnabled)
             return 0.0;
 
-        int n = options.ClusterPartitionCount;
-        return n <= 1 ? 0.0 : (n - 1.0) / n;
+        if (table is null || !database.Kahuna.IsClusterMode)
+        {
+            int n = options.ClusterPartitionCount;
+            return n <= 1 ? 0.0 : (n - 1.0) / n;
+        }
+
+        string keySpace = node switch
+        {
+            IndexRangeScanNode { Index.Id: { } indexId } => table.Store.IndexKeySpace(indexId),
+            TableScanNode { Source: TableScanSource.ForcedIndex, Index: { Id: { } indexId } } => table.Store.IndexKeySpace(indexId),
+            _ => table.Store.RowKeySpace,
+        };
+
+        return database.Kahuna.GetPlacement(keySpace).RemoteLeaderFraction;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────

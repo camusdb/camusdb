@@ -132,6 +132,132 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     public IRaft Raft => node.Raft;
 
     /// <summary>
+    /// True when this node was built through the cluster constructor (real inter-node
+    /// transports and peers); false for the standalone embedded node. Placement and
+    /// distributed-execution decisions branch on this — a standalone node never reads the
+    /// range map or Raft placement because there is nothing to ask.
+    /// </summary>
+    public bool IsClusterMode => isClusterMode;
+
+    /// <summary>
+    /// How long a cached <see cref="TablePlacement"/> stays fresh. Short on purpose: placement
+    /// is advisory (execution re-resolves through the locator), so the only cost of staleness
+    /// is a mis-costed plan or an extra hop, and the read itself is a cheap in-memory compose.
+    /// </summary>
+    private const long PlacementCacheTtlMs = 2_000;
+
+    /// <summary>Per-key-space placement snapshots; see <see cref="GetPlacement"/>.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TablePlacement> placementCache = new();
+
+    /// <summary>
+    /// Returns the current placement of <paramref name="keySpace"/> (a bucket prefix with no
+    /// trailing slash, e.g. <c>{dbId}:{tableId}:r</c>): its spans, owning partitions, and this
+    /// node's best-effort view of each partition's leader and replica set.
+    ///
+    /// <para>Standalone nodes short-circuit to a single local span without touching Kahuna or
+    /// Raft. Cluster nodes compose <c>IKahuna.GetRangeMap</c> (node-local applied snapshot)
+    /// with <c>IRaft</c> placement reads — all cheap, synchronous, in-memory — and cache the
+    /// result for <see cref="PlacementCacheTtlMs"/>. Callers that observe a generation fence
+    /// miss or <c>MustRetry</c> at execution time should call <see cref="InvalidatePlacement"/>
+    /// before re-resolving.</para>
+    ///
+    /// <para>Hash-routed key spaces resolve to exactly one partition, computed with the same
+    /// hash Kahuna's data router uses: <c>1 + InversePrefixedHash(prefix + "/", '/',
+    /// InitialPartitions)</c>. <c>IRaft.GetPrefixPartitionKey</c> is a different hash over a
+    /// different partition map and must never be used for data keys.</para>
+    /// </summary>
+    public TablePlacement GetPlacement(string keySpace)
+    {
+        if (!isClusterMode)
+            return placementCache.GetOrAdd(keySpace, static ks => TablePlacement.Local(ks));
+
+        if (placementCache.TryGetValue(keySpace, out TablePlacement? cached)
+            && Environment.TickCount64 - cached.CapturedAtTicks < PlacementCacheTtlMs)
+            return cached;
+
+        TablePlacement fresh = BuildPlacement(keySpace);
+        placementCache[keySpace] = fresh;
+        return fresh;
+    }
+
+    /// <summary>
+    /// Drops the cached placement for <paramref name="keySpace"/> so the next
+    /// <see cref="GetPlacement"/> rebuilds from the live range map — for callers that just
+    /// observed evidence the cache is stale (generation fence miss, leader-moved retry).
+    /// </summary>
+    public void InvalidatePlacement(string keySpace) => placementCache.TryRemove(keySpace, out _);
+
+    private TablePlacement BuildPlacement(string keySpace)
+    {
+        string localEndpoint = Raft.GetLocalEndpoint();
+
+        // Filtered form on purpose: the unfiltered call enumerates every registered key space.
+        KahunaRangeMapResponse map = node.Kahuna.GetRangeMap(keySpace);
+
+        KahunaKeySpaceRangesResponse? space = null;
+        foreach (KahunaKeySpaceRangesResponse candidate in map.KeySpaces)
+        {
+            if (string.Equals(candidate.KeySpace, keySpace, StringComparison.Ordinal))
+            {
+                space = candidate;
+                break;
+            }
+        }
+
+        bool isKeyRange = space is not null
+            && string.Equals(space.RoutingMode, "KeyRange", StringComparison.Ordinal)
+            && space.Descriptors.Count > 0;
+
+        List<PlacementSpan> spans;
+
+        if (isKeyRange)
+        {
+            spans = new(space!.Descriptors.Count);
+            foreach (KahunaRangeDescriptorResponse descriptor in space.Descriptors)
+                spans.Add(BuildSpan(localEndpoint, descriptor.StartKey, descriptor.EndKey, descriptor.PartitionId, descriptor.Generation));
+        }
+        else
+        {
+            // Hash routing — or a key-range space with no seeded descriptors, which the router
+            // also serves through the hash path. One partition owns the whole bucket. The
+            // trailing slash matters: the data router hashes the key-space slice before the
+            // LAST '/', so appending one reproduces what routing does for keys in this bucket.
+            int partitionId = 1 + (int)HashUtils.InversePrefixedHash(keySpace + "/", '/', Raft.Configuration.InitialPartitions);
+            spans = [BuildSpan(localEndpoint, startKey: null, endKey: null, partitionId, generation: 0L)];
+        }
+
+        return new TablePlacement(keySpace, isKeyRange, spans, Environment.TickCount64);
+    }
+
+    private PlacementSpan BuildSpan(string localEndpoint, string? startKey, string? endKey, int partitionId, long generation)
+    {
+        bool hosted = Raft.HostsPartition(partitionId);
+        string? leaderHint = Raft.GetPartitionLeaderHint(partitionId);
+
+        // Empty replica list = legacy full replication (every roster node hosts the partition);
+        // non-empty = the complete hosting set under per-partition replica placement. Nodes
+        // being removed no longer count as dispatch targets.
+        IReadOnlyList<Kommander.System.RaftReplica> replicas = Raft.GetPartitionReplicas(partitionId);
+        List<string>? endpoints = null;
+
+        foreach (Kommander.System.RaftReplica replica in replicas)
+        {
+            if (replica.Role != Kommander.System.RaftReplicaRole.Removing)
+                (endpoints ??= new(replicas.Count)).Add(replica.Endpoint);
+        }
+
+        return new PlacementSpan(
+            startKey,
+            endKey,
+            partitionId,
+            generation,
+            leaderHint,
+            endpoints ?? (IReadOnlyList<string>)[],
+            LeaderIsLocal: hosted && string.Equals(leaderHint, localEndpoint, StringComparison.Ordinal),
+            HostedLocally: hosted);
+    }
+
+    /// <summary>
     /// Maximum time replicated DDL waits for live schema-apply acknowledgements.
     /// </summary>
     public TimeSpan SchemaAckWaitTimeout { get; set; } = TimeSpan.FromSeconds(30);

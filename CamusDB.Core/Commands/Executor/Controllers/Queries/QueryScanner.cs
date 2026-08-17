@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -24,9 +25,17 @@ internal sealed class QueryScanner
 {
     private readonly ILogger<ICamusDB> logger;
 
-    public QueryScanner(ILogger<ICamusDB> logger)
+    /// <summary>
+    /// Node-to-node fragment channel; null in standalone mode or until the host wires one.
+    /// When present, gather spans whose leader is another node and whose residual filter is
+    /// shippable execute remotely (filter runs at the data); everything else scans locally.
+    /// </summary>
+    private readonly IQueryFragmentTransport? fragmentTransport;
+
+    public QueryScanner(ILogger<ICamusDB> logger, IQueryFragmentTransport? fragmentTransport = null)
     {
         this.logger = logger;
+        this.fragmentTransport = fragmentTransport;
     }
 
     /// <summary>
@@ -364,6 +373,313 @@ internal sealed class QueryScanner
             finally
             {
                 decodeSlots.Release();
+            }
+        }
+    }
+
+    /// <summary>Rows buffered per span channel before its fetch worker stalls (backpressure).</summary>
+    private const int GatherSpanChannelCapacity = 256;
+
+    /// <summary>
+    /// Span-fragmented full primary-row scan for a plan whose scan leaf sits under a
+    /// <see cref="GatherNode"/>: one fetch-and-decode worker per placement span, each bounded
+    /// to its span's row-id range, drained strictly in span order. Because the spans partition
+    /// the keyspace contiguously and ascending, the concatenated stream is byte-identical to
+    /// the sequential unbounded scan; the win is that later spans fetch and decode — each from
+    /// its own partition leader — while earlier spans are being consumed.
+    ///
+    /// The phantom-protection range lock covers the whole row keyspace and is acquired once
+    /// here, before any worker starts. Filtering, stats, and dependency bookkeeping stay on
+    /// the consumer thread (they are not thread-safe); workers never use borrowed decode
+    /// (rows cross channels and outlive the scan iteration).
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ScanTableSpansGather(
+        QueryPlan plan,
+        QueryFilterer queryFilterer,
+        GatherNode gather)
+    {
+        TableDescriptor table = plan.Table;
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        QueryDependencyCollector? deps = plan.DepCollector;
+
+        await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
+            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+
+        deps?.RecordRange(table.Store.RowKeySpace);
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
+
+        using System.Diagnostics.Activity? storageSpan =
+            Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.StorageRead);
+        storageSpan?.SetTag("scan", Diagnostics.ServerDiagnostics.Tags.Scan.Full);
+        storageSpan?.SetTag("gather_spans", gather.Placement.Spans.Count);
+        long scanStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        long rowsScanned = 0, rowsReturned = 0;
+
+        try
+        {
+            await foreach ((ObjectIdValue rowId, QueryRow queryRow, bool preFiltered) in GatherSpansAsync(plan, gather).ConfigureAwait(false))
+            {
+                rowsScanned++;
+                if (scanStats is not null)
+                {
+                    scanStats.KvScanEntries++;
+                    scanStats.RowsRead++;
+                }
+
+                deps?.RecordPoint(table.Store.RowPointKey(rowId));
+
+                // A remotely executed span already applied the residual filter at the data;
+                // re-evaluating would double-run the predicate (wrong for anything stateful
+                // and wasted work for everything else).
+                if (preFiltered || await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                {
+                    rowsReturned++;
+                    yield return new QueryResultRow(rowId, queryRow);
+                }
+            }
+        }
+        finally
+        {
+            Diagnostics.ServerDiagnostics.RecordScanDuration(
+                Diagnostics.ServerDiagnostics.Tags.Scan.Full,
+                System.Diagnostics.Stopwatch.GetElapsedTime(scanStart).TotalMilliseconds);
+            Diagnostics.ServerDiagnostics.RecordQueryRows(
+                Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Scanned, rowsScanned);
+            Diagnostics.ServerDiagnostics.RecordQueryRows(
+                Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Returned, rowsReturned);
+        }
+    }
+
+    private async IAsyncEnumerable<(ObjectIdValue rowId, QueryRow row, bool preFiltered)> GatherSpansAsync(
+        QueryPlan plan,
+        GatherNode gather)
+    {
+        TableDescriptor table = plan.Table;
+        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
+        HLCTimestamp readTs = plan.Ticket.TxnState.ReadTimestamp;
+        int visibilityVersion = plan.TableSchemaVersion;
+        CamusDBOptions options = plan.Database.Options;
+        IReadOnlySet<string>? requiredColumns = plan.ScanRequiredColumns;
+        bool slotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null;
+        long? maxRows = plan.ScanRowLimit;
+        IReadOnlyList<PlacementSpan> spans = gather.Placement.Spans;
+
+        // One serialized filter shared by every remote span. Remote dispatch requires a
+        // shippable residual filter: an unfiltered span gains nothing from a fragment (the
+        // locator already streams its pages), and non-pure filters must evaluate exactly once
+        // on the coordinator. A dependency-collecting scan (result-cache candidate) must also
+        // stay local: point deps are recorded per scanned row on the consumer, and remote
+        // filtering would drop the deps of filtered-out rows — an update to one of them would
+        // then fail to invalidate the cached result.
+        string? shippableFilterJson = null;
+        if (fragmentTransport is not null
+            && plan.DepCollector is null
+            && plan.ExecutionFilter is { } filterAst
+            && FragmentFilterShippability.IsShippable(filterAst))
+            shippableFilterJson = NodeAstWireCodec.Serialize(filterAst);
+
+        // The session must exist before workers read tx.TransactionId concurrently; a no-op
+        // for eager, read-only, and already-started transactions.
+        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
+
+        using CancellationTokenSource cts = new();
+
+        var channels = new Channel<(ObjectIdValue rowId, QueryRow row, bool preFiltered)>[spans.Count];
+        var workers = new Task[spans.Count];
+
+        for (int i = 0; i < spans.Count; i++)
+        {
+            channels[i] = Channel.CreateBounded<(ObjectIdValue rowId, QueryRow row, bool preFiltered)>(
+                new BoundedChannelOptions(GatherSpanChannelCapacity) { SingleReader = true, SingleWriter = true });
+
+            PlacementSpan span = spans[i];
+
+            if (!GatherNode.TryParseRowIdBound(span.StartKey, out ObjectIdValue? fromRowId)
+                || !GatherNode.TryParseRowIdBound(span.EndKey, out ObjectIdValue? untilRowId))
+            {
+                // The planner validated the bounds; a malformed one here means the snapshot
+                // changed shape in a way parsing rejects. Fail closed — the consumer surfaces it.
+                channels[i].Writer.TryComplete(new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Placement span boundary is not a row-id key: " + (span.StartKey ?? span.EndKey)));
+                workers[i] = Task.CompletedTask;
+                continue;
+            }
+
+            bool remote = shippableFilterJson is not null
+                && !span.LeaderIsLocal
+                && span.LeaderEndpoint is not null;
+
+            workers[i] = remote
+                ? RunRemoteSpanAsync(channels[i].Writer, span, fromRowId, untilRowId, shippableFilterJson!)
+                : RunLocalSpanAsync(channels[i].Writer, fromRowId, untilRowId, afterRowId: null);
+        }
+
+        try
+        {
+            long emitted = 0;
+
+            for (int i = 0; i < spans.Count; i++)
+            {
+                await foreach ((ObjectIdValue rowId, QueryRow row, bool preFiltered) item in
+                    channels[i].Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
+                {
+                    yield return item;
+                    emitted++;
+
+                    if (maxRows is not null && emitted >= maxRows.Value)
+                        yield break;
+                }
+
+                await workers[i].ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            cts.Cancel();
+
+            foreach (Channel<(ObjectIdValue rowId, QueryRow row, bool preFiltered)> channel in channels)
+            {
+                while (channel.Reader.TryRead(out _)) { }
+            }
+
+            foreach (Task worker in workers)
+            {
+                try
+                {
+                    await worker.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Consumer is exiting; a worker fault was either already thrown from its
+                    // channel or belongs to an abandoned span.
+                }
+            }
+        }
+
+        async Task RunRemoteSpanAsync(
+            ChannelWriter<(ObjectIdValue rowId, QueryRow row, bool preFiltered)> writer,
+            PlacementSpan span,
+            ObjectIdValue? fromRowId,
+            ObjectIdValue? untilRowId,
+            string filterJson)
+        {
+            // Rows already delivered to the channel from this span; a mid-stream failure
+            // resumes locally AFTER this row, so nothing is duplicated or lost.
+            ObjectIdValue? lastEmitted = null;
+
+            try
+            {
+                QueryFragmentRequest request = new()
+                {
+                    FragmentId = Guid.NewGuid().ToString("n"),
+                    DatabaseName = plan.Database.Name,
+                    DatabaseId = plan.Database.Id,
+                    TableName = table.Name,
+                    TableId = table.Id,
+                    SchemaVersion = visibilityVersion,
+                    FromRowIdHex = fromRowId?.ToString(),
+                    UntilRowIdHex = untilRowId?.ToString(),
+                    ReadTsNode = readTs.N,
+                    ReadTsPhysical = readTs.L,
+                    ReadTsCounter = readTs.C,
+                    MaxRows = maxRows,
+                    FilterJson = filterJson,
+                    RequiredColumns = requiredColumns?.ToArray(),
+                };
+
+                RowEncoder.RowDecodeState decodeState = new()
+                {
+                    SlotBackedDecode = slotBackedDecode,
+                    BorrowedDecode = false,
+                };
+
+                await foreach (QueryFragmentRow fragmentRow in fragmentTransport!
+                    .ExecuteFragmentAsync(span.LeaderEndpoint!, request, cts.Token).ConfigureAwait(false))
+                {
+                    ObjectIdValue rowId = ObjectId.ToValue(fragmentRow.RowIdHex);
+
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema,
+                        txId,
+                        rowId,
+                        fragmentRow.Data,
+                        options,
+                        requiredColumns,
+                        visibilityVersion,
+                        decodeState).ConfigureAwait(false);
+
+                    await writer.WriteAsync((rowId, row, true), cts.Token).ConfigureAwait(false);
+                    lastEmitted = rowId;
+                }
+
+                writer.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                // Remote fragment failed (peer down, schema/id mismatch, stale placement).
+                // The span's data is still fully reachable through locator-routed reads, so
+                // resume the remainder locally — always correct, never duplicated (resume is
+                // exclusive of the last delivered row). Refresh placement for the next query.
+                Log.LogRemoteFragmentFellBackToLocal(logger, span.LeaderEndpoint!, ex.Message);
+                plan.Database.Kahuna.InvalidatePlacement(table.Store.RowKeySpace);
+
+                await RunLocalSpanAsync(writer, fromRowId, untilRowId, afterRowId: lastEmitted).ConfigureAwait(false);
+            }
+        }
+
+        async Task RunLocalSpanAsync(
+            ChannelWriter<(ObjectIdValue rowId, QueryRow row, bool preFiltered)> writer,
+            ObjectIdValue? fromRowId,
+            ObjectIdValue? untilRowId,
+            ObjectIdValue? afterRowId)
+        {
+            try
+            {
+                // Private decode-plan cache per worker; borrowed decode never crosses a channel.
+                RowEncoder.RowDecodeState decodeState = new()
+                {
+                    SlotBackedDecode = slotBackedDecode,
+                    BorrowedDecode = false,
+                };
+
+                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+                    plan.Ticket.TxnState,
+                    maxRows: maxRows,
+                    afterRowId: afterRowId,
+                    cancellationToken: cts.Token,
+                    untilRowId: untilRowId,
+                    fromRowId: fromRowId).ConfigureAwait(false))
+                {
+                    if (data.Length == 0)
+                        continue;
+
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema,
+                        txId,
+                        rowId,
+                        data,
+                        options,
+                        requiredColumns,
+                        visibilityVersion,
+                        decodeState).ConfigureAwait(false);
+
+                    await writer.WriteAsync((rowId, row, false), cts.Token).ConfigureAwait(false);
+                }
+
+                writer.Complete();
+            }
+            catch (OperationCanceledException)
+            {
+                writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                writer.TryComplete(ex);
             }
         }
     }

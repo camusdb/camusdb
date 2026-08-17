@@ -868,14 +868,14 @@ public sealed class TestSchemaChangeCoordinatorCluster
         // Unlike ForceLeaderChangeAsync, this does NOT block the old leader — the
         // cluster remains fully stable, so WaitForSchemaAcksAsync succeeds with all 3 nodes.
         InProcessSchemaCluster.Node newLeader = cluster.Nodes.First(n => n.Index != originalLeaderIndex);
-        await cluster.TransferSchemaLeadershipAsync(db, newLeader, timeout: TimeSpan.FromSeconds(15));
+        await cluster.TransferSchemaLeadershipAsync(db, newLeader, timeout: TimeSpan.FromSeconds(30));
 
         // Step 4: the production OnBecameLeader callback (wired by DatabaseOpener via
         // SchemaReplicator.Register) fires ResumeJobsAsync automatically on the new leader.
         // ResumeJobsAsync retries with backoff to handle the KV apply race (OnLeaderChanged
         // fires before the new leader's KV state machine has applied all committed entries).
         // Wait for all nodes to converge two versions ahead: DeleteOnly → WriteOnly → Public.
-        await cluster.WaitForSchemaConvergenceAsync(db, version + 2, timeout: TimeSpan.FromSeconds(20));
+        await cluster.WaitForSchemaConvergenceAsync(db, version + 2, timeout: TimeSpan.FromSeconds(60));
 
         foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
         {

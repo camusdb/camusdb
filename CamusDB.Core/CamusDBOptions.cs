@@ -420,6 +420,24 @@ public sealed record CamusDBOptions
     public bool KeyRangeShardingEnabled { get; init; }
 
     /// <summary>
+    /// Enables planner fragmentation of eligible queries into per-span scan fragments executed
+    /// through a <c>Gather</c> exchange. Eligible today: snapshot/read-only single-table full
+    /// primary-row scans over a key-range-sharded table whose placement reports more than one
+    /// span; everything else plans and executes exactly as with the flag off. Fragmented plans
+    /// bypass the plan cache (their shape depends on live placement, which the cache key does
+    /// not carry).
+    ///
+    /// <para>Cluster scope: nodes must agree, or a statement planned on one node would assume
+    /// an execution model a peer refuses. Restart-class: the planner and executor read it
+    /// through the engine's constructed options; per-statement flips would also make the
+    /// plan-cache bypass decision unstable.</para>
+    ///
+    /// Default off — plans and results are byte-identical to the non-distributed engine.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public bool DistributedQueryExecutionEnabled { get; init; }
+
+    /// <summary>
     /// Number of Raft data partitions active in this cluster. Populated from the
     /// <c>initial_partitions</c> config key at startup. Used by <see cref="PlacementReader"/>
     /// to approximate the remote-data fraction for <c>NetworkFactor</c> cost estimates.

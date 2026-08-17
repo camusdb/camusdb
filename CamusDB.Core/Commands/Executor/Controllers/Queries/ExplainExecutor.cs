@@ -144,6 +144,24 @@ internal sealed class ExplainExecutor
             });
         }
 
+        // Emit a distribution row when distributed execution is enabled, so eligibility is
+        // observable: either the gather that was planned or the reason the plan stayed local.
+        if (plan.Database.Options.DistributedQueryExecutionEnabled)
+        {
+            string distributionDetail = plan.Root is not null && ContainsGather(plan.Root)
+                ? "distributed=yes"
+                : $"distributed=no ({plan.DistributionSkipReason ?? "not eligible"})";
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "stage",          new ColumnValue(ColumnType.String, stage) },
+                { "node",           new ColumnValue(ColumnType.String, "distribution") },
+                { "detail",         new ColumnValue(ColumnType.String, distributionDetail) },
+                { "estimated_rows", ColumnValue.Null },
+                { "estimated_cost", ColumnValue.Null },
+            });
+        }
+
         // Emit a cache-eligibility row when the query carries a {cache=...} hint, so EXPLAIN
         // surfaces whether the result will be cached — and, when a hint is present but ignored
         // (a join, or the cache disabled), why. This is a static plan property with no side
@@ -302,6 +320,17 @@ internal sealed class ExplainExecutor
                 { "kv_scan_entries", ColumnValue.Null },
             });
         }
+    }
+
+    private static bool ContainsGather(PhysicalPlanNode node)
+    {
+        for (PhysicalPlanNode? current = node; current is not null; current = current.Input)
+        {
+            if (current is GatherNode)
+                return true;
+        }
+
+        return false;
     }
 
     private async Task<QueryPlan> BuildPlanAsync(

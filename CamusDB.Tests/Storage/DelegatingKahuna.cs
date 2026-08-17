@@ -141,6 +141,13 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => inner.BootstrapFromPitrBackupAsync(backupDir, leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
         public virtual void RegisterKeyRange(string keySpace) => inner.RegisterKeyRange(keySpace);
         public virtual Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RegisterKeyRangeAsync(keySpace, cancellationToken);
+        public virtual Task<KahunaRegisterKeyRangeResponse> RegisterKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RegisterKeyRangeWithOutcomeAsync(keySpace, cancellationToken);
+        public virtual Task<KahunaRemoveKeyRangeResponse> RemoveKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RemoveKeyRangeWithOutcomeAsync(keySpace, cancellationToken);
+        public virtual Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => inner.SplitRangeAtKeyWithOutcomeAsync(keySpace, splitKey, cancellationToken);
+        public virtual Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => inner.MergeRangesWithOutcomeAsync(cancellationToken);
+        public virtual KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => inner.GetRangeMap(keySpace);
+        public virtual Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => inner.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
+        public virtual Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, CancellationToken cancellationToken) => inner.GetRangeTransactionStateLocal(partitionId, startKey, endKey, cancellationToken);
         public virtual Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RemoveKeyRangeAsync(keySpace, cancellationToken);
         public virtual Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => inner.TriggerAutoSplitAsync(ct);
         public virtual Task<int> TriggerAutoMergeAsync(CancellationToken ct = default) => inner.TriggerAutoMergeAsync(ct);

@@ -8,6 +8,8 @@
 
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Auth;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
@@ -238,7 +240,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         bool isClusterMode = false,
         IQueryResultCache? cache = null,
         CamusDBOptionsHolder? optionsHolder = null,
-        ClusterSettingsService? clusterSettings = null)
+        ClusterSettingsService? clusterSettings = null,
+        IQueryFragmentTransport? fragmentTransport = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
@@ -291,7 +294,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowUpdater = new(logger);
         tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);
-        queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna);
+        queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);
         sqlExecutor = new();
         schemaQuerier = new(catalogs, logger, options);
         // The owner resolver is what turns a recorded owner into enforceable definer's rights. Null
@@ -1626,6 +1629,67 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<DatabaseDescriptor> OpenDatabase(string database, bool recoveryMode = false)
     {
         return await databaseOpener.Open(database, recoveryMode).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Executes a peer coordinator's span-scan fragment on this node: verifies the request
+    /// resolves to exactly the objects the coordinator planned against (database and table by
+    /// immutable id, schema by version — any mismatch fails closed so the coordinator falls
+    /// back to a local scan), then runs the bounded snapshot scan with the residual filter
+    /// evaluated here, yielding surviving rows' raw bytes. Read path only: a zero-identity
+    /// snapshot transaction at the coordinator's timestamp, no locks, no session.
+    /// </summary>
+    public async IAsyncEnumerable<QueryFragmentRow> ExecuteQueryFragment(
+        QueryFragmentRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (request.FormatVersion != QueryFragmentRequest.CurrentFormatVersion)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Unsupported query-fragment format version {request.FormatVersion} (this node speaks {QueryFragmentRequest.CurrentFormatVersion})");
+
+        if (string.IsNullOrEmpty(request.FilterJson))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A query fragment must carry a residual filter; unfiltered spans are scanned by the coordinator");
+
+        DatabaseDescriptor database = await OpenDatabase(request.DatabaseName).ConfigureAwait(false);
+
+        if (!string.Equals(database.Id, request.DatabaseId, StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Query fragment database id mismatch: resolved '{database.Id}', coordinator planned '{request.DatabaseId}'");
+
+        TableDescriptor table = await database.TableDescriptors[request.TableName].ConfigureAwait(false);
+
+        if (!string.Equals(table.Id, request.TableId, StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Query fragment table id mismatch: resolved '{table.Id}', coordinator planned '{request.TableId}'");
+
+        if (table.Schema.Version != request.SchemaVersion)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Query fragment schema version mismatch: this node has {table.Schema.Version}, coordinator planned {request.SchemaVersion}");
+
+        NodeAst filter = NodeAstWireCodec.Deserialize(request.FilterJson);
+
+        ObjectIdValue? fromRowId = request.FromRowIdHex is null ? null : ObjectId.ToValue(request.FromRowIdHex);
+        ObjectIdValue? untilRowId = request.UntilRowIdHex is null ? null : ObjectId.ToValue(request.UntilRowIdHex);
+
+        KvTransaction snapshotTx = KvTransaction.CreateSnapshotReadOnly(
+            new HLCTimestamp(request.ReadTsNode, request.ReadTsPhysical, request.ReadTsCounter));
+
+        IReadOnlySet<string>? requiredColumns = request.RequiredColumns is { Length: > 0 }
+            ? new HashSet<string>(request.RequiredColumns, StringComparer.Ordinal)
+            : null;
+
+        await foreach (QueryFragmentRow row in queryExecutor.ExecuteFragmentScan(
+            database, table, filter, fromRowId, untilRowId, request.MaxRows,
+            request.SchemaVersion, requiredColumns, snapshotTx, cancellationToken).ConfigureAwait(false))
+        {
+            yield return row;
+        }
     }
 
     public async Task CloseDatabase(CloseDatabaseTicket ticket)

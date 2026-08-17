@@ -514,6 +514,12 @@ public class ConfigDefinition
     /// </summary>
     public bool KeyRangeSharding { get; set; }
 
+    /// <summary>
+    /// Planner fragmentation of eligible read-only scans into per-span Gather fragments.
+    /// Default false. Maps to <c>CamusDBOptions.DistributedQueryExecutionEnabled</c>.
+    /// </summary>
+    public bool DistributedQueryExecution { get; set; }
+
     /// <summary>Max UTF-16 length for any identifier (db, table, column, index). &lt;= 0 disables. Default 64.</summary>
     public int MaxIdentifierLength { get; set; } = 64;
 

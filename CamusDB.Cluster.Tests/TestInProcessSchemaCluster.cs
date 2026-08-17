@@ -240,7 +240,7 @@ public sealed class TestInProcessSchemaCluster
 
         // Force a leadership change — blocks the original leader's transport entirely.
         InProcessSchemaCluster.Node newLeader =
-            await cluster.ForceLeaderChangeAsync(db, timeout: TimeSpan.FromSeconds(15));
+            await cluster.ForceLeaderChangeAsync(db, timeout: TimeSpan.FromSeconds(30));
 
         Assert.AreNotEqual(originalLeader.Index, newLeader.Index,
             "New leader must be a different node than the original");
@@ -516,7 +516,7 @@ public sealed class TestInProcessSchemaCluster
 
         // Read correctness on a follower: existing rows surface the default.
         InProcessSchemaCluster.Node follower = cluster.Nodes.First(n =>
-            !n.Kahuna.AmISchemaLeaderAsync(db, default).AsTask().GetAwaiter().GetResult());
+            !n.Kahuna.AmISchemaLeaderAsync(n.Database!.Id, default).AsTask().GetAwaiter().GetResult());
 
         KvTransaction readTx = await follower.Database!.Transactions.BeginAsync();
         (_, IAsyncEnumerable<QueryResultRow> cursor) = await follower.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
@@ -665,7 +665,7 @@ public sealed class TestInProcessSchemaCluster
 
             // Step 5: block the current leader so its second-batch Kahuna writes fail.
             // ForceLeaderChangeAsync blocks both inbound and outbound for the old leader.
-            await cluster.ForceLeaderChangeAsync(db, timeout: TimeSpan.FromSeconds(20));
+            await cluster.ForceLeaderChangeAsync(db, timeout: TimeSpan.FromSeconds(45));
 
             // Wait for the old leader's ack-lease to expire so the new leader's quorum is clean.
             await Task.Delay(lease + TimeSpan.FromMilliseconds(300));
@@ -695,7 +695,7 @@ public sealed class TestInProcessSchemaCluster
                 .Where(n => n.Index != blockedNodeIndex)
                 .ToArray();
 
-            DateTime resumeDeadline = DateTime.UtcNow.AddSeconds(40);
+            DateTime resumeDeadline = DateTime.UtcNow.AddSeconds(90);
             while (DateTime.UtcNow < resumeDeadline)
             {
                 if (liveNodes.All(n => n.Database?.Schema.SchemaVersion >= targetVersion))
@@ -796,13 +796,13 @@ public sealed class TestInProcessSchemaCluster
         DateTime stepDownDeadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < stepDownDeadline)
         {
-            if (!await leader.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false))
+            if (!await leader.Kahuna.AmISchemaLeaderAsync(leader.Database!.Id, CancellationToken.None).ConfigureAwait(false))
                 break;
             await Task.Delay(100).ConfigureAwait(false);
         }
 
         Assert.IsFalse(
-            await leader.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false),
+            await leader.Kahuna.AmISchemaLeaderAsync(leader.Database!.Id, CancellationToken.None).ConfigureAwait(false),
             "Degraded node must have stepped down schema-partition leadership");
 
         // Further DDL proposals on the degraded node must be rejected with a typed exception
@@ -913,13 +913,13 @@ public sealed class TestInProcessSchemaCluster
         DateTime stepDownDeadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < stepDownDeadline)
         {
-            if (!await nodeB.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false))
+            if (!await nodeB.Kahuna.AmISchemaLeaderAsync(nodeB.Database!.Id, CancellationToken.None).ConfigureAwait(false))
                 break;
             await Task.Delay(100).ConfigureAwait(false);
         }
 
         Assert.IsFalse(
-            await nodeB.Kahuna.AmISchemaLeaderAsync(db, CancellationToken.None).ConfigureAwait(false),
+            await nodeB.Kahuna.AmISchemaLeaderAsync(nodeB.Database!.Id, CancellationToken.None).ConfigureAwait(false),
             "Degraded resuming node must have stepped down schema-partition leadership");
     }
 

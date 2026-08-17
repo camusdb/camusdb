@@ -65,6 +65,78 @@ public sealed class QueryPlanner
         return node;
     }
 
+    /// <summary>
+    /// Wraps a full primary-row scan in a <see cref="GatherNode"/> when the statement and the
+    /// table's live placement make span-fragmented execution both safe and useful. Runs on
+    /// every plan build — including plan-cache replays, which rebuild the scan node fresh — so
+    /// the gather always reflects current placement and nothing placement-shaped is ever
+    /// cached.
+    ///
+    /// Eligibility, all required:
+    /// distribution enabled, key-range sharding on, cluster mode (a standalone node has one
+    /// span by construction), a plain primary-row table scan (index scans, forced-index scans
+    /// and point lookups keep today's plan), a transaction that neither folds reads (an
+    /// optimistic read-set must be built by one session stream) nor takes exclusive predicate
+    /// locks (the DML write path), and a placement with more than one span whose interior
+    /// boundaries all parse as row ids. Anything else returns the scan unchanged — with the
+    /// flag off the plan is byte-identical to the non-distributed engine.
+    /// </summary>
+    private PhysicalPlanNode TryWrapScanInGather(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        QueryPlan plan,
+        PhysicalPlanNode scanNode)
+    {
+        if (!_options.DistributedQueryExecutionEnabled)
+            return scanNode;
+
+        QueryTicket ticket = plan.Ticket;
+        string? reason = null;
+
+        if (!_options.KeyRangeShardingEnabled)
+            reason = "key-range sharding is off";
+        else if (scanNode is not TableScanNode { Source: TableScanSource.PrimaryRows })
+            reason = "not a primary-row full scan";
+        else if (!database.Kahuna.IsClusterMode)
+            reason = "standalone node";
+        else if (ticket.TxnState.FoldReads)
+            reason = "transaction folds reads (optimistic read-set needs one session stream)";
+        else if (ticket.ExclusivePredicateLocks)
+            reason = "exclusive predicate locks (DML write path)";
+
+        if (reason is not null)
+        {
+            plan.DistributionSkipReason = reason;
+            return scanNode;
+        }
+
+        Storage.Kv.TablePlacement placement = database.Kahuna.GetPlacement(table.Store.RowKeySpace);
+
+        if (!placement.IsKeyRange || placement.Spans.Count <= 1)
+        {
+            plan.DistributionSkipReason = "placement has a single span";
+            return scanNode;
+        }
+
+        foreach (Storage.Kv.PlacementSpan span in placement.Spans)
+        {
+            if (!GatherNode.TryParseRowIdBound(span.StartKey, out _)
+                || !GatherNode.TryParseRowIdBound(span.EndKey, out _))
+            {
+                plan.DistributionSkipReason = "placement span boundary is not a row-id key";
+                return scanNode;
+            }
+        }
+
+        return new GatherNode(placement)
+        {
+            Input = scanNode,
+            // Ordered concatenation of contiguous ascending spans preserves whatever ordering
+            // the underlying scan guarantees.
+            OutputOrdering = scanNode.OutputOrdering,
+        };
+    }
+
     public QueryPlan GetPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
     {
         QueryPlan plan = new(database, table, ticket);
@@ -228,7 +300,7 @@ public sealed class QueryPlanner
             }
         }
 
-        PhysicalPlanNode root = scanNode;
+        PhysicalPlanNode root = TryWrapScanInGather(database, table, plan, scanNode);
 
         if (plan.ExecutionFilter is not null)
             root = new FilterNode(plan.ExecutionFilter, root);

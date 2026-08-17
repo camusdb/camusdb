@@ -19,6 +19,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -81,7 +82,7 @@ internal sealed class QueryExecutor
     /// </summary>
     private readonly IKahuna? _kahuna;
 
-    public QueryExecutor(ILogger<ICamusDB> logger, CamusDBOptions options, StatisticsManager? stats = null, IKahuna? kahuna = null)
+    public QueryExecutor(ILogger<ICamusDB> logger, CamusDBOptions options, StatisticsManager? stats = null, IKahuna? kahuna = null, IQueryFragmentTransport? fragmentTransport = null)
     {
         this.logger = logger;
         this.options = options;
@@ -90,7 +91,7 @@ internal sealed class QueryExecutor
         queryPlanner = new QueryPlanner(stats, PlanCache, options);
         queryAggregator = new QueryAggregator(stats);
         queryJoinExecutor = new QueryJoinExecutor(this, options, stats, PlanCache);
-        this.queryScanner = new(logger);
+        this.queryScanner = new(logger, fragmentTransport);
     }
 
     /// <param name="metaOut">
@@ -493,6 +494,23 @@ internal sealed class QueryExecutor
 
         switch (node)
         {
+            case GatherNode gatherNode:
+                if (collectStats)
+                {
+                    // Per-node runtime stats are not safe to mutate from concurrent span
+                    // workers; EXPLAIN ANALYZE executes the input unbounded instead — the
+                    // spans partition the keyspace, so the row stream is identical.
+                    if (gatherNode.Input is null)
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Gather node has no input");
+
+                    cursor = ExecutePlanNode(plan, gatherNode.Input, collectStats);
+                    break;
+                }
+
+                Trace(QueryPlanStepType.FullScanFromTableIndex);
+                cursor = queryScanner.ScanTableSpansGather(plan, queryFilterer, gatherNode);
+                break;
+
             case TableScanNode tableScan when tableScan.Source == TableScanSource.PrimaryRows:
                 Trace(QueryPlanStepType.FullScanFromTableIndex);
                 cursor = queryScanner.ScanUsingTableIndex(plan, queryFilterer);
@@ -582,6 +600,70 @@ internal sealed class QueryExecutor
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Data cursor is null");
 
             return input;
+        }
+    }
+
+    /// <summary>
+    /// Executes the scan half of a peer's span fragment: a bounded primary-row scan at the
+    /// fragment's snapshot timestamp with the residual filter evaluated here, yielding the raw
+    /// bytes of surviving rows for the coordinator to re-decode. Runs as a zero-identity
+    /// snapshot read — no Kahuna session, no locks (the coordinator holds the range lock for
+    /// the whole keyspace) — so nothing here mutates transaction state. Borrowed decode is the
+    /// right choice for once-through filter-and-discard rows; the shipped bytes are a copy.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryFragmentRow> ExecuteFragmentScan(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        NodeAst filter,
+        ObjectIdValue? fromRowId,
+        ObjectIdValue? untilRowId,
+        long? maxRows,
+        int schemaVersion,
+        IReadOnlySet<string>? requiredColumns,
+        KvTransaction snapshotTx,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        QueryTicket ticket = new(
+            txnState: snapshotTx,
+            databaseName: database.Name,
+            tableName: table.Name,
+            index: null,
+            projection: null,
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null);
+
+        RowEncoder.RowDecodeState decodeState = new()
+        {
+            SlotBackedDecode = true,
+            BorrowedDecode = true,
+        };
+
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+            snapshotTx,
+            maxRows: maxRows,
+            cancellationToken: cancellationToken,
+            untilRowId: untilRowId,
+            fromRowId: fromRowId).ConfigureAwait(false))
+        {
+            if (data.Length == 0)
+                continue;
+
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                table.Schema,
+                snapshotTx.TransactionId,
+                rowId,
+                data,
+                database.Options,
+                requiredColumns,
+                schemaVersion,
+                decodeState).ConfigureAwait(false);
+
+            if (await queryFilterer.MeetWhereAsync(filter, row, ticket, database).ConfigureAwait(false))
+                yield return new QueryFragmentRow(rowId.ToString(), data.ToArray());
         }
     }
 

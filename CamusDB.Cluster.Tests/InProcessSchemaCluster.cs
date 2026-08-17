@@ -51,6 +51,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     public Node[] Nodes { get; }
 
+    /// <summary>The in-process fragment channel shared by every node; set by StartAsync.</summary>
+    internal InProcessFragmentTransport? FragmentTransport { get; set; }
+
     public static async Task<InProcessSchemaCluster> StartAsync(
         int nodeCount = 3,
         int partitions = 1,
@@ -149,6 +152,11 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             foreach (EmbeddedKahuna kahuna in kahunaNodes)
                 kahuna.SetSchemaAckSender(ackRelay);
 
+            // In-process fragment channel: every node can execute span fragments on its peers.
+            // Wired unconditionally — it only engages when a plan actually fragments (the
+            // distribution flag is off in most fixtures, so this is inert for them).
+            InProcessFragmentTransport fragmentTransport = new();
+
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
                 {
@@ -160,7 +168,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                         logger, effective,
                         sharedNode: kahuna,
                         schemaDdlForwarder: forwarder,
-                        isClusterMode: true
+                        isClusterMode: true,
+                        fragmentTransport: fragmentTransport
                     );
 
                     return new Node(index, kahuna, executor);
@@ -168,9 +177,69 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 .ToArray();
 
             InProcessSchemaCluster cluster = new(nodes, faultComm);
+            cluster.FragmentTransport = fragmentTransport;
+            fragmentTransport.Cluster = cluster;
             if (forwarder is not null)
                 forwarder.Cluster = cluster;
             return cluster;
+        }
+    }
+
+    /// <summary>
+    /// In-process <see cref="IQueryFragmentTransport"/>: resolves the target node by its Raft
+    /// endpoint and executes the fragment on that node's <see cref="CommandExecutor"/>. Every
+    /// request and every returned row is deliberately round-tripped through the JSON wire
+    /// encoding, so cluster tests exercise the same serialization the HTTP transport uses —
+    /// an in-process shortcut that skipped the codec would leave it untested.
+    /// Records executed requests and supports injecting failures for fallback coverage.
+    /// </summary>
+    internal sealed class InProcessFragmentTransport : IQueryFragmentTransport
+    {
+        internal InProcessSchemaCluster? Cluster { get; set; }
+
+        private readonly List<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest> executed = new();
+
+        private int failRemaining;
+
+        internal int ExecutedCount { get { lock (executed) return executed.Count; } }
+
+        internal void ResetExecuted() { lock (executed) executed.Clear(); }
+
+        /// <summary>The next <paramref name="count"/> fragment executions throw before any row.</summary>
+        internal void FailNextFragments(int count) => failRemaining = count;
+
+        public async IAsyncEnumerable<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow> ExecuteFragmentAsync(
+            string targetRaftEndpoint,
+            CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest request,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            InProcessSchemaCluster cluster = Cluster
+                ?? throw new InvalidOperationException("Fragment transport used before the cluster was wired");
+
+            Node? target = cluster.Nodes.FirstOrDefault(
+                n => n.Kahuna.Raft.GetLocalEndpoint() == targetRaftEndpoint)
+                ?? throw new InvalidOperationException($"No cluster node has endpoint '{targetRaftEndpoint}'");
+
+            // Wire round-trip on purpose (see class doc).
+            string requestJson = System.Text.Json.JsonSerializer.Serialize(request);
+            CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest decoded =
+                System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest>(requestJson)!;
+
+            lock (executed)
+                executed.Add(decoded);
+
+            if (failRemaining > 0)
+            {
+                failRemaining--;
+                throw new System.IO.IOException("Injected fragment transport failure");
+            }
+
+            await foreach (CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row in
+                target.Executor.ExecuteQueryFragment(decoded, cancellationToken).ConfigureAwait(false))
+            {
+                string rowJson = System.Text.Json.JsonSerializer.Serialize(row);
+                yield return System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow>(rowJson)!;
+            }
         }
     }
 
@@ -270,9 +339,29 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The key the engine actually partitions schema state by: the database's opaque Id once
+    /// the database is open on any node, else the user-facing name. Every schema-leader check
+    /// in this harness must use this — the executor keys <c>AmISchemaLeaderAsync</c> by
+    /// <c>database.Id</c>, and the name generally hashes to a different partition. On old
+    /// Kommander versions every partition happened to share one leader, which masked
+    /// name-keyed lookups; leader balancing spreads partition leaderships and unmasks them.
+    /// </summary>
+    private string SchemaKeyFor(string databaseName)
+    {
+        foreach (Node node in Nodes)
+        {
+            if (node.Database is { } db && string.Equals(db.Name, databaseName, StringComparison.Ordinal))
+                return db.Id;
+        }
+
+        return databaseName;
+    }
+
     public async Task<Node> WaitForSchemaLeaderNodeAsync(string databaseName, TimeSpan? timeout = null)
     {
-        int partitionId = Nodes[0].Kahuna.SchemaLogPartition(databaseName);
+        string schemaKey = SchemaKeyFor(databaseName);
+        int partitionId = Nodes[0].Kahuna.SchemaLogPartition(schemaKey);
         await Nodes[0].Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None).ConfigureAwait(false);
 
         // Best-effort settle: let the schema-partition leader hold continuously before we resolve
@@ -296,7 +385,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         {
             foreach (Node node in Nodes)
             {
-                if (await node.Kahuna.AmISchemaLeaderAsync(databaseName, CancellationToken.None).ConfigureAwait(false))
+                if (await node.Kahuna.AmISchemaLeaderAsync(schemaKey, CancellationToken.None).ConfigureAwait(false))
                     return node;
             }
 
@@ -457,6 +546,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         TimeSpan? timeout = null)
     {
         TimeSpan searchTimeout = timeout ?? TimeSpan.FromSeconds(15);
+        string schemaKey = SchemaKeyFor(databaseName);
 
         Node currentLeader = await WaitForSchemaLeaderNodeAsync(databaseName, searchTimeout).ConfigureAwait(false);
         string targetEndpoint = targetNode.Kahuna.Raft.GetLocalEndpoint();
@@ -464,7 +554,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         if (currentLeader.Index == targetNode.Index)
             return; // already there
 
-        await currentLeader.Kahuna.TransferSchemaLeadershipAsync(databaseName, targetEndpoint, CancellationToken.None)
+        await currentLeader.Kahuna.TransferSchemaLeadershipAsync(schemaKey, targetEndpoint, CancellationToken.None)
             .ConfigureAwait(false);
 
         // Wait until the target node has won the transfer.
@@ -474,7 +564,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(200));
             try
             {
-                if (await targetNode.Kahuna.AmISchemaLeaderAsync(databaseName, cts.Token).ConfigureAwait(false))
+                if (await targetNode.Kahuna.AmISchemaLeaderAsync(schemaKey, cts.Token).ConfigureAwait(false))
                     return;
             }
             catch (OperationCanceledException) { }
@@ -515,7 +605,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(200));
                 try
                 {
-                    if (await node.Kahuna.AmISchemaLeaderAsync(databaseName, cts.Token).ConfigureAwait(false))
+                    if (await node.Kahuna.AmISchemaLeaderAsync(SchemaKeyFor(databaseName), cts.Token).ConfigureAwait(false))
                         return node;
                 }
                 catch (OperationCanceledException) { }

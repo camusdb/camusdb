@@ -45,6 +45,14 @@ public sealed class QueryPlan
     /// <summary>Centralized predicate analysis for the query WHERE clause.</summary>
     public PredicateAnalysis PredicateAnalysis { get; internal set; } = PredicateAnalysis.Empty;
 
+    /// <summary>
+    /// Why this plan was NOT fragmented, when distributed execution is enabled but the
+    /// statement or placement disqualified it. Null when the plan fragmented (a
+    /// <see cref="Plans.GatherNode"/> is in the tree) or when the feature is off entirely.
+    /// Surfaced by EXPLAIN so eligibility is observable rather than guessed.
+    /// </summary>
+    public string? DistributionSkipReason { get; internal set; }
+
     /// <summary>Row filter applied during scan execution after index selection.</summary>
     public NodeAst? ExecutionFilter { get; internal set; }
 

@@ -103,6 +103,7 @@ public static class PlanRenderer
             MergeJoinNode n => RenderMergeJoin(n),
             DerivedTableScanNode n => RenderDerivedTableScan(n),
             SemiJoinNode n => RenderSemiJoin(n),
+            GatherNode n => $"gather(spans: {n.Placement.Spans.Count}, remote_leader_fraction: {n.Placement.RemoteLeaderFraction.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)})",
             _ => node.GetType().Name,
         };
 

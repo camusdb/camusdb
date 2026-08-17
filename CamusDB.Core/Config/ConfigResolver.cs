@@ -263,6 +263,7 @@ public static class ConfigResolver
         LockWaitDeadlineMs = config.LockWaitDeadlineMs,
 
         KeyRangeShardingEnabled = keyRangeSharding,
+        DistributedQueryExecutionEnabled = config.DistributedQueryExecution,
         ClusterPartitionCount = config.InitialPartitions,
         GrpcBatchMaxInFlight = config.GrpcBatchMaxInFlight,
         CostBasedAccessPathEnabled = config.CostBasedAccessPathEnabled,

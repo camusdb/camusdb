@@ -66,6 +66,13 @@ internal static class QueryPlanStepAdapter
                 // Row filtering uses <see cref="QueryPlan.ExecutionFilter"/> during scan execution.
                 return;
 
+            case GatherNode:
+                // Transparent for the legacy step list: the gather executes the same scan
+                // subtree the steps describe (per span), so step-list consumers — the
+                // borrowed-decode check and the planner's scan-limit/index-only pattern
+                // matches — see the scan exactly as they would without fragmentation.
+                return;
+
             case NestedLoopJoinNode:
                 return;
 

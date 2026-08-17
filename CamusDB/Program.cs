@@ -262,74 +262,39 @@ builder.Services.AddRazorPages();
 
 if (config.IsClusterMode)
 {
+    // One raft-endpoint → HTTP base-URI resolver shared by every node-to-node channel
+    // (schema DDL, cluster settings, query fragments). See PeerEndpointResolver for the
+    // http_peers/uniform-port semantics; it used to live inline here, duplicated per channel.
+    builder.Services.AddSingleton<CamusDB.Core.Config.PeerEndpointResolver>(services =>
+        new CamusDB.Core.Config.PeerEndpointResolver(
+            config.Peers, config.HttpPeers, config.HttpPort,
+            services.GetRequiredService<ILogger<ICamusDB>>()));
+
     builder.Services.AddSingleton<ISchemaDdlForwarder>(services =>
     {
-        // Build a raft-endpoint → HTTP base-URI map from the (Peers, HttpPeers)
-        // config pair.  When http_peers is populated and its count matches peers,
-        // each entry gives the exact HTTP address for that node regardless of port
-        // or host topology.  When http_peers is absent the resolver falls back to
-        // extracting the host from the raft endpoint and appending this node's
-        // HTTP port, which is correct for uniform-port clusters.
-        Dictionary<string, Uri> peerEndpointMap = [];
-        if (config.HttpPeers.Count == config.Peers.Count && config.HttpPeers.Count > 0)
-        {
-            for (int i = 0; i < config.Peers.Count; i++)
-                peerEndpointMap[config.Peers[i]] = new Uri($"http://{config.HttpPeers[i]}");
-        }
-
-        int httpPort = config.HttpPort;
-        ILogger<ICamusDB> resolverLogger = services.GetRequiredService<ILogger<ICamusDB>>();
-        Func<string, Uri> resolver = raftEndpoint =>
-        {
-            if (peerEndpointMap.TryGetValue(raftEndpoint, out Uri? mapped))
-                return mapped;
-
-            // Uniform-port fallback: same host as the raft endpoint, this node's HTTP port.
-            // This fires when the map is populated but the key didn't match — either because
-            // http_peers was omitted (expected) or because a peers entry doesn't byte-match
-            // the format Raft reports for that node (misconfiguration).  Log at Warning so
-            // operators can catch the latter case; a silent miss would route DDL to the
-            // wrong address.
-            if (peerEndpointMap.Count > 0)
-                resolverLogger.LogWarning(
-                    "Raft endpoint '{RaftEndpoint}' not found in http_peers map (keys: {Keys}); " +
-                    "falling back to uniform-port heuristic. If this is unexpected, verify that " +
-                    "each peers entry byte-matches the format Raft reports (host:raftPort).",
-                    raftEndpoint,
-                    string.Join(", ", peerEndpointMap.Keys));
-
-            string host = raftEndpoint.Contains(':') ? raftEndpoint.Split(':')[0] : raftEndpoint;
-            return new Uri($"http://{host}:{httpPort}");
-        };
-        return new HttpSchemaDdlForwarder(new HttpClient(), resolver, resolverLogger);
+        CamusDB.Core.Config.PeerEndpointResolver resolver =
+            services.GetRequiredService<CamusDB.Core.Config.PeerEndpointResolver>();
+        return new HttpSchemaDdlForwarder(
+            new HttpClient(), resolver.Resolve, services.GetRequiredService<ILogger<ICamusDB>>());
     });
 
-    // Same peer-endpoint resolution as the DDL forwarder above, for forwarding a cluster-setting
-    // change from a non-leader node to the settings-partition leader. Unlike the DDL forwarder it
-    // attaches the node secret, without which an auth-enabled receiving node refuses /internal/*.
+    // Unlike the DDL forwarder, the settings forwarder attaches the node secret, without
+    // which an auth-enabled receiving node refuses /internal/*.
     builder.Services.AddSingleton<CamusDB.Core.Config.IClusterSettingsForwarder>(services =>
     {
-        Dictionary<string, Uri> peerEndpointMap = [];
-        if (config.HttpPeers.Count == config.Peers.Count && config.HttpPeers.Count > 0)
-        {
-            for (int i = 0; i < config.Peers.Count; i++)
-                peerEndpointMap[config.Peers[i]] = new Uri($"http://{config.HttpPeers[i]}");
-        }
-
-        int httpPort = config.HttpPort;
-        ILogger<ICamusDB> resolverLogger = services.GetRequiredService<ILogger<ICamusDB>>();
-        Func<string, Uri> resolver = raftEndpoint =>
-        {
-            if (peerEndpointMap.TryGetValue(raftEndpoint, out Uri? mapped))
-                return mapped;
-
-            string host = raftEndpoint.Contains(':') ? raftEndpoint.Split(':')[0] : raftEndpoint;
-            return new Uri($"http://{host}:{httpPort}");
-        };
-
+        CamusDB.Core.Config.PeerEndpointResolver resolver =
+            services.GetRequiredService<CamusDB.Core.Config.PeerEndpointResolver>();
         return new HttpClusterSettingsForwarder(
-            new HttpClient(), resolver, camusOptions.NodeSecret, resolverLogger);
+            new HttpClient(), resolver.Resolve, camusOptions.NodeSecret,
+            services.GetRequiredService<ILogger<ICamusDB>>());
     });
+
+    // Query fragment channel: executes eligible span scans on the span's leader node.
+    builder.Services.AddSingleton<IQueryFragmentTransport>(services =>
+        new HttpQueryFragmentTransport(
+            new HttpClient(),
+            services.GetRequiredService<CamusDB.Core.Config.PeerEndpointResolver>(),
+            camusOptions.NodeSecret));
 
     builder.Services.AddSingleton<CommandExecutor>(services =>
         new CommandExecutor(
@@ -342,7 +307,8 @@ if (config.IsClusterMode)
             isClusterMode: true,
             cache: queryResultCache,
             optionsHolder: services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>(),
-            clusterSettings: services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>()
+            clusterSettings: services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>(),
+            fragmentTransport: services.GetRequiredService<IQueryFragmentTransport>()
         ));
 }
 else
