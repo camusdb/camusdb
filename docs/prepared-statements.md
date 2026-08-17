@@ -73,7 +73,9 @@ misspelling should not quietly become a wrong answer.
 
 ## What can be prepared
 
-`SELECT`, `INSERT`, `UPDATE`, `DELETE`, and the `SHOW …` statements.
+`SELECT`, `INSERT`, `UPDATE`, `DELETE`, and the `SHOW …` statements — every `SHOW` the grammar has,
+including the node-scoped ones (`SHOW ENGINE STATS`, `SHOW VARIABLES`, `SHOW CLUSTER SETTINGS`) that
+run against no database at all.
 
 Schema and database/user administration cannot be prepared: those statements are one-shot, several
 return no database descriptor, and nothing about them benefits from a handle. `/execute-sql-ddl` and

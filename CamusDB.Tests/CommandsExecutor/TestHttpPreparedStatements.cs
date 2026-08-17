@@ -25,6 +25,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsValidator;
+using CamusDB.Core.SQLParser;
 using CamusDB.App.Controllers;
 using CamusDB.App.Models;
 using CamusDB.App.Services;
@@ -147,6 +148,45 @@ internal sealed class TestHttpPreparedStatements : BaseTest
 
         Assert.That(response.Status, Is.EqualTo("failed"));
         Assert.That(response.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
+    }
+
+    /// <summary>
+    /// Every <c>SHOW</c> the grammar has must be preparable. The driver decides what to register on a
+    /// bare <c>SHOW</c> prefix, so a node type missing from the allow-list is not a refusal a client
+    /// can act on — it is a wasted registration round trip plus a warn-level log line per statement,
+    /// every time a new node comes up. Enumerating the grammar rather than listing the types keeps a
+    /// <c>SHOW</c> added later from reintroducing the gap silently.
+    /// </summary>
+    [Test]
+    public void EveryShowStatementIsPreparable()
+    {
+        string[] missing = Enum.GetValues<NodeType>()
+            .Where(static type => type.ToString().StartsWith("Show", StringComparison.Ordinal))
+            .Where(static type => !PreparedStatementBinder.IsPreparable(type))
+            .Select(static type => type.ToString())
+            .ToArray();
+
+        Assert.That(missing, Is.Empty,
+            "these SHOW statements would be refused at prepare time and re-sent inline");
+    }
+
+    /// <summary>
+    /// A node-scoped <c>SHOW</c> runs against no database at all, so preparing one exercises the
+    /// branch that skips database resolution entirely — reached, on the prepared path, from the root
+    /// node type stored at registration rather than from a re-parse of the request body.
+    /// </summary>
+    [Test]
+    public async Task PreparedShowVariables_RunsWithoutADatabase()
+    {
+        PrepareStatementResponse prepared = await PrepareAsync("", "SHOW VARIABLES");
+
+        Assert.That(prepared.Status, Is.EqualTo("ok"), prepared.Message);
+
+        JsonResult result = await Sql(new { statementId = prepared.StatementId }).ExecuteSQLQuery();
+
+        ExecuteSQLQueryResponse response = (ExecuteSQLQueryResponse)result.Value!;
+        Assert.That(response.Status, Is.EqualTo("ok"), response.Message);
+        Assert.That(response.Total, Is.GreaterThan(0), "the server always reports some variables");
     }
 
     // ─── Execute ──────────────────────────────────────────────────────────────

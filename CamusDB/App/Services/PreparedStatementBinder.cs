@@ -33,6 +33,14 @@ public static class PreparedStatementBinder
     /// <para>Schema and database/user administration are excluded: they are one-shot, they are
     /// routed by endpoint rather than by handle, and several of them return no database descriptor,
     /// so nothing about them benefits from a handle.</para>
+    ///
+    /// <para>Every <c>SHOW</c> is in, including the node-scoped ones (<c>SHOW ENGINE STATS</c>,
+    /// <c>SHOW VARIABLES</c>, <c>SHOW CLUSTER SETTINGS</c>) that run against no database at all.
+    /// They are reads, they are polled on a loop by monitoring clients, and both transports already
+    /// route a prepared execution by its stored root node — so a handle reaches the same no-database
+    /// branch an inline execution does. Leaving them out only bought a rejected registration per
+    /// statement: the driver matches on a bare <c>SHOW</c> prefix, so a gap here is a wasted round
+    /// trip and a warn-level log line, not a refusal the client can act on.</para>
     /// </summary>
     public static bool IsPreparable(NodeType rootType) => rootType is
         NodeType.Select or
@@ -50,7 +58,14 @@ public static class PreparedStatementBinder
         NodeType.ShowOrphanDatabases or
         NodeType.ShowIndexes or
         NodeType.ShowStatistics or
-        NodeType.ShowGrants;
+        NodeType.ShowGrants or
+        NodeType.ShowViews or
+        NodeType.ShowMaterializedViews or
+        NodeType.ShowCreateView or
+        NodeType.ShowCreateMaterializedView or
+        NodeType.ShowEngineStats or
+        NodeType.ShowVariables or
+        NodeType.ShowClusterSettings;
 
     /// <summary>
     /// Parses <paramref name="sql"/>, checks it may be prepared, and builds the entry that both
