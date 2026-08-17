@@ -203,7 +203,16 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         internal int ExecutedCount { get { lock (executed) return executed.Count; } }
 
-        internal void ResetExecuted() { lock (executed) executed.Clear(); }
+        private long rowsReturned;
+
+        /// <summary>Total survivor rows shipped across all fragment executions since the last reset.</summary>
+        internal long RowsReturned => Interlocked.Read(ref rowsReturned);
+
+        internal void ResetExecuted()
+        {
+            lock (executed) executed.Clear();
+            Interlocked.Exchange(ref rowsReturned, 0);
+        }
 
         /// <summary>The next <paramref name="count"/> fragment executions throw before any row.</summary>
         internal void FailNextFragments(int count) => failRemaining = count;
@@ -237,6 +246,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             await foreach (CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row in
                 target.Executor.ExecuteQueryFragment(decoded, cancellationToken).ConfigureAwait(false))
             {
+                Interlocked.Increment(ref rowsReturned);
                 string rowJson = System.Text.Json.JsonSerializer.Serialize(row);
                 yield return System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow>(rowJson)!;
             }

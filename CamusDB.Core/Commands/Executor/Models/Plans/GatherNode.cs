@@ -29,13 +29,24 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// partition leader), which is where the parallelism comes from. Until the remote fragment
 /// service exists, span execution stays in-process and remote pages arrive via locator
 /// routing; relocating fragment execution to the data-owning node changes the transport, not
-/// this operator's semantics. Degrades to a single unbounded execution of the input under
-/// EXPLAIN ANALYZE (per-node runtime stats are not thread-safe across span workers).</para>
+/// this operator's semantics. Runs normally under EXPLAIN ANALYZE — the gather's stats
+/// bookkeeping is consumer-side and single-threaded — except in partial-aggregation mode,
+/// which ANALYZE disables (it replaces instrumented scanning, so ANALYZE reports the
+/// row-gather strategy it actually executed).</para>
 /// </summary>
 public sealed class GatherNode : PhysicalPlanNode
 {
     /// <summary>The placement snapshot the planner sliced against (advisory; see class doc).</summary>
     public TablePlacement Placement { get; }
+
+    /// <summary>
+    /// Per-span cap on filter-surviving rows (<c>limit + offset</c>), when the plan shape
+    /// permits: since span-order concatenation preserves global row order, the final LIMIT cut
+    /// can never require more than this many rows from any one span. Applied remotely by the
+    /// fragment (survivors stop shipping) — local spans rely on the pull pipeline's laziness.
+    /// Null = unbounded.
+    /// </summary>
+    public long? MaxSurvivors { get; init; }
 
     /// <summary>Gather output lands on the coordinator regardless of input distribution.</summary>
     public override bool CanDecomposeToLocalPlusMerge => false;

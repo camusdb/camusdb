@@ -28,6 +28,9 @@ public sealed class QueryFragmentWireLine
 
     public byte[]? Data { get; set; }
 
+    /// <summary>Partial-aggregate cells (see <see cref="Models.Queries.QueryFragmentRow.CellsJson"/>).</summary>
+    public string? Cells { get; set; }
+
     public string? Error { get; set; }
 }
 
@@ -102,6 +105,12 @@ public sealed class HttpQueryFragmentTransport : IQueryFragmentTransport
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Query fragment on '{targetRaftEndpoint}' failed mid-stream: {parsed.Error}");
+
+            if (parsed.Cells is not null)
+            {
+                yield return new QueryFragmentRow(null, null, parsed.Cells);
+                continue;
+            }
 
             if (parsed.RowIdHex is null || parsed.Data is null)
                 throw new CamusDBException(

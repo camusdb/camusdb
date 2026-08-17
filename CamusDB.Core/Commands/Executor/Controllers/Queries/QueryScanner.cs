@@ -584,6 +584,7 @@ internal sealed class QueryScanner
                     ReadTsPhysical = readTs.L,
                     ReadTsCounter = readTs.C,
                     MaxRows = maxRows,
+                    MaxSurvivors = gather.MaxSurvivors,
                     FilterJson = filterJson,
                     RequiredColumns = requiredColumns?.ToArray(),
                 };

@@ -2,6 +2,31 @@
 
 Controller implementations for every database operation. Each controller is a focused, stateless (or near-stateless) class that executes one category of work.
 
+## Statement services
+
+Extracted from `CommandExecutor` so the facade stays a composition root. Each owns one category of
+work and documents the invariant that makes it correct.
+
+| Service | Responsibility |
+|---------|---------------|
+| `ServerLevelStatementDispatcher` | Statements that open no database (CREATE/DROP/RENAME/RELINK DATABASE, COMMENT ON DATABASE, users, grants, cluster settings). Shared by the DDL and no-rows entry points so the two lists cannot drift |
+| `DatabaseLifecycleService` | Create, branch, open, close, drop, relink, rename — and the fences that keep those correct against each other |
+| `DDL/DdlStatementDispatcher` | Routes a parsed DDL statement to the service that executes it |
+| `DDL/SchemaDdlService` | Table/column/index/constraint/comment DDL, and the three execution shapes (single transaction, two-phase index DDL, staged coordinator) |
+| `DDL/DdlForwardingCoordinator` | Forwards DDL to the schema leader and waits until the change is visible locally |
+| `DDL/TableSettingsService` | Version-neutral `ALTER TABLE … SET/RESET` storage parameters |
+| `DDL/CreateTableAsSelectExecutor` | `CREATE TABLE … AS SELECT` and the relation-staging primitives a matview refresh uses |
+| `DML/NonQueryStatementDispatcher` | Statements returning no rows; also accepts schema DDL by forwarding |
+| `DML/RowCommandService` | Ticket-based `Insert` / `Update` / `Delete` / `Query` / `QueryById` |
+| `DML/SetTransactionStatement` | The `SET TRANSACTION` family, shared by both entry points |
+| `Queries/SelectStatementExecutor` | The read path: `SELECT` in all its forms, the `SHOW` family, distributed query fragments |
+| `Queries/QueryResultStream` | Presents materialized rows as the async cursor every read path returns |
+| `Auth/StatementAuthorizer` | The statement-level authorization gate and the ambient scope the per-table check reads |
+| `Auth/UserAdminService` | Server-level user and grant administration |
+| `Maintenance/BackgroundSchedulerHost` | The leader-owned background loops, their start ordering, and teardown |
+| `Maintenance/MetadataDiscoveryService` | Finds databases/tables with background work by reading authoritative KV metadata |
+| `Maintenance/StartupRecoveryService` | Reclaims what a crashed or dead run left behind |
+
 ## Database lifecycle
 
 | Controller | Responsibility |

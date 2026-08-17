@@ -134,6 +134,182 @@ public sealed class QueryPlanner
             // Ordered concatenation of contiguous ascending spans preserves whatever ordering
             // the underlying scan guarantees.
             OutputOrdering = scanNode.OutputOrdering,
+            // A remote fragment applies the residual filter BEFORE this cap, so — unlike the
+            // scan-level ScanRowLimit — a filter does not disqualify it: each span may stop
+            // after limit+offset SURVIVORS, because span-order concatenation means the global
+            // LIMIT cut can never need more than that many rows from any single span.
+            MaxSurvivors = ComputeFragmentSurvivorCap(ticket, scanNode.OutputOrdering is not null),
+        };
+    }
+
+    /// <summary>
+    /// The per-span survivor cap for fragmented scans: <c>limit + offset</c> under the same
+    /// shape preconditions as <see cref="TryComputeScanRowLimit"/> minus the residual-filter
+    /// clause (fragments filter before counting). Null = no cap (no LIMIT, or a shape where a
+    /// downstream operator consumes unbounded rows: DISTINCT, grouping, aggregation,
+    /// semi-join probes, or an ORDER BY the scan does not satisfy).
+    /// </summary>
+    private static long? ComputeFragmentSurvivorCap(QueryTicket ticket, bool scanSatisfiesOrderBy)
+    {
+        if (ticket.Limit is null
+            || ticket.IsDistinct
+            || ticket.GroupBy is { Count: > 0 }
+            || ticket.Having is not null
+            || (ticket.Projection is { Count: > 0 } && QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+            || ticket.SemiJoinSpecs is { Count: > 0 }
+            || (ticket.OrderBy is { Count: > 0 } && !scanSatisfiesOrderBy))
+            return null;
+
+        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
+        if (limit.Type != ColumnType.Integer64)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
+
+        long cap = limit.LongValue;
+
+        if (ticket.Offset is not null)
+        {
+            ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
+            if (offset.Type != ColumnType.Integer64)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
+
+            try
+            {
+                cap = checked(cap + offset.LongValue);
+            }
+            catch (OverflowException)
+            {
+                return null;
+            }
+        }
+
+        return cap <= 0 ? 0 : cap;
+    }
+
+    /// <summary>Aggregate functions whose partial states merge by re-aggregation (COUNT by SUM).</summary>
+    private static readonly HashSet<string> PartialMergeableAggFunctions =
+        new(StringComparer.OrdinalIgnoreCase) { "count", "sum", "min", "max", "avg" };
+
+    private static NodeAst Identifier(string name) =>
+        new(NodeType.Identifier, null, null, null, null, null, null, null, name);
+
+    private static NodeAst AliasedCall(string function, NodeAst? argument, string alias) =>
+        new(NodeType.ExprAlias,
+            new NodeAst(NodeType.ExprFuncCall, Identifier(function), argument, null, null, null, null, null, null),
+            Identifier(alias),
+            null, null, null, null, null, null);
+
+    /// <summary>
+    /// Builds the partial split for an aggregate directly above a gather, or null when the
+    /// shape disqualifies it — see <see cref="PartialAggregatePlan"/> for what qualifies and
+    /// why. Global shapes are limited to a single aggregate (the engine's global aggregation
+    /// path is single-projection by construction, and the binder rejects multi-aggregate
+    /// globals) and exclude AVG (its expansion needs the multi-projection grouped machinery).
+    /// Grouped shapes take full projection lists including AVG, which decomposes into
+    /// internal SUM/COUNT pair columns finalized after the merge.
+    /// </summary>
+    private static PartialAggregatePlan? TryBuildPartialAggregatePlan(QueryTicket ticket, PhysicalPlanNode input)
+    {
+        // The residual filter rides between the aggregate and the gather as a FilterNode
+        // (it contributes no operator of its own — fragments evaluate it), so unwrap it.
+        if (input is FilterNode)
+            input = input.Input!;
+
+        if (input is not GatherNode)
+            return null;
+
+        if (ticket.Projection is not { Count: > 0 })
+            return null;
+
+        // HAVING's hidden-aggregate expansion evaluates over the original rows, which
+        // partials no longer have.
+        if (ticket.Having is not null)
+            return null;
+
+        bool grouped = ticket.GroupBy is { Count: > 0 };
+
+        List<string>? groupCols = null;
+        if (grouped)
+        {
+            groupCols = TryExtractGroupByColumns(ticket.GroupBy!);
+            if (groupCols is null)
+                return null;
+        }
+        else if (ticket.Projection.Count != 1)
+        {
+            return null;
+        }
+
+        List<NodeAst> ship = new(ticket.Projection.Count + 1);
+        List<NodeAst> merge = new(ticket.Projection.Count + 1);
+        List<PartialAvgFinalizer> avgFinalizers = [];
+        HashSet<string> projectedGroupCols = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (NodeAst projection in ticket.Projection)
+        {
+            // Bare group-key column: passes through both halves under its bare name.
+            if (grouped && projection.nodeType == NodeType.Identifier && projection.yytext is { } columnName)
+            {
+                string bare = columnName.LastIndexOf('.') >= 0 ? columnName[(columnName.LastIndexOf('.') + 1)..] : columnName;
+
+                if (!groupCols!.Contains(bare, StringComparer.OrdinalIgnoreCase))
+                    return null;
+
+                projectedGroupCols.Add(bare);
+                ship.Add(projection);
+                merge.Add(Identifier(bare));
+                continue;
+            }
+
+            if (projection.nodeType != NodeType.ExprAlias
+                || projection.leftAst is not { nodeType: NodeType.ExprFuncCall } funcCall
+                || projection.rightAst?.yytext is not { } alias)
+                return null;
+
+            string? funcName = funcCall.leftAst?.yytext;
+            if (funcName is null || !PartialMergeableAggFunctions.Contains(funcName))
+                return null;
+
+            // The argument runs on remote nodes: it must be a pure function of the row.
+            // COUNT(*) has the all-fields sentinel argument, which is trivially pure.
+            if (funcCall.rightAst is { } argument
+                && argument.nodeType != NodeType.ExprAllFields
+                && !FragmentFilterShippability.IsShippable(argument))
+                return null;
+
+            if (funcName.Equals("avg", StringComparison.OrdinalIgnoreCase))
+            {
+                // AVG only decomposes on the grouped path (the global aggregator is
+                // single-projection) and needs a real column argument.
+                if (!grouped || funcCall.rightAst is null || funcCall.rightAst.nodeType == NodeType.ExprAllFields)
+                    return null;
+
+                string sumName = $"__partial_{alias}_sum";
+                string countName = $"__partial_{alias}_cnt";
+
+                ship.Add(AliasedCall("sum", funcCall.rightAst, sumName));
+                ship.Add(AliasedCall("count", funcCall.rightAst, countName));
+                merge.Add(AliasedCall("sum", Identifier(sumName), sumName));
+                merge.Add(AliasedCall("sum", Identifier(countName), countName));
+                avgFinalizers.Add(new PartialAvgFinalizer(alias, sumName, countName));
+                continue;
+            }
+
+            string mergeFunction = funcName.Equals("count", StringComparison.OrdinalIgnoreCase) ? "sum" : funcName;
+            ship.Add(projection);
+            merge.Add(AliasedCall(mergeFunction, Identifier(alias), alias));
+        }
+
+        // Every group key must reach the partial rows, or the coordinator cannot re-group.
+        if (grouped && groupCols!.Any(c => !projectedGroupCols.Contains(c)))
+            return null;
+
+        return new PartialAggregatePlan
+        {
+            ShipProjections = ship,
+            ShipGroupBy = grouped ? groupCols!.Select(Identifier).ToArray() : null,
+            MergeProjections = merge,
+            MergeGroupBy = grouped ? groupCols!.Select(Identifier).ToArray() : null,
+            AvgFinalizers = avgFinalizers,
         };
     }
 
@@ -319,6 +495,7 @@ public sealed class QueryPlanner
         {
             root = new AggregateNode(root)
             {
+                PartialPlan = isStreamingGroupBy ? null : TryBuildPartialAggregatePlan(ticket, root),
                 GroupByExpressions = ticket.GroupBy,
                 AggregateProjections = ExtractAggregateProjections(ticket),
                 IsStreamingGroupBy = isStreamingGroupBy,
@@ -397,6 +574,7 @@ public sealed class QueryPlanner
                     {
                         root = new AggregateNode(root)
                         {
+                            PartialPlan = TryBuildPartialAggregatePlan(ticket, root),
                             GroupByExpressions = ticket.GroupBy,
                             AggregateProjections = ExtractAggregateProjections(ticket),
                         };
@@ -463,6 +641,8 @@ public sealed class QueryPlanner
         if (ticket.Projection is { Count: > 0 } && QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
             return null;
 
+        // A scan-level cap truncates BEFORE filtering, so any residual filter disqualifies it.
+        // (The fragment survivor cap below has no such clause: a fragment filters first.)
         if (executionFilter is not null)
             return null;
 

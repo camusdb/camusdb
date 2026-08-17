@@ -44,10 +44,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
 {
     private readonly EmbeddedKahuna sharedNode;
+    
     private readonly string leaderKey;
+    
     private readonly TableAnalyzer analyzer;
+    
     private readonly Func<CancellationToken, Task<IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)>>> discoverStale;
+    
     private readonly Func<int> foregroundLoad;
+    
     private readonly ILogger<ICamusDB> logger;
 
     /// <summary>
@@ -176,22 +181,21 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
         if (LoadExceeded())
             return 0;
 
-        IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)> candidates =
-            await discoverStale(ct).ConfigureAwait(false);
+        IReadOnlyList<(DatabaseDescriptor db, TableDescriptor table)> candidates = await discoverStale(ct).ConfigureAwait(false);
         if (candidates.Count == 0)
             return 0;
 
         // Jitter: shuffle so that when more tables are stale than we analyze per sweep, the excess is
         // spread across future sweeps instead of always starving the same tail (anti-thundering-herd).
-        var ordered = new List<(DatabaseDescriptor db, TableDescriptor table)>(candidates);
+        List<(DatabaseDescriptor db, TableDescriptor table)> ordered = new(candidates);
         Shuffle(ordered, (ulong)Now().L);
 
         int maxConcurrent = Math.Max(1, options.AutoAnalyzeMaxConcurrent);
         HLCTimestamp analyzedAt = Now();
 
         int analyzed = 0;
-        using var slots = new SemaphoreSlim(maxConcurrent);
-        var running = new List<Task>();
+        using SemaphoreSlim slots = new(maxConcurrent);
+        List<Task> running = new();
 
         foreach ((DatabaseDescriptor db, TableDescriptor table) in ordered)
         {
@@ -218,8 +222,15 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
                 break;
             }
 
-            running.Add(RunOneAsync(db, table, claim, analyzedAt, ct, slots,
-                onSuccess: () => Interlocked.Increment(ref analyzed)));
+            running.Add(RunOneAsync(
+                db, 
+                table, 
+                claim,
+                analyzedAt, 
+                ct, 
+                slots,
+                onSuccess: () => Interlocked.Increment(ref analyzed)
+            ));
         }
 
         await Task.WhenAll(running).ConfigureAwait(false);
@@ -244,7 +255,8 @@ internal sealed class AutoAnalyzeScheduler : IAsyncDisposable
                 db, table, analyzedAt,
                 stillOwner: AmILeaderAsync,
                 shouldPause: LoadExceeded,
-                cancellationToken: ct).ConfigureAwait(false);
+                cancellationToken: ct
+            ).ConfigureAwait(false);
 
             onSuccess();
 

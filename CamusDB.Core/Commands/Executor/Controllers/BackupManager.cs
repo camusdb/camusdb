@@ -34,6 +34,32 @@ internal sealed class BackupManager
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Common gate for every backup/PITR admin operation: superuser authorization (when authentication
+    /// is enabled) followed by the backup-configured check. Both are server-level and privileged, so a
+    /// non-superuser is refused and an unconfigured node reports the capability as unavailable rather
+    /// than leaking a raw engine exception.
+    ///
+    /// <para><paramref name="authenticationEnabled"/> is passed rather than read from a held
+    /// configuration snapshot so the decision uses the caller's already-pinned snapshot — the same one
+    /// the rest of that request was authorized against.</para>
+    /// </summary>
+    internal void EnsureAllowed(Principal? principal, bool authenticationEnabled)
+    {
+        if (authenticationEnabled)
+        {
+            if (principal is null)
+                throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Backup administration requires a superuser");
+        }
+
+        if (!node.IsBackupConfigured)
+            throw new CamusDBException(
+                CamusDBErrorCodes.BackupNotConfigured,
+                "Backups are not configured on this node; set 'kahuna.backup_dir' and restart to enable them");
+    }
+
     public async Task<BackupInfo> TakeBackup(TakeBackupTicket ticket, CancellationToken cancellationToken = default)
     {
         try

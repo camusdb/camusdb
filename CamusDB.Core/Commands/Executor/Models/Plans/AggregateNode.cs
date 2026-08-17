@@ -67,6 +67,15 @@ public sealed class AggregateNode : PhysicalPlanNode
     /// </summary>
     public bool IsStreamingGroupBy { get; init; }
 
+    /// <summary>
+    /// When non-null, this aggregate may execute as per-span partials below the
+    /// <see cref="GatherNode"/> it sits on — see <see cref="PartialAggregatePlan"/> for the
+    /// split. Set only by the planner; the executor still falls back to ordinary row-gather
+    /// aggregation when runtime conditions disallow partials (dependency collection,
+    /// EXPLAIN ANALYZE, a residual filter that cannot ship).
+    /// </summary>
+    public PartialAggregatePlan? PartialPlan { get; init; }
+
     public AggregateNode(PhysicalPlanNode input)
     {
         Input = input;

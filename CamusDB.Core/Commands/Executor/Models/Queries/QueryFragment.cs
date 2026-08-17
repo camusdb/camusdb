@@ -62,22 +62,45 @@ public sealed class QueryFragmentRequest
 
     public uint ReadTsCounter { get; set; }
 
-    /// <summary>Per-span row cap (the coordinator's pushed-down scan limit), null = unlimited.</summary>
+    /// <summary>Per-span cap on rows SCANNED (the coordinator's pushed-down scan limit), null = unlimited.</summary>
     public long? MaxRows { get; set; }
 
     /// <summary>
+    /// Per-span cap on rows that SURVIVE the filter (the coordinator's <c>limit + offset</c>);
+    /// the fragment stops scanning once this many survivors shipped. Null = unlimited.
+    /// </summary>
+    public long? MaxSurvivors { get; set; }
+
+    /// <summary>
     /// Residual WHERE filter as a serialized <c>NodeAst</c> (see <c>NodeAstWireCodec</c>).
-    /// Required: a fragment without a filter has no reason to exist — an unfiltered span is
-    /// served just as well by locator-routed pages, so the coordinator scans it locally.
+    /// Required for row fragments: an unfiltered span is served just as well by locator-routed
+    /// pages, so the coordinator scans it locally. Optional for aggregate fragments
+    /// (<see cref="AggregateJson"/> set): a partial COUNT over an unfiltered span still ships
+    /// one row instead of the span.
     /// </summary>
     public string FilterJson { get; set; } = "";
+
+    /// <summary>
+    /// When set: the fragment computes partial aggregates instead of shipping rows. Each
+    /// element is one serialized projection (aliased aggregate calls and, for grouped
+    /// partials, bare group-key identifiers); the remote runs the engine's own aggregator
+    /// over its span's filter-survivors and streams one value row per group
+    /// (<see cref="QueryFragmentRow.CellsJson"/>) — exactly one row for global aggregates.
+    /// </summary>
+    public string[]? AggregatesJson { get; set; }
+
+    /// <summary>Serialized fragment-side GROUP BY expressions; null for global aggregates.</summary>
+    public string[]? GroupByJson { get; set; }
 
     /// <summary>Columns the remote must decode (filter columns included); null = all columns.</summary>
     public string[]? RequiredColumns { get; set; }
 }
 
 /// <summary>
-/// One surviving row from a fragment: its row id and the raw KV row bytes, exactly as stored.
-/// The coordinator decodes these through the same path as locally scanned spans.
+/// One fragment result frame. Row fragments carry <see cref="RowIdHex"/> + <see cref="Data"/>
+/// (raw KV row bytes; the coordinator re-decodes through the same path as local spans).
+/// Aggregate fragments carry <see cref="CellsJson"/> — a JSON object of output-name →
+/// wire-encoded <c>ColumnValue</c> (see <c>ColumnValueWireCodec</c>) holding the span's
+/// partial aggregate states.
 /// </summary>
-public sealed record QueryFragmentRow(string RowIdHex, byte[] Data);
+public sealed record QueryFragmentRow(string? RowIdHex, byte[]? Data, string? CellsJson = null);

@@ -82,11 +82,15 @@ internal sealed class QueryExecutor
     /// </summary>
     private readonly IKahuna? _kahuna;
 
+    /// <summary>Node-to-node fragment channel; null in standalone mode. See <see cref="QueryScanner"/>.</summary>
+    private readonly IQueryFragmentTransport? fragmentTransport;
+
     public QueryExecutor(ILogger<ICamusDB> logger, CamusDBOptions options, StatisticsManager? stats = null, IKahuna? kahuna = null, IQueryFragmentTransport? fragmentTransport = null)
     {
         this.logger = logger;
         this.options = options;
         _kahuna = kahuna;
+        this.fragmentTransport = fragmentTransport;
         PlanCache = new PlanCache(options.PlanCacheMaxEntries);
         queryPlanner = new QueryPlanner(stats, PlanCache, options);
         queryAggregator = new QueryAggregator(stats);
@@ -478,6 +482,26 @@ internal sealed class QueryExecutor
     /// </summary>
     private IAsyncEnumerable<QueryResultRow> ExecutePlanNode(QueryPlan plan, PhysicalPlanNode node, bool collectStats)
     {
+        // Partial-merge aggregation replaces BOTH the aggregate and its gather input: every
+        // span contributes one partial row and the merge projection produces the final answer.
+        // Must be decided before the generic input execution below — running the gather here
+        // would ship rows the partial path exists to avoid. Falls through to ordinary
+        // aggregation when runtime conditions disallow partials: EXPLAIN ANALYZE (stats),
+        // dependency collection (result-cache point deps need every scanned row), or a
+        // residual filter that cannot be evaluated under the fragment's synthetic ticket.
+        if (node is AggregateNode { PartialPlan: not null } partialAggregate
+            && (partialAggregate.Input is GatherNode or FilterNode { Input: GatherNode })
+            && !collectStats
+            && plan.DepCollector is null
+            && (plan.ExecutionFilter is null || FragmentFilterShippability.IsShippable(plan.ExecutionFilter)))
+        {
+            GatherNode partialGather = partialAggregate.Input as GatherNode
+                ?? (GatherNode)partialAggregate.Input!.Input!;
+
+            Trace(QueryPlanStepType.Aggregate);
+            return ExecuteGatherPartialAggregate(plan, partialAggregate, partialGather, fragmentTransport);
+        }
+
         // Row filtering is evaluated inside the scan leaf (QueryPlan.ExecutionFilter); the
         // filter node contributes no operator, matching the step list which emits no step for it.
         if (node is FilterNode)
@@ -495,18 +519,12 @@ internal sealed class QueryExecutor
         switch (node)
         {
             case GatherNode gatherNode:
-                if (collectStats)
-                {
-                    // Per-node runtime stats are not safe to mutate from concurrent span
-                    // workers; EXPLAIN ANALYZE executes the input unbounded instead — the
-                    // spans partition the keyspace, so the row stream is identical.
-                    if (gatherNode.Input is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Gather node has no input");
-
-                    cursor = ExecutePlanNode(plan, gatherNode.Input, collectStats);
-                    break;
-                }
-
+                // Safe under EXPLAIN ANALYZE: all scan-stat and row-count bookkeeping in the
+                // gather happens on the consumer thread (span workers only fetch and decode),
+                // so the counters are as accurate as the sequential scan's. Partial
+                // aggregation is the one gather mode ANALYZE disables (its branch above
+                // requires !collectStats): it replaces instrumented scanning entirely, so
+                // ANALYZE reports the row-gather strategy it actually executed.
                 Trace(QueryPlanStepType.FullScanFromTableIndex);
                 cursor = queryScanner.ScanTableSpansGather(plan, queryFilterer, gatherNode);
                 break;
@@ -618,11 +636,15 @@ internal sealed class QueryExecutor
         ObjectIdValue? fromRowId,
         ObjectIdValue? untilRowId,
         long? maxRows,
+        long? maxSurvivors,
         int schemaVersion,
         IReadOnlySet<string>? requiredColumns,
         KvTransaction snapshotTx,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (maxSurvivors is <= 0)
+            yield break;
+
         QueryTicket ticket = new(
             txnState: snapshotTx,
             databaseName: database.Name,
@@ -641,6 +663,8 @@ internal sealed class QueryExecutor
             SlotBackedDecode = true,
             BorrowedDecode = true,
         };
+
+        long survivors = 0;
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
             snapshotTx,
@@ -663,8 +687,345 @@ internal sealed class QueryExecutor
                 decodeState).ConfigureAwait(false);
 
             if (await queryFilterer.MeetWhereAsync(filter, row, ticket, database).ConfigureAwait(false))
+            {
                 yield return new QueryFragmentRow(rowId.ToString(), data.ToArray());
+
+                survivors++;
+                if (maxSurvivors is not null && survivors >= maxSurvivors.Value)
+                    yield break;
+            }
         }
+    }
+
+    /// <summary>
+    /// Computes one span's partial aggregates for a peer coordinator: scans the span at the
+    /// fragment's snapshot timestamp, applies the (optional) residual filter, feeds the
+    /// survivors through the engine's own aggregator with the shipped projections, and streams
+    /// each result row (one per group; exactly one for global aggregates) as wire-encoded
+    /// cells. Running the real aggregator — not a re-implementation — is what keeps NULL
+    /// handling, COUNT-skips-NULLs, and empty-input semantics identical to sequential
+    /// execution.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryFragmentRow> ExecuteFragmentAggregate(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        IReadOnlyList<NodeAst> aggregateProjections,
+        IReadOnlyList<NodeAst>? groupBy,
+        NodeAst? filter,
+        ObjectIdValue? fromRowId,
+        ObjectIdValue? untilRowId,
+        int schemaVersion,
+        IReadOnlySet<string>? requiredColumns,
+        KvTransaction snapshotTx,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        QueryTicket ticket = new(
+            txnState: snapshotTx,
+            databaseName: database.Name,
+            tableName: table.Name,
+            index: null,
+            projection: aggregateProjections.ToList(),
+            where: null,
+            filters: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null,
+            groupBy: groupBy?.ToList());
+
+        IAsyncEnumerable<QueryResultRow> partialRows = queryAggregator.AggregateResultset(
+            ticket,
+            ScanSpanRows(database, table, filter, fromRowId, untilRowId, schemaVersion, requiredColumns, snapshotTx, ticket, cancellationToken),
+            QueryExecutionContext.For(database));
+
+        await foreach (QueryResultRow row in partialRows.ConfigureAwait(false))
+            yield return new QueryFragmentRow(null, null, EncodeCells(row.Row));
+    }
+
+    /// <summary>Encodes one value row as the fragment wire cells object (name → wire value).</summary>
+    private static string EncodeCells(IReadOnlyDictionary<string, ColumnValue> row)
+    {
+        using MemoryStream stream = new();
+        using (System.Text.Json.Utf8JsonWriter writer = new(stream))
+        {
+            writer.WriteStartObject();
+            foreach (KeyValuePair<string, ColumnValue> cell in row)
+            {
+                writer.WritePropertyName(cell.Key);
+                ColumnValueWireCodec.Write(writer, cell.Value);
+            }
+            writer.WriteEndObject();
+        }
+
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>
+    /// The shared span cursor for fragment execution: bounded snapshot scan, decode, optional
+    /// residual filter. Borrowed decode is correct here — rows are consumed once by the filter
+    /// and aggregator and never retained beyond the values the aggregate extracts.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ScanSpanRows(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        NodeAst? filter,
+        ObjectIdValue? fromRowId,
+        ObjectIdValue? untilRowId,
+        int schemaVersion,
+        IReadOnlySet<string>? requiredColumns,
+        KvTransaction snapshotTx,
+        QueryTicket ticket,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        RowEncoder.RowDecodeState decodeState = new()
+        {
+            SlotBackedDecode = true,
+            BorrowedDecode = filter is not null,
+        };
+
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+            snapshotTx,
+            cancellationToken: cancellationToken,
+            untilRowId: untilRowId,
+            fromRowId: fromRowId).ConfigureAwait(false))
+        {
+            if (data.Length == 0)
+                continue;
+
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                table.Schema,
+                snapshotTx.TransactionId,
+                rowId,
+                data,
+                database.Options,
+                requiredColumns,
+                schemaVersion,
+                decodeState).ConfigureAwait(false);
+
+            if (filter is null || await queryFilterer.MeetWhereAsync(filter, row, ticket, database).ConfigureAwait(false))
+                yield return new QueryResultRow(rowId, row);
+        }
+    }
+
+    /// <summary>
+    /// Executes a partial-merge aggregate over a gather: every span contributes its partial
+    /// rows (one per group; exactly one for global aggregates) — remote-eligible spans compute
+    /// theirs on the span's leader, remaining spans compute locally and sequentially on this
+    /// thread — and the final answer is the engine's own aggregator run over all partial rows
+    /// with the plan's merge projections, followed by AVG finalization (a typed Float64
+    /// division, never a SQL divide — integer division would corrupt integer averages). A
+    /// remote failure recomputes that span's partials locally (partials ship atomically at
+    /// completion, so there is no mid-stream resume to reconcile).
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ExecuteGatherPartialAggregate(
+        QueryPlan plan,
+        AggregateNode aggregateNode,
+        GatherNode gather,
+        IQueryFragmentTransport? fragmentTransport)
+    {
+        TableDescriptor table = plan.Table;
+        DatabaseDescriptor database = plan.Database;
+        HLCTimestamp readTs = plan.Ticket.TxnState.ReadTimestamp;
+        PartialAggregatePlan partialPlan = aggregateNode.PartialPlan!;
+        NodeAst? filter = plan.ExecutionFilter;
+
+        await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
+            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+
+        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
+
+        string? filterJson = filter is not null ? NodeAstWireCodec.Serialize(filter) : null;
+        string[] aggregatesJson = partialPlan.ShipProjections.Select(NodeAstWireCodec.Serialize).ToArray();
+        string[]? groupByJson = partialPlan.ShipGroupBy?.Select(NodeAstWireCodec.Serialize).ToArray();
+
+        IReadOnlyList<PlacementSpan> spans = gather.Placement.Spans;
+        var partialTasks = new Task<List<Dictionary<string, ColumnValue>>>[spans.Count];
+        List<(ObjectIdValue? from, ObjectIdValue? until, int index)> localSpans = [];
+
+        using CancellationTokenSource cts = new();
+
+        for (int i = 0; i < spans.Count; i++)
+        {
+            PlacementSpan span = spans[i];
+
+            if (!GatherNode.TryParseRowIdBound(span.StartKey, out ObjectIdValue? fromRowId)
+                || !GatherNode.TryParseRowIdBound(span.EndKey, out ObjectIdValue? untilRowId))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "Placement span boundary is not a row-id key: " + (span.StartKey ?? span.EndKey));
+
+            bool remote = fragmentTransport is not null
+                && !span.LeaderIsLocal
+                && span.LeaderEndpoint is not null;
+
+            if (remote)
+                partialTasks[i] = ComputeRemotePartialsAsync(span, fromRowId, untilRowId);
+            else
+                localSpans.Add((fromRowId, untilRowId, i));
+        }
+
+        try
+        {
+            // Local spans run sequentially on this thread: filter evaluation shares one
+            // filterer, which is not safe to run concurrently.
+            foreach ((ObjectIdValue? fromRowId, ObjectIdValue? untilRowId, int index) in localSpans)
+                partialTasks[index] = Task.FromResult(await ComputeLocalPartialsAsync(fromRowId, untilRowId).ConfigureAwait(false));
+
+            List<QueryResultRow> partialRows = [];
+            for (int i = 0; i < spans.Count; i++)
+            {
+                foreach (Dictionary<string, ColumnValue> cells in await partialTasks[i].ConfigureAwait(false))
+                    partialRows.Add(new QueryResultRow(default, cells));
+            }
+
+            QueryTicket mergeTicket = new(
+                txnState: plan.Ticket.TxnState,
+                databaseName: database.Name,
+                tableName: table.Name,
+                index: null,
+                projection: partialPlan.MergeProjections.ToList(),
+                where: null,
+                filters: null,
+                orderBy: null,
+                limit: null,
+                offset: null,
+                parameters: null,
+                groupBy: partialPlan.MergeGroupBy);
+
+            await foreach (QueryResultRow merged in queryAggregator.AggregateResultset(
+                mergeTicket, partialRows.ToAsyncEnumerable(), QueryExecutionContext.For(database)).ConfigureAwait(false))
+            {
+                yield return partialPlan.AvgFinalizers.Count == 0 ? merged : FinalizeAverages(merged, partialPlan);
+            }
+        }
+        finally
+        {
+            cts.Cancel();
+
+            foreach (Task<List<Dictionary<string, ColumnValue>>>? task in partialTasks)
+            {
+                if (task is null || task.IsCompletedSuccessfully)
+                    continue;
+
+                try
+                {
+                    await task.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Abandoned or already-handled span partial.
+                }
+            }
+        }
+
+        async Task<List<Dictionary<string, ColumnValue>>> ComputeRemotePartialsAsync(
+            PlacementSpan span, ObjectIdValue? fromRowId, ObjectIdValue? untilRowId)
+        {
+            try
+            {
+                QueryFragmentRequest request = new()
+                {
+                    FragmentId = Guid.NewGuid().ToString("n"),
+                    DatabaseName = database.Name,
+                    DatabaseId = database.Id,
+                    TableName = table.Name,
+                    TableId = table.Id,
+                    SchemaVersion = plan.TableSchemaVersion,
+                    FromRowIdHex = fromRowId?.ToString(),
+                    UntilRowIdHex = untilRowId?.ToString(),
+                    ReadTsNode = readTs.N,
+                    ReadTsPhysical = readTs.L,
+                    ReadTsCounter = readTs.C,
+                    FilterJson = filterJson ?? "",
+                    AggregatesJson = aggregatesJson,
+                    GroupByJson = groupByJson,
+                    RequiredColumns = plan.ScanRequiredColumns?.ToArray(),
+                };
+
+                List<Dictionary<string, ColumnValue>> partials = [];
+
+                await foreach (QueryFragmentRow row in fragmentTransport!
+                    .ExecuteFragmentAsync(span.LeaderEndpoint!, request, cts.Token).ConfigureAwait(false))
+                {
+                    if (row.CellsJson is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInternalOperation,
+                            "Aggregate fragment returned a non-cells frame");
+
+                    partials.Add(ParseCells(row.CellsJson));
+                }
+
+                return partials;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Partials ship atomically at completion, so a failed remote span simply
+                // recomputes locally from scratch — nothing partial was consumed.
+                Log.LogRemoteFragmentFellBackToLocal(logger, span.LeaderEndpoint ?? "?", ex.Message);
+                database.Kahuna.InvalidatePlacement(table.Store.RowKeySpace);
+
+                return await ComputeLocalPartialsAsync(fromRowId, untilRowId).ConfigureAwait(false);
+            }
+        }
+
+        async Task<List<Dictionary<string, ColumnValue>>> ComputeLocalPartialsAsync(
+            ObjectIdValue? fromRowId, ObjectIdValue? untilRowId)
+        {
+            List<Dictionary<string, ColumnValue>> partials = [];
+
+            await foreach (QueryFragmentRow partial in ExecuteFragmentAggregate(
+                database, table, partialPlan.ShipProjections, partialPlan.ShipGroupBy, filter,
+                fromRowId, untilRowId, plan.TableSchemaVersion, plan.ScanRequiredColumns,
+                plan.Ticket.TxnState, cts.Token).ConfigureAwait(false))
+            {
+                partials.Add(ParseCells(partial.CellsJson!));
+            }
+
+            return partials;
+        }
+
+        static Dictionary<string, ColumnValue> ParseCells(string cellsJson)
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(cellsJson);
+
+            Dictionary<string, ColumnValue> cells = new(StringComparer.OrdinalIgnoreCase);
+            foreach (System.Text.Json.JsonProperty property in doc.RootElement.EnumerateObject())
+                cells[property.Name] = ColumnValueWireCodec.Read(property.Value);
+
+            return cells;
+        }
+    }
+
+    /// <summary>
+    /// Replaces each AVG's internal sum/count pair with the final Float64 average (NULL when
+    /// the count is zero — the aggregator's own empty-input answer), leaving every other
+    /// column untouched.
+    /// </summary>
+    private static QueryResultRow FinalizeAverages(QueryResultRow merged, PartialAggregatePlan partialPlan)
+    {
+        Dictionary<string, ColumnValue> finalized = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (KeyValuePair<string, ColumnValue> cell in merged.Row)
+            finalized[cell.Key] = cell.Value;
+
+        foreach (PartialAvgFinalizer finalizer in partialPlan.AvgFinalizers)
+        {
+            ColumnValue sum = finalized[finalizer.SumName];
+            ColumnValue count = finalized[finalizer.CountName];
+
+            finalized.Remove(finalizer.SumName);
+            finalized.Remove(finalizer.CountName);
+
+            long countValue = count.Type == ColumnType.Integer64 ? count.LongValue : 0;
+
+            finalized[finalizer.OutputName] = countValue == 0 || sum.Type == ColumnType.Null
+                ? ColumnValue.Null
+                : new ColumnValue(
+                    ColumnType.Float64,
+                    (sum.Type == ColumnType.Integer64 ? sum.LongValue : sum.FloatValue) / (double)countValue);
+        }
+
+        return new QueryResultRow(merged.RowId, finalized);
     }
 
     private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(

@@ -39,7 +39,9 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
     };
 
     private readonly HttpClient httpClient;
+    
     private readonly Func<string, Uri> endpointResolver;
+    
     private readonly ILogger<ICamusDB> logger;
 
     public HttpSchemaDdlForwarder(HttpClient httpClient, Func<string, Uri> endpointResolver, ILogger<ICamusDB> logger)

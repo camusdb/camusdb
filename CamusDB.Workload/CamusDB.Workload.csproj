@@ -14,7 +14,7 @@
          It exposes parameterized commands and per-transaction isolation/mode/locking knobs
          over the multiplexed gRPC BatchExecute transport (Protocol=grpc). -->
     <ItemGroup>
-        <PackageReference Include="CamusDB.Client" Version="0.7.3" />
+        <PackageReference Include="CamusDB.Client" Version="0.9.7" />
         <PackageReference Include="CommandLineParser" Version="2.9.1" />
     </ItemGroup>
 

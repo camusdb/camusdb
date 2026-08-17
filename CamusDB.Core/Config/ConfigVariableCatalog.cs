@@ -79,6 +79,7 @@ public static class ConfigVariableCatalog
         [nameof(CamusDBOptions.DataDirectory)] = "data_dir",
         [nameof(CamusDBOptions.ClusterPartitionCount)] = "initial_partitions",
         [nameof(CamusDBOptions.KeyRangeShardingEnabled)] = "key_range_sharding",
+        [nameof(CamusDBOptions.DistributedQueryExecutionEnabled)] = "distributed_query_execution",
         [nameof(CamusDBOptions.QueryResultCacheSingleFlightWaitMs)] = "query_result_cache_singleflight_wait_ms",
     };
 
