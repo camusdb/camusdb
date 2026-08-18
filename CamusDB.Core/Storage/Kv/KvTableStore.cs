@@ -28,7 +28,7 @@ namespace CamusDB.Core.Storage.Kv;
 /// Per-table data access layer built on top of <see cref="IKahuna"/>.
 ///
 /// Key layout (all keys share the leading <c>{dbId}:{tableId}</c> segment so databases are
-/// isolated in the shared keyspace and Kommander routes the whole table to one partition):
+/// isolated in the shared keyspace and every key of one table routes together):
 ///
 ///   Primary rows:      {dbId}:{tableId}:r/{rowIdHex24}                         → serialized row bytes
 ///   Unique index:      {dbId}:{tableId}:i:{indexId}/{encodedKey}               → rowIdHex24 (UTF-8)
@@ -43,15 +43,26 @@ namespace CamusDB.Core.Storage.Kv;
 /// 24-character lowercase-hex ObjectId (e.g. <c>"6849f3a1c2e7d50b4f8a91d3"</c>); the two forms
 /// coexist safely because their lengths and character sets never overlap.
 ///
-/// Routing constraint:
+/// <b>Hash-routing constraint (the default mode).</b> Under hash routing a key space must hash to
+/// exactly one partition whether it is reached by a scan or by a point write, or a scan would miss
+/// rows a write placed elsewhere:
 ///   LocateAndScanRange routes via SimpleHash(prefix) while individual TrySet/Delete
 ///   route via InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash]).
 ///   For rows: bucket prefix "{dbId}:{tableId}:r" → SimpleHash("{dbId}:{tableId}:r") matches writes.
 ///   For indexes: bucket prefix "{dbId}:{tableId}:i:{indexId}" → SimpleHash("{dbId}:{tableId}:i:{indexId}")
 ///   matches writes whose key is "{dbId}:{tableId}:i:{indexId}/{...}" (last slash before the suffix).
 ///   Note: non-unique keys are "{dbId}:{tableId}:i:{indexId}/{encodedKey}{rowId}" with no extra slash,
-///   so the routing invariant holds for both unique and non-unique on a single partition.
-///   With multiple partitions (Phase 6) this requires review.
+///   so the hash agrees for both unique and non-unique.
+/// Do not add slashes to a key or a bucket prefix without re-deriving both sides of that equality.
+///
+/// <b>This is a property of hash routing only, not a layout invariant.</b> When
+/// <see cref="CamusDBOptions.KeyRangeShardingEnabled"/> is on, this store's row space — and every
+/// eligible index space — is registered for key-range routing instead, and Kahuna may split a
+/// space into child ranges owned by different partitions, so one table's keys are no longer
+/// confined to a single partition. Correctness there comes from the range map rather than from the
+/// hash agreement above: reads resolve every intersecting range descriptor and merge the results in
+/// key order, and writes that arrive while a range boundary is moving are refused with
+/// <c>MustRetry</c> and retried by <see cref="RetryOnMustRetry"/>. Nothing in the key layout changes.
 ///
 /// All write methods take a <see cref="KvTransaction"/> so they can accumulate acquired locks
 /// and modified keys for the 2-phase commit.

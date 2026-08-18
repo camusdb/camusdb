@@ -45,6 +45,12 @@ public static class EmbeddedKahunaOptionsBuilder
             WalRevision = "v1",
             StartElectionTimeout = 2000,
             EndElectionTimeout = 4000,
+            // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000
+            // sampled keys, so inheriting it would make every key-range-routed table start splitting
+            // itself as soon as key_range_sharding is switched on — a rebalancing policy arriving as a
+            // side effect of a routing flag. Splitting a chosen range on demand is unaffected: a manual
+            // split does not consult this threshold. Override with kahuna.range_split_threshold.
+            RangeSplitThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -70,6 +76,13 @@ public static class EmbeddedKahunaOptionsBuilder
             // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
             // serializes the write path. Multi-partition deployments can raise kahuna.key_value_workers
             // (with 4 partitions on the pre-WriteIOThreads-fix stack, 8x actors measured ~3x at 64 clients).
+            //
+            // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000
+            // sampled keys, so inheriting it would make every key-range-routed table start splitting
+            // itself as soon as key_range_sharding is switched on — a rebalancing policy arriving as a
+            // side effect of a routing flag. Splitting a chosen range on demand is unaffected: a manual
+            // split does not consult this threshold. Override with kahuna.range_split_threshold.
+            RangeSplitThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -101,6 +114,13 @@ public static class EmbeddedKahunaOptionsBuilder
             // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
             // serializes the write path. Multi-partition deployments can raise kahuna.key_value_workers
             // (with 4 partitions on the pre-WriteIOThreads-fix stack, 8x actors measured ~3x at 64 clients).
+            //
+            // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000
+            // sampled keys, so inheriting it would make every key-range-routed table start splitting
+            // itself as soon as key_range_sharding is switched on — a rebalancing policy arriving as a
+            // side effect of a routing flag. Splitting a chosen range on demand is unaffected: a manual
+            // split does not consult this threshold. Override with kahuna.range_split_threshold.
+            RangeSplitThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -250,6 +270,12 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.BaseSnapshotIntervalSeconds is int baseSnapshot)
             baseline.BaseSnapshotInterval = TimeSpan.FromSeconds(baseSnapshot);
+
+        if (kahuna.RangeSplitThreshold is int rangeSplitThreshold)
+            baseline.RangeSplitThreshold = rangeSplitThreshold;
+
+        if (kahuna.RangeSplitMinRangeSize is int rangeSplitMinRangeSize)
+            baseline.RangeSplitMinRangeSize = rangeSplitMinRangeSize;
 
         if (kahuna.RestoreRoot is not null)
             baseline.RestoreRoot = kahuna.RestoreRoot;

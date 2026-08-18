@@ -70,6 +70,8 @@ public sealed class KahunaOptionsConfig
         "backup_retention_max_bytes",
         "backup_gc_interval_seconds",
         "backup_restore_throttle_bytes_per_sec",
+        "range_split_threshold",
+        "range_split_min_range_size",
     };
 
     /// <summary>Persistence backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
@@ -306,6 +308,36 @@ public sealed class KahunaOptionsConfig
     /// </summary>
     public int? BaseSnapshotIntervalSeconds { get; set; }
 
+    // ── Range auto-split ──────────────────────────────────────────────────────────────────────
+    // Only meaningful together with key_range_sharding; under hash routing a key space is never
+    // registered for key-range routing, so no descriptor exists for the split checker to act on.
+
+    /// <summary>
+    /// Sampled key count at which a key-range-routed space is automatically split into two child
+    /// ranges on separate Raft partitions. <c>0</c> disables count-based auto-splitting — and, when
+    /// the load branch is also off (it is: CamusDB never enables it), stops Kahuna from spawning the
+    /// periodic split-checker actor at all. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitThreshold"/>.
+    ///
+    /// <para><b>CamusDB pins this to 0 rather than inheriting Kahuna's default of 1000.</b> The
+    /// inherited default would make any table that grows past ~1000 keys split itself the moment
+    /// <c>key_range_sharding</c> is switched on, which is a large behavioral change to arrive as a
+    /// side effect of a routing flag — and the write path's behavior across a split boundary is not
+    /// yet proven under concurrent traffic. An operator who wants automatic rebalancing sets this
+    /// explicitly and thereby opts in; splitting a specific range on demand does not depend on this
+    /// knob, because a manual split bypasses the threshold entirely.</para>
+    /// </summary>
+    public int? RangeSplitThreshold { get; set; }
+
+    /// <summary>
+    /// Minimum number of keys each child range must retain for an auto-split to be allowed, which
+    /// keeps the splitter from carving off a range that is empty or nearly so. Inert while
+    /// <see cref="RangeSplitThreshold"/> is 0. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitMinRangeSize"/>; unset keeps Kahuna's
+    /// default of 10.
+    /// </summary>
+    public int? RangeSplitMinRangeSize { get; set; }
+
     /// <summary>
     /// Server-owned root that restore destinations must be contained within. Setting it enables remote
     /// (REST) restore with destinations confined to this tree; leaving it empty keeps remote restore
@@ -530,6 +562,23 @@ public sealed class KahunaOptionsConfig
                 $"'kahuna.pitr_window_seconds' ({effectiveWindow}); set both when lowering the window below " +
                 $"the {DefaultBaseSnapshotIntervalSeconds}s default snapshot interval");
 
+        if (RangeSplitThreshold is < 0)
+            throw InvalidConfig($"'kahuna.range_split_threshold' must be >= 0 (0 disables auto-split), got {RangeSplitThreshold}");
+
+        if (RangeSplitMinRangeSize is < 1)
+            throw InvalidConfig($"'kahuna.range_split_min_range_size' must be >= 1, got {RangeSplitMinRangeSize}");
+
+        // A range cannot be split into two halves that each hold minRangeSize keys unless it holds at
+        // least twice that many, so a threshold below 2*minRangeSize describes a split that can never
+        // be granted — the checker would sample, refuse, and back off forever. Rejecting it here turns
+        // a silently inert configuration into a startup error.
+        if (RangeSplitThreshold is int splitThreshold and > 0
+            && splitThreshold < 2 * (RangeSplitMinRangeSize ?? DefaultRangeSplitMinRangeSize))
+            throw InvalidConfig(
+                $"'kahuna.range_split_threshold' ({splitThreshold}) must be >= twice " +
+                $"'kahuna.range_split_min_range_size' ({RangeSplitMinRangeSize ?? DefaultRangeSplitMinRangeSize}), " +
+                "or no range can ever satisfy the split policy");
+
         if (RestoreRoot is not null && string.IsNullOrWhiteSpace(RestoreRoot))
             throw InvalidConfig("'kahuna.restore_root' must not be blank when set (omit the key to disable confined remote restore)");
 
@@ -556,6 +605,9 @@ public sealed class KahunaOptionsConfig
     // cross-check above reflects what the node will actually run with when a key is left unset.
     private const int DefaultPitrWindowSeconds = 3600;
     private const int DefaultBaseSnapshotIntervalSeconds = 1800;
+
+    // Kahuna's own RangeSplitMinRangeSize default, used to cross-check a threshold supplied without it.
+    private const int DefaultRangeSplitMinRangeSize = 10;
 
     private static void ValidateStorage(string? value, string field)
     {

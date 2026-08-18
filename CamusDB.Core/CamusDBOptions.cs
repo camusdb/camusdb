@@ -401,17 +401,33 @@ public sealed record CamusDBOptions
     /// opens-and-registers independently), and the range-lock path switches from prefix locks to
     /// Kahuna range locks (prefix locks are rejected on ranged spaces).
     ///
-    /// Second slice: secondary indexes whose key columns are all non-String ASCII-encoding
-    /// types (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed
-    /// indexes stay hash-routed until the persistence comparator is aligned. Kahuna
-    /// auto-split/merge is not wired (logical range routing + per-range locks work without it).
+    /// Secondary indexes whose key columns are all non-String ASCII-encoding types
+    /// (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed indexes
+    /// stay hash-routed until the persistence comparator is aligned.
     ///
-    /// <b>Operational requirement:</b> key-range routing requires <c>InitialPartitions ≥ 2</c>
-    /// in <c>config.yml</c>. With a single partition the Kahuna registry call is a silent no-op
-    /// (stays hash-routed, range locks transparently fall back to the single-partition hash path),
-    /// so enabling this flag on a single-partition node is safe but has no effect. A startup
-    /// warning is emitted when the flag is on and <c>InitialPartitions &lt; 2</c>. Production
-    /// clusters must set <c>initial_partitions: 2</c> (or more) to activate key-range sharding.
+    /// <b>Splitting.</b> A registered space starts as one whole-space range and can be divided into
+    /// child ranges owned by different Raft partitions — which is the point of the mode, since it is
+    /// what lets one table's write coordination spread beyond a single partition leader. CamusDB
+    /// pins Kahuna's count-based auto-split threshold to <c>0</c>, so no space splits on its own
+    /// unless an operator sets <c>kahuna.range_split_threshold</c>; see
+    /// <see cref="Config.Models.KahunaOptionsConfig.RangeSplitThreshold"/> for why the inherited
+    /// default is not used. Splitting a chosen range on demand does not depend on that threshold.
+    ///
+    /// <b>Reads and writes across a range boundary</b> are handled by Kahuna, not by this engine: a
+    /// scan resolves every range descriptor its bounds intersect and merges the results in key
+    /// order, and a write that arrives while a boundary is moving is refused with a retryable
+    /// <c>MustRetry</c> that the store's retry path absorbs. Split behavior under sustained
+    /// concurrent write traffic is not yet proven by tests, which is the main reason the mode is
+    /// still opt-in.
+    ///
+    /// <b>Partitions.</b> Registration succeeds and the space really is key-range routed even on a
+    /// node started with a single partition — the range map lives on the reserved meta partition, so
+    /// one data partition is enough to hold ranged data. What a single partition cannot give you is
+    /// the benefit: a range has nowhere to move to, so the space stays one range and write
+    /// coordination stays on one leader exactly as under hash routing. Set
+    /// <c>initial_partitions: 2</c> or more in <c>config.yml</c> for the mode to distribute anything;
+    /// a startup warning is emitted below that. Enabling the flag on a single-partition node is
+    /// harmless, but it buys ordered range scans and per-range locking rather than distribution.
     ///
     /// Default off. Set via <c>key_range_sharding</c> in <c>config.yml</c>; the
     /// <c>CAMUS_KEY_RANGE_SHARDING</c> environment variable overrides YAML when set.

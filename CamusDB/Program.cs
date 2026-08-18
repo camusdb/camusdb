@@ -468,14 +468,16 @@ ThreadPool.SetMinThreads(1024, 512);
 
 WebApplication app = builder.Build();
 
-// Warn early when key-range sharding is enabled but InitialPartitions < 2.
-// With a single partition Kahuna treats RegisterKeyRangeAsync as a no-op, so the flag is
-// harmless but silent — operators must know they need ≥ 2 partitions to benefit.
+// Warn early when key-range sharding is enabled but there is only one partition. Registration
+// still succeeds and the space is genuinely key-range routed, so this is not a no-op — but with a
+// single partition a range has nowhere to move to, so the table stays on one leader and the mode
+// distributes nothing. Operators reading "sharding enabled" in their config need to know that.
 if (camusOptions.KeyRangeShardingEnabled && config.InitialPartitions < 2)
     app.Logger.LogWarning(
         "key_range_sharding is enabled but initial_partitions={InitialPartitions} < 2; " +
-        "key-range routing is a no-op on a single-partition node. " +
-        "Set initial_partitions >= 2 in config.yml to activate key-range sharding.",
+        "key spaces are key-range routed, but with one partition a range cannot move, so write " +
+        "coordination stays on a single leader. Set initial_partitions >= 2 in config.yml to " +
+        "distribute a table across partitions.",
         config.InitialPartitions);
 
 if (config.IsClusterMode)

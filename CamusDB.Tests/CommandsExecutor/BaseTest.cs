@@ -63,6 +63,18 @@ public abstract class BaseTest
     /// </summary>
     protected virtual bool NeedsPerTestNode => true;
 
+    /// <summary>
+    /// Raft partitions the per-test node starts with. One is enough for everything that routes by
+    /// hash, which is why it is the default: a table's whole key space hashes onto a single partition
+    /// either way, and extra partitions only cost startup time.
+    ///
+    /// <para>A fixture exercising key-range routing raises this. Under that mode a key space is
+    /// divided into ranges that are meant to be served by <em>different</em> partitions, so with a
+    /// single one there is nowhere for a range to move to and the behavior under test cannot
+    /// occur.</para>
+    /// </summary>
+    protected virtual int NodeInitialPartitions => 1;
+
     /// <summary>The per-test in-memory node, available after <see cref="SetUpTestEnvironment"/>.</summary>
     protected EmbeddedKahuna? TestNode => testNode;
 
@@ -82,7 +94,7 @@ public abstract class BaseTest
                 NodeName = $"test-{Guid.NewGuid():N}",
                 Storage = "memory",
                 WalStorage = "memory",
-                InitialPartitions = 1
+                InitialPartitions = NodeInitialPartitions
             }.WithTestNodeDefaults());
             await testNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
             await testNode.WaitForLeaderAsync("warmup", CancellationToken.None).ConfigureAwait(false);
