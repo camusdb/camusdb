@@ -1315,6 +1315,11 @@ internal sealed class QueryJoinExecutor
                             CamusDBErrorCodes.InvalidInternalOperation,
                             "Broadcast join fragment returned a frame without match indices");
 
+                    if (fragmentRow.RowIdHex is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInternalOperation,
+                            "Broadcast join fragment returned a row frame without a row id");
+
                     ObjectIdValue rowId = ObjectId.ToValue(fragmentRow.RowIdHex);
 
                     QueryRow row = await RowEncoder.DecodeToQueryRowAsync(

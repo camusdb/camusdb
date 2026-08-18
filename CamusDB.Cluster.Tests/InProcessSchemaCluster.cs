@@ -870,5 +870,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             if (IsBlocked(manager, node)) return Task.FromResult(new LeaveResponse(false));
             return inner.SendLeave(manager, node, request, cancellationToken);
         }
+
+        public Task<SetMemberRoleResponse> SendSetMemberRole(RaftManager manager, RaftNode node, SetMemberRoleRequest request, CancellationToken cancellationToken = default)
+        {
+            // A dropped role-transition request must not look like an idempotent no-op: the default
+            // status on the response record is Success, so a blocked link has to say Errored explicitly
+            // or the caller would treat the partition as having committed the transition.
+            if (IsBlocked(manager, node)) return Task.FromResult(new SetMemberRoleResponse(false, Status: RaftOperationStatus.Errored));
+            return inner.SendSetMemberRole(manager, node, request, cancellationToken);
+        }
     }
 }

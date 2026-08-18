@@ -546,7 +546,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Keep every branch's snapshot-floor hold alive for as long as the branch exists. The
         // registry is opened asynchronously, so defer the start until it is ready; the loops
         // themselves elect a single sweeping node by registry-partition leadership.
-        if (sharedNode is not null)
+        if (backgroundSchedulers is not null && sharedNode is not null)
         {
             backgroundSchedulers.Start(this, sharedNode);
         }

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics.CodeAnalysis;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.SQLParser;
@@ -203,6 +204,7 @@ internal static class StoredBodyColumns
     /// Rewrites an expression tree. <paramref name="aliasSlot"/> marks the clauses that may name one
     /// of the select's own output columns instead of a relation's.
     /// </summary>
+    [return: NotNullIfNotNull(nameof(node))]
     private static NodeAst? Rewrite(Schema schema, NodeAst? node, Scope? scope, string? viewName, bool aliasSlot)
     {
         if (node is null)

@@ -638,6 +638,11 @@ internal sealed class QueryScanner
                         continue;
                     }
 
+                    if (fragmentRow.RowIdHex is null)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInternalOperation,
+                            "Scan fragment returned a row frame without a row id");
+
                     ObjectIdValue rowId = ObjectId.ToValue(fragmentRow.RowIdHex);
 
                     QueryRow row = await RowEncoder.DecodeToQueryRowAsync(

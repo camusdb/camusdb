@@ -127,7 +127,7 @@ public abstract class BaseTest
     /// this test's own isolated data directory.</para>
     /// </summary>
     protected CamusDBOptions Options =>
-        ConfigureOptions(CamusDBOptions.Default with { DataDirectory = tempDir });
+        ConfigureOptions(CamusDBOptions.Default with { DataDirectory = tempDir! });
 
     /// <summary>
     /// Hook for a fixture to state the configuration it needs, applied once per test before anything is
