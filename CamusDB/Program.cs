@@ -112,6 +112,21 @@ Func<ConfigDefinition> baseDefinitionFactory = () =>
 // appears not to have taken effect. Printed before the host is built so it survives a later failure.
 Console.WriteLine($"Configuration: {configLocation.Describe()}");
 Console.WriteLine($"Data directory: {camusOptions.DataDirectory}");
+
+// The small profile is worth stating, and stating alongside its limit: it caps the caches this node
+// allocates, not the managed heap the runtime grows under a burst of large statements. With server GC
+// (one heap per core, the build default) that heap is what dominates peak RSS, and no configuration
+// value the node reads can change it — the setting is read by the runtime before Main. Naming the
+// environment variable here is the difference between "the profile did nothing" and "the profile did
+// its half".
+if (camusOptions.MemoryProfile == MemoryProfile.Dev)
+{
+    Console.WriteLine("Memory profile: dev (caches capped at ~96 MiB; not for production)");
+
+    if (System.Runtime.GCSettings.IsServerGC)
+        Console.WriteLine("  For a smaller managed heap too, start with DOTNET_gcServer=0 in the environment.");
+}
+
 Console.WriteLine();
 
 Directory.CreateDirectory(camusOptions.DataDirectory);
@@ -172,10 +187,13 @@ CamusDBConfig.SetAmbient(camusOptions);
 // controllers and keeps the ambient value in sync.
 CamusDB.Core.Config.CamusDBOptionsHolder optionsHolder = new(camusOptions with { BootstrapSuperuserPassword = "" });
 
-// Diagnostics are opt-in and standalone-only this phase: enable the Core Meter/ActivitySource gate
-// only for a standalone node with diagnostics turned on. When false, every ServerDiagnostics record
-// helper short-circuits, so an unconfigured or cluster node emits nothing and pays no cost.
-bool diagnosticsActive = !config.IsClusterMode && config.Diagnostics.Enabled;
+// Diagnostics are opt-in for both modes: enable the Core Meter/ActivitySource gate whenever the
+// operator turned diagnostics on. When false, every ServerDiagnostics record helper
+// short-circuits, so an unconfigured node emits nothing and pays no cost. Cluster nodes were
+// excluded in the first diagnostics phase; chaos/reliability harnesses need Prometheus /metrics
+// (including the kahuna.placement.* counters) on every node of a cluster, so the gate is now
+// purely the operator's diagnostics switch.
+bool diagnosticsActive = config.Diagnostics.Enabled;
 CamusDB.Core.Diagnostics.ServerDiagnostics.Enabled = diagnosticsActive;
 
 // Build the singleton query-result cache once, after config statics are set.
@@ -375,7 +393,7 @@ builder.Services.AddSingleton<CamusDB.App.Services.ForegroundRequestGauge>();
 // meaningless on another node, which is why clients must re-prepare on CADB0520.
 builder.Services.AddSingleton<CamusDB.App.Services.PreparedStatementRegistry>();
 
-// Opt-in OpenTelemetry export (standalone only). Subscribes to the CamusDB.Server meter/activity
+// Opt-in OpenTelemetry export. Subscribes to the CamusDB.Server meter/activity
 // source plus the embedded dependency meters ("Kahuna", "Kommander") and standard runtime/ASP.NET
 // signals, so a workload run can attribute time to server handler, execution, commit, and the
 // underlying KV/WAL/runtime layers. A run id supplied via CAMUS_DIAGNOSTICS_RUN_ID rides along as a
@@ -494,7 +512,7 @@ if (config.GrpcEnabled)
     app.MapGrpcService<CamusDB.App.Grpc.CamusAuthService>();
 }
 
-// Prometheus scrape endpoint (standalone + diagnostics + prometheus_enabled only). It exposes
+// Prometheus scrape endpoint (diagnostics + prometheus_enabled only). It exposes
 // operational metadata; protect it or bind it to a trusted interface in production.
 if (diagnosticsActive && config.Diagnostics.PrometheusEnabled)
     app.MapPrometheusScrapingEndpoint(config.Diagnostics.PrometheusPath);

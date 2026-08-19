@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Config;
 using CamusDB.Core.Config.Models;
 using Kahuna;
 
@@ -54,6 +55,11 @@ public static class EmbeddedKahunaOptionsBuilder
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
+            // With join_existing the peer list is the SEED list of the running cluster rather than
+            // the founding roster: the node contacts a seed, enters the committed roster as a
+            // learner, and is promoted once caught up. ConfigDefinition.Validate has already
+            // required cluster mode and a non-empty peer list when the flag is set.
+            JoinExistingSeeds = config.JoinExisting ? [.. config.Peers] : null,
         };
     }
 
@@ -304,23 +310,47 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.BackupMacKeyFile is not null)
             baseline.BackupMacKeyFile = kahuna.BackupMacKeyFile;
 
-        // Kahuna only builds the shared bundle when sharing is enabled and both databases are RocksDB;
-        // otherwise the budgets are ignored. In that build case the memtable sub-budget must fit inside
-        // the total cache budget, or Kahuna's RocksDbSharedResources.CreateWithUnifiedBudget throws an
-        // ArgumentOutOfRangeException while the node is starting. KahunaOptionsConfig.Validate only sees
-        // the raw config, so a single-knob override (e.g. lowering only the total budget below the
-        // baseline memtable default) slips past it and would surface as a raw crash at boot. Re-check the
-        // effective, post-merge pair here so it fails fast with a clear config error instead.
-        if (baseline.RocksDbSharedMemoryEnabled
-            && baseline.Storage == "rocksdb"
-            && baseline.WalStorage == "rocksdb"
-            && baseline.RocksDbSharedMemtableBudgetMb > baseline.RocksDbSharedMemoryBudgetMb)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidConfig,
-                $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.RocksDbSharedMemtableBudgetMb}) must be <= " +
-                $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.RocksDbSharedMemoryBudgetMb})");
-        }
+        if (kahuna.ReplicationFactor is int replicationFactor)
+            baseline.ReplicationFactor = replicationFactor;
+
+        if (kahuna.Zone is not null)
+            baseline.Zone = kahuna.Zone;
+
+        if (kahuna.EnablePlacementRebalancer is bool placementRebalancer)
+            baseline.EnablePlacementRebalancer = placementRebalancer;
+
+        if (kahuna.PlacementPassIntervalMs is int placementPass)
+            baseline.PlacementPassInterval = TimeSpan.FromMilliseconds(placementPass);
+
+        if (kahuna.MaxReplicaMovesPerPass is int movesPerPass)
+            baseline.MaxReplicaMovesPerPass = movesPerPass;
+
+        if (kahuna.MaxConcurrentReplicaTransfers is int replicaTransfers)
+            baseline.MaxConcurrentReplicaTransfers = replicaTransfers;
+
+        if (kahuna.MaxConcurrentReplicaRepairs is int replicaRepairs)
+            baseline.MaxConcurrentReplicaRepairs = replicaRepairs;
+
+        if (kahuna.ReplicaCountDeadband is int replicaDeadband)
+            baseline.ReplicaCountDeadband = replicaDeadband;
+
+        if (kahuna.DecommissionDrainTimeoutMs is int drainTimeout)
+            baseline.DecommissionDrainTimeout = TimeSpan.FromMilliseconds(drainTimeout);
+
+        if (kahuna.EnableLeaderBalancer is bool leaderBalancer)
+            baseline.EnableLeaderBalancer = leaderBalancer;
+
+        if (kahuna.LeaderBalancerIntervalMs is int balancerInterval)
+            baseline.LeaderBalancerInterval = TimeSpan.FromMilliseconds(balancerInterval);
+
+        if (kahuna.LeaderBalancerReportIntervalMs is int balancerReportInterval)
+            baseline.LeaderBalancerReportInterval = TimeSpan.FromMilliseconds(balancerReportInterval);
+
+        if (kahuna.LeaderBalancerReportTtlMs is int balancerReportTtl)
+            baseline.LeaderBalancerReportTtl = TimeSpan.FromMilliseconds(balancerReportTtl);
+
+        if (kahuna.MinLeaderStabilityMs is int leaderStability)
+            baseline.MinLeaderStability = TimeSpan.FromMilliseconds(leaderStability);
 
         // Compose the session-timeout cap with the engine's serializable lifetime. Every session is
         // started with Timeout = MaxSerializableTransactionLifetimeMs, and Kahuna clamps that to the
@@ -336,14 +366,88 @@ public static class EmbeddedKahunaOptionsBuilder
         if (lifetimeMs > 0 && baseline.MaxTransactionTimeout < lifetimeMs)
             baseline.MaxTransactionTimeout = lifetimeMs;
 
-        ApplyMemoryProportionalDefaults(baseline, kahuna);
+        if (options.MemoryProfile == MemoryProfile.Dev)
+            ApplySmallFixedCacheDefaults(baseline, kahuna);
+        else
+            ApplyMemoryProportionalDefaults(baseline, kahuna);
+
+        // Kahuna only builds the shared bundle when sharing is enabled and both databases are RocksDB;
+        // otherwise the budgets are ignored. In that build case the memtable sub-budget must fit inside
+        // the total cache budget, or Kahuna's RocksDbSharedResources.CreateWithUnifiedBudget throws an
+        // ArgumentOutOfRangeException while the node is starting. KahunaOptionsConfig.Validate only sees
+        // the raw config, so a single-knob override (e.g. setting only the memtable budget above the
+        // total the sizing step chose) slips past it and would surface as a raw crash at boot. Checking
+        // the fully-merged pair — after the sizing defaults, not before them — is what makes the check
+        // see the values the node will actually be built with, and it fails fast with a clear config
+        // error instead.
+        if (baseline.RocksDbSharedMemoryEnabled
+            && baseline.Storage == "rocksdb"
+            && baseline.WalStorage == "rocksdb"
+            && baseline.RocksDbSharedMemtableBudgetMb > baseline.RocksDbSharedMemoryBudgetMb)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidConfig,
+                $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.RocksDbSharedMemtableBudgetMb}) must be <= " +
+                $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.RocksDbSharedMemoryBudgetMb})");
+        }
 
         return baseline;
     }
 
     /// <summary>
+    /// Sizes the same four cache knobs as <see cref="ApplyMemoryProportionalDefaults"/>, but to small
+    /// fixed budgets that ignore how much memory the machine has: about 64 MiB of RocksDB block cache
+    /// (16 MiB of it for memtables) and 32 MiB of key/value actor caches, roughly 96 MiB in total
+    /// against the ~1.5 GiB the proportional sizing takes on an 8 GiB box.
+    ///
+    /// <para>Selected by <c>memory_profile: dev</c> / <c>--memory-profile dev</c>, for a node sharing a
+    /// machine with the application being developed against it. The budgets are ceilings on caching
+    /// only — nothing about correctness or durability changes — so the cost is read throughput once the
+    /// working set no longer fits: the same TPC-C workload that motivated the proportional sizing ran
+    /// roughly 5x slower against a 320 MB block cache. That is an acceptable trade on a laptop and a bad
+    /// one on a server, which is why this is opt-in rather than a small default.</para>
+    ///
+    /// <para>Fixed rather than a smaller fraction of RAM because the point of the profile is a
+    /// predictable ceiling: an operator asking for a small node wants the same small node on a 64 GiB
+    /// workstation as in a 2 GiB container. Like the proportional path it only fills knobs the operator
+    /// left unset, so a single explicit <c>kahuna.*</c> budget can be raised without leaving the
+    /// profile, and it runs after the <c>key_value_workers</c> override for the same reason.</para>
+    /// </summary>
+    private static void ApplySmallFixedCacheDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna)
+    {
+        const long OneMb = 1024L * 1024;
+        const int BlockCacheMb = 64;
+        const int MemtableMb = 16;
+        const long ActorLayerBytes = 32 * OneMb;
+
+        if (kahuna.RocksdbSharedMemoryBudgetMb is null)
+            baseline.RocksDbSharedMemoryBudgetMb = BlockCacheMb;
+
+        // Derived from whatever the total ended up being, not pinned: an operator who set only the total
+        // to something below 16 MiB would otherwise get a memtable sub-budget larger than the cache it
+        // is charged against, which the cross-field check above rejects at boot.
+        if (kahuna.RocksdbSharedMemtableBudgetMb is null)
+            baseline.RocksDbSharedMemtableBudgetMb = Math.Min(MemtableMb, baseline.RocksDbSharedMemoryBudgetMb);
+
+        int actorCount = Math.Max(1, baseline.KeyValueWorkers);
+
+        // Budgeted as a layer and split, matching the proportional path: a per-actor constant would be
+        // multiplied by one actor per CPU, so the same profile would mean 32 MiB on a 4-core laptop and
+        // 256 MiB on a 32-core one. The 1 MiB per-actor floor keeps an individual cache non-degenerate
+        // on a machine with many cores.
+        if (kahuna.MaxBytesPerActor is null)
+            baseline.MaxBytesPerActor = Math.Max(ActorLayerBytes / actorCount, OneMb);
+
+        // Both caps evict, so the smaller binds; deriving the entry cap from the byte cap at the same
+        // assumed ~512 B/entry keeps the two describing one cache rather than two.
+        if (kahuna.MaxEntriesPerActor is null)
+            baseline.MaxEntriesPerActor = (int)Math.Max(baseline.MaxBytesPerActor / 512, 2_000);
+    }
+
+    /// <summary>
     /// Sizes the read caches proportionally to the machine instead of the old fixed values, for every
-    /// knob the operator did not set explicitly. Measured motivation: the fixed 320 MB RocksDB block
+    /// knob the operator did not set explicitly. This is the <see cref="MemoryProfile.Prod"/> sizing;
+    /// <see cref="MemoryProfile.Dev"/> replaces it with <see cref="ApplySmallFixedCacheDefaults"/>. Measured motivation: the fixed 320 MB RocksDB block
     /// cache forced a 1.2 GB TPC-C working set through disk reads on nearly every statement — raising
     /// it to 2 GB on a 16 GB machine took the same workload from 24.5 to 119.6 tx/s at 8 clients
     /// (and resolved a pipelining collapse to 3.4 tx/s that was pure read-I/O queueing).

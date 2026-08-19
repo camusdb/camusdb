@@ -17,7 +17,7 @@ namespace CamusDB.Workload.Client;
 /// otherwise the measured throughput knee could reflect a client-side head-of-line limit rather than
 /// the server. Reads and writes use separate connection sets: reads run on connections whose default
 /// transaction mode is <c>ReadOnly</c> (genuine read-only autocommit — one round trip, no write lock),
-/// while writes drive explicit optimistic read/write transactions.
+/// while writes drive explicit read/write transactions under the run's configured isolation/locking.
 /// </summary>
 public sealed class ConnectionSet : IAsyncDisposable
 {
@@ -36,11 +36,12 @@ public sealed class ConnectionSet : IAsyncDisposable
 
     /// <summary>
     /// Opens <paramref name="connections"/> read connections and <paramref name="connections"/> write
-    /// connections against the same endpoint. Reads default to read-only; writes default to
-    /// ReadCommitted + ReadWrite + Optimistic so autocommit and explicit transactions share the shape.
+    /// connections against the same endpoint. Reads default to read-only; writes carry the settings'
+    /// isolation/locking plus ReadWrite so autocommit and explicit transactions share the shape.
     /// </summary>
     public static async Task<ConnectionSet> OpenAsync(
-        string endpoint, string database, string protocol, int connections, CancellationToken ct)
+        string endpoint, string database, string protocol, int connections,
+        ConnectionSettings settings, CancellationToken ct)
     {
         if (connections < 1)
             connections = 1;
@@ -48,9 +49,10 @@ public sealed class ConnectionSet : IAsyncDisposable
         CamusConnection[] reads = new CamusConnection[connections];
         CamusConnection[] writes = new CamusConnection[connections];
 
-        string readCs = $"Endpoint={endpoint};Database={database};Protocol={protocol};TransactionMode=ReadOnly";
+        string suffix = settings.CommonSuffix();
+        string readCs = $"Endpoint={endpoint};Database={database};Protocol={protocol};TransactionMode=ReadOnly{suffix}";
         string writeCs = $"Endpoint={endpoint};Database={database};Protocol={protocol};" +
-                         "IsolationLevel=ReadCommitted;TransactionMode=ReadWrite;Locking=Optimistic";
+                         $"IsolationLevel={settings.IsolationLevel};TransactionMode=ReadWrite;Locking={settings.Locking}{suffix}";
 
         for (int i = 0; i < connections; i++)
         {
@@ -63,11 +65,12 @@ public sealed class ConnectionSet : IAsyncDisposable
         return new ConnectionSet(reads, writes);
     }
 
-    /// <summary>Opens a single connection for setup/reconciliation work (schema, seeding, verification).</summary>
+    /// <summary>Opens a single connection for setup/reconciliation work (schema, seeding, verification).
+    /// Only the settings' common suffix applies — setup transactions keep the client defaults.</summary>
     public static async Task<CamusConnection> OpenSingleAsync(
-        string endpoint, string database, string protocol, CancellationToken ct)
+        string endpoint, string database, string protocol, ConnectionSettings settings, CancellationToken ct)
     {
-        string cs = $"Endpoint={endpoint};Database={database};Protocol={protocol}";
+        string cs = $"Endpoint={endpoint};Database={database};Protocol={protocol}{settings.CommonSuffix()}";
         CamusConnection conn = new(new CamusConnectionStringBuilder(cs));
         await conn.OpenAsync(ct).ConfigureAwait(false);
         return conn;

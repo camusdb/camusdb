@@ -415,10 +415,17 @@ public sealed record CamusDBOptions
     ///
     /// <b>Reads and writes across a range boundary</b> are handled by Kahuna, not by this engine: a
     /// scan resolves every range descriptor its bounds intersect and merges the results in key
-    /// order, and a write that arrives while a boundary is moving is refused with a retryable
-    /// <c>MustRetry</c> that the store's retry path absorbs. Split behavior under sustained
-    /// concurrent write traffic is not yet proven by tests, which is the main reason the mode is
-    /// still opt-in.
+    /// order, and a write in flight while a boundary moves is refused with a retryable outcome
+    /// rather than routed to the wrong owner — either a <c>MustRetry</c> the store's retry path
+    /// absorbs, or a conflict abort against the exclusive lock the split holds over the half it is
+    /// moving. Both leave nothing written, so replaying from <c>BEGIN</c> is safe; a write the
+    /// client was told had committed survives the split. A range lock taken before a split is
+    /// clamped onto both children, so a holder keeps its protection without re-acquiring anything.
+    ///
+    /// <b>This is a supported mode, but hash routing remains the default</b> — key-range routing
+    /// costs a range-map lookup and only pays for itself when a table's write coordination actually
+    /// needs more than one leader. See <c>docs/key-range-sharding.md</c> for the operator-facing
+    /// description of what the mode changes, when to enable it, and its known limits.
     ///
     /// <b>Partitions.</b> Registration succeeds and the space really is key-range routed even on a
     /// node started with a single partition — the range map lives on the reserved meta partition, so
@@ -1332,6 +1339,20 @@ public sealed record CamusDBOptions
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int RegexCacheMaxEntries { get; init; } = 1024;
+
+    /// <summary>
+    /// How the embedded storage node sizes the cache budgets left unset: <see cref="MemoryProfile.Prod"/>
+    /// scales them to the machine, <see cref="MemoryProfile.Dev"/> pins them to small fixed values so a
+    /// node can share a developer machine. Set via <c>memory_profile</c> in <c>config.yml</c> or
+    /// <c>--memory-profile</c>. Default: <see cref="MemoryProfile.Prod"/>.
+    ///
+    /// <para>Restart-class because it is consumed once, by <c>EmbeddedKahunaOptionsBuilder</c>, to build
+    /// the node's options before it starts; the caches it sizes are allocated at that point and are
+    /// never re-read. Node-scoped because how much memory one node may use is a property of the box it
+    /// runs on — a fleet of differently-sized machines is expected to disagree about it.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public MemoryProfile MemoryProfile { get; init; } = MemoryProfile.Prod;
 
     /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded

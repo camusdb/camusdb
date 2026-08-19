@@ -11,7 +11,8 @@ To see what a running node actually resolved — including which layer supplied 
 Highest wins:
 
 1. **CLI flags** — only flags you explicitly pass override YAML (nullable options; no sentinel defaults).
-2. **Environment variables** — currently `CAMUS_KEY_RANGE_SHARDING` overrides `key_range_sharding`.
+2. **Environment variables** — currently `CAMUS_KEY_RANGE_SHARDING` overrides `key_range_sharding`
+   (what that setting does: [key-range-sharding.md](key-range-sharding.md)).
 3. **`config.yml`**
 4. **Built-in defaults** in `ConfigDefinition` / `CamusDBConfig`.
 
@@ -24,6 +25,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 |------------|----------|---------|
 | `data_dir` | `--data-dir` | `Data` (process cwd) |
 | `mode` | `--mode` | `standalone` |
+| `memory_profile` | `--memory-profile` | `prod` |
 | `node_name` | `--raft-nodename` | `""` (cluster: machine name) |
 | `raft_node_id` | `--raft-nodeid` | `1` |
 | `raft_host` | `--raft-host` | `localhost` |
@@ -95,11 +97,34 @@ older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed toget
 
 Storage backends: `memory`, `sqlite`, `rocksdb`.
 
+### Memory profile
+
+`memory_profile` (`--memory-profile`) selects *how* the four cache-sizing knobs below are defaulted.
+It changes nothing else — not worker counts, not durability, not any behavior an application can
+observe other than how often a read is served from cache instead of disk.
+
+| Profile | Block cache | Memtable sub-budget | Actor caches | Total |
+|---------|-------------|---------------------|--------------|-------|
+| `prod` (default) | 10% of RAM, `[320 MiB, 2 GiB]` | ¼ of it, `[128 MiB, 1 GiB]` | 6.25% of RAM, ≥ 64 MiB | ~16% of RAM (~1.5 GiB on an 8 GiB box) |
+| `dev` | 64 MiB | 16 MiB | 32 MiB | ~96 MiB, on any machine |
+
+`dev` is for a node sharing a developer machine with the application being built against it: the
+budgets are fixed, so the same node is the same size on a 64 GiB workstation and in a 2 GiB
+container. The cost is throughput once the working set outgrows the cache — the TPC-C run that
+motivated proportional sizing was ~5x slower against a 320 MiB block cache — so it is not a server
+setting. Note that the caches are ceilings filled lazily: a burst of large writes can still push
+process RSS well above the cache total, because transient managed allocations and the .NET GC (server
+GC by default, one heap per core) dominate the peak. `DOTNET_gcServer=0` in the environment is the
+lever for that half of the footprint; it is a runtime setting, not a CamusDB one.
+
+An explicit `kahuna.*` budget always beats the profile, so `dev` plus one raised budget is a valid
+combination rather than a conflict.
+
 ### Memory-proportional cache defaults
 
-Most unset keys keep Kahuna's own default, but the four cache-sizing knobs are an exception: when
-left unset they are computed at startup from the machine's available memory (container limits
-respected) rather than from a fixed constant. A fixed 320 MB block cache was measured forcing a
+Under `memory_profile: prod`, most unset keys keep Kahuna's own default, but the four cache-sizing
+knobs are an exception: when left unset they are computed at startup from the machine's available
+memory (container limits respected) rather than from a fixed constant. A fixed 320 MB block cache was measured forcing a
 1.2 GB TPC-C working set through disk reads on nearly every statement; sizing it to the machine
 took the same workload from 24.5 to 119.6 tx/s at 8 clients.
 
@@ -139,6 +164,7 @@ one per CPU) to get the total.
 | Condition | Error |
 |-----------|-------|
 | Unknown `mode` | `InvalidConfig` |
+| Unknown `memory_profile` (not `prod`/`dev`) | `InvalidConfig` |
 | Port outside 1..65535 | `InvalidConfig` |
 | `http_peers` count ≠ `peers` count | `InvalidConfig` |
 | Invalid `default_isolation_level` | `InvalidConfig` |

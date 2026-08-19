@@ -52,6 +52,12 @@ ENV CAMUS_INITIAL_CLUSTER_PARTITIONS="$CAMUS_INITIAL_CLUSTER_PARTITIONS"
 
 RUN mkdir -p /data
 
+# Extra CLI flags appended verbatim (word-split) at the end of the command line, so a container
+# can opt into flags the fixed list doesn't cover without rebuilding the image — e.g.
+# CAMUS_EXTRA_ARGS="--join-existing true" boots the node as a runtime joiner of the cluster
+# seeded by CAMUS_INITIAL_CLUSTER. Empty by default: the command line is unchanged.
+ENV CAMUS_EXTRA_ARGS=""
+
 ENTRYPOINT ["sh", "-c", "exec dotnet CamusDB.dll \
   --mode=cluster \
   --http-port=${CAMUS_HTTP_PORT:-5095} \
@@ -62,4 +68,5 @@ ENTRYPOINT ["sh", "-c", "exec dotnet CamusDB.dll \
   --https-certificate=/app/certificate.pfx \
   --raft-certificate=/app/certificate.pfx \
   --initial-cluster-partitions=${CAMUS_INITIAL_CLUSTER_PARTITIONS:-3} \
-  --initial-cluster ${CAMUS_INITIAL_CLUSTER}"]
+  --initial-cluster ${CAMUS_INITIAL_CLUSTER} \
+  ${CAMUS_EXTRA_ARGS}"]

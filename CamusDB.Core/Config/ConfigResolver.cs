@@ -37,6 +37,12 @@ public static class ConfigResolver
             config.RecordSource("mode", ConfigValueSource.CommandLine);
         }
 
+        if (cli.MemoryProfile is not null)
+        {
+            config.MemoryProfile = cli.MemoryProfile;
+            config.RecordSource("memory_profile", ConfigValueSource.CommandLine);
+        }
+
         if (cli.DataDir is not null)
         {
             config.DataDir = cli.DataDir;
@@ -85,6 +91,12 @@ public static class ConfigResolver
         {
             config.HttpPeers = [.. cli.HttpPeers];
             config.RecordSource("http_peers", ConfigValueSource.CommandLine);
+        }
+
+        if (cli.JoinExisting is bool joinExisting)
+        {
+            config.JoinExisting = joinExisting;
+            config.RecordSource("join_existing", ConfigValueSource.CommandLine);
         }
 
         if (cli.SchemaAckWaitTimeoutMs is int schemaAckWait)
@@ -179,6 +191,8 @@ public static class ConfigResolver
         // An empty data_dir means "unset": keep the built-in default rather than
         // rooting the database at the current directory.
         DataDirectory = !string.IsNullOrEmpty(config.DataDir) ? config.DataDir : CamusDBOptions.Default.DataDirectory,
+
+        MemoryProfile = config.ParseMemoryProfile(),
 
         StatsFlushIntervalMs = config.StatsFlushIntervalMs,
         StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows,

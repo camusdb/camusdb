@@ -76,6 +76,16 @@ public static class Program
             Console.Error.WriteLine($"--read-percent + --write-percent must equal 100 (got {o.ReadPercent}+{o.WritePercent}).");
             return 2;
         }
+        if (!TryParseLocking(o.Locking, out CamusLocking locking))
+        {
+            Console.Error.WriteLine($"--locking must be optimistic or pessimistic (got '{o.Locking}').");
+            return 2;
+        }
+        if (!TryParseIsolation(o.Isolation, out CamusIsolationLevel isolation))
+        {
+            Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
+            return 2;
+        }
         if (Directory.Exists(o.Output))
         {
             Console.Error.WriteLine($"Output directory already exists: {o.Output}. Refusing to overwrite.");
@@ -103,10 +113,11 @@ public static class Program
             baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, ct).ConfigureAwait(false);
         }
 
+        ConnectionSettings settings = new(locking, isolation, o.NoAutoPrepare, o.RequestTimeout);
         await using ConnectionSet connections =
-            await ConnectionSet.OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, ct).ConfigureAwait(false);
+            await ConnectionSet.OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, settings, ct).ConfigureAwait(false);
 
-        WriteOperation writeOperation = new(connections, dataset, o.WritesPerTransaction);
+        WriteOperation writeOperation = new(connections, dataset, o.WritesPerTransaction, locking, isolation);
         OperationDispatcher dispatcher = new(
             new ReadOperation(connections, dataset),
             writeOperation);
@@ -140,12 +151,14 @@ public static class Program
         await using (CamusConnection verify = await OpenSingleAsync(o, ct).ConfigureAwait(false))
         {
             reconciliation = await Reconciliation
-                .VerifyAsync(verify, metrics, baselineVersionSum, writeOperation.CommittedRows, o.Rows, ct)
+                .VerifyAsync(
+                    verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
+                    writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct)
                 .ConfigureAwait(false);
         }
 
-        RunSummary summary = RunSummary.Build(metrics, o.Mode, o.TargetOps, measure.TotalSeconds);
-        RunManifest manifest = BuildManifest(o, dataset);
+        RunSummary summary = RunSummary.Build(metrics, o.Mode, o.TargetOps, measure.TotalSeconds, o.ExpectFaults);
+        RunManifest manifest = BuildManifest(o, dataset, locking, isolation);
 
         ResultWriter writer = new(o.Output);
         await writer.WriteAsync(manifest, summary, intervals, metrics.Errors, ct).ConfigureAwait(false);
@@ -206,9 +219,33 @@ public static class Program
     }
 
     private static Task<CamusConnection> OpenSingleAsync(CommonOptions o, CancellationToken ct)
-        => ConnectionSet.OpenSingleAsync(o.Endpoint, o.Database, o.Protocol, ct);
+        => ConnectionSet.OpenSingleAsync(
+            o.Endpoint, o.Database, o.Protocol,
+            new ConnectionSettings(NoAutoPrepare: o.NoAutoPrepare, RequestTimeoutSeconds: o.RequestTimeout), ct);
 
-    private static RunManifest BuildManifest(RunOptions o, Dataset dataset) => new(
+    /// <summary>Accepts the CLI spelling (snake_case, case-insensitive) for concurrency-control knobs.</summary>
+    private static bool TryParseLocking(string value, out CamusLocking locking)
+    {
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "optimistic": locking = CamusLocking.Optimistic; return true;
+            case "pessimistic": locking = CamusLocking.Pessimistic; return true;
+            default: locking = CamusLocking.Optimistic; return false;
+        }
+    }
+
+    private static bool TryParseIsolation(string value, out CamusIsolationLevel isolation)
+    {
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "read_committed": isolation = CamusIsolationLevel.ReadCommitted; return true;
+            case "serializable": isolation = CamusIsolationLevel.Serializable; return true;
+            default: isolation = CamusIsolationLevel.ReadCommitted; return false;
+        }
+    }
+
+    private static RunManifest BuildManifest(
+        RunOptions o, Dataset dataset, CamusLocking locking, CamusIsolationLevel isolation) => new(
         ToolVersion: Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0",
         GitCommit: Environment.GetEnvironmentVariable("CAMUS_GIT_COMMIT"),
         Endpoint: o.Endpoint,
@@ -224,6 +261,11 @@ public static class Program
         ReadPercent: o.ReadPercent,
         WritePercent: o.WritePercent,
         WritesPerTransaction: o.WritesPerTransaction,
+        Locking: locking.ToString(),
+        Isolation: isolation.ToString(),
+        NoAutoPrepare: o.NoAutoPrepare,
+        RequestTimeoutSeconds: o.RequestTimeout,
+        ExpectFaults: o.ExpectFaults,
         SchemaFingerprint: dataset.Fingerprint(),
         StartedAtUtc: DateTime.UtcNow.ToString("O"),
         Runtime: Environment.Version.ToString(),
@@ -242,10 +284,12 @@ public static class Program
         Console.WriteLine($"  Write p50/p99 (ms)  : {s.WriteLatency.P50:F2} / {s.WriteLatency.P99:F2}");
         Console.WriteLine($"  Commit p50/p99 (ms) : {s.WriteCommit.P50:F2} / {s.WriteCommit.P99:F2}");
         Console.WriteLine($"  Conflicts           : {s.Conflicts}");
+        Console.WriteLine($"  Indeterminate       : {s.Indeterminate}");
         Console.WriteLine($"  Reconciliation      : {(r.Passed ? "PASS" : "FAIL")}");
         foreach (string f in r.Failures)
             Console.WriteLine($"    ✗ {f}");
-        Console.WriteLine($"  Run validity        : {(s.Valid ? "VALID" : "INVALID")}");
+        Console.WriteLine($"  Run validity        : {(s.Valid ? "VALID" : "INVALID")}" +
+                          (s.ExpectFaults ? " (expect-faults waivers active)" : ""));
         foreach (string w in s.ValidityWarnings)
             Console.WriteLine($"    ⚠ {w}");
         Console.WriteLine();

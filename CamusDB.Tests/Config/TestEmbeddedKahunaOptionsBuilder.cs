@@ -352,9 +352,11 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     [Test]
     public void RaisingOnlyMemtableBudgetAboveTotalDefault_IsRejectedAtBuild()
     {
-        // Symmetric to the above: only the memtable budget is overridden, past the baseline total default
-        // of 320. Effective pair becomes total=320 / memtable=500 — rejected at build time.
-        KahunaOptionsConfig kahuna = new() { RocksdbSharedMemtableBudgetMb = 500 };
+        // Symmetric to the above: only the memtable budget is overridden, past anything the total can be
+        // defaulted to. The check runs on the pair the node is actually built with — after the sizing
+        // defaults — and the total's ceiling is 2 GB however large the machine is, so 4 GB of memtable
+        // inside it is inverted on every machine this can run on.
+        KahunaOptionsConfig kahuna = new() { RocksdbSharedMemtableBudgetMb = 4096 };
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
             () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-memtable", kahuna, CamusDBOptions.Default))!;
@@ -561,5 +563,142 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // renewal-margin cross-check is skipped.
         ConfigDefinition config = new() { RangeLockExpiresMs = 0 };
         Assert.DoesNotThrow(() => config.Validate());
+    }
+
+    // ── Partition placement + leader balancing ───────────────────────────────
+
+    [Test]
+    public void PlacementAndBalancerKnobs_OverrideClusterBaseline()
+    {
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig
+            {
+                ReplicationFactor = 3,
+                Zone = "rack-a",
+                EnablePlacementRebalancer = true,
+                PlacementPassIntervalMs = 2_000,
+                MaxReplicaMovesPerPass = 6,
+                MaxConcurrentReplicaTransfers = 2,
+                MaxConcurrentReplicaRepairs = 4,
+                ReplicaCountDeadband = 0,
+                DecommissionDrainTimeoutMs = 60_000,
+                EnableLeaderBalancer = true,
+                LeaderBalancerIntervalMs = 10_000,
+                LeaderBalancerReportIntervalMs = 2_500,
+                LeaderBalancerReportTtlMs = 12_000,
+                MinLeaderStabilityMs = 3_000,
+            },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.ReplicationFactor, Is.EqualTo(3));
+        Assert.That(built.Zone, Is.EqualTo("rack-a"));
+        Assert.That(built.EnablePlacementRebalancer, Is.True);
+        Assert.That(built.PlacementPassInterval, Is.EqualTo(TimeSpan.FromMilliseconds(2_000)));
+        Assert.That(built.MaxReplicaMovesPerPass, Is.EqualTo(6));
+        Assert.That(built.MaxConcurrentReplicaTransfers, Is.EqualTo(2));
+        Assert.That(built.MaxConcurrentReplicaRepairs, Is.EqualTo(4));
+        Assert.That(built.ReplicaCountDeadband, Is.EqualTo(0));
+        Assert.That(built.DecommissionDrainTimeout, Is.EqualTo(TimeSpan.FromMilliseconds(60_000)));
+        Assert.That(built.EnableLeaderBalancer, Is.True);
+        Assert.That(built.LeaderBalancerInterval, Is.EqualTo(TimeSpan.FromMilliseconds(10_000)));
+        Assert.That(built.LeaderBalancerReportInterval, Is.EqualTo(TimeSpan.FromMilliseconds(2_500)));
+        Assert.That(built.LeaderBalancerReportTtl, Is.EqualTo(TimeSpan.FromMilliseconds(12_000)));
+        Assert.That(built.MinLeaderStability, Is.EqualTo(TimeSpan.FromMilliseconds(3_000)));
+    }
+
+    [Test]
+    public void UnsetPlacementKnobs_KeepKahunaDefaults()
+    {
+        ConfigDefinition config = new() { DataDir = "/data/camus" };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.ReplicationFactor, Is.EqualTo(0), "full replication stays the default");
+        Assert.That(built.Zone, Is.Null);
+        Assert.That(built.EnablePlacementRebalancer, Is.False);
+        Assert.That(built.PlacementPassInterval, Is.EqualTo(TimeSpan.FromSeconds(5)));
+        Assert.That(built.MaxReplicaMovesPerPass, Is.EqualTo(4));
+        Assert.That(built.MaxConcurrentReplicaTransfers, Is.EqualTo(1));
+        Assert.That(built.MaxConcurrentReplicaRepairs, Is.EqualTo(3));
+        Assert.That(built.ReplicaCountDeadband, Is.EqualTo(1));
+        Assert.That(built.DecommissionDrainTimeout, Is.EqualTo(TimeSpan.FromMinutes(2)));
+        Assert.That(built.EnableLeaderBalancer, Is.False);
+        Assert.That(built.LeaderBalancerInterval, Is.EqualTo(TimeSpan.FromSeconds(30)));
+    }
+
+    [Test]
+    public void NegativeReplicationFactor_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { ReplicationFactor = -1 }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("replication_factor"));
+    }
+
+    [Test]
+    public void BlankZone_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { Zone = "  " }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("zone"));
+    }
+
+    [Test]
+    public void ReportTtlAtOrBelowReportInterval_IsRejected()
+    {
+        // The cross-check compares the EFFECTIVE pair: a TTL lowered below the default 5 s report
+        // interval must be caught even when the interval key itself is untouched.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { LeaderBalancerReportTtlMs = 4_000 }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("leader_balancer_report_ttl_ms"));
+    }
+
+    [Test]
+    public void JoinExisting_SeedsFlowFromPeers()
+    {
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Mode = "cluster",
+            JoinExisting = true,
+            Peers = ["10.0.0.1:7070", "10.0.0.2:7072"],
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.JoinExistingSeeds, Is.EqualTo(new[] { "10.0.0.1:7070", "10.0.0.2:7072" }));
+    }
+
+    [Test]
+    public void JoinExistingOff_LeavesSeedsNull()
+    {
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Mode = "cluster",
+            Peers = ["10.0.0.1:7070"],
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.JoinExistingSeeds, Is.Null, "an ordinary boot must never be mistaken for a join");
+    }
+
+    [Test]
+    public void NonPositivePlacementKnobs_AreRejected()
+    {
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { PlacementPassIntervalMs = 0 }.Validate());
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { MaxReplicaMovesPerPass = 0 }.Validate());
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { MaxConcurrentReplicaTransfers = 0 }.Validate());
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { MaxConcurrentReplicaRepairs = 0 }.Validate());
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { ReplicaCountDeadband = -1 }.Validate());
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { DecommissionDrainTimeoutMs = 0 }.Validate());
+        Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { MinLeaderStabilityMs = 0 }.Validate());
     }
 }

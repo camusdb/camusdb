@@ -44,6 +44,63 @@ public class TestConfigReader
 
     [Test]
     [NonParallelizable]
+    public void TestReadsPlacementAndBalancerKahunaKeys()
+    {
+        string yml = string.Join('\n',
+            "mode: cluster",
+            "kahuna:",
+            "  replication_factor: 3",
+            "  zone: rack-a",
+            "  enable_placement_rebalancer: true",
+            "  enable_leader_balancer: true",
+            "  leader_balancer_interval_ms: 10000");
+
+        ConfigDefinition config = new ConfigReader().Read(yml);
+
+        Assert.AreEqual(3, config.Kahuna.ReplicationFactor);
+        Assert.AreEqual("rack-a", config.Kahuna.Zone);
+        Assert.AreEqual(true, config.Kahuna.EnablePlacementRebalancer);
+        Assert.AreEqual(true, config.Kahuna.EnableLeaderBalancer);
+        Assert.AreEqual(10_000, config.Kahuna.LeaderBalancerIntervalMs);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void TestReadsJoinExisting()
+    {
+        string yml = string.Join('\n',
+            "mode: cluster",
+            "join_existing: true",
+            "peers:",
+            "  - 10.0.0.1:7070");
+
+        ConfigDefinition config = new ConfigReader().Read(yml);
+
+        Assert.AreEqual(true, config.JoinExisting);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void TestRejectsJoinExistingWithoutPeers()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("mode: cluster\njoin_existing: true"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidConfig, ex.Code);
+        StringAssert.Contains("join_existing", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void TestRejectsJoinExistingInStandaloneMode()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("mode: standalone\njoin_existing: true"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidConfig, ex.Code);
+        StringAssert.Contains("cluster mode", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
     public void TestRejectsUnknownMode()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(

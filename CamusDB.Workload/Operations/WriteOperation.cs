@@ -13,8 +13,8 @@ using CamusDB.Workload.Workload;
 namespace CamusDB.Workload.Operations;
 
 /// <summary>
-/// One optimistic read/write transaction: BEGIN (ReadCommitted, ReadWrite, Optimistic), read each
-/// target row's balance+version, then UPDATE it with a bounded balance change and
+/// One read/write transaction under the run's configured isolation/locking (defaults: ReadCommitted,
+/// Optimistic): BEGIN, read each target row's balance+version, then UPDATE it with a bounded balance change and
 /// <c>version = version + 1</c>, and COMMIT — success is counted only after the commit returns. All
 /// target rows come from the worker's own <see cref="WorkerShard"/>, so two workers never touch the
 /// same row and the baseline is structurally conflict-free. The begin/read/update/commit spans are
@@ -24,23 +24,27 @@ namespace CamusDB.Workload.Operations;
 /// </summary>
 public sealed class WriteOperation
 {
-    private static readonly CamusTransactionOptions Options = new()
-    {
-        IsolationLevel = CamusIsolationLevel.ReadCommitted,
-        Mode = CamusTransactionMode.ReadWrite,
-        Locking = CamusLocking.Optimistic,
-    };
-
+    private readonly CamusTransactionOptions _options;
     private readonly ConnectionSet _connections;
     private readonly Dataset _dataset;
     private readonly int _writesPerTransaction;
     private long _committedRows;
+    private long _indeterminateTxns;
 
-    public WriteOperation(ConnectionSet connections, Dataset dataset, int writesPerTransaction)
+    public WriteOperation(
+        ConnectionSet connections, Dataset dataset, int writesPerTransaction,
+        CamusLocking locking = CamusLocking.Optimistic,
+        CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted)
     {
         _connections = connections;
         _dataset = dataset;
         _writesPerTransaction = Math.Max(1, writesPerTransaction);
+        _options = new CamusTransactionOptions
+        {
+            IsolationLevel = isolationLevel,
+            Mode = CamusTransactionMode.ReadWrite,
+            Locking = locking,
+        };
     }
 
     /// <summary>
@@ -51,6 +55,14 @@ public sealed class WriteOperation
     /// always over-count by the warm-up writes.
     /// </summary>
     public long CommittedRows => System.Threading.Interlocked.Read(ref _committedRows);
+
+    /// <summary>
+    /// Transactions whose commit round trip failed without a server verdict, across the whole run
+    /// (warm-up <em>and</em> measured windows, mirroring <see cref="CommittedRows"/>). Each may have
+    /// durably committed all of its row writes or none; reconciliation widens its expected
+    /// <c>SUM(version)</c> delta by up to this count × writes-per-transaction to admit both outcomes.
+    /// </summary>
+    public long IndeterminateTxns => System.Threading.Interlocked.Read(ref _indeterminateTxns);
 
     public async Task<OperationResult> ExecuteAsync(WorkerShard shard, long baseRowIndex, CancellationToken ct)
     {
@@ -72,7 +84,7 @@ public sealed class WriteOperation
         CamusTransaction tx;
         try
         {
-            tx = await conn.BeginTransactionAsync(Options, ct).ConfigureAwait(false);
+            tx = await conn.BeginTransactionAsync(_options, ct).ConfigureAwait(false);
             beginMs = Elapsed(ref ts);
         }
         catch (Exception ex)
@@ -81,6 +93,10 @@ public sealed class WriteOperation
             return OperationResult.Failure(OperationKind.Write, status, code);
         }
 
+        // False until control reaches the commit call itself. A SELECT/UPDATE failure — even one thrown
+        // after the row work — is a definite abort because no commit was ever requested; only an
+        // exception from the commit round trip leaves the durable outcome unknown.
+        bool commitSubmitted = false;
         try
         {
             foreach (long rowIndex in rowIndexes)
@@ -112,6 +128,7 @@ public sealed class WriteOperation
                 updateMs += Elapsed(ref ts);
             }
 
+            commitSubmitted = true;
             await tx.CommitAsync(ct).ConfigureAwait(false);
             commitMs = Elapsed(ref ts);
             System.Threading.Interlocked.Add(ref _committedRows, count);
@@ -119,7 +136,16 @@ public sealed class WriteOperation
         }
         catch (Exception ex)
         {
-            (OperationStatus status, string code) = ErrorClassifier.Classify(ex);
+            (OperationStatus status, string code) = ErrorClassifier.Classify(ex, commitSubmitted);
+            if (status == OperationStatus.Indeterminate)
+            {
+                // The commit may already have durably applied; a rollback attempt would either be
+                // rejected or race the in-flight commit, so the transaction is left for the server's
+                // reaper/finalizer and the ambiguity is carried into reconciliation instead.
+                System.Threading.Interlocked.Increment(ref _indeterminateTxns);
+                return OperationResult.Failure(OperationKind.Write, status, code);
+            }
+
             try
             {
                 await tx.RollbackAsync(ct).ConfigureAwait(false);

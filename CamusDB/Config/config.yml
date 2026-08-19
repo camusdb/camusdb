@@ -36,6 +36,20 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
                            # TPC-C (1000 warehouses, 8 clients): 28.8 tx/s with 1 partition + one-phase vs
                            # 7.0 tx/s with 4 partitions (commit p50 7.6 ms vs ~107 ms). Raise only for
                            # cluster deployments, where partitions map to distinct leaders.
+# ── Memory profile ────────────────────────────────────────────────────────────
+# memory_profile (default prod): how the node sizes the cache budgets you leave unset — the RocksDB
+#   shared block cache, its memtable sub-budget, and the key/value actor caches.
+#     prod — sized from the machine's available memory, container limits respected (~16% of RAM
+#            across both cache layers; ~1.5 GiB on an 8 GiB / 8-core box). See the kahuna: section.
+#     dev  — small fixed budgets: 64 MiB block cache (16 MiB of it memtables) and 32 MiB of actor
+#            caches, ~96 MiB in total, regardless of how large the machine is. For a node sharing a
+#            laptop with the app being developed against it. Nothing about correctness or durability
+#            changes; a working set larger than the cache is read from disk, so a real dataset is
+#            materially slower — do not run a server on it.
+#   Any explicit kahuna.* budget still wins over the profile, so the two can be combined.
+#   Also settable as --memory-profile prod|dev, which overrides this value.
+# memory_profile: prod
+
 # http_port: 5095          # HTTP API port (1..65535)
 # https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
 # https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
@@ -78,6 +92,15 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   - 192.168.1.11:5095
 #   - 192.168.1.12:5095
 #
+# join_existing: join a RUNNING cluster as a new node instead of bootstrapping one, with 'peers'
+# acting as the SEED list (one or more members of the running cluster). The node enters the
+# committed roster as a learner and is promoted to voter once caught up. Never guessed from
+# state: a would-be joiner booted without this flag forms a separate cluster (split brain), and a
+# founding node booted with it finds no cluster to join. Requires cluster mode and >= 1 peer.
+# Graceful scale-down is the reverse path: POST /v1/cluster/leave drains the node's replicas onto
+# survivors and commits its removal. Also settable as --join-existing true|false.
+# join_existing: false
+#
 # Schema two-version gate tunables (cluster mode). A DDL proposer waits for every
 # live node to ack the previous schema version before proposing the next.
 # schema_ack_wait_timeout_ms: how long to wait for all acks before giving up (> 0).
@@ -97,6 +120,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # lock_escalation_threshold: 50           # shared-point locks before bucket escalation (> 0)
 # lock_wait_deadline_ms: 500              # per-operation Serializable conflict cap (> 0)
 # key_range_sharding: false               # opt tables into Kahuna key-range routing
+#                                         # (see docs/key-range-sharding.md; needs initial_partitions >= 2
+#                                         #  to distribute anything)
 
 # Unresolved-finalize budget. A COMMIT/ROLLBACK can come back "outcome not known yet" (a leadership
 # flip mid-finalize, an in-progress drain, a participant write shed under load). That is not a
@@ -418,11 +443,39 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # on an access-controlled (ideally encrypted) volume.
 #   backup_cluster_id: prod-cluster-a           # stamped into manifests; a restore refuses a foreign cluster's chain. Empty on standalone is fine
 #   backup_mac_key_file: /etc/camusdb/backup.key # HMAC-SHA-256 key file signing manifests (authenticity). Same file on all nodes, kept outside backup_dir. Omit = unsigned
+#
+#   # Partition placement (replication factor). Cluster mode. Applies at cluster BOOTSTRAP only:
+#   # there is no in-place migration from full replication — restarting an existing cluster with a
+#   # factor set changes the configured target while already-committed ranges keep their empty
+#   # (full-replication) replica sets. Set the same values on every node. The placement table is
+#   # observable at GET /v1/cluster/placement; graceful decommission at POST /v1/cluster/leave.
+#   replication_factor: 0                # 0 = full replication (default): every voter hosts every range.
+#                                        # N > 0: each range gets N replicas and a per-range quorum.
+#                                        # Prefer odd values (3 is the standard choice); even warns at startup
+#   zone: rack-a                         # failure-domain label; replicas spread across distinct zones. Omit = zone-unaware
+#   enable_placement_rebalancer: false   # master switch for ONGOING moves (repair under-replication on node
+#                                        # loss, trim over-replication, smooth skew on join/leave). Initial
+#                                        # placement at the factor is applied at bootstrap regardless
+#   placement_pass_interval_ms: 5000     # placement-controller cadence; a relocation costs ~3 passes, so this floors convergence speed
+#   max_replica_moves_per_pass: 4        # new moves per pass across all priorities; keep >= repairs + transfers
+#   max_concurrent_replica_transfers: 1  # in-flight BALANCE backfills (skew smoothing); never starves client traffic
+#   max_concurrent_replica_repairs: 3    # in-flight REPAIR moves (restore durability); budgeted separately from balance
+#   replica_count_deadband: 1            # per-node imbalance tolerated before balance moves are planned
+#   decommission_drain_timeout_ms: 120000 # how long a graceful leave waits for replica evacuation; one drain at a time
+#
+#   # Raft leader balancing (which replica LEADS, vs which nodes HOLD a range — that is placement above).
+#   # Off by default; set the same values on every node.
+#   enable_leader_balancer: false        # master switch for the load-report-driven leader balancer
+#   leader_balancer_interval_ms: 30000   # balancing-pass cadence
+#   leader_balancer_report_interval_ms: 5000  # per-node load-report publish cadence
+#   leader_balancer_report_ttl_ms: 20000 # reports older than this are ignored; must be > the report interval
+#   min_leader_stability_ms: 5000        # minimum leader tenure before the balancer may move leadership again
 
-# ── Diagnostics (standalone only; opt-in) ─────────────────────────────────────
+# ── Diagnostics (opt-in) ──────────────────────────────────────────────────────
 # Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:
 # with enabled=false the server registers no exporter, endpoint, or collector and emits nothing.
-# Effective only for a standalone node; cluster behavior is unchanged. The Prometheus endpoint
+# Works in both standalone and cluster mode; in cluster mode the Kahuna/Kommander meters include
+# the kahuna.placement.* counters used to watch replica moves. The Prometheus endpoint
 # exposes operational metadata — protect it or bind it to a trusted interface.
 #
 # enabled: master switch. Default false.

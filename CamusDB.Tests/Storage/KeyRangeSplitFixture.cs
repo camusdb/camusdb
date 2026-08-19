@@ -186,6 +186,49 @@ public abstract class KeyRangeSplitFixture : BaseTest
     }
 
     /// <summary>
+    /// Splits a space, retrying for up to <paramref name="budget"/> instead of the handful of attempts
+    /// <see cref="SplitAtAsync"/> allows.
+    ///
+    /// <para>Needed whenever writes are in flight against the space being split. Kahuna checks both
+    /// halves are non-empty before dividing a range, and a scan whose window contains an uncommitted
+    /// write cannot be served — so the check answers "indeterminate" and the split declines for as long
+    /// as a transaction happens to be staging a write there. That is transient and retrying is the
+    /// documented response, but a three-attempt budget is not enough to ride it out under continuous
+    /// traffic.</para>
+    /// </summary>
+    protected async Task<int> SplitAtWithinAsync(string keySpace, string splitKey, TimeSpan budget)
+    {
+        int before = Descriptors(keySpace).Count;
+
+        Assert.That(before, Is.GreaterThan(0),
+            $"'{keySpace}' has no descriptor to split — the space was never registered for key-range routing");
+
+        KahunaSplitRangeResponse response = new();
+        DateTime deadline = DateTime.UtcNow + budget;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            response = await TestNode!.Kahuna
+                .SplitRangeAtKeyWithOutcomeAsync(keySpace, splitKey, CancellationToken.None);
+
+            if (response.Success || Descriptors(keySpace).Count > before)
+                break;
+
+            await Task.Delay(100);
+        }
+
+        List<KahunaRangeDescriptorResponse> after = Descriptors(keySpace);
+
+        Assert.That(after.Count, Is.GreaterThan(before),
+            $"No split of '{keySpace}' at '{splitKey}' landed within {budget.TotalSeconds}s; " +
+            $"last outcome {response.Status} ({response.Reason})");
+
+        AssertCoversSpaceContiguously(after, keySpace);
+
+        return after.Count;
+    }
+
+    /// <summary>
     /// Asserts the descriptors tile the space end to end. A gap makes the keys inside it unroutable
     /// and an overlap gives two partitions a claim on the same key; both are invisible at the SQL
     /// layer until a read silently returns fewer rows, so the shape is checked directly.

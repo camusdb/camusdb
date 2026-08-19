@@ -108,6 +108,57 @@ internal static class KeyRangeSplitHarness
     }
 
     /// <summary>
+    /// Like <see cref="SplitAtAsync"/>, but keeps offering the split around the cluster for up to
+    /// <paramref name="budget"/>.
+    ///
+    /// <para>Needed whenever writes are in flight against the space. Kahuna checks both halves are
+    /// non-empty before dividing a range, and a scan whose window contains an uncommitted write cannot
+    /// be served — so the check answers "indeterminate" and the split declines for as long as some
+    /// transaction happens to be staging a write there. Retrying is the documented response; a
+    /// three-pass budget is simply not enough to ride it out under continuous traffic.</para>
+    /// </summary>
+    /// <returns>
+    /// The number of descriptors covering the space, and the index of the node whose call committed
+    /// the split (<c>-1</c> if the map changed without any single call reporting success).
+    /// </returns>
+    public static async Task<(int Descriptors, int CommittedBy)> SplitAtWithinAsync(
+        InProcessSchemaCluster cluster, string keySpace, string splitKey, TimeSpan budget)
+    {
+        int before = DescriptorsOn(cluster.Nodes[0], keySpace).Count;
+
+        Assert.That(before, Is.GreaterThan(0),
+            $"Key space '{keySpace}' has no descriptor to split — it was never registered or never seeded");
+
+        List<string> refusals = [];
+        DateTime deadline = DateTime.UtcNow + budget;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                KahunaSplitRangeResponse response =
+                    await node.Kahuna.Kahuna.SplitRangeAtKeyWithOutcomeAsync(keySpace, splitKey, CancellationToken.None);
+
+                if (response.Success)
+                    return (await WaitForDescriptorsAsync(cluster, keySpace, atLeast: before + 1), node.Index);
+
+                refusals.Add($"node {node.Index}: {response.Status} ({response.Reason})");
+
+                if (DescriptorsOn(node, keySpace).Count > before)
+                    return (await WaitForDescriptorsAsync(cluster, keySpace, atLeast: before + 1), -1);
+            }
+
+            await Task.Delay(100);
+        }
+
+        Assert.Fail(
+            $"No node committed a split of '{keySpace}' at '{splitKey}' within {budget.TotalSeconds}s. " +
+            $"Last outcomes: {string.Join("; ", refusals.TakeLast(cluster.Nodes.Length))}");
+
+        return (0, -1);
+    }
+
+    /// <summary>
     /// Blocks until every node's applied range map reports at least <paramref name="atLeast"/>
     /// descriptors for the space, then asserts the descriptors tile it without gap or overlap.
     ///

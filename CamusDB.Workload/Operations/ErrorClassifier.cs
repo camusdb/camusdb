@@ -23,6 +23,24 @@ public static class ErrorClassifier
     private const string MustRetry = "CADB0504";
     private const string LifetimeExceeded = "CADB0505";
 
+    /// <summary>
+    /// Classifies a write-path failure with knowledge of whether the commit request had already been
+    /// submitted. A <see cref="CamusException"/> is a server verdict — the server answered, so the
+    /// transaction definitely aborted (conflict/domain error) even when the answer arrived during the
+    /// commit round trip. Any other failure after commit submission (cancellation, transport drop,
+    /// timeout, unexpected client fault) means no verdict was received: the commit may have durably
+    /// applied before the failure, so the outcome is <see cref="OperationStatus.Indeterminate"/> rather
+    /// than a definite abort. Failures before commit submission keep their ordinary classification —
+    /// no commit was requested, so nothing can have landed.
+    /// </summary>
+    public static (OperationStatus Status, string Code) Classify(Exception ex, bool commitSubmitted)
+    {
+        (OperationStatus status, string code) = Classify(ex);
+        if (commitSubmitted && ex is not CamusException)
+            return (OperationStatus.Indeterminate, code);
+        return (status, code);
+    }
+
     public static (OperationStatus Status, string Code) Classify(Exception ex)
     {
         if (ex is CamusException camus)

@@ -53,6 +53,15 @@ public sealed class TestKeyRangeSplitSafety
 
     private const int RowCount = 40;
 
+    /// <summary>Writes each node must have acknowledged before a split is attempted.</summary>
+    private const int WritesBeforeSplit = 2;
+
+    /// <summary>Writes that keep flowing after cutover, so the post-split path is covered too.</summary>
+    private const int WritesAfterSplit = 10;
+
+    /// <summary>Backstop so a split that never lands cannot turn a writer into an infinite loop.</summary>
+    private const int WriterHardCap = 300;
+
     private static readonly ILoggerFactory sharedLoggerFactory = LoggerFactory.Create(builder =>
         builder.AddFilter("Camus", LogLevel.Warning).AddConsole());
 
@@ -368,4 +377,184 @@ public sealed class TestKeyRangeSplitSafety
                 $"Node {node.Index} must return exactly the same rows, in the same order, as before the split");
         }
     }
+    // -----------------------------------------------------------------------
+    // 6. Writes issued from nodes that are not executing the split. Only one
+    //    node runs any given split, so in a cluster every other node is on the
+    //    path a split-local guard cannot see — and a write that slips through
+    //    commits onto the old owner, is acknowledged, and then disappears when
+    //    the range routes to its new one.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task WritesFromEveryNodeWhileOneOfThemSplits_LoseNoAcknowledgedRow()
+    {
+        (InProcessSchemaCluster cluster, string db, List<string> seededIds) = await SetupAsync(nodeCount: 3);
+        await using InProcessSchemaCluster scope = cluster;
+
+        TableDescriptor table = await TableAsync(cluster.Nodes[0], db);
+        string keySpace = table.Store.RowKeySpace;
+
+        string splitKey = KeyRangeSplitHarness.MedianRowKey(
+            table, await KeyRangeSplitHarness.ScanRowIdsAsync(cluster.Nodes[0], table));
+
+        // Every node writes, so whichever one ends up committing the split, the other two were
+        // writing from outside it. That is stronger than picking a non-executing node in advance,
+        // and it does not depend on predicting which node wins the meta-partition leadership.
+        List<string>[] acknowledged = [.. cluster.Nodes.Select(_ => new List<string>())];
+        int[] attempted = new int[cluster.Nodes.Length];
+        int stopAfter = int.MaxValue;
+        object gate = new();
+
+        List<Task> writers = [];
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            int index = node.Index;
+
+            writers.Add(Task.Run(async () =>
+            {
+                while (Volatile.Read(ref attempted[index]) < Volatile.Read(ref stopAfter)
+                       && Volatile.Read(ref attempted[index]) < WriterHardCap)
+                {
+                    string id = ObjectIdGenerator.Generate().ToString();
+
+                    if (await TryInsertOneAsync(node, db, id, 1_000 + Volatile.Read(ref attempted[index])))
+                        lock (gate) acknowledged[index].Add(id);
+
+                    Interlocked.Increment(ref attempted[index]);
+                }
+            }));
+        }
+
+        // Do not start the split until every node has a committed write behind it, so the split is
+        // landing on a range all three nodes are actively writing to.
+        DateTime warmupDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+
+        while (DateTime.UtcNow < warmupDeadline)
+        {
+            lock (gate)
+            {
+                if (acknowledged.All(list => list.Count >= WritesBeforeSplit))
+                    break;
+            }
+
+            await Task.Delay(20);
+        }
+
+        int[] acknowledgedBeforeSplit;
+        lock (gate) acknowledgedBeforeSplit = [.. acknowledged.Select(list => list.Count)];
+
+        (int ranges, int committedBy) = await KeyRangeSplitHarness.SplitAtWithinAsync(
+            cluster, keySpace, splitKey, TimeSpan.FromSeconds(60));
+
+        // Keep writing past cutover before letting the writers drain.
+        Volatile.Write(ref stopAfter, attempted.Max() + WritesAfterSplit);
+
+        await Task.WhenAll(writers);
+
+        Assert.That(ranges, Is.GreaterThan(1), "The space never divided");
+
+        for (int i = 0; i < cluster.Nodes.Length; i++)
+            Assert.That(acknowledgedBeforeSplit[i], Is.GreaterThan(0),
+                $"Node {i} had acknowledged nothing when the split began, so it was not one of the " +
+                "nodes writing into the range as it moved");
+
+        if (committedBy >= 0)
+        {
+            int fromOtherNodes = acknowledged
+                .Where((_, index) => index != committedBy)
+                .Sum(list => list.Count);
+
+            Assert.That(fromOtherNodes, Is.GreaterThan(0),
+                $"Only node {committedBy} — the one that ran the split — wrote anything, so the " +
+                "cross-node case this test exists for went unexercised");
+        }
+
+        HashSet<string> expected = seededIds
+            .Concat(acknowledged.SelectMany(list => list))
+            .ToHashSet(StringComparer.Ordinal);
+
+        // Read back from every node: a row can be missing because it was lost at cutover, or present
+        // on one node and unreachable from another whose routing did not catch up.
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            HashSet<string> seen = await ReadAllIdsAsync(node, db);
+
+            Assert.That(seen, Is.SupersetOf(expected),
+                $"Node {node.Index} cannot see {expected.Except(seen).Count()} row(s) the client was " +
+                "told had committed — the shape of a write that landed on the old owner after its " +
+                "contents were copied to the new one");
+
+            Assert.That(seen.Count, Is.EqualTo(expected.Count),
+                $"Node {node.Index} returned rows nobody was told had committed");
+        }
+    }
+
+    /// <summary>
+    /// Inserts one row through <paramref name="node"/> in its own transaction, reporting whether the
+    /// client was told it committed. A retryable failure is replayed from a fresh transaction, which is
+    /// what CamusDB's autocommit path does with that error class; exhausting the retries reports "not
+    /// acknowledged" rather than failing, because a write refused under contention is a correct outcome
+    /// and the guarantee under test concerns writes that were acknowledged.
+    /// </summary>
+    private static async Task<bool> TryInsertOneAsync(
+        InProcessSchemaCluster.Node node, string db, string id, long amount)
+    {
+        for (int attempt = 0; attempt < 6; attempt++)
+        {
+            KvTransaction tx = await node.Database!.Transactions.BeginAsync();
+
+            try
+            {
+                await node.Executor.Insert(new InsertTicket(
+                    txnState: tx, databaseName: db, tableName: "readings",
+                    values: new() { new() {
+                        { "id",     new(ColumnType.Id,        id) },
+                        { "label",  new(ColumnType.String,    $"node{node.Index}-{amount}") },
+                        { "amount", new(ColumnType.Integer64, amount) },
+                    }}));
+
+                await node.Database.Transactions.CommitAsync(tx);
+
+                return true;
+            }
+            catch (CamusDBException ex) when (SerializableRetryHelper.IsRetryable(ex))
+            {
+                await node.Database!.Transactions.RollbackIfNotCompletedAsync(tx);
+                await Task.Delay(20 * (attempt + 1));
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Every <c>id</c> the table holds as <paramref name="node"/> sees it, read through SQL — the same
+    /// way a client connected to that node would find out whether its row is still there.
+    /// </summary>
+    private static async Task<HashSet<string>> ReadAllIdsAsync(InProcessSchemaCluster.Node node, string db)
+    {
+        KvTransaction tx = await node.Database!.Transactions.BeginAsync();
+
+        try
+        {
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await node.Executor.ExecuteSQLQuery(
+                new ExecuteSQLTicket(txnState: tx, database: db, sql: "SELECT id FROM readings", parameters: null));
+
+            HashSet<string> ids = new(StringComparer.Ordinal);
+
+            await foreach (QueryResultRow row in cursor)
+                ids.Add(row.Row["id"].StrValue!);
+
+            await node.Database.Transactions.CommitAsync(tx);
+
+            return ids;
+        }
+        catch
+        {
+            await node.Database!.Transactions.RollbackIfNotCompletedAsync(tx);
+            throw;
+        }
+    }
+
 }

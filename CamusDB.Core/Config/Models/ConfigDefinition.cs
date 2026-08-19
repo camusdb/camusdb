@@ -62,6 +62,13 @@ public class ConfigDefinition
 
     public string Mode { get; set; } = "standalone";
 
+    /// <summary>
+    /// How the embedded node sizes the cache budgets left unset: <c>prod</c> (the default) scales them
+    /// to the machine's memory, <c>dev</c> pins them to small fixed values. Parsed by
+    /// <see cref="ParseMemoryProfile"/>; maps to <c>CamusDBOptions.MemoryProfile</c>.
+    /// </summary>
+    public string MemoryProfile { get; set; } = "prod";
+
     public string NodeName { get; set; } = "";
 
     public string RaftHost { get; set; } = "localhost";
@@ -80,6 +87,17 @@ public class ConfigDefinition
     /// Format: "host:httpPort" (e.g. "192.168.1.10:5095").
     /// </summary>
     public List<string> HttpPeers { get; set; } = [];
+
+    /// <summary>
+    /// Join a <b>running</b> cluster as a new member instead of bootstrapping one, using
+    /// <see cref="Peers"/> as the seed list. The node enters the committed roster as a learner and
+    /// is promoted to voter once caught up. Explicit, never inferred: a fresh node must not decide
+    /// on its own whether it is forming a cluster or joining one — booting a would-be joiner
+    /// without this flag forms a separate cluster (split brain), and booting a founding node with
+    /// it fails to find a cluster to join. Requires cluster mode and at least one peer. Maps to
+    /// <c>EmbeddedKahunaOptions.JoinExistingSeeds</c>.
+    /// </summary>
+    public bool JoinExisting { get; set; }
 
     /// <summary>
     /// How long a DDL proposer waits for every live node to ack the previous schema
@@ -860,6 +878,22 @@ public class ConfigDefinition
         };
     }
 
+    /// <summary>
+    /// Parses <see cref="MemoryProfile"/> to the engine enum. Spelled out here rather than parsed with
+    /// <c>Enum.TryParse</c> so an unknown value names the two accepted tokens instead of listing CLR
+    /// member names an operator would then have to guess the casing of.
+    /// </summary>
+    public Config.MemoryProfile ParseMemoryProfile()
+    {
+        return MemoryProfile switch
+        {
+            "prod" => Config.MemoryProfile.Prod,
+            "dev" => Config.MemoryProfile.Dev,
+            _ => throw Invalid(
+                "'memory_profile' must be 'prod' or 'dev', got '" + MemoryProfile + "'"),
+        };
+    }
+
     /// <summary>Parses <see cref="DefaultReadValidation"/> to the Kahuna enum.</summary>
     public ReadValidation ParseDefaultReadValidation()
     {
@@ -1157,11 +1191,12 @@ public class ConfigDefinition
                 "transient-shedding threshold), or a single shed round consumes the whole budget; " +
                 "set it <= 0 to disable retrying entirely");
 
-        // The three enum-valued strings validate by parsing, so file and statement reject the same
+        // The enum-valued strings validate by parsing, so file and statement reject the same
         // spellings for the same reason.
         ParseBorrowedDecode();
         ParseDefaultReadValidation();
         ParseDefaultDecisionDurability();
+        ParseMemoryProfile();
 
         Kahuna.Validate();
         Diagnostics.Validate();
@@ -1214,6 +1249,18 @@ public class ConfigDefinition
 
         foreach (string httpPeer in HttpPeers)
             ValidateHostPort(httpPeer, "http_peers");
+
+        // A joiner with no seeds has no cluster to join, and outside cluster mode there is no
+        // external transport to join over — both describe a node that can never come up as asked,
+        // so fail at config time where the key is named rather than at Raft startup.
+        if (JoinExisting)
+        {
+            if (!IsClusterMode)
+                throw Invalid("'join_existing' requires cluster mode ('mode: cluster')");
+
+            if (Peers.Count == 0)
+                throw Invalid("'join_existing' requires 'peers' to list at least one seed endpoint of the running cluster");
+        }
     }
 
     private static void ValidateHostPort(string value, string field)

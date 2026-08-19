@@ -51,7 +51,7 @@ public sealed class RealServerSmokeTests
 
         // Setup (outside measurement) and capture the version baseline for delta reconciliation.
         long baselineVersionSum;
-        await using (CamusConnection setup = await ConnectionSet.OpenSingleAsync(endpoint, database, protocol, ct))
+        await using (CamusConnection setup = await ConnectionSet.OpenSingleAsync(endpoint, database, protocol, ConnectionSettings.Default, ct))
         {
             await dataset.EnsureSchemaAsync(setup, ct);
             await dataset.SeedAsync(setup, batchSize: 250, ct);
@@ -59,7 +59,7 @@ public sealed class RealServerSmokeTests
         }
 
         // Short mixed run.
-        await using ConnectionSet connections = await ConnectionSet.OpenAsync(endpoint, database, protocol, connections: 4, ct);
+        await using ConnectionSet connections = await ConnectionSet.OpenAsync(endpoint, database, protocol, connections: 4, ConnectionSettings.Default, ct);
         var writeOperation = new WriteOperation(connections, dataset, writesPerTx);
         var dispatcher = new OperationDispatcher(
             new ReadOperation(connections, dataset),
@@ -75,9 +75,10 @@ public sealed class RealServerSmokeTests
         Assert.That(metrics.Conflicts, Is.EqualTo(0), "baseline must be conflict-free");
 
         // Reopen and reconcile persisted effect.
-        await using CamusConnection verify = await ConnectionSet.OpenSingleAsync(endpoint, database, protocol, ct);
+        await using CamusConnection verify = await ConnectionSet.OpenSingleAsync(endpoint, database, protocol, ConnectionSettings.Default, ct);
         ReconciliationResult reconciliation = await Reconciliation.VerifyAsync(
-            verify, metrics, baselineVersionSum, writeOperation.CommittedRows, rows, ct);
+            verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
+            writeOperation.IndeterminateTxns, writesPerTx, expectFaults: false, rows, ct);
 
         Assert.That(reconciliation.Passed, Is.True,
             "persisted version totals and accounting must reconcile: " + string.Join("; ", reconciliation.Failures));

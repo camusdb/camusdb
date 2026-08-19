@@ -28,6 +28,12 @@ public class CamusCommandLineOptions
     [Option("data-dir", Required = false, HelpText = "Directory where database files are stored")]
     public string? DataDir { get; set; }
 
+    [Option("memory-profile", Required = false,
+        HelpText = "How the unset cache budgets are sized: prod (default) scales them to the machine's " +
+                   "memory; dev pins them to ~96 MiB of caches for a node sharing a developer machine. " +
+                   "An explicit kahuna.* budget always wins over the profile")]
+    public string? MemoryProfile { get; set; }
+
     [Option("raft-nodename", Required = false, HelpText = "Unique node name in the cluster")]
     public string? RaftNodeName { get; set; }
 
@@ -48,6 +54,12 @@ public class CamusCommandLineOptions
 
     [Option("http-peers", Required = false, HelpText = "Per-peer HTTP host:port list (parallel to --initial-cluster)", Separator = ' ')]
     public IEnumerable<string>? HttpPeers { get; set; }
+
+    [Option("join-existing", Required = false,
+        HelpText = "true|false. Join a RUNNING cluster as a new node using --initial-cluster as the seed list, " +
+                   "instead of bootstrapping via static discovery (default false). Never guessed: a would-be " +
+                   "joiner booted without it forms a separate cluster")]
+    public bool? JoinExisting { get; set; }
 
     [Option("schema-ack-wait-timeout-ms", Required = false, HelpText = "Schema two-version gate ack wait timeout (ms)")]
     public int? SchemaAckWaitTimeoutMs { get; set; }
@@ -85,6 +97,7 @@ public class CamusCommandLineOptions
         return new CamusDB.Core.Config.ConfigCliOverrides
         {
             Mode = Mode,
+            MemoryProfile = MemoryProfile,
             DataDir = DataDir,
             NodeName = RaftNodeName,
             RaftNodeId = RaftNodeId,
@@ -93,6 +106,7 @@ public class CamusCommandLineOptions
             InitialPartitions = InitialClusterPartitions,
             Peers = peers,
             HttpPeers = httpPeers,
+            JoinExisting = JoinExisting,
             SchemaAckWaitTimeoutMs = SchemaAckWaitTimeoutMs,
             SchemaAckLiveNodeLeaseMs = SchemaAckLiveNodeLeaseMs,
             HttpPort = HttpPort,

@@ -31,6 +31,12 @@ public abstract class CommonOptions
 
     [Option("payload-bytes", Default = 256, HelpText = "Size of the deterministic payload string per row.")]
     public int PayloadBytes { get; set; }
+
+    [Option("no-auto-prepare", Default = false, HelpText = "Append MaxAutoPrepare=0 to every connection string (read, write, setup), disabling client auto-prepare.")]
+    public bool NoAutoPrepare { get; set; }
+
+    [Option("request-timeout", HelpText = "Per-request timeout in seconds appended to every connection string (client default when omitted).")]
+    public int? RequestTimeout { get; set; }
 }
 
 /// <summary>
@@ -92,6 +98,15 @@ public sealed class RunOptions : CommonOptions
 
     [Option("init-if-missing", Default = false, HelpText = "Seed the dataset first if absent (local convenience; setup is never measured).")]
     public bool InitIfMissing { get; set; }
+
+    [Option("locking", Default = "optimistic", HelpText = "Write-transaction locking: optimistic (default) or pessimistic.")]
+    public string Locking { get; set; } = "optimistic";
+
+    [Option("isolation", Default = "read_committed", HelpText = "Write-transaction isolation: read_committed (default) or serializable.")]
+    public string Isolation { get; set; } = "read_committed";
+
+    [Option("expect-faults", Default = false, HelpText = "Chaos runs: conflicts and open-loop pacing shortfalls become validity warnings instead of INVALID, and reconciliation tolerates them.")]
+    public bool ExpectFaults { get; set; }
 }
 
 /// <summary>

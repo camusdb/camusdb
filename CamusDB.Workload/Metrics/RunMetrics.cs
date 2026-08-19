@@ -29,6 +29,7 @@ public sealed class RunMetrics
     private long _failed;
     private long _conflicts;
     private long _transient;
+    private long _indeterminate;
     private long _domainErrors;
     private long _internalErrors;
     private long _scheduleDrops; // open-loop: schedule slots dropped due to backpressure
@@ -60,6 +61,7 @@ public sealed class RunMetrics
     public long Failed => Interlocked.Read(ref _failed);
     public long Conflicts => Interlocked.Read(ref _conflicts);
     public long Transient => Interlocked.Read(ref _transient);
+    public long Indeterminate => Interlocked.Read(ref _indeterminate);
     public long DomainErrors => Interlocked.Read(ref _domainErrors);
     public long InternalErrors => Interlocked.Read(ref _internalErrors);
     public long ScheduleDrops => Interlocked.Read(ref _scheduleDrops);
@@ -104,6 +106,7 @@ public sealed class RunMetrics
         {
             case OperationStatus.Conflict: Interlocked.Increment(ref _conflicts); break;
             case OperationStatus.Transient: Interlocked.Increment(ref _transient); break;
+            case OperationStatus.Indeterminate: Interlocked.Increment(ref _indeterminate); break;
             case OperationStatus.DomainError: Interlocked.Increment(ref _domainErrors); break;
             default: Interlocked.Increment(ref _internalErrors); break;
         }

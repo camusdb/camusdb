@@ -85,7 +85,8 @@ public sealed class ResultWriter
     {
         StringBuilder sb = new();
         sb.AppendLine("# Workload run summary").AppendLine();
-        sb.AppendLine($"- **Validity:** {(s.Valid ? "VALID" : "INVALID (see warnings)")}");
+        sb.AppendLine($"- **Validity:** {(s.Valid ? "VALID" : "INVALID (see warnings)")}" +
+                      (s.ExpectFaults ? " — run executed with `--expect-faults` (conflict/pacing waivers active)" : ""));
         foreach (string w in s.ValidityWarnings)
             sb.AppendLine($"  - ⚠️ {w}");
         sb.AppendLine();
@@ -103,7 +104,7 @@ public sealed class ResultWriter
         sb.AppendLine($"| Committed write txns/s | {s.WriteTxnsPerSec:F1} |");
         sb.AppendLine($"| Rows/s | {s.RowsPerSec:F1} |");
         sb.AppendLine($"| Offered / Started / Completed | {s.Offered} / {s.Started} / {s.Completed} |");
-        sb.AppendLine($"| Failed (conflict/transient/domain/internal) | {s.Failed} ({s.Conflicts}/{s.Transient}/{s.DomainErrors}/{s.InternalErrors}) |");
+        sb.AppendLine($"| Failed (conflict/transient/indeterminate/domain/internal) | {s.Failed} ({s.Conflicts}/{s.Transient}/{s.Indeterminate}/{s.DomainErrors}/{s.InternalErrors}) |");
         sb.AppendLine($"| Schedule drops | {s.ScheduleDrops} |").AppendLine();
 
         sb.AppendLine("## Latency (ms)").AppendLine();

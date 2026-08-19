@@ -11,7 +11,9 @@ namespace CamusDB.Workload.Results;
 /// The run's provenance: everything needed to reproduce it and to refuse an invalid comparison against
 /// a run made under different durability/settlement settings. Durability-relevant server configuration
 /// is operator-supplied because the client cannot observe it; the fingerprint and seed tie the run to
-/// the exact seeded data.
+/// the exact seeded data. Locking/isolation/auto-prepare/timeout and <c>ExpectFaults</c> are recorded
+/// because runs under different concurrency-control or fault-tolerance settings are not comparable —
+/// in particular, an <c>ExpectFaults</c> run had validity waivers active.
 /// </summary>
 public sealed record RunManifest(
     string ToolVersion,
@@ -29,6 +31,11 @@ public sealed record RunManifest(
     int ReadPercent,
     int WritePercent,
     int WritesPerTransaction,
+    string Locking,
+    string Isolation,
+    bool NoAutoPrepare,
+    int? RequestTimeoutSeconds,
+    bool ExpectFaults,
     string SchemaFingerprint,
     string StartedAtUtc,
     string Runtime,

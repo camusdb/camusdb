@@ -72,6 +72,20 @@ public sealed class KahunaOptionsConfig
         "backup_restore_throttle_bytes_per_sec",
         "range_split_threshold",
         "range_split_min_range_size",
+        "replication_factor",
+        "zone",
+        "enable_placement_rebalancer",
+        "placement_pass_interval_ms",
+        "max_replica_moves_per_pass",
+        "max_concurrent_replica_transfers",
+        "max_concurrent_replica_repairs",
+        "replica_count_deadband",
+        "decommission_drain_timeout_ms",
+        "enable_leader_balancer",
+        "leader_balancer_interval_ms",
+        "leader_balancer_report_interval_ms",
+        "leader_balancer_report_ttl_ms",
+        "min_leader_stability_ms",
     };
 
     /// <summary>Persistence backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
@@ -392,6 +406,117 @@ public sealed class KahunaOptionsConfig
     /// </summary>
     public string? BackupMacKeyFile { get; set; }
 
+    // ── Partition placement (replication factor) ──────────────────────────────────────────────
+    // Per-partition replica placement instead of full replication. Applies at cluster bootstrap
+    // only: Kahuna has no in-place migration from full replication, so restarting an existing
+    // cluster with a factor set changes the configured target while already-committed ranges keep
+    // their empty (full-replication) replica sets. Standalone nodes accept the keys but a factor
+    // above the node count degrades gracefully to one replica per available node.
+
+    /// <summary>
+    /// Replica-set size for each data partition. <c>0</c> (Kahuna's default) keeps full
+    /// replication: every voter node hosts every partition. Odd values are strongly preferred (an
+    /// even factor tolerates no more failures than the next odd factor down); Kahuna logs a startup
+    /// warning for even factors. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.ReplicationFactor"/>.
+    /// </summary>
+    public int? ReplicationFactor { get; set; }
+
+    /// <summary>
+    /// Failure-domain label for this node (rack, availability zone). When zones are configured the
+    /// placement planner spreads each range's replicas across distinct zones, so a zone outage
+    /// cannot take out a whole quorum. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.Zone"/>.
+    /// </summary>
+    public string? Zone { get; set; }
+
+    /// <summary>
+    /// Master switch for <b>ongoing</b> placement moves: repairing under-replicated ranges when a
+    /// node dies, trimming over-replication, and smoothing skew as nodes join and leave. Initial
+    /// placement at the configured factor is applied at bootstrap regardless of this switch. Maps
+    /// to <see cref="Kahuna.EmbeddedKahunaOptions.EnablePlacementRebalancer"/>.
+    /// </summary>
+    public bool? EnablePlacementRebalancer { get; set; }
+
+    /// <summary>
+    /// Cadence of the placement controller pass, in milliseconds (Kahuna default 5000). Every
+    /// relocation costs several passes, so this sets the floor on placement convergence speed.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.PlacementPassInterval"/>.
+    /// </summary>
+    public int? PlacementPassIntervalMs { get; set; }
+
+    /// <summary>
+    /// New replica moves initiated per controller pass across all priorities — the blast radius of
+    /// a bad plan (Kahuna default 4). Keep it at or above repairs + transfers, or it binds first
+    /// and starves repairs. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.MaxReplicaMovesPerPass"/>.
+    /// </summary>
+    public int? MaxReplicaMovesPerPass { get; set; }
+
+    /// <summary>
+    /// In-flight replica backfills initiated by <b>balance</b> moves (Kahuna default 1) — caps
+    /// concurrent skew-smoothing so it never starves client traffic. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.MaxConcurrentReplicaTransfers"/>.
+    /// </summary>
+    public int? MaxConcurrentReplicaTransfers { get; set; }
+
+    /// <summary>
+    /// In-flight <b>repair</b> moves: re-replicating under-replicated ranges and shedding replicas
+    /// stranded on departed nodes (Kahuna default 3). Budgeted separately from balance transfers so
+    /// restoring durability is never serialized behind cosmetic rebalancing. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.MaxConcurrentReplicaRepairs"/>.
+    /// </summary>
+    public int? MaxConcurrentReplicaRepairs { get; set; }
+
+    /// <summary>
+    /// Per-node replica-count imbalance tolerated above the even spread before balancing moves are
+    /// planned (Kahuna default 1). Under-replicated ranges bypass the deadband. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.ReplicaCountDeadband"/>.
+    /// </summary>
+    public int? ReplicaCountDeadband { get; set; }
+
+    /// <summary>
+    /// Upper bound, in milliseconds, on how long a graceful decommission waits for the leaving
+    /// node's replicas to be evacuated onto survivors before the removal commits anyway (Kahuna
+    /// default 120000). Only one node may drain at a time. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.DecommissionDrainTimeout"/>.
+    /// </summary>
+    public int? DecommissionDrainTimeoutMs { get; set; }
+
+    // ── Raft leader balancing ─────────────────────────────────────────────────────────────────
+    // Spreads partition leadership (which replica leads, as opposed to which nodes hold a range)
+    // across the cluster by load reports. Off by default in Kahuna; the placement rebalancer does
+    // not require it — placement runs its own controller pass on its own interval.
+
+    /// <summary>
+    /// Enables the Raft leader balancer. Set the same value on every node. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.EnableLeaderBalancer"/>.
+    /// </summary>
+    public bool? EnableLeaderBalancer { get; set; }
+
+    /// <summary>
+    /// How often the balancing pass runs, in milliseconds (Kahuna default 30000). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.LeaderBalancerInterval"/>.
+    /// </summary>
+    public int? LeaderBalancerIntervalMs { get; set; }
+
+    /// <summary>
+    /// How often each node publishes its load report, in milliseconds (Kahuna default 5000). Maps
+    /// to <see cref="Kahuna.EmbeddedKahunaOptions.LeaderBalancerReportInterval"/>.
+    /// </summary>
+    public int? LeaderBalancerReportIntervalMs { get; set; }
+
+    /// <summary>
+    /// Age, in milliseconds, past which a node's load report is ignored by the balancer (Kahuna
+    /// default 20000). Must exceed the report interval or every report expires before it is read.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.LeaderBalancerReportTtl"/>.
+    /// </summary>
+    public int? LeaderBalancerReportTtlMs { get; set; }
+
+    /// <summary>
+    /// Minimum time, in milliseconds, a partition keeps its leader before the balancer may move
+    /// leadership again (Kahuna default 5000) — damping against leadership thrash. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.MinLeaderStability"/>.
+    /// </summary>
+    public int? MinLeaderStabilityMs { get; set; }
+
     /// <summary>
     /// Returns an independent copy. <see cref="CamusDBOptions"/> is immutable, but this class is a
     /// YAML-bound settings object with ordinary setters, so holding the deserialized instance directly
@@ -599,6 +724,53 @@ public sealed class KahunaOptionsConfig
 
         if (BackupRestoreThrottleBytesPerSec is < 0)
             throw InvalidConfig($"'kahuna.backup_restore_throttle_bytes_per_sec' must be >= 0, got {BackupRestoreThrottleBytesPerSec}");
+
+        if (ReplicationFactor is < 0)
+            throw InvalidConfig($"'kahuna.replication_factor' must be >= 0 (0 keeps full replication), got {ReplicationFactor}");
+
+        if (Zone is not null && string.IsNullOrWhiteSpace(Zone))
+            throw InvalidConfig("'kahuna.zone' must not be blank when set (omit the key for zone-unaware placement)");
+
+        if (PlacementPassIntervalMs is <= 0)
+            throw InvalidConfig($"'kahuna.placement_pass_interval_ms' must be > 0, got {PlacementPassIntervalMs}");
+
+        if (MaxReplicaMovesPerPass is <= 0)
+            throw InvalidConfig($"'kahuna.max_replica_moves_per_pass' must be > 0, got {MaxReplicaMovesPerPass}");
+
+        if (MaxConcurrentReplicaTransfers is <= 0)
+            throw InvalidConfig($"'kahuna.max_concurrent_replica_transfers' must be > 0, got {MaxConcurrentReplicaTransfers}");
+
+        if (MaxConcurrentReplicaRepairs is <= 0)
+            throw InvalidConfig($"'kahuna.max_concurrent_replica_repairs' must be > 0, got {MaxConcurrentReplicaRepairs}");
+
+        if (ReplicaCountDeadband is < 0)
+            throw InvalidConfig($"'kahuna.replica_count_deadband' must be >= 0, got {ReplicaCountDeadband}");
+
+        if (DecommissionDrainTimeoutMs is <= 0)
+            throw InvalidConfig($"'kahuna.decommission_drain_timeout_ms' must be > 0, got {DecommissionDrainTimeoutMs}");
+
+        if (LeaderBalancerIntervalMs is <= 0)
+            throw InvalidConfig($"'kahuna.leader_balancer_interval_ms' must be > 0, got {LeaderBalancerIntervalMs}");
+
+        if (LeaderBalancerReportIntervalMs is <= 0)
+            throw InvalidConfig($"'kahuna.leader_balancer_report_interval_ms' must be > 0, got {LeaderBalancerReportIntervalMs}");
+
+        if (LeaderBalancerReportTtlMs is <= 0)
+            throw InvalidConfig($"'kahuna.leader_balancer_report_ttl_ms' must be > 0, got {LeaderBalancerReportTtlMs}");
+
+        if (MinLeaderStabilityMs is <= 0)
+            throw InvalidConfig($"'kahuna.min_leader_stability_ms' must be > 0, got {MinLeaderStabilityMs}");
+
+        // A TTL at or below the publishing cadence expires every report before the balancer can read
+        // it, which silently disables balancing while looking configured. Cross-check the EFFECTIVE
+        // pair so a one-sided override is caught (Kahuna defaults: report every 5 s, TTL 20 s).
+        int effectiveReportInterval = LeaderBalancerReportIntervalMs ?? DefaultLeaderBalancerReportIntervalMs;
+        int effectiveReportTtl = LeaderBalancerReportTtlMs ?? DefaultLeaderBalancerReportTtlMs;
+        if (effectiveReportTtl <= effectiveReportInterval)
+            throw InvalidConfig(
+                $"effective 'kahuna.leader_balancer_report_ttl_ms' ({effectiveReportTtl}) must be > " +
+                $"'kahuna.leader_balancer_report_interval_ms' ({effectiveReportInterval}), " +
+                "or every load report expires before the balancer reads it");
     }
 
     // Match EmbeddedKahunaOptions defaults (PitrWindow 1h, BaseSnapshotInterval 30m) so the effective
@@ -608,6 +780,10 @@ public sealed class KahunaOptionsConfig
 
     // Kahuna's own RangeSplitMinRangeSize default, used to cross-check a threshold supplied without it.
     private const int DefaultRangeSplitMinRangeSize = 10;
+
+    // Kahuna's leader-balancer report defaults, used to cross-check a one-sided TTL/interval override.
+    private const int DefaultLeaderBalancerReportIntervalMs = 5_000;
+    private const int DefaultLeaderBalancerReportTtlMs = 20_000;
 
     private static void ValidateStorage(string? value, string field)
     {

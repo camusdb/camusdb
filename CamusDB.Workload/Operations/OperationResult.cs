@@ -23,6 +23,14 @@ public enum OperationStatus
     /// <summary>A transport-transient failure (stream drop, unavailable) — reported separately from conflicts.</summary>
     Transient,
 
+    /// <summary>
+    /// A write whose commit round trip failed without a server verdict (e.g. the node died between the
+    /// commit request and its response). The transaction may have durably committed all of its row
+    /// writes or none of them, so it can be counted neither as committed nor as a definite abort;
+    /// reconciliation admits both outcomes via an ambiguity band instead of demanding exact equality.
+    /// </summary>
+    Indeterminate,
+
     /// <summary>A domain error surfaced by the server (a CADBxxxx that is not a conflict/transient class).</summary>
     DomainError,
 
