@@ -18,6 +18,13 @@ RUN cd /src/CamusDB/ && dotnet publish --no-self-contained --configuration Relea
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
+# Chaos-testing tools: tc/netem (iproute2) and iptables let an orchestrator inject network
+# latency/loss and partitions via `docker exec` when the container runs with NET_ADMIN.
+# Installed early so the layer caches independently of the application layers below.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends iproute2 iptables \
+  && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 5095
 EXPOSE 5096
 EXPOSE 7070

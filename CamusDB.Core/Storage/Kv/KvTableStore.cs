@@ -1140,7 +1140,7 @@ public sealed class KvTableStore
                 cancellationToken
             ).ConfigureAwait(false);
 
-            if (type == KeyValueResponseType.MustRetry)
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             if (type != KeyValueResponseType.Set)
@@ -1154,7 +1154,7 @@ public sealed class KvTableStore
                 cancellationToken
             ).ConfigureAwait(false);
 
-            if (type == KeyValueResponseType.MustRetry)
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
@@ -1887,6 +1887,11 @@ public sealed class KvTableStore
                 if (type == KeyValueResponseType.AlreadyLocked)
                     throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction");
 
+                // A range that lost quorum or changed leadership (e.g. under a partition) aborts the
+                // lock acquisition; that is transient and retryable from BeginAsync, not corruption.
+                if (type == KeyValueResponseType.Aborted)
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Lock acquisition on {key} was aborted by Kahuna — retry the operation from BeginAsync");
+
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {type}");
             }
 
@@ -1965,6 +1970,18 @@ public sealed class KvTableStore
                         if (byKey.TryGetValue(key, out KahunaSetKeyValueRequestItem? item))
                             retry.Add(item);
                         break;
+
+                    case KeyValueResponseType.Aborted:
+                        // Kahuna aborted this batched set — the range lost quorum or changed leadership
+                        // (e.g. under a network partition), so its transaction state is gone and the
+                        // operation cannot be replayed in place under the same coordinator. Every other
+                        // Aborted site in this store surfaces a retryable TransactionMustRetry so the
+                        // client restarts from BeginAsync; this path previously omitted the case and let
+                        // Aborted fall through to SystemSpaceCorrupt, reporting a transient partition as
+                        // durable corruption and turning a recoverable blip into a fatal error.
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.TransactionMustRetry,
+                            $"Batched set of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
 
                     default:
                         throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch set failed for key {key}: {resp.Type}");
@@ -2338,7 +2355,7 @@ public sealed class KvTableStore
                 cancellationToken
             ).ConfigureAwait(false);
 
-            if (type == KeyValueResponseType.MustRetry)
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             if (type != KeyValueResponseType.Set)
@@ -2352,7 +2369,7 @@ public sealed class KvTableStore
                 cancellationToken
             ).ConfigureAwait(false);
 
-            if (type == KeyValueResponseType.MustRetry)
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {kvKey}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
             if (type is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
@@ -2494,6 +2511,16 @@ public sealed class KvTableStore
                             retry.Add(item);
                         break;
 
+                    case KeyValueResponseType.Aborted:
+                        // Kahuna aborted this batched delete — the range lost quorum or changed
+                        // leadership (e.g. under a network partition), so the transaction cannot
+                        // continue and must restart from BeginAsync. Surface a retryable
+                        // TransactionMustRetry rather than falling through to SystemSpaceCorrupt, which
+                        // wrongly reported a transient partition as durable corruption.
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.TransactionMustRetry,
+                            $"Batched delete of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+
                     default:
                         throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch delete failed for key {key}: {resp.Type}");
                 }
@@ -2549,7 +2576,7 @@ public sealed class KvTableStore
             cancellationToken
         ).ConfigureAwait(false);
 
-        if (type == KeyValueResponseType.MustRetry)
+        if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.Aborted)
             throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Write conflict on {key}; a concurrent transaction holds a lock — retry the operation from BeginAsync");
 
         if (type != KeyValueResponseType.Set)
@@ -2617,6 +2644,11 @@ public sealed class KvTableStore
 
         if (lockType == KeyValueResponseType.AlreadyLocked)
             throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction");
+
+        // A range that lost quorum or changed leadership (e.g. under a partition) aborts the lock
+        // acquisition; that is transient and retryable from BeginAsync, not corruption.
+        if (lockType == KeyValueResponseType.Aborted)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Lock acquisition on {key} was aborted by Kahuna — retry the operation from BeginAsync");
 
         if (lockType != KeyValueResponseType.Locked)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");

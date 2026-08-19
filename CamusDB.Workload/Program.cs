@@ -86,6 +86,12 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return 2;
         }
+        if (o.Workload is not ("accounts" or "bank"))
+        {
+            Console.Error.WriteLine($"--workload must be accounts or bank (got '{o.Workload}').");
+            return 2;
+        }
+        bool bank = o.Workload == "bank";
         if (Directory.Exists(o.Output))
         {
             Console.Error.WriteLine($"Output directory already exists: {o.Output}. Refusing to overwrite.");
@@ -97,6 +103,7 @@ public static class Program
         // Setup (never measured). Capture the SUM(version) baseline here so reconciliation measures only
         // this run's increments, even when the dataset was already written by a previous run.
         long baselineVersionSum;
+        long baselineBalanceSum = 0;
         await using (CamusConnection setup = await OpenSingleAsync(o, ct).ConfigureAwait(false))
         {
             if (o.InitIfMissing)
@@ -111,13 +118,20 @@ public static class Program
             }
 
             baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, ct).ConfigureAwait(false);
+            if (bank)
+                baselineBalanceSum = await Reconciliation.ReadBalanceSumAsync(setup, ct).ConfigureAwait(false);
         }
 
         ConnectionSettings settings = new(locking, isolation, o.NoAutoPrepare, o.RequestTimeout);
         await using ConnectionSet connections =
             await ConnectionSet.OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, settings, ct).ConfigureAwait(false);
 
-        WriteOperation writeOperation = new(connections, dataset, o.WritesPerTransaction, locking, isolation);
+        // The bank transfer contends across the whole keyspace and conserves SUM(balance); the accounts
+        // write stays shard-disjoint and conflict-free. Both report as writes, so scheduling and metrics
+        // are identical either way.
+        IWriteOperation writeOperation = bank
+            ? new TransferOperation(connections, dataset, o.Rows, locking, isolation)
+            : new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation);
         OperationDispatcher dispatcher = new(
             new ReadOperation(connections, dataset),
             writeOperation);
@@ -153,7 +167,8 @@ public static class Program
             reconciliation = await Reconciliation
                 .VerifyAsync(
                     verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
-                    writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct)
+                    writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
+                    bankMode: bank, baselineBalanceSum: baselineBalanceSum)
                 .ConfigureAwait(false);
         }
 
@@ -165,6 +180,22 @@ public static class Program
         await File.WriteAllTextAsync(
             Path.Combine(o.Output, "reconciliation.json"),
             System.Text.Json.JsonSerializer.Serialize(reconciliation, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
+            ct).ConfigureAwait(false);
+
+        // Time anchor for aligning intervals.csv (second 0 == MeasureStartUtc) with wall-clock event
+        // streams. Kept as a small standalone artifact so it can be added without disturbing the
+        // established summary.json / manifest.json shapes their own consumers depend on.
+        await File.WriteAllTextAsync(
+            Path.Combine(o.Output, "run-meta.json"),
+            System.Text.Json.JsonSerializer.Serialize(
+                new
+                {
+                    measureStartUtc = metrics.MeasureStartUtc.ToString("O"),
+                    warmupSeconds = warmup.TotalSeconds,
+                    measureSeconds = measure.TotalSeconds,
+                    drainSeconds = drain.TotalSeconds,
+                },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
             ct).ConfigureAwait(false);
 
         PrintConsole(summary, reconciliation, o.Output);

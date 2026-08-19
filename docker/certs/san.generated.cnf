@@ -1,0 +1,42 @@
+[req]
+default_bits       = 2048
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = req_ext
+x509_extensions    = req_ext
+
+[dn]
+C  = CO
+ST = BOG
+L  = BOG
+O  = CamusDB Development
+CN = camus-cluster
+
+[req_ext]
+subjectAltName   = @alt_names
+# Nodes act as both gRPC server and client, so both EKUs are needed.
+extendedKeyUsage = serverAuth, clientAuth
+# Self-signed cert doubles as its own trust anchor when added to the container CA store.
+basicConstraints = critical, CA:TRUE
+
+[alt_names]
+DNS.1 = localhost
+IP.1  = 127.0.0.1
+IP.2  = ::1
+DNS.2 = camus1
+IP.3  = 10.101.0.2
+DNS.3 = camus2
+IP.4  = 10.101.0.3
+DNS.4 = camus3
+IP.5  = 10.101.0.4
+DNS.5 = camus4
+IP.6  = 10.101.0.5
+DNS.6 = camus5
+IP.7  = 10.101.0.6
+DNS.7 = camus6
+IP.8  = 10.101.0.7
+DNS.8 = camus7
+IP.9  = 10.101.0.8
+DNS.9 = camus8
+IP.10  = 10.101.0.9

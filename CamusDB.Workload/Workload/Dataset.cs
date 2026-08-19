@@ -8,6 +8,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using CamusDB.Client;
+using CamusDB.Workload.Operations;
 using CamusDB.Workload.Util;
 
 namespace CamusDB.Workload.Workload;
@@ -117,31 +118,56 @@ public sealed class Dataset
         for (long start = 0; start < _rows; start += batchSize)
         {
             long end = Math.Min(start + batchSize, _rows);
-            CamusTransaction tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
-            try
+
+            // Retry each batch from a fresh BEGIN on a retryable abort. Seeding runs right after the
+            // cluster comes up, while the Raft leader balancer and placement rebalancer may still be
+            // moving leadership; a batch commit can then hit a transient TransactionMustRetry / lock
+            // conflict / Kahuna-aborted response. Without this, one momentary election during setup
+            // fails the whole seed — and, under a chaos scenario, aborts the run before it starts.
+            for (int attempt = 1; ; attempt++)
             {
-                for (long i = start; i < end; i++)
+                CamusTransaction tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
+                try
                 {
-                    (string id, long owner, long balance, string payload) = RowFor(i);
-                    using CamusCommand insert = conn.CreateCamusCommand(
-                        $"INSERT INTO {TableName} (id, owner, balance, version, payload) " +
-                        "VALUES (@id, @owner, @balance, 0, @payload)");
-                    insert.Transaction = tx;
-                    insert.Parameters.Add("@id", ColumnType.Id, id);
-                    insert.Parameters.Add("@owner", ColumnType.Integer64, owner);
-                    insert.Parameters.Add("@balance", ColumnType.Integer64, balance);
-                    insert.Parameters.Add("@payload", ColumnType.String, payload);
-                    await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    for (long i = start; i < end; i++)
+                    {
+                        (string id, long owner, long balance, string payload) = RowFor(i);
+                        using CamusCommand insert = conn.CreateCamusCommand(
+                            $"INSERT INTO {TableName} (id, owner, balance, version, payload) " +
+                            "VALUES (@id, @owner, @balance, 0, @payload)");
+                        insert.Transaction = tx;
+                        insert.Parameters.Add("@id", ColumnType.Id, id);
+                        insert.Parameters.Add("@owner", ColumnType.Integer64, owner);
+                        insert.Parameters.Add("@balance", ColumnType.Integer64, balance);
+                        insert.Parameters.Add("@payload", ColumnType.String, payload);
+                        await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+                    await tx.CommitAsync(ct).ConfigureAwait(false);
+                    break;
                 }
-                await tx.CommitAsync(ct).ConfigureAwait(false);
-            }
-            catch
-            {
-                await tx.RollbackAsync(ct).ConfigureAwait(false);
-                throw;
+                catch (Exception ex)
+                {
+                    // Best-effort rollback: an already-aborted transaction may itself refuse the rollback.
+                    try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
+                    catch { /* the batch is retried from a new transaction regardless */ }
+
+                    // Retry a retryable server verdict (conflict) OR a transient transport failure — a
+                    // client request timeout / cancellation is common while a just-started cluster is
+                    // still electing leaders. The ct.IsCancellationRequested guard keeps the workload's
+                    // own SIGINT (which also surfaces as a canceled task) from being retried.
+                    OperationStatus status = ErrorClassifier.Classify(ex).Status;
+                    bool retryable = status is OperationStatus.Conflict or OperationStatus.Transient;
+                    if (!retryable || attempt >= MaxSeedBatchAttempts || ct.IsCancellationRequested)
+                        throw;
+
+                    await Task.Delay(Math.Min(50 * attempt, 500), ct).ConfigureAwait(false);
+                }
             }
         }
     }
+
+    /// <summary>Bounded retries per seeding batch before a persistent failure is surfaced.</summary>
+    private const int MaxSeedBatchAttempts = 20;
 
     private static async Task TryDdlAsync(CamusConnection conn, string sql, CancellationToken ct)
     {

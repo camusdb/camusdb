@@ -107,6 +107,9 @@ public sealed class RunOptions : CommonOptions
 
     [Option("expect-faults", Default = false, HelpText = "Chaos runs: conflicts and open-loop pacing shortfalls become validity warnings instead of INVALID, and reconciliation tolerates them.")]
     public bool ExpectFaults { get; set; }
+
+    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free) or bank (contended transfers with a conserved SUM(balance) invariant).")]
+    public string Workload { get; set; } = "accounts";
 }
 
 /// <summary>

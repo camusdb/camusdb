@@ -44,6 +44,9 @@ public sealed class IntervalRecorder
 
     public void Start()
     {
+        // Anchor the measured window to wall-clock so intervals.csv (second 0 == now) can be aligned
+        // with external wall-clock event streams (e.g. a chaos harness's fault timeline).
+        _metrics.MeasureStartUtc = DateTime.UtcNow;
         _cts = new CancellationTokenSource();
         _loop = Task.Run(() => SampleLoopAsync(_cts.Token));
     }

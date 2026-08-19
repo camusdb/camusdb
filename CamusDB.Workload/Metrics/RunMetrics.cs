@@ -46,6 +46,15 @@ public sealed class RunMetrics
     public readonly LatencyHistogram ScheduleDelay = new();
     public readonly ErrorSampler Errors = new();
 
+    /// <summary>
+    /// Wall-clock UTC at which the measured window began (the instant the interval recorder started).
+    /// Stamped once by <see cref="IntervalRecorder.Start"/>. This is the anchor that lets an external
+    /// tool align the per-second <c>intervals.csv</c> (whose <c>second</c> column is 0 at this instant)
+    /// with wall-clock events such as a chaos harness's fault timeline. <see cref="DateTime.MinValue"/>
+    /// until the measured window starts.
+    /// </summary>
+    public DateTime MeasureStartUtc { get; set; } = DateTime.MinValue;
+
     private readonly int _writesPerTransaction;
 
     public RunMetrics(int writesPerTransaction)

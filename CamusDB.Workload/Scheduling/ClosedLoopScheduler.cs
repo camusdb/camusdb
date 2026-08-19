@@ -62,13 +62,31 @@ public sealed class ClosedLoopScheduler
                 metrics.IncInFlight();
             }
 
-            var (result, totalMs) = await _dispatcher
-                .ExecuteAsync(kind, rowIndex, worker.Shard, ct).ConfigureAwait(false);
-
-            if (metrics is not null)
+            // Guard the dispatch like the open-loop scheduler does: an operation that lets an exception
+            // escape (e.g. a request-level TaskCanceledException from a client timeout under a fault)
+            // must be recorded as a failed op and classified, never allowed to unwind the worker loop
+            // and crash the whole run. Without this a single stray transport cancellation during a fault
+            // window aborts an otherwise-recoverable closed-loop run.
+            try
             {
-                metrics.RecordResult(result, totalMs);
-                metrics.DecInFlight();
+                var (result, totalMs) = await _dispatcher
+                    .ExecuteAsync(kind, rowIndex, worker.Shard, ct).ConfigureAwait(false);
+
+                if (metrics is not null)
+                    metrics.RecordResult(result, totalMs);
+            }
+            catch (Exception ex)
+            {
+                if (metrics is not null)
+                {
+                    (Operations.OperationStatus status, string code) = Operations.ErrorClassifier.Classify(ex);
+                    metrics.RecordResult(Operations.OperationResult.Failure(kind, status, code), 0);
+                }
+            }
+            finally
+            {
+                if (metrics is not null)
+                    metrics.DecInFlight();
             }
         }
     }

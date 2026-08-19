@@ -22,7 +22,7 @@ namespace CamusDB.Workload.Operations;
 /// found commit — durable WAL — dominates). A conflict here is not retried into a better number; it is
 /// classified and surfaced so the run can be invalidated per the non-conflicting contract.
 /// </summary>
-public sealed class WriteOperation
+public sealed class WriteOperation : IWriteOperation
 {
     private readonly CamusTransactionOptions _options;
     private readonly ConnectionSet _connections;

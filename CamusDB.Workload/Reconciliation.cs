@@ -30,9 +30,24 @@ public sealed record ReconciliationResult(
     bool AccountingBalances,
     bool NoConflicts,
     bool ConflictsWaived,
-    IReadOnlyList<string> Failures)
+    IReadOnlyList<string> Failures,
+    bool BalanceConserved = true,
+    long BalanceBaseline = 0,
+    long BalanceFinal = 0,
+    bool VersionCheckWaived = false)
 {
-    public bool Passed => VersionsMatch && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived);
+    // BalanceConserved is the bank-transfer atomicity invariant: SUM(balance) must be unchanged after a
+    // transfer run. It is never waived — unlike conflicts, an atomicity break is a correctness failure a
+    // chaos run must catch, not tolerate. Defaults to true so the accounts workload (whose writes change
+    // balances by design) is unaffected.
+    //
+    // VersionCheckWaived turns off the SUM(version) accounting for the bank workload: its transfers
+    // retry on failure and are NOT idempotent, so an indeterminate commit followed by a retry can apply
+    // the transfer twice — which inflates the version count while still conserving balance. The version
+    // band assumes at-most-once application (true only for the non-retrying accounts writes), so in bank
+    // mode SUM(balance) conservation is the consistency guard and the version delta is informational.
+    public bool Passed => (VersionsMatch || VersionCheckWaived)
+        && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived) && BalanceConserved;
 }
 
 /// <summary>
@@ -55,6 +70,11 @@ public static class Reconciliation
     /// same seeded dataset.</summary>
     public static Task<long> ReadVersionSumAsync(CamusConnection conn, CancellationToken ct)
         => ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct);
+
+    /// <summary>Reads the current <c>SUM(balance)</c> baseline; captured once before a bank-transfer run
+    /// so the conservation invariant measures against the pre-run total.</summary>
+    public static Task<long> ReadBalanceSumAsync(CamusConnection conn, CancellationToken ct)
+        => ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct);
 
     /// <summary>
     /// The inclusive band of acceptable <c>SUM(version)</c> deltas. An indeterminate transaction
@@ -92,7 +112,8 @@ public static class Reconciliation
     public static async Task<ReconciliationResult> VerifyAsync(
         CamusConnection conn, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
-        long expectedRows, CancellationToken ct)
+        long expectedRows, CancellationToken ct,
+        bool bankMode = false, long baselineBalanceSum = 0)
     {
         long persistedSum = await ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct).ConfigureAwait(false);
         long rowCount = await ScalarAsync(conn, $"SELECT COUNT(*) FROM {Dataset.TableName}", ct).ConfigureAwait(false);
@@ -105,8 +126,17 @@ public static class Reconciliation
                           && metrics.Started == metrics.Completed + metrics.Failed;
         bool noConflicts = metrics.Conflicts == 0;
 
+        // Bank-transfer atomicity invariant: every transfer conserves total balance and commits
+        // atomically, so SUM(balance) must be unchanged. This holds across faults and indeterminate
+        // commits (an atomic transfer applies both legs or neither), so a changed sum is a genuine
+        // atomicity break — never waived. In accounts mode balances change by design, so it is skipped.
+        long balanceFinal = bankMode
+            ? await ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct).ConfigureAwait(false)
+            : 0;
+        bool balanceConserved = !bankMode || balanceFinal == baselineBalanceSum;
+
         List<string> failures = new();
-        if (!versionsMatch)
+        if (!versionsMatch && !bankMode)
             failures.Add($"persisted SUM(version) delta={persistedDelta} outside [{expectedMin}, {expectedMax}] " +
                          $"(committed rows + up to {indeterminateTxns} indeterminate txn(s) × {writesPerTransaction}; " +
                          $"baseline={baselineVersionSum}, final={persistedSum}).");
@@ -117,18 +147,44 @@ public static class Reconciliation
                          $"completed={metrics.Completed}, failed={metrics.Failed}, drops={metrics.ScheduleDrops}.");
         if (!noConflicts && !expectFaults)
             failures.Add($"{metrics.Conflicts} conflict(s) in the non-conflicting baseline.");
+        if (!balanceConserved)
+            failures.Add($"SUM(balance) changed from {baselineBalanceSum} to {balanceFinal} " +
+                         $"(delta {balanceFinal - baselineBalanceSum}) — a bank transfer broke atomicity.");
 
         return new ReconciliationResult(
             expectedMin, expectedMax, persistedDelta, indeterminateTxns,
-            versionsMatch, rowCount, rowCountMatches, accounting, noConflicts, expectFaults && !noConflicts, failures);
+            versionsMatch, rowCount, rowCountMatches, accounting, noConflicts, expectFaults && !noConflicts, failures,
+            balanceConserved, baselineBalanceSum, balanceFinal, VersionCheckWaived: bankMode);
     }
+
+    // Reconciliation runs right after the measured window, when a cluster that just lost and recovered a
+    // node may still be slow to answer — a single scalar read can hit a client timeout or a retryable
+    // server verdict. These reads are pure aggregates outside the measurement, so retrying them is both
+    // safe and necessary: without it a transient blip during the post-fault settle crashes the whole run
+    // (unhandled) instead of producing the consistency verdict the run exists to report.
+    private const int MaxScalarAttempts = 12;
 
     private static async Task<long> ScalarAsync(CamusConnection conn, string sql, CancellationToken ct)
     {
-        using CamusCommand cmd = conn.CreateCamusCommand(sql);
-        using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false) || reader.IsDBNull(0))
-            return 0;
-        return reader.GetInt64(0);
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using CamusCommand cmd = conn.CreateCamusCommand(sql);
+                using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                if (!await reader.ReadAsync(ct).ConfigureAwait(false) || reader.IsDBNull(0))
+                    return 0;
+                return reader.GetInt64(0);
+            }
+            catch (Exception ex)
+            {
+                Operations.OperationStatus status = Operations.ErrorClassifier.Classify(ex).Status;
+                bool retryable = status is Operations.OperationStatus.Conflict or Operations.OperationStatus.Transient;
+                if (!retryable || attempt >= MaxScalarAttempts || ct.IsCancellationRequested)
+                    throw;
+
+                await Task.Delay(Math.Min(100 * attempt, 1000), ct).ConfigureAwait(false);
+            }
+        }
     }
 }
