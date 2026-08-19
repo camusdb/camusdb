@@ -94,6 +94,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TransactionMutationLimitExceeded => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.SpillStorageUnavailable           => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.TooManyAuthAttempts               => StatusCode.ResourceExhausted,
+        CamusDBErrorCodes.InsufficientDiskSpace             => StatusCode.ResourceExhausted,
 
         // Authentication / authorization
         CamusDBErrorCodes.AuthenticationFailed   => StatusCode.Unauthenticated,

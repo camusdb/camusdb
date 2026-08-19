@@ -158,4 +158,15 @@ internal static partial class Log
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "SQL parser cache sweep: {Count} entries, {Hits} hits, {Misses} misses, {Evictions} evictions (cumulative)")]
     public static partial void LogParserCacheSweep(ILogger logger, int count, long hits, long misses, long evictions);
+
+    // Disk-space write admission
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Free space {FreeBytes} bytes on the data volume is below the watermark {MinFreeBytes} bytes; new DML mutations will be refused (CADB0536) until space is freed")]
+    public static partial void LogDiskSpaceLow(ILogger logger, long freeBytes, long minFreeBytes);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Free space {FreeBytes} bytes on the data volume is above the watermark {MinFreeBytes} bytes again; DML admission restored")]
+    public static partial void LogDiskSpaceRecovered(ILogger logger, long freeBytes, long minFreeBytes);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Disk free-space probe failed; disk-space admission is inactive until it recovers: {Message}")]
+    public static partial void LogDiskSpaceProbeFailed(ILogger logger, string message);
 }

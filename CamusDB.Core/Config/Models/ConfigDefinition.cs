@@ -577,6 +577,13 @@ public class ConfigDefinition
     public int MaxViewExpansionDepth { get; set; } = 32;
 
     /// <summary>
+    /// Free-space watermark (bytes) on the data directory's volume below which new user DML is
+    /// refused with CADB0536; reads, DDL, and internal transactions stay admitted. &lt;= 0 disables.
+    /// Default 64 MiB. Maps to <c>CamusDBOptions.MinFreeDiskBytes</c>.
+    /// </summary>
+    public long MinFreeDiskBytes { get; set; } = 64 * 1024 * 1024;
+
+    /// <summary>
     /// Rows written per transaction while a materialized view is refreshed. Must stay well below
     /// <see cref="MaxMutationsPerTransaction"/>. Default 10 000. Maps to
     /// <c>CamusDBOptions.MaterializedViewRefreshChunkRows</c>.

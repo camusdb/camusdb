@@ -162,7 +162,11 @@ public static class Reconciliation
     // server verdict. These reads are pure aggregates outside the measurement, so retrying them is both
     // safe and necessary: without it a transient blip during the post-fault settle crashes the whole run
     // (unhandled) instead of producing the consistency verdict the run exists to report.
-    private const int MaxScalarAttempts = 12;
+    // A node recovering from a fault — a restart, or a full disk that was just freed and is now
+    // compacting — can stay slow for tens of seconds. Reconciliation is post-measurement, so it can
+    // afford to be patient: ~30 attempts with up to 2 s of backoff is roughly a minute of tolerance
+    // before it gives up. Even then the caller keeps the measured artifacts (see VerifyOrInconclusive).
+    private const int MaxScalarAttempts = 30;
 
     private static async Task<long> ScalarAsync(CamusConnection conn, string sql, CancellationToken ct)
     {
@@ -183,8 +187,41 @@ public static class Reconciliation
                 if (!retryable || attempt >= MaxScalarAttempts || ct.IsCancellationRequested)
                     throw;
 
-                await Task.Delay(Math.Min(100 * attempt, 1000), ct).ConfigureAwait(false);
+                await Task.Delay(Math.Min(200 * attempt, 2000), ct).ConfigureAwait(false);
             }
         }
     }
+
+    /// <summary>
+    /// Runs <see cref="VerifyAsync"/> but never throws: if the verification queries cannot complete —
+    /// a node too slow after a fault, a transport that stays down — it returns an <c>inconclusive</c>
+    /// result (not passed, with the reason) instead of unwinding the run. The measured artifacts are
+    /// already written by then, so a run that produced valid data but could not be verified is reported
+    /// as "could not verify", not lost as "crashed".
+    /// </summary>
+    public static async Task<ReconciliationResult> VerifyOrInconclusiveAsync(
+        CamusConnection conn, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
+        long indeterminateTxns, int writesPerTransaction, bool expectFaults,
+        long expectedRows, CancellationToken ct, bool bankMode, long baselineBalanceSum)
+    {
+        try
+        {
+            return await VerifyAsync(conn, metrics, baselineVersionSum, committedRowWrites, indeterminateTxns,
+                writesPerTransaction, expectFaults, expectedRows, ct, bankMode, baselineBalanceSum).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            return Inconclusive($"{ex.GetType().Name}: {ex.Message}", indeterminateTxns, metrics.Conflicts, baselineBalanceSum);
+        }
+    }
+
+    /// <summary>Builds a not-passed "could not verify" result carrying the reason, for when the
+    /// verification cannot run at all (the reconciliation connection could not even be opened).</summary>
+    public static ReconciliationResult Inconclusive(string reason, long indeterminateTxns, long conflicts, long baselineBalanceSum)
+        => new(
+            0, 0, 0, indeterminateTxns,
+            VersionsMatch: false, RowCount: -1, RowCountMatches: false, AccountingBalances: false,
+            NoConflicts: conflicts == 0, ConflictsWaived: false,
+            Failures: [$"reconciliation could not complete (the cluster stayed unavailable after the fault): {reason}"],
+            BalanceConserved: false, BalanceBaseline: baselineBalanceSum, BalanceFinal: 0, VersionCheckWaived: false);
 }

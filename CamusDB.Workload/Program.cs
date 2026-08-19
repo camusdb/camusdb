@@ -160,27 +160,16 @@ public static class Program
                 .RunAsync(workers, o.TargetOps, o.MaxInFlight, warmup, measure, drain, ct).ConfigureAwait(false);
         }
 
-        // Reconciliation (outside the measured window).
-        ReconciliationResult reconciliation;
-        await using (CamusConnection verify = await OpenSingleAsync(o, ct).ConfigureAwait(false))
-        {
-            reconciliation = await Reconciliation
-                .VerifyAsync(
-                    verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
-                    writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
-                    bankMode: bank, baselineBalanceSum: baselineBalanceSum)
-                .ConfigureAwait(false);
-        }
-
+        // Write the measured artifacts FIRST, before reconciliation. The summary/intervals/errors are
+        // the run's actual results and are always valid; reconciliation is a separate post-run check
+        // that queries a cluster which may still be recovering from a fault. Writing the measured data
+        // first means a reconciliation that cannot complete downgrades the verdict to "could not
+        // verify" — it never discards a run that produced perfectly good data.
         RunSummary summary = RunSummary.Build(metrics, o.Mode, o.TargetOps, measure.TotalSeconds, o.ExpectFaults);
         RunManifest manifest = BuildManifest(o, dataset, locking, isolation);
 
         ResultWriter writer = new(o.Output);
         await writer.WriteAsync(manifest, summary, intervals, metrics.Errors, ct).ConfigureAwait(false);
-        await File.WriteAllTextAsync(
-            Path.Combine(o.Output, "reconciliation.json"),
-            System.Text.Json.JsonSerializer.Serialize(reconciliation, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
-            ct).ConfigureAwait(false);
 
         // Time anchor for aligning intervals.csv (second 0 == MeasureStartUtc) with wall-clock event
         // streams. Kept as a small standalone artifact so it can be added without disturbing the
@@ -196,6 +185,31 @@ public static class Program
                     drainSeconds = drain.TotalSeconds,
                 },
                 new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
+            ct).ConfigureAwait(false);
+
+        // Reconciliation (outside the measured window). Never crashes the run: neither a query that
+        // cannot complete nor a connection that cannot even open discards the artifacts above — both
+        // downgrade the verdict to "could not verify".
+        ReconciliationResult reconciliation;
+        try
+        {
+            await using CamusConnection verify = await OpenSingleAsync(o, ct).ConfigureAwait(false);
+            reconciliation = await Reconciliation
+                .VerifyOrInconclusiveAsync(
+                    verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
+                    writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
+                    bankMode: bank, baselineBalanceSum: baselineBalanceSum)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            reconciliation = Reconciliation.Inconclusive(
+                $"{ex.GetType().Name}: {ex.Message}", writeOperation.IndeterminateTxns, metrics.Conflicts, baselineBalanceSum);
+        }
+
+        await File.WriteAllTextAsync(
+            Path.Combine(o.Output, "reconciliation.json"),
+            System.Text.Json.JsonSerializer.Serialize(reconciliation, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
             ct).ConfigureAwait(false);
 
         PrintConsole(summary, reconciliation, o.Output);

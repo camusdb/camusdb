@@ -105,6 +105,7 @@ public class ConfigReader
         "max_index_columns",
         "max_index_include_tuple_bytes",
         "max_mutations_per_transaction",
+        "min_free_disk_bytes",
         "max_view_expansion_depth",
         "materialized_view_refresh_chunk_rows",
         "materialized_view_refresh_enabled",

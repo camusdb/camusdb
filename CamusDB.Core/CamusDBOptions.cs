@@ -44,6 +44,31 @@ public sealed record CamusDBOptions
     public string DataDirectory { get; init; } = Path.GetFullPath("Data");
 
     /// <summary>
+    /// Disk-space admission watermark: when free space on the volume that holds
+    /// <see cref="DataDirectory"/> drops below this many bytes, new user DML mutations are
+    /// refused with <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/> (<c>CADB0536</c>)
+    /// before any write reaches the storage engine. Without this gate the node accepts writes
+    /// into memtables until a flush hits a hard ENOSPC, which is far harder to recover from
+    /// than a refused statement.
+    ///
+    /// <para>Scope of the gate: only transactions that carry a positive mutation budget — user
+    /// DML. Reads, DDL, rollbacks, and internal system transactions (which run with the budget
+    /// disabled) stay admitted, so an operator can still drop objects to free space. In-flight
+    /// transactions are never aborted by the gate; only new mutations are refused.</para>
+    ///
+    /// <para><c>&lt;= 0</c> disables the gate. Node-scoped on purpose: disks fill per node.
+    /// Runtime-mutable: the gate re-reads the value from the current options snapshot on every
+    /// check, so lowering it frees a node without a restart.</para>
+    ///
+    /// <para>Sizing note: the gate cannot shrink what is already buffered, so a watermark
+    /// smaller than the engine's total write-buffer memory still leaves a window where the
+    /// final flushes exhaust the disk. Size it at or above the write-buffer budget when the
+    /// volume is small. Default: <c>64 MiB</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long MinFreeDiskBytes { get; init; } = 64 * 1024 * 1024;
+
+    /// <summary>
     /// Minimum interval, in milliseconds, between background flushes of advisory table
     /// statistics to durable Kahuna storage, per table. Statistics are updated in
     /// memory on every DML but only persisted at most once per this interval, so a write

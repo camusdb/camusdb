@@ -296,14 +296,30 @@ public sealed class KvTransaction
     public long? AgeMs => lifetimeWatch?.ElapsedMilliseconds;
 
     /// <summary>
+    /// Disk-space admission gate installed by <see cref="KvTransactionsManager"/>: throws
+    /// <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/> when the data volume's free space is
+    /// below the configured watermark. Invoked from <see cref="ReserveMutations"/> only for
+    /// transactions with a positive mutation budget, so DDL and internal system transactions
+    /// (budget disabled) are never refused — an operator must be able to drop objects to free
+    /// space. Null when no manager installed one (direct test constructions).
+    /// </summary>
+    public Action? WriteAdmissionGate { get; set; }
+
+    /// <summary>
     /// Reserves <paramref name="count"/> mutations against this transaction's budget before the
     /// corresponding writes are issued. Throws <see cref="CamusDBErrorCodes.TransactionMutationLimitExceeded"/>
     /// if the budget would be exceeded; otherwise adds to the running total monotonically.
+    /// Also runs <see cref="WriteAdmissionGate"/> first, which throws
+    /// <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/> while the node's data volume is below
+    /// its free-space watermark — before the mutation is counted or any write is issued.
     /// No-op when the limit is disabled (<c>&lt;= 0</c>) or <paramref name="count"/> is zero.
     /// </summary>
     public void ReserveMutations(int count)
     {
         if (mutationLimit <= 0 || count == 0) return;
+
+        WriteAdmissionGate?.Invoke();
+
         lock (trackSync)
         {
             if ((long)mutationCount + count > mutationLimit)

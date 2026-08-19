@@ -301,6 +301,7 @@ public static class ConfigResolver
         MaxIndexIncludeTupleBytes = config.MaxIndexIncludeTupleBytes,
         MaxMutationsPerTransaction = config.MaxMutationsPerTransaction,
         MaxViewExpansionDepth = config.MaxViewExpansionDepth,
+        MinFreeDiskBytes = config.MinFreeDiskBytes,
         MaterializedViewRefreshChunkRows = config.MaterializedViewRefreshChunkRows,
         MaterializedViewRefreshEnabled = config.MaterializedViewRefreshEnabled,
         MaterializedViewRefreshTakeoverAttempts = config.MaterializedViewRefreshTakeoverAttempts,

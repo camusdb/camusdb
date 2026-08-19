@@ -96,7 +96,7 @@ public sealed class ClusterController : CommandsController
 
     [HttpGet]
     [Route("/v1/cluster/placement")]
-    public JsonResult GetPlacement()
+    public async Task<JsonResult> GetPlacement()
     {
         IRaft raft = kahuna.Raft;
 
@@ -119,6 +119,9 @@ public sealed class ClusterController : CommandsController
                 Generation = range.Generation,
                 EffectiveReplicationFactor = raft.GetEffectiveReplicationFactor(range.PartitionId),
                 HostedLocally = hosted,
+                // Only a hosting node can lead a partition; ask its local belief (non-blocking).
+                LeaderLocal = hosted && range.State != RaftPartitionState.Removed
+                    && await raft.AmILeaderQuick(range.PartitionId).ConfigureAwait(false),
             };
 
             foreach (RaftReplica replica in range.Replicas)

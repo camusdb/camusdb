@@ -98,12 +98,39 @@ public sealed class Dataset
     /// <summary>True when the table already holds the expected row count (so seeding can be skipped).</summary>
     public async Task<bool> IsSeededAsync(CamusConnection conn, CancellationToken ct)
     {
-        using CamusCommand count = conn.CreateCamusCommand($"SELECT COUNT(*) FROM {TableName}");
-        using CamusDataReader reader = await count.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+        try
+        {
+            using CamusCommand count = conn.CreateCamusCommand($"SELECT COUNT(*) FROM {TableName}");
+            using CamusDataReader reader = await count.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+                return false;
+            long existing = reader.GetInt64(0);
+            return existing >= _rows;
+        }
+        catch (CamusException e) when (IsMissingTable(e))
+        {
+            // Table not found on the node this round-robined to. Either it was never created, or a
+            // just-issued CREATE TABLE has not propagated to this node yet. Both mean "not fully
+            // seeded", so report that and let the seeding path (which retries the propagation lag per
+            // batch) proceed rather than crash the whole init.
             return false;
-        long existing = reader.GetInt64(0);
-        return existing >= _rows;
+        }
+    }
+
+    /// <summary>
+    /// True when an exception is CamusDB's "table doesn't exist" (CADB0011), reported during setup as
+    /// pure catalog-propagation lag. The gRPC client does not always carry the server error code across
+    /// the wire — <see cref="CamusException.Code"/> can arrive empty — so the message is the reliable
+    /// signal, with the code checked first when it is present.
+    /// </summary>
+    private static bool IsMissingTable(Exception ex)
+    {
+        if (ex is not CamusException camus)
+            return false;
+        if (camus.Code == "CADB0011")
+            return true;
+        return camus.Message.Contains("doesn't exist", StringComparison.OrdinalIgnoreCase)
+            && camus.Message.Contains("Table", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Seeds all rows in batched transactions. Idempotent when already seeded.</summary>
@@ -124,7 +151,16 @@ public sealed class Dataset
             // moving leadership; a batch commit can then hit a transient TransactionMustRetry / lock
             // conflict / Kahuna-aborted response. Without this, one momentary election during setup
             // fails the whole seed — and, under a chaos scenario, aborts the run before it starts.
-            for (int attempt = 1; ; attempt++)
+            // Two independent retry budgets. A conflict / transient abort gets the tight budget: it
+            // signals contention that either clears in a few tries or is a real problem. Table-not-found
+            // (CADB0011) gets a far more patient budget on its own counter, because it is pure one-time
+            // DDL-propagation lag: on a multi-node cluster the seeding INSERT can route to a node the
+            // CREATE TABLE has not reached yet, and — with the placement rebalancer actively moving the
+            // catalog partition at bootstrap — that window can outlast a few seconds. Seeding is setup,
+            // so waiting a minute for the table to become visible everywhere is the right trade.
+            int retryAttempt = 0;
+            int propagationAttempt = 0;
+            while (true)
             {
                 CamusTransaction tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
                 try
@@ -151,23 +187,33 @@ public sealed class Dataset
                     try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
                     catch { /* the batch is retried from a new transaction regardless */ }
 
-                    // Retry a retryable server verdict (conflict) OR a transient transport failure — a
-                    // client request timeout / cancellation is common while a just-started cluster is
-                    // still electing leaders. The ct.IsCancellationRequested guard keeps the workload's
-                    // own SIGINT (which also surfaces as a canceled task) from being retried.
+                    // The ct.IsCancellationRequested guard keeps the workload's own SIGINT (also a
+                    // canceled task) from being retried.
                     OperationStatus status = ErrorClassifier.Classify(ex).Status;
-                    bool retryable = status is OperationStatus.Conflict or OperationStatus.Transient;
-                    if (!retryable || attempt >= MaxSeedBatchAttempts || ct.IsCancellationRequested)
+                    bool tablePropagating = IsMissingTable(ex);
+                    bool retryable = status is OperationStatus.Conflict or OperationStatus.Transient || tablePropagating;
+                    bool budgetLeft = tablePropagating
+                        ? ++propagationAttempt < MaxSeedPropagationAttempts
+                        : ++retryAttempt < MaxSeedBatchAttempts;
+                    if (!retryable || !budgetLeft || ct.IsCancellationRequested)
                         throw;
 
-                    await Task.Delay(Math.Min(50 * attempt, 500), ct).ConfigureAwait(false);
+                    int delayMs = tablePropagating ? 500 : Math.Min(50 * retryAttempt, 500);
+                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
                 }
             }
         }
     }
 
-    /// <summary>Bounded retries per seeding batch before a persistent failure is surfaced.</summary>
+    /// <summary>Bounded retries per seeding batch for a conflict / transient abort before a persistent failure is surfaced.</summary>
     private const int MaxSeedBatchAttempts = 20;
+
+    /// <summary>
+    /// Patient retry budget for table-not-found (DDL propagation lag) during seeding: 120 tries at a
+    /// steady 500&#160;ms is roughly a minute, enough to outlast catalog propagation on a large cluster
+    /// whose placement rebalancer is still moving the catalog partition at bootstrap.
+    /// </summary>
+    private const int MaxSeedPropagationAttempts = 120;
 
     private static async Task TryDdlAsync(CamusConnection conn, string sql, CancellationToken ct)
     {

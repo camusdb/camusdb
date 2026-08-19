@@ -358,6 +358,19 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string SequenceUnavailable = "CADB0535";
 
+    /// <summary>
+    /// A write was refused by the node's disk-space admission gate: free space on the data
+    /// directory's volume is below <see cref="CamusDBOptions.MinFreeDiskBytes"/>. Refusal happens
+    /// before any mutation reaches the storage engine, which keeps flushes and the WAL out of a
+    /// hard ENOSPC failure and leaves headroom to persist what is already buffered.
+    ///
+    /// <para>Reads keep working, and DDL/system transactions are exempt on purpose — an operator
+    /// must be able to <c>DROP TABLE</c>/<c>DROP DATABASE</c> to recover space. Retryable only
+    /// after space is freed on this node (or the threshold is lowered at runtime), so it maps to
+    /// HTTP 507 (Insufficient Storage) rather than a generic 503.</para>
+    /// </summary>
+    public const string InsufficientDiskSpace = "CADB0536";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -508,6 +521,7 @@ public static class CamusDBErrorCodes
         FeatureNotSupported => 501,
         ConcurrentSchemaChange => 409,
         SequenceUnavailable => 503,
+        InsufficientDiskSpace => 507,
         PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

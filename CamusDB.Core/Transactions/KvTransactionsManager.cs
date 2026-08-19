@@ -12,6 +12,8 @@ using Kahuna.Shared.KeyValue;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using CamusDB.Core.Cache;
+using CamusDB.Core.Config;
+using CamusDB.Core.Storage;
 using CamusDB.Core.Util.Diagnostics;
 
 namespace CamusDB.Core.Transactions;
@@ -140,6 +142,39 @@ public sealed class KvTransactionsManager : IDisposable
         this.mintLocalT = mintLocalT;
         this.logger = logger ?? NullLogger<ICamusDB>.Instance;
         _cache = cache;
+        diskSpace = new DiskSpaceMonitor(options.DataDirectory, this.logger);
+    }
+
+    /// <summary>
+    /// Watches free space on the volume that holds <see cref="CamusDBOptions.DataDirectory"/> for
+    /// the write-admission gate. The data directory is <see cref="ConfigMutability.Restart"/>-class,
+    /// so latching it here at construction is correct; the watermark itself is read from the live
+    /// <see cref="options"/> snapshot on every check.
+    /// </summary>
+    private readonly DiskSpaceMonitor diskSpace;
+
+    /// <summary>
+    /// Write-admission gate installed on every read-write transaction as
+    /// <see cref="KvTransaction.WriteAdmissionGate"/>: refuses a new mutation with
+    /// <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/> while the data volume's free space is
+    /// below <see cref="CamusDBOptions.MinFreeDiskBytes"/>. Runs before the mutation is counted,
+    /// so nothing reaches the storage engine — the refusal is what keeps a nearly-full disk out of
+    /// a hard ENOSPC during a memtable flush. Reads the watermark from the current options
+    /// snapshot on every call, so a runtime change takes effect at the next statement.
+    /// </summary>
+    private void EnsureDiskSpaceForWrites()
+    {
+        long minFreeBytes = options.MinFreeDiskBytes;
+        if (minFreeBytes <= 0)
+            return;
+
+        if (!diskSpace.IsBelow(minFreeBytes, out long freeBytes))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsufficientDiskSpace,
+            $"Write rejected: the data volume has {freeBytes} bytes free, below the 'min_free_disk_bytes' " +
+            $"watermark of {minFreeBytes}; free disk space on this node or lower the watermark, then retry");
     }
 
     /// <summary>
@@ -278,7 +313,10 @@ public sealed class KvTransactionsManager : IDisposable
             KvTransaction txDeferred = new(
                 Kommander.Time.HLCTimestamp.Zero, uniqueId, isReadOnly: false, level, mode,
                 mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode,
-                clientId: clientId, priority: priorityMode);
+                clientId: clientId, priority: priorityMode)
+            {
+                WriteAdmissionGate = EnsureDiskSpaceForWrites
+            };
 
             DecisionDurability capturedDecision = decisionDurabilityMode;
             txDeferred.SessionStarter = async ct =>
@@ -307,7 +345,10 @@ public sealed class KvTransactionsManager : IDisposable
 
         KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: false, level, mode,
             mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode,
-            priority: priorityMode);
+            priority: priorityMode)
+        {
+            WriteAdmissionGate = EnsureDiskSpaceForWrites
+        };
         Track(tx);
 
         // No client-side range-lock heartbeat: range-lock acquisitions are registered with the

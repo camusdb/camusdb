@@ -45,6 +45,12 @@ public sealed class ClusterPartitionPlacementModel
 
     public bool HostedLocally { get; set; }
 
+    /// <summary>Whether the answering node believes it is the Raft leader of this partition. Each
+    /// partition has exactly one leader, so polling every node's placement and collecting the
+    /// partitions each reports <c>LeaderLocal</c> for gives the whole leader distribution — the
+    /// signal for observing the leader balancer. Local belief only (see <c>AmILeaderQuick</c>).</summary>
+    public bool LeaderLocal { get; set; }
+
     public List<ClusterPartitionReplicaModel> Replicas { get; set; } = new();
 }
 
