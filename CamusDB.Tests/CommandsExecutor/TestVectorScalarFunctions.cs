@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -293,5 +295,269 @@ internal sealed class TestVectorScalarFunctions : SharedNodeBaseTest
         List<QueryResultRow> rows = await ExecSelect(executor, reopened, "SELECT vector_dims(v) AS d FROM t");
         Assert.AreEqual(1, rows.Count);
         Assert.AreEqual(768L, rows[0].Row["d"].LongValue);
+    }
+
+    // ── Distance metrics ──────────────────────────────────────────────────────
+
+    /// <summary>Packs float32 elements little-endian, matching the documented wire contract.</summary>
+    private static ColumnValue Pack(float[] elements)
+    {
+        byte[] bytes = new byte[elements.Length * 4];
+
+        for (int i = 0; i < elements.Length; i++)
+            BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(i * 4, 4), elements[i]);
+
+        return new ColumnValue(bytes);
+    }
+
+    private static float[] RandomElements(Random random, int dimensions)
+    {
+        float[] elements = new float[dimensions];
+
+        for (int i = 0; i < dimensions; i++)
+            elements[i] = (float)(random.NextDouble() * 2d - 1d);
+
+        return elements;
+    }
+
+    /// <summary>
+    /// Compensated (Kahan) summation, used only by the reference values below. Summing in a different
+    /// way from the engine is the point: a reference that repeated the engine's own naive loop would
+    /// agree with it even when both are wrong.
+    /// </summary>
+    private static double KahanSum(IEnumerable<double> terms)
+    {
+        double sum = 0d;
+        double compensation = 0d;
+
+        foreach (double term in terms)
+        {
+            double adjusted = term - compensation;
+            double next = sum + adjusted;
+            compensation = next - sum - adjusted;
+            sum = next;
+        }
+
+        return sum;
+    }
+
+    private static double ReferenceL2(float[] a, float[] b)
+        => Math.Sqrt(KahanSum(a.Zip(b, (x, y) => ((double)x - y) * ((double)x - y))));
+
+    private static double ReferenceInnerProduct(float[] a, float[] b)
+        => KahanSum(a.Zip(b, (x, y) => (double)x * y));
+
+    private static double ReferenceCosineDistance(float[] a, float[] b)
+    {
+        double dot = ReferenceInnerProduct(a, b);
+        double magnitudeA = Math.Sqrt(KahanSum(a.Select(x => (double)x * x)));
+        double magnitudeB = Math.Sqrt(KahanSum(b.Select(x => (double)x * x)));
+        return 1d - dot / (magnitudeA * magnitudeB);
+    }
+
+    /// <summary>
+    /// Relative tolerance for a 768-dimension double accumulation compared against a compensated
+    /// reference. Naive summation of ~768 terms loses far less than this; a wider gap means an
+    /// arithmetic error, not rounding.
+    /// </summary>
+    private const double Tolerance = 1e-9;
+
+    private static void AssertClose(double expected, double actual, string label)
+    {
+        double allowed = Tolerance * Math.Max(1d, Math.Abs(expected));
+        Assert.That(actual, Is.EqualTo(expected).Within(allowed), label);
+    }
+
+    private async Task<(DatabaseDescriptor db, CommandExecutor executor)> SetupVectorTable()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE t (id OID NOT NULL, v bytes(4096), PRIMARY KEY (id))");
+        return (db, executor);
+    }
+
+    private static async Task<double> Metric(
+        CommandExecutor executor, DatabaseDescriptor db, string metric, ColumnValue query)
+    {
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(tx, db.Name, $"SELECT {metric}(v, @q) AS d FROM t", new() { { "@q", query } }));
+
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(ColumnType.Float64, rows[0].Row["d"].Type);
+        return rows[0].Row["d"].FloatValue;
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Metrics_MatchAnIndependentReference()
+    {
+        // Fixed seed: a failure must be reproducible.
+        Random random = new(20260819);
+        float[] stored = RandomElements(random, 768);
+        float[] query = RandomElements(random, 768);
+
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Pack(stored));
+
+        ColumnValue queryVector = Pack(query);
+
+        AssertClose(ReferenceL2(stored, query),
+            await Metric(executor, db, "l2_distance", queryVector), "l2_distance");
+        AssertClose(ReferenceInnerProduct(stored, query),
+            await Metric(executor, db, "inner_product", queryVector), "inner_product");
+        AssertClose(ReferenceCosineDistance(stored, query),
+            await Metric(executor, db, "cosine_distance", queryVector), "cosine_distance");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task L2Distance_OfIdenticalVectorsIsZero()
+    {
+        float[] elements = RandomElements(new Random(7), 128);
+
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Pack(elements));
+
+        Assert.AreEqual(0d, await Metric(executor, db, "l2_distance", Pack(elements)));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task CosineDistance_OfIdenticalVectorsIsZeroAndNeverNegative()
+    {
+        // Without clamping, rounding can push the similarity a few ulps past 1 and produce a small
+        // negative distance, which would sort ahead of a genuine exact match.
+        float[] elements = RandomElements(new Random(11), 768);
+
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Pack(elements));
+
+        double distance = await Metric(executor, db, "cosine_distance", Pack(elements));
+
+        Assert.GreaterOrEqual(distance, 0d, "cosine distance must never be negative");
+        Assert.LessOrEqual(distance, Tolerance);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task CosineDistance_OfOppositeVectorsIsTwo()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Pack([1f, 0f, 0f, 0f]));
+
+        AssertClose(2d, await Metric(executor, db, "cosine_distance", Pack([-1f, 0f, 0f, 0f])), "opposite");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Metrics_RankInTheDocumentedDirection()
+    {
+        // near is closer to the query than far. L2 and cosine must report near as smaller;
+        // inner_product must report it as larger. A sign error would still return plausible rows.
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+
+        ColumnValue query = Pack([1f, 0f, 0f, 0f]);
+        ColumnValue near = Pack([0.9f, 0.1f, 0f, 0f]);
+        ColumnValue far = Pack([0f, 1f, 0f, 0f]);
+
+        await ExecInsert(executor, db, "INSERT INTO t (id, v) VALUES (@id, @v)",
+            new() { { "@id", new(ColumnType.Id, OID) }, { "@v", near } });
+
+        double nearL2 = await Metric(executor, db, "l2_distance", query);
+        double nearDot = await Metric(executor, db, "inner_product", query);
+        double nearCosine = await Metric(executor, db, "cosine_distance", query);
+
+        (DatabaseDescriptor db2, CommandExecutor executor2) = await SetupVectorTable();
+        await ExecInsert(executor2, db2, "INSERT INTO t (id, v) VALUES (@id, @v)",
+            new() { { "@id", new(ColumnType.Id, OID) }, { "@v", far } });
+
+        double farL2 = await Metric(executor2, db2, "l2_distance", query);
+        double farDot = await Metric(executor2, db2, "inner_product", query);
+        double farCosine = await Metric(executor2, db2, "cosine_distance", query);
+
+        Assert.Less(nearL2, farL2, "l2_distance: nearer row must score lower");
+        Assert.Greater(nearDot, farDot, "inner_product: nearer row must score HIGHER");
+        Assert.Less(nearCosine, farCosine, "cosine_distance: nearer row must score lower");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Metrics_DoNotOverflowOnExtremeFiniteValues()
+    {
+        // Every intermediate is widened to double before multiplying. In float, MaxValue squared is
+        // infinity, so a float accumulator would return Infinity or NaN here.
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        float[] extreme = Enumerable.Repeat(float.MaxValue, 512).ToArray();
+        await InsertVector(executor, db, Pack(extreme));
+
+        double dot = await Metric(executor, db, "inner_product", Pack(extreme));
+        double l2 = await Metric(executor, db, "l2_distance", Pack(extreme));
+
+        Assert.IsTrue(double.IsFinite(dot), $"inner_product overflowed: {dot}");
+        AssertClose(512d * (double)float.MaxValue * float.MaxValue, dot, "inner_product");
+        Assert.AreEqual(0d, l2);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Metrics_RejectMismatchedDimensions()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Vector(768));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await Metric(executor, db, "l2_distance", Vector(512)));
+
+        Assert.AreEqual(CamusDBErrorCodes.VectorDimensionMismatch, ex!.Code);
+        StringAssert.Contains("768", ex.Message);
+        StringAssert.Contains("512", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Metrics_RejectANonFiniteElement()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Pack([1f, float.NaN, 0f, 0f]));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await Metric(executor, db, "l2_distance", Pack([1f, 1f, 1f, 1f])));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue, ex!.Code);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task CosineDistance_RejectsAZeroMagnitudeOperand()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, Pack([0f, 0f, 0f, 0f]));
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await Metric(executor, db, "cosine_distance", Pack([1f, 0f, 0f, 0f])));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue, ex!.Code);
+        StringAssert.Contains("cosine_distance", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task Metrics_ReturnNullForANullOperand()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await SetupVectorTable();
+        await InsertVector(executor, db, ColumnValue.Null);
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(tx, db.Name,
+                "SELECT l2_distance(v, @q) AS a, inner_product(v, @q) AS b, cosine_distance(v, @q) AS c FROM t",
+                new() { { "@q", Pack([1f, 0f, 0f, 0f]) } }));
+
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+
+        Assert.AreEqual(ColumnType.Null, rows[0].Row["a"].Type);
+        Assert.AreEqual(ColumnType.Null, rows[0].Row["b"].Type);
+        Assert.AreEqual(ColumnType.Null, rows[0].Row["c"].Type);
     }
 }

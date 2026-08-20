@@ -69,6 +69,21 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string MalformedVector = "CADB0410";
 
+    /// <summary>
+    /// Two vector operands of a distance function have different dimensions. The message names both.
+    /// Comparing them by truncating to the shorter one would return a plausible ranking from
+    /// mismatched data, so the operation is refused. A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string VectorDimensionMismatch = "CADB0411";
+
+    /// <summary>
+    /// A vector element is not a usable number: NaN or an infinity anywhere in the payload, or a
+    /// zero magnitude where the metric divides by it (cosine). Reported rather than returned as NaN,
+    /// because a NaN escapes into the sort and orders rows arbitrarily without any error surfacing.
+    /// A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string InvalidVectorValue = "CADB0412";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -507,6 +522,8 @@ public static class CamusDBErrorCodes
         AnalyzeRequiresNoPendingWrites => 400,
         CheckConstraintViolation => 400,
         MalformedVector => 400,
+        VectorDimensionMismatch => 400,
+        InvalidVectorValue => 400,
         InvalidAsOfSystemTime => 400,
         CommentTooLong => 400,
         UnsupportedAuthPlugin => 400,
