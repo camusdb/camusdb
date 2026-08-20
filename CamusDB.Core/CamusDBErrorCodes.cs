@@ -61,6 +61,14 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string SchemaLimitExceeded = "CADB0408";
 
+    /// <summary>
+    /// A Bytes value was used where a packed float32 vector was required, but its byte count is not a
+    /// whole number of 4-byte elements. Raised instead of flooring the dimension, because a floored
+    /// value would satisfy a constraint written for the shorter width and let a corrupt payload
+    /// through. A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string MalformedVector = "CADB0410";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -498,6 +506,7 @@ public static class CamusDBErrorCodes
         TransactionMutationLimitExceeded => 400,
         AnalyzeRequiresNoPendingWrites => 400,
         CheckConstraintViolation => 400,
+        MalformedVector => 400,
         InvalidAsOfSystemTime => 400,
         CommentTooLong => 400,
         UnsupportedAuthPlugin => 400,
