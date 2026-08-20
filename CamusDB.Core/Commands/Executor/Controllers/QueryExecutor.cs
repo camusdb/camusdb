@@ -1522,7 +1522,7 @@ internal sealed class QueryExecutor
     }
 
     /// <summary>
-    /// Returns <c>true</c> when any projection, WHERE, HAVING, or GROUP BY expression in
+    /// Returns <c>true</c> when any projection, WHERE, HAVING, GROUP BY or ORDER BY expression in
     /// <paramref name="ticket"/> contains a call to a volatile scalar function. Such queries
     /// must not be served from or stored in the result cache because repeated executions are
     /// expected to return different rows.
@@ -1549,6 +1549,17 @@ internal sealed class QueryExecutor
             foreach (NodeAst expr in groupBy)
             {
                 if (ScalarFunctionEvaluator.ContainsVolatileFunction(expr))
+                    return true;
+            }
+        }
+
+        // ORDER BY random() reorders the same rows on every execution, so serving it from the cache
+        // would return one frozen permutation forever.
+        if (ticket.OrderBy is { } orderBy)
+        {
+            foreach (QueryOrderBy clause in orderBy)
+            {
+                if (ScalarFunctionEvaluator.ContainsVolatileFunction(clause.Expression))
                     return true;
             }
         }

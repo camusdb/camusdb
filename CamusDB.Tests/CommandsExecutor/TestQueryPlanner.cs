@@ -904,6 +904,79 @@ public class TestQueryPlanner
     }
 
     // ────────────────────────────────────────────────────────────────────────────
+    // ORDER BY expression binding
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A column named only inside an ORDER BY expression must survive projection narrowing.
+    /// Without this the scan would decode just the projected columns, and the ordering expression
+    /// would later evaluate against a column that was never read.
+    /// </summary>
+    [Test]
+    public void OrderByExpression_KeepsItsColumnsInTheScanSet()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT year FROM robots ORDER BY length(name)");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        Assert.IsNotNull(plan.ScanRequiredColumns);
+        CollectionAssert.Contains(plan.ScanRequiredColumns, "name");
+        CollectionAssert.Contains(plan.ScanRequiredColumns, "year");
+    }
+
+    /// <summary>
+    /// An index whose columns happen to line up must not be used to elide the sort when the key is
+    /// computed: the rows would come back in index order while the query asked for something else.
+    /// </summary>
+    [Test]
+    public void OrderByExpression_DoesNotElideTheSortViaAnIndex()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots ORDER BY length(name)");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        CollectionAssert.Contains(StepTypes(plan), QueryPlanStepType.SortBy);
+    }
+
+    /// <summary>
+    /// The ticket keeps the ordering AST instead of collapsing it to a name, and the clause reports
+    /// itself as computed so downstream operators cannot mistake its label for a column.
+    /// </summary>
+    [Test]
+    public void OrderByExpression_IsPreservedOnTheTicket()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots ORDER BY length(name)");
+
+        Assert.AreEqual(1, ticket.OrderBy!.Count);
+        Assert.IsTrue(ticket.OrderBy[0].IsExpression);
+        Assert.AreEqual(NodeType.ExprFuncCall, ticket.OrderBy[0].Expression!.nodeType);
+    }
+
+    /// <summary>A bare column key stays a name-based clause, keeping the comparer's ordinal path.</summary>
+    [Test]
+    public void OrderByColumn_StaysANameBasedClause()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT id FROM robots ORDER BY year");
+
+        Assert.IsFalse(ticket.OrderBy![0].IsExpression);
+        Assert.AreEqual("year", ticket.OrderBy[0].ColumnName);
+    }
+
+    /// <summary>
+    /// An explicit select-list alias outranks a base column of the same name, so the ordering
+    /// resolves to the expression the alias stands for — here the column <c>year</c>, not the
+    /// table's own <c>name</c> column.
+    /// </summary>
+    [Test]
+    public void OrderByAlias_ResolvesToTheAliasedExpression()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT year AS name FROM robots ORDER BY name");
+
+        Assert.IsFalse(ticket.OrderBy![0].IsExpression);
+        Assert.AreEqual("year", ticket.OrderBy[0].ColumnName);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
     // Locate-column plumbing tests
     // ────────────────────────────────────────────────────────────────────────────
 

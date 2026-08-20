@@ -165,35 +165,126 @@ internal static class QueryTicketAdapter
         List<QueryOrderBy> clauses = new(orderBy.Count);
 
         foreach (OrderByItem item in orderBy)
-        {
-            clauses.Add(new QueryOrderBy(
-                ResolveOrderColumnName(item.Expression, projections, groupBy, sortAfterProjection),
-                item.Direction));
-        }
+            clauses.Add(ResolveOrderClause(item, projections, groupBy, sortAfterProjection));
 
         return clauses;
     }
 
-    private static string ResolveOrderColumnName(
-        NodeAst expression,
+    /// <summary>
+    /// Binds one ORDER BY item to either a row key or a per-row expression.
+    ///
+    /// <para>A grouped or aggregate query sorts <em>after</em> projection, so its keys resolve to
+    /// output column names exactly as before. A plain SELECT sorts <em>before</em> projection, so an
+    /// explicit alias is resolved back to the expression it names — the same precedence, reached from
+    /// the other side. When the result is a bare column the clause stays a row key, which keeps the
+    /// ordinal-resolving fast path in the comparer for every ordinary sort.</para>
+    ///
+    /// <para>Anything else becomes an expression clause. It used to raise
+    /// <c>InvalidInternalOperation</c> here, which reported a caller's valid-looking SQL as an engine
+    /// fault.</para>
+    /// </summary>
+    private static QueryOrderBy ResolveOrderClause(
+        OrderByItem item,
         IReadOnlyList<ProjectionItem> projections,
         IReadOnlyList<NodeAst>? groupBy,
         bool sortAfterProjection)
     {
+        NodeAst expression = item.Expression;
+
         if (sortAfterProjection
             && QueryProjectionResolver.TryResolvePostAggregateOrderColumn(
                 expression,
                 projections,
                 groupBy,
-                out string columnName))
+                out string outputName))
         {
-            return columnName;
+            return new QueryOrderBy(outputName, item.Direction);
+        }
+
+        if (!sortAfterProjection
+            && QueryProjectionResolver.TryResolveProjectionAliasTarget(expression, projections, out NodeAst aliased))
+        {
+            expression = aliased;
         }
 
         if (expression.nodeType == NodeType.Identifier)
-            return expression.yytext ?? "";
+            return new QueryOrderBy(expression.yytext ?? "", item.Direction);
 
-        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid order by clause");
+        if (sortAfterProjection)
+        {
+            // Rows here have already been reduced to grouped output, so a base column the expression
+            // names is simply gone by the time the sort runs. There is nothing to compute it from.
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "ORDER BY expression must appear in the select list or GROUP BY clause when the query groups or aggregates");
+        }
+
+        RequirePerRowOrderExpression(expression);
+
+        return new QueryOrderBy(DescribeOrderExpression(expression), item.Direction, expression);
+    }
+
+    /// <summary>
+    /// Rejects ordering expressions that cannot be evaluated against a single row.
+    ///
+    /// <para>An aggregate is legal in a grouped query's ORDER BY, but that form never reaches here:
+    /// it resolves to an output column on the post-projection path above. Reaching this method means
+    /// the aggregate has no GROUP BY to belong to, so it is a caller error rather than a shape the
+    /// sorter should attempt.</para>
+    ///
+    /// <para>These raise <c>InvalidInput</c> so an unsupported query reads as a rejected statement,
+    /// never as an internal fault.</para>
+    /// </summary>
+    private static void RequirePerRowOrderExpression(NodeAst expression)
+    {
+        if (ContainsSubquery(expression))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "ORDER BY does not support subqueries");
+
+        if (QueryExpressionClassifier.IsAggregateProjection(expression)
+            || QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "ORDER BY cannot use an aggregate function without GROUP BY");
+        }
+    }
+
+    private static bool ContainsSubquery(NodeAst? expression)
+    {
+        if (expression is null)
+            return false;
+
+        if (expression.nodeType is NodeType.ExprScalarSubquery
+            or NodeType.ExprInSubquery
+            or NodeType.ExprNotInSubquery
+            or NodeType.ExprExistsSubquery
+            or NodeType.ExprExistsCorrelated)
+        {
+            return true;
+        }
+
+        return ContainsSubquery(expression.leftAst)
+            || ContainsSubquery(expression.rightAst)
+            || ContainsSubquery(expression.extendedOne)
+            || ContainsSubquery(expression.extendedTwo)
+            || ContainsSubquery(expression.extendedThree)
+            || ContainsSubquery(expression.extendedFour)
+            || ContainsSubquery(expression.extendedFive);
+    }
+
+    /// <summary>
+    /// Short label for an expression key. It exists for error messages and plan output only — an
+    /// expression clause is never looked up by name — so a function call reports its own name rather
+    /// than a rendering of its arguments.
+    /// </summary>
+    private static string DescribeOrderExpression(NodeAst expression)
+    {
+        if (expression.nodeType == NodeType.ExprFuncCall && expression.leftAst?.yytext is { } functionName)
+            return $"{functionName}(…)";
+
+        return expression.nodeType.ToString();
     }
 
     private static bool SortAfterProjection(SelectQuery query) =>

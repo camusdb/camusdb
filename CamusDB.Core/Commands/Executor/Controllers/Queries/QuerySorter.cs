@@ -46,6 +46,29 @@ internal sealed class QuerySorter
     // Public entry points
     // ──────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Rejects an ordering key the comparer cannot evaluate yet.
+    ///
+    /// <para>Binding preserves a per-row ordering expression so the shape is understood, resolved
+    /// and analyzed; computing it is separate work. Until the comparer materializes sort keys, such
+    /// a query must be refused outright. The alternative is worse than an error: the comparer would
+    /// look the expression's label up as a column, find nothing, and either fault as an internal
+    /// error or order every row equally — a silently wrong answer that still returns rows.</para>
+    /// </summary>
+    private static void RequireSupportedOrderKeys(IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        foreach (QueryOrderBy clause in orderBy)
+        {
+            if (clause.Expression is null)
+                continue;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"ORDER BY {clause.ColumnName} is not supported yet: ordering by a computed expression " +
+                "requires a sort key that is evaluated per row. Order by a projected column instead.");
+        }
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> SortResultset(
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
@@ -54,6 +77,8 @@ internal sealed class QuerySorter
     {
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
+
+        RequireSupportedOrderKeys(ticket.OrderBy);
 
         IComparer<QueryResultRow> comparer = new QueryResultRowOrderComparer(ticket.OrderBy);
 

@@ -459,6 +459,11 @@ internal static class IndexScanSelector
         {
             // Index columns are bare; an ORDER BY column may be alias-qualified ("u.position").
             // Compare against the bare column name so aliased single-table ORDER BY can elide.
+            // A computed key is never provided by an index; its label is a diagnostic, not a column.
+            // Stop here rather than comparing it, so the prefix length reflects only real columns.
+            if (orderBy[i].IsExpression)
+                break;
+
             if (!string.Equals(index.Columns[i], BareColumnName(orderBy[i].ColumnName), StringComparison.Ordinal))
                 break;
 

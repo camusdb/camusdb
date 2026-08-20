@@ -27,7 +27,7 @@ internal static class RequiredColumnAnalyzer
         HashSet<string> required = new(StringComparer.OrdinalIgnoreCase);
         CollectFromProjections(ticket.Projection, ticket.RowNameResolver, required, ticket);
         CollectFromExpression(ticket.Where, ticket.RowNameResolver, required, ticket);
-        CollectFromOrderBy(ticket.OrderBy, required);
+        CollectFromOrderBy(ticket.OrderBy, ticket.RowNameResolver, required, ticket);
         CollectFromExpressionList(ticket.GroupBy, ticket.RowNameResolver, required, ticket);
         CollectFromHaving(ticket, required);
 
@@ -177,7 +177,7 @@ internal static class RequiredColumnAnalyzer
                 if (scanFiltersByAlias.TryGetValue(boundSource.Alias, out NodeAst? scanFilter))
                     CollectFromExpressionForAlias(scanFilter, bound.RowNames, boundSource.Alias, required, ticket);
 
-                CollectFromOrderByForAlias(ticket.OrderBy, bound.RowNames, boundSource.Alias, required);
+                CollectFromOrderByForAlias(ticket.OrderBy, bound.RowNames, boundSource.Alias, required, ticket);
                 CollectFromExpressionListForAlias(ticket.GroupBy, bound.RowNames, boundSource.Alias, required, ticket);
                 CollectFromHavingForAlias(ticket, bound.RowNames, boundSource.Alias, required);
                 return;
@@ -242,7 +242,11 @@ internal static class RequiredColumnAnalyzer
             CollectFromExpressionForAlias(expression, rowNames, alias, required, ticket);
     }
 
-    private static void CollectFromOrderBy(List<QueryOrderBy>? orderBy, HashSet<string> required)
+    private static void CollectFromOrderBy(
+        List<QueryOrderBy>? orderBy,
+        QueryRowNameResolver? rowNames,
+        HashSet<string> required,
+        QueryTicket ticket)
     {
         if (orderBy is null)
             return;
@@ -252,20 +256,38 @@ internal static class RequiredColumnAnalyzer
         // the sorter, which fetches the value by bare name when the qualified lookup misses —
         // without stripping, the sort column would never be decoded and the sort would fail.
         foreach (QueryOrderBy clause in orderBy)
+        {
+            // An expression key names no column of its own; the columns it needs are inside it.
+            // Missing them here would narrow the projection past what the sort reads, and the
+            // ordering expression would then evaluate against a column that was never decoded.
+            if (clause.Expression is not null)
+            {
+                CollectFromExpression(clause.Expression, rowNames, required, ticket);
+                continue;
+            }
+
             required.Add(GetBareColumnName(clause.ColumnName));
+        }
     }
 
     private static void CollectFromOrderByForAlias(
         List<QueryOrderBy>? orderBy,
         QueryRowNameResolver rowNames,
         string alias,
-        HashSet<string> required)
+        HashSet<string> required,
+        QueryTicket ticket)
     {
         if (orderBy is null)
             return;
 
         foreach (QueryOrderBy clause in orderBy)
         {
+            if (clause.Expression is not null)
+            {
+                CollectFromExpressionForAlias(clause.Expression, rowNames, alias, required, ticket);
+                continue;
+            }
+
             if (TryResolveColumnForAlias(clause.ColumnName, rowNames, alias, out string columnName))
                 required.Add(columnName);
         }

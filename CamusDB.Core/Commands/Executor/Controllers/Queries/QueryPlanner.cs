@@ -1296,6 +1296,12 @@ public sealed class QueryPlanner
 
         for (int i = 0; i < orderBy.Count; i++)
         {
+            // A computed key is not a column, so no index order can satisfy it. Its label is only a
+            // diagnostic string; matching it against an index column name would elide the sort and
+            // return rows in index order while the query asked for something else.
+            if (orderBy[i].IsExpression)
+                return false;
+
             if (orderBy[i].Type != streamingOrdering[i].Type)
                 return false;
 

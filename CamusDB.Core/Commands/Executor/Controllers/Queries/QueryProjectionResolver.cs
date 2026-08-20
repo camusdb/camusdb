@@ -79,6 +79,48 @@ internal static class QueryProjectionResolver
         return false;
     }
 
+    /// <summary>
+    /// Resolves <c>ORDER BY name</c> against the select list's <b>explicit</b> aliases, returning the
+    /// expression the alias stands for.
+    ///
+    /// <para>This is the pre-projection half of one precedence rule. A plain SELECT sorts before it
+    /// projects, so an alias cannot be looked up as an output column the way the post-aggregate path
+    /// does — it has to be resolved back to the expression it names. Both halves agree on the rule
+    /// itself: <b>an explicit select-list alias outranks a base column of the same name</b>, which is
+    /// what standard SQL and PostgreSQL do, and what
+    /// <see cref="TryResolvePostAggregateOrderColumn"/> already did for grouped queries.</para>
+    ///
+    /// <para>Only an explicit alias participates. A bare <c>SELECT x</c> carries no
+    /// <see cref="ProjectionItem.OutputName"/>, so <c>ORDER BY x</c> stays a plain column reference
+    /// and the ordinary sort path is untouched.</para>
+    /// </summary>
+    public static bool TryResolveProjectionAliasTarget(
+        NodeAst orderExpression,
+        IReadOnlyList<ProjectionItem> projections,
+        out NodeAst target)
+    {
+        target = orderExpression;
+
+        if (orderExpression.nodeType != NodeType.Identifier)
+            return false;
+
+        string name = orderExpression.yytext ?? "";
+
+        foreach (ProjectionItem projection in projections)
+        {
+            if (string.IsNullOrEmpty(projection.OutputName))
+                continue;
+
+            if (!string.Equals(projection.OutputName, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            target = QueryExpressionClassifier.UnwrapAlias(projection.Expression);
+            return true;
+        }
+
+        return false;
+    }
+
     private static bool TryResolveProjectionOrderColumn(
         NodeAst orderExpression,
         IReadOnlyList<ProjectionItem> projections,

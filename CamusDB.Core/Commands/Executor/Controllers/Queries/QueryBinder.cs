@@ -411,7 +411,17 @@ internal sealed class QueryBinder
                     "ORDER BY must reference a SELECT projection or GROUP BY expression");
             }
 
-            ValidateExpression(orderBy.Expression, rowNames);
+            // A plain SELECT sorts before it projects, so an explicit select-list alias is resolved
+            // back to the expression it names and that expression is what gets validated. Validating
+            // the alias itself would reject `SELECT name AS n … ORDER BY n` as an unknown column,
+            // since no row carries a column called "n". Same precedence as the grouped path above —
+            // an alias outranks a base column of the same name — reached from the other side.
+            NodeAst validated =
+                QueryProjectionResolver.TryResolveProjectionAliasTarget(orderBy.Expression, query.Projections, out NodeAst aliased)
+                    ? aliased
+                    : orderBy.Expression;
+
+            ValidateExpression(validated, rowNames);
         }
     }
 
