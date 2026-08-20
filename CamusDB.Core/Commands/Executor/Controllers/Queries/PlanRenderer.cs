@@ -221,12 +221,19 @@ public static class PlanRenderer
 
     private static string RenderSort(SortNode node)
     {
+        // The name distinguishes the two operators, because "no spill file appeared" is not evidence
+        // that the bounded path ran — a small input never spills either way.
+        string name = node.BoundedLimit is null ? "sort" : "topk";
+
         if (node.OrderBy is not { Count: > 0 })
-            return "sort";
+            return name;
 
         string cols = string.Join(", ", node.OrderBy.Select(
             o => $"{o.ColumnName} {(o.Type == OrderType.Ascending ? "ASC" : "DESC")}"));
-        return $"sort({cols})";
+
+        return node.BoundedLimit is { } k
+            ? $"topk(k: {k}, {cols})"
+            : $"sort({cols})";
     }
 
     private static string RenderLimit(LimitNode node)

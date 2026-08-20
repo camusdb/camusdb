@@ -511,11 +511,16 @@ public sealed class QueryPlanner
                 root = new ProjectNode(root);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
-                root = new LimitNode(root)
+            {
+                LimitNode limitNode = new(root)
                 {
                     LimitValue = EvalLong(ticket.Limit, ticket),
                     OffsetValue = EvalLong(ticket.Offset, ticket),
                 };
+
+                ApplyTopKBound(limitNode, ticket);
+                root = limitNode;
+            }
         }
         else
         {
@@ -557,11 +562,16 @@ public sealed class QueryPlanner
                 }
 
                 if (ticket.Limit is not null || ticket.Offset is not null)
-                    root = new LimitNode(root)
+                {
+                    LimitNode limitNode = new(root)
                     {
                         LimitValue = EvalLong(ticket.Limit, ticket),
                         OffsetValue = EvalLong(ticket.Offset, ticket),
                     };
+
+                    ApplyTopKBound(limitNode, ticket);
+                    root = limitNode;
+                }
             }
             else
             {
@@ -591,11 +601,16 @@ public sealed class QueryPlanner
                 // output rows, not the aggregate's input (SELECT COUNT(*) … LIMIT 1 counts
                 // every row and then limits the single result row).
                 if (ticket.Limit is not null || ticket.Offset is not null)
-                    root = new LimitNode(root)
+                {
+                    LimitNode limitNode = new(root)
                     {
                         LimitValue = EvalLong(ticket.Limit, ticket),
                         OffsetValue = EvalLong(ticket.Offset, ticket),
                     };
+
+                    ApplyTopKBound(limitNode, ticket);
+                    root = limitNode;
+                }
             }
         }
 
@@ -1310,6 +1325,58 @@ public sealed class QueryPlanner
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Marks the sort below <paramref name="limit"/> as bounded when the LIMIT makes all but the
+    /// first <c>offset + limit</c> rows unreachable.
+    ///
+    /// <para><b>Only when nothing between the two changes the row count.</b> A projection is
+    /// row-preserving, so a bound above it is still the same set of rows. An aggregate is not:
+    /// <c>SELECT count(*) FROM t ORDER BY x LIMIT 1</c> must count every row and then return one, so
+    /// bounding its input to a single row would answer with a count of 1. The walk stops at anything
+    /// that is not row-preserving rather than reasoning about which plan shape produced it.</para>
+    ///
+    /// <para>The bound is refused when spill is enabled and <c>k</c> exceeds the spill threshold: at
+    /// that size the external sort is the operator that is actually designed to hold the rows. That
+    /// reuses the existing threshold rather than adding a second knob to keep in agreement.</para>
+    /// </summary>
+    private void ApplyTopKBound(LimitNode limit, QueryTicket ticket)
+    {
+        if (limit.LimitValue is not { } limitValue || limitValue < 0)
+            return;
+
+        long offsetValue = limit.OffsetValue ?? 0;
+
+        if (offsetValue < 0)
+            return;
+
+        long bound;
+
+        try
+        {
+            bound = checked(offsetValue + limitValue);
+        }
+        catch (OverflowException)
+        {
+            // A caller can write LIMIT 9223372036854775807 OFFSET 9223372036854775807. There is no
+            // bound to apply, and wrapping would produce a small one — silently dropping rows.
+            return;
+        }
+
+        if (bound > int.MaxValue)
+            return;
+
+        if (_options.SpillEnabled && bound > _options.SpillEffectiveThreshold)
+            return;
+
+        PhysicalPlanNode? node = limit.Input;
+
+        while (node is ProjectNode)
+            node = node.Input;
+
+        if (node is SortNode sort)
+            sort.BoundedLimit = bound;
     }
 
     private static long? EvalLong(NodeAst? expr, QueryTicket ticket)

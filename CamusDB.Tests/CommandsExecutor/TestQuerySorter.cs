@@ -172,6 +172,90 @@ public class TestQuerySorter
         Assert.AreEqual("robot-c", sorted[2].Row["name"].StrValue);
     }
 
+    /// <summary>
+    /// Parity between the bounded retention and the full sort over an expression ordering. The two
+    /// paths evaluate keys through one shared definition but compare them through different
+    /// comparers (key arrays against carrier columns), so this drives randomized data — mixed
+    /// directions, NULLs in the computed key, a unique tiebreaker — and requires the bounded result
+    /// to equal the full sort's prefix exactly.
+    /// </summary>
+    [Test]
+    public async Task SortResultset_BoundedExpressionOrdering_MatchesTheFullSortPrefix()
+    {
+        CamusDB.Core.SQLParser.NodeAst identifier = new(
+            CamusDB.Core.SQLParser.NodeType.Identifier, null, null, null, null, null, null, null, "a");
+
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Descending, identifier),
+            new QueryOrderBy("b", OrderType.Ascending));
+
+        Random random = new(20260820);
+        List<QueryResultRow> rows = new(200);
+
+        for (long tiebreaker = 0; tiebreaker < 200; tiebreaker++)
+        {
+            ColumnValue computedKey = random.Next(5) == 0
+                ? ColumnValue.Null
+                : new ColumnValue(ColumnType.Integer64, (long)random.Next(0, 10));
+
+            rows.Add(new QueryResultRow(default(ObjectIdValue), new Dictionary<string, ColumnValue>
+            {
+                { "a", computedKey },
+                { "b", new ColumnValue(ColumnType.Integer64, tiebreaker) },
+            }));
+        }
+
+        QuerySorter sorter = new();
+        QueryExecutionContext context = new(CamusDBOptions.Default);
+
+        List<QueryResultRow> bounded = await sorter
+            .SortResultset(ticket, ToAsync(rows), context, boundedLimit: 25)
+            .ToListAsync();
+
+        List<QueryResultRow> full = await sorter
+            .SortResultset(ticket, ToAsync(rows), context)
+            .ToListAsync();
+
+        Assert.AreEqual(25, bounded.Count);
+        Assert.AreEqual(200, full.Count);
+
+        // The unique tiebreaker makes the total order deterministic, so exact equality is required.
+        CollectionAssert.AreEqual(
+            full.Take(25).Select(r => r.Row["b"].LongValue).ToArray(),
+            bounded.Select(r => r.Row["b"].LongValue).ToArray());
+    }
+
+    /// <summary>
+    /// The bounded expression path must emit rows untouched: no <c>~sort</c> carrier column may
+    /// appear, and none of the row's own columns may be dropped.
+    /// </summary>
+    [Test]
+    public async Task SortResultset_BoundedExpressionOrdering_EmitsRowsWithoutCarrierColumns()
+    {
+        CamusDB.Core.SQLParser.NodeAst identifier = new(
+            CamusDB.Core.SQLParser.NodeType.Identifier, null, null, null, null, null, null, null, "n");
+
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("k", OrderType.Ascending, identifier));
+
+        List<QueryResultRow> rows = [Row(("n", 2L), ("name", "b")), Row(("n", 1L), ("name", "a"))];
+
+        QuerySorter sorter = new();
+        List<QueryResultRow> sorted = await sorter
+            .SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default), boundedLimit: 2)
+            .ToListAsync();
+
+        Assert.AreEqual(2, sorted.Count);
+        Assert.AreEqual("a", sorted[0].Row["name"].StrValue);
+        Assert.AreEqual("b", sorted[1].Row["name"].StrValue);
+
+        foreach (QueryResultRow row in sorted)
+        {
+            Assert.AreEqual(2, row.Row.Count);
+            Assert.IsFalse(row.Row.Keys.Any(static key => key.StartsWith('~')),
+                "no internal carrier column may leave the sort operator");
+        }
+    }
+
     private static QueryResultRow Row(params (string name, object value)[] columns)
     {
         Dictionary<string, ColumnValue> row = new();

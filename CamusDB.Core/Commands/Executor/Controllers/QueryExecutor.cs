@@ -569,9 +569,10 @@ internal sealed class QueryExecutor
                 cursor = QueryUsingInListIndex(plan, inListScan);
                 break;
 
-            case SortNode:
+            case SortNode sortNode:
                 Trace(QueryPlanStepType.SortBy);
-                cursor = querySorter.SortResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database));
+                cursor = querySorter.SortResultset(
+                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database), sortNode.BoundedLimit);
                 break;
 
             case AggregateNode aggregateNode:

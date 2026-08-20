@@ -7,6 +7,8 @@
  */
 
 using System.Buffers.Binary;
+using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
@@ -24,6 +26,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// reads in the <em>host's</em> order, which happens to match on x64 and ARM64 and would silently
 /// produce garbage anywhere else. <see cref="BinaryPrimitives.ReadSingleLittleEndian"/> states the
 /// order, and compiles to a plain load on a little-endian target, so the correctness costs nothing.
+/// The vectorized kernels below do use the reinterpreting read, but only behind an explicit
+/// <see cref="BitConverter.IsLittleEndian"/> guard; a big-endian host takes the scalar form.
 /// </para>
 ///
 /// <para>Bytes columns are not vector columns: the schema cannot tell an embedding from a file, so
@@ -122,5 +126,257 @@ internal static class VectorCodec
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidVectorValue,
             $"Function '{calledName}' is undefined for the zero-magnitude vector in argument {operandOrdinal}");
+    }
+
+    // ── Accumulation kernels ──────────────────────────────────────────────────
+    //
+    // The kernels below are the inner loops of the distance metrics. Each has a vectorized main
+    // loop and a scalar form. The vectorized loop widens every float lane to double before any
+    // arithmetic, so the accumulation semantics match the scalar form: no subtraction, product or
+    // sum ever runs in float. Lane sums are combined at the end, so the summation order differs
+    // from the scalar form; callers accept a small relative tolerance for that reason.
+    //
+    // Validation is identical on both forms. The vectorized loop records non-finite lanes with a
+    // mask and, when the mask trips, re-reads both operands through the scalar form. The scalar
+    // form always raises on the first non-finite element in read order, so both forms report the
+    // same element in the same message.
+
+    /// <summary>Exponent bits of a float32. A value is non-finite exactly when all are set.</summary>
+    private const int FloatExponentMask = 0x7F80_0000;
+
+    /// <summary>
+    /// True when the vectorized loop is usable: the host is little-endian, so a reinterpreted
+    /// float read matches the wire contract; the hardware accelerates <see cref="Vector{T}"/>; and
+    /// the input has at least one full lane of elements.
+    /// </summary>
+    private static bool CanVectorize(int dimensions) =>
+        BitConverter.IsLittleEndian && Vector.IsHardwareAccelerated && dimensions >= Vector<float>.Count;
+
+    /// <summary>Lanes whose element is NaN or infinity, as an all-ones mask per matching lane.</summary>
+    private static Vector<int> NonFiniteLanes(Vector<float> values)
+    {
+        Vector<int> mask = new(FloatExponentMask);
+
+        return Vector.Equals(Vector.AsVectorInt32(values) & mask, mask);
+    }
+
+    /// <summary>
+    /// Sum of squared element differences — the L2 distance before its square root. Rejects a
+    /// non-finite element in either operand, naming the first one in read order.
+    /// </summary>
+    internal static double SumSquaredDifferences(
+        string calledName, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int dimensions)
+    {
+        if (!CanVectorize(dimensions))
+            return SumSquaredDifferencesScalar(calledName, left, right, dimensions);
+
+        ReadOnlySpan<float> leftElements = MemoryMarshal.Cast<byte, float>(left);
+        ReadOnlySpan<float> rightElements = MemoryMarshal.Cast<byte, float>(right);
+
+        int lanes = Vector<float>.Count;
+        int vectorized = dimensions - dimensions % lanes;
+
+        Vector<double> sumLow = Vector<double>.Zero;
+        Vector<double> sumHigh = Vector<double>.Zero;
+        Vector<int> nonFinite = Vector<int>.Zero;
+
+        for (int index = 0; index < vectorized; index += lanes)
+        {
+            Vector<float> leftChunk = new(leftElements.Slice(index, lanes));
+            Vector<float> rightChunk = new(rightElements.Slice(index, lanes));
+
+            nonFinite |= NonFiniteLanes(leftChunk) | NonFiniteLanes(rightChunk);
+
+            Vector.Widen(leftChunk, out Vector<double> leftLow, out Vector<double> leftHigh);
+            Vector.Widen(rightChunk, out Vector<double> rightLow, out Vector<double> rightHigh);
+
+            Vector<double> differenceLow = leftLow - rightLow;
+            Vector<double> differenceHigh = leftHigh - rightHigh;
+
+            sumLow += differenceLow * differenceLow;
+            sumHigh += differenceHigh * differenceHigh;
+        }
+
+        // The scalar re-read always raises, because the mask only trips on a non-finite element.
+        if (nonFinite != Vector<int>.Zero)
+            return SumSquaredDifferencesScalar(calledName, left, right, dimensions);
+
+        double sum = Vector.Sum(sumLow) + Vector.Sum(sumHigh);
+
+        for (int index = vectorized; index < dimensions; index++)
+        {
+            double difference = ReadElement(calledName, left, index, 1) - ReadElement(calledName, right, index, 2);
+
+            sum += difference * difference;
+        }
+
+        return sum;
+    }
+
+    /// <summary>
+    /// Scalar form of <see cref="SumSquaredDifferences"/>. It is the correctness baseline, the
+    /// big-endian and short-input fallback, and the error path that names the first non-finite
+    /// element. Tests compare the vectorized form against it.
+    /// </summary>
+    internal static double SumSquaredDifferencesScalar(
+        string calledName, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int dimensions)
+    {
+        double sum = 0d;
+
+        for (int index = 0; index < dimensions; index++)
+        {
+            double difference = ReadElement(calledName, left, index, 1) - ReadElement(calledName, right, index, 2);
+
+            sum += difference * difference;
+        }
+
+        return sum;
+    }
+
+    /// <summary>
+    /// Plain dot product of two vectors. Rejects a non-finite element in either operand, naming
+    /// the first one in read order.
+    /// </summary>
+    internal static double DotProduct(
+        string calledName, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int dimensions)
+    {
+        if (!CanVectorize(dimensions))
+            return DotProductScalar(calledName, left, right, dimensions);
+
+        ReadOnlySpan<float> leftElements = MemoryMarshal.Cast<byte, float>(left);
+        ReadOnlySpan<float> rightElements = MemoryMarshal.Cast<byte, float>(right);
+
+        int lanes = Vector<float>.Count;
+        int vectorized = dimensions - dimensions % lanes;
+
+        Vector<double> sumLow = Vector<double>.Zero;
+        Vector<double> sumHigh = Vector<double>.Zero;
+        Vector<int> nonFinite = Vector<int>.Zero;
+
+        for (int index = 0; index < vectorized; index += lanes)
+        {
+            Vector<float> leftChunk = new(leftElements.Slice(index, lanes));
+            Vector<float> rightChunk = new(rightElements.Slice(index, lanes));
+
+            nonFinite |= NonFiniteLanes(leftChunk) | NonFiniteLanes(rightChunk);
+
+            Vector.Widen(leftChunk, out Vector<double> leftLow, out Vector<double> leftHigh);
+            Vector.Widen(rightChunk, out Vector<double> rightLow, out Vector<double> rightHigh);
+
+            sumLow += leftLow * rightLow;
+            sumHigh += leftHigh * rightHigh;
+        }
+
+        if (nonFinite != Vector<int>.Zero)
+            return DotProductScalar(calledName, left, right, dimensions);
+
+        double sum = Vector.Sum(sumLow) + Vector.Sum(sumHigh);
+
+        for (int index = vectorized; index < dimensions; index++)
+            sum += ReadElement(calledName, left, index, 1) * ReadElement(calledName, right, index, 2);
+
+        return sum;
+    }
+
+    /// <summary>
+    /// Scalar form of <see cref="DotProduct"/>; see <see cref="SumSquaredDifferencesScalar"/> for
+    /// the roles the scalar forms keep.
+    /// </summary>
+    internal static double DotProductScalar(
+        string calledName, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int dimensions)
+    {
+        double sum = 0d;
+
+        for (int index = 0; index < dimensions; index++)
+            sum += ReadElement(calledName, left, index, 1) * ReadElement(calledName, right, index, 2);
+
+        return sum;
+    }
+
+    /// <summary>
+    /// The three sums cosine distance needs — dot product plus each operand's sum of squares — in
+    /// one pass over the elements, so the operands are read once, not three times. Rejects a
+    /// non-finite element in either operand, naming the first one in read order.
+    /// </summary>
+    internal static (double product, double leftSquares, double rightSquares) CosineTerms(
+        string calledName, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int dimensions)
+    {
+        if (!CanVectorize(dimensions))
+            return CosineTermsScalar(calledName, left, right, dimensions);
+
+        ReadOnlySpan<float> leftElements = MemoryMarshal.Cast<byte, float>(left);
+        ReadOnlySpan<float> rightElements = MemoryMarshal.Cast<byte, float>(right);
+
+        int lanes = Vector<float>.Count;
+        int vectorized = dimensions - dimensions % lanes;
+
+        Vector<double> productLow = Vector<double>.Zero;
+        Vector<double> productHigh = Vector<double>.Zero;
+        Vector<double> leftSquaresLow = Vector<double>.Zero;
+        Vector<double> leftSquaresHigh = Vector<double>.Zero;
+        Vector<double> rightSquaresLow = Vector<double>.Zero;
+        Vector<double> rightSquaresHigh = Vector<double>.Zero;
+        Vector<int> nonFinite = Vector<int>.Zero;
+
+        for (int index = 0; index < vectorized; index += lanes)
+        {
+            Vector<float> leftChunk = new(leftElements.Slice(index, lanes));
+            Vector<float> rightChunk = new(rightElements.Slice(index, lanes));
+
+            nonFinite |= NonFiniteLanes(leftChunk) | NonFiniteLanes(rightChunk);
+
+            Vector.Widen(leftChunk, out Vector<double> leftLow, out Vector<double> leftHigh);
+            Vector.Widen(rightChunk, out Vector<double> rightLow, out Vector<double> rightHigh);
+
+            productLow += leftLow * rightLow;
+            productHigh += leftHigh * rightHigh;
+            leftSquaresLow += leftLow * leftLow;
+            leftSquaresHigh += leftHigh * leftHigh;
+            rightSquaresLow += rightLow * rightLow;
+            rightSquaresHigh += rightHigh * rightHigh;
+        }
+
+        if (nonFinite != Vector<int>.Zero)
+            return CosineTermsScalar(calledName, left, right, dimensions);
+
+        double product = Vector.Sum(productLow) + Vector.Sum(productHigh);
+        double leftSquares = Vector.Sum(leftSquaresLow) + Vector.Sum(leftSquaresHigh);
+        double rightSquares = Vector.Sum(rightSquaresLow) + Vector.Sum(rightSquaresHigh);
+
+        for (int index = vectorized; index < dimensions; index++)
+        {
+            double leftElement = ReadElement(calledName, left, index, 1);
+            double rightElement = ReadElement(calledName, right, index, 2);
+
+            product += leftElement * rightElement;
+            leftSquares += leftElement * leftElement;
+            rightSquares += rightElement * rightElement;
+        }
+
+        return (product, leftSquares, rightSquares);
+    }
+
+    /// <summary>
+    /// Scalar form of <see cref="CosineTerms"/>; see <see cref="SumSquaredDifferencesScalar"/> for
+    /// the roles the scalar forms keep.
+    /// </summary>
+    internal static (double product, double leftSquares, double rightSquares) CosineTermsScalar(
+        string calledName, ReadOnlySpan<byte> left, ReadOnlySpan<byte> right, int dimensions)
+    {
+        double product = 0d;
+        double leftSquares = 0d;
+        double rightSquares = 0d;
+
+        for (int index = 0; index < dimensions; index++)
+        {
+            double leftElement = ReadElement(calledName, left, index, 1);
+            double rightElement = ReadElement(calledName, right, index, 2);
+
+            product += leftElement * rightElement;
+            leftSquares += leftElement * leftElement;
+            rightSquares += rightElement * rightElement;
+        }
+
+        return (product, leftSquares, rightSquares);
     }
 }

@@ -400,12 +400,22 @@ internal static class CostEstimator
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
 
-            case SortNode:
-                return (inputCardinality, new PlanCost
+            case SortNode sort:
+            {
+                // A bounded sort still reads every input row — the pass over the input is what it
+                // costs — but it holds and emits only the rows the LIMIT above it can reach. Pricing
+                // it as a full sort would keep charging for a materialization it no longer performs,
+                // and would leave every node above it estimating from the wrong cardinality.
+                long retained = sort.BoundedLimit is { } bound
+                    ? Math.Min(bound, inputCardinality)
+                    : inputCardinality;
+
+                return (retained, new PlanCost
                 {
-                    EstimatedRows = inputCardinality,
-                    InMemoryRows  = inputCardinality,
+                    EstimatedRows = retained,
+                    InMemoryRows  = retained,
                 });
+            }
 
             case LimitNode limit:
             {

@@ -73,23 +73,6 @@ internal sealed class TestOrderByExpressionBinding : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task ComputedOrdering_IsRejectedAsInvalidInput()
-    {
-        // Binding accepts the shape and preserves it; the comparer cannot evaluate it yet. The
-        // important part is the error class: this used to surface as InvalidInternalOperation,
-        // which reports a caller's valid SQL as an engine fault.
-        (DatabaseDescriptor db, CommandExecutor executor) = await SetupRows();
-
-        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-            async () => await Select(executor, db, "SELECT id FROM t ORDER BY length(name)"));
-
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
-        Assert.AreNotEqual(CamusDBErrorCodes.InvalidInternalOperation, ex.Code);
-        StringAssert.Contains("length", ex.Message);
-    }
-
-    [Test]
-    [NonParallelizable]
     public async Task AggregateOrdering_WithoutGroupBy_IsRejected()
     {
         (DatabaseDescriptor db, CommandExecutor executor) = await SetupRows();

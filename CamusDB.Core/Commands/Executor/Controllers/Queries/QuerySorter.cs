@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
+using CamusDB.Core.Catalogs.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -47,54 +48,304 @@ internal sealed class QuerySorter
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Rejects an ordering key the comparer cannot evaluate yet.
-    ///
-    /// <para>Binding preserves a per-row ordering expression so the shape is understood, resolved
-    /// and analyzed; computing it is separate work. Until the comparer materializes sort keys, such
-    /// a query must be refused outright. The alternative is worse than an error: the comparer would
-    /// look the expression's label up as a column, find nothing, and either fault as an internal
-    /// error or order every row equally — a silently wrong answer that still returns rows.</para>
+    /// Prefix of the internal column that carries a computed sort key. <c>~</c> is already reserved
+    /// for engine-internal names — <c>ValidateNotReservedColumnName</c> refuses it for user columns
+    /// and the primary-key index is <c>~pk</c> — so a carrier can never collide with a real column.
     /// </summary>
-    private static void RequireSupportedOrderKeys(IReadOnlyList<QueryOrderBy> orderBy)
-    {
-        foreach (QueryOrderBy clause in orderBy)
-        {
-            if (clause.Expression is null)
-                continue;
-
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"ORDER BY {clause.ColumnName} is not supported yet: ordering by a computed expression " +
-                "requires a sort key that is evaluated per row. Order by a projected column instead.");
-        }
-    }
+    private const string SortKeyPrefix = "~sort";
 
     internal async IAsyncEnumerable<QueryResultRow> SortResultset(
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
         QueryExecutionContext context,
+        long? boundedLimit = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
 
-        RequireSupportedOrderKeys(ticket.OrderBy);
+        // LIMIT 0 asks for no rows. Returning here means the input is never enumerated, so the scan
+        // below does not run and no ordering key is ever evaluated.
+        if (boundedLimit == 0)
+            yield break;
 
-        IComparer<QueryResultRow> comparer = new QueryResultRowOrderComparer(ticket.OrderBy);
-
-        if (!context.Options.SpillEnabled)
+        if (!HasComputedKey(ticket.OrderBy))
         {
-            List<QueryResultRow> rows = new();
-            await foreach (QueryResultRow row in dataCursor.WithCancellation(cancellationToken).ConfigureAwait(false))
-                rows.Add(row);
-            rows.Sort(comparer);
-            foreach (QueryResultRow row in rows)
+            IAsyncEnumerable<QueryResultRow> plain = boundedLimit is { } plainBound
+                ? TopKAsync(dataCursor, new QueryResultRowOrderComparer(ticket.OrderBy), (int)plainBound, cancellationToken)
+                : SortByKeys(dataCursor, ticket.OrderBy, context, cancellationToken);
+
+            await foreach (QueryResultRow row in plain.ConfigureAwait(false))
                 yield return row;
+
             yield break;
         }
 
-        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(dataCursor, comparer, context, cancellationToken).ConfigureAwait(false))
+        // Bounded retention never spills — the heap holds only k rows — so the computed keys do
+        // not need to survive a spill round trip. They ride beside the heap entries instead of
+        // being attached as carrier columns, which removes both per-row dictionary copies the
+        // carrier costs (the attach on every input row and the strip on every emitted row).
+        if (boundedLimit is { } bound)
+        {
+            IAsyncEnumerable<RankedRow> ranked = EvaluateSortKeysAsync(
+                ticket, ticket.OrderBy, dataCursor, cancellationToken);
+
+            await foreach (RankedRow entry in TopKAsync(
+                ranked, new RankedRowComparer(ticket.OrderBy), (int)bound, cancellationToken).ConfigureAwait(false))
+            {
+                yield return entry.Row;
+            }
+
+            yield break;
+        }
+
+        // The full sort can spill, so every ordering key becomes a materialized column on the row:
+        // the existing spill encoder round-trips it with no format change, and the comparer below
+        // is the same one an ordinary column sort uses — including its NULL placement, its
+        // multi-key walk and its direction handling.
+        List<QueryOrderBy> materializedOrder = BuildMaterializedOrder(ticket.OrderBy);
+
+        IAsyncEnumerable<QueryResultRow> keyed = MaterializeSortKeysAsync(
+            ticket, ticket.OrderBy, dataCursor, cancellationToken);
+
+        await foreach (QueryResultRow row in SortByKeys(keyed, materializedOrder, context, cancellationToken).ConfigureAwait(false))
+            yield return StripSortKeys(row);
+    }
+
+    /// <summary>
+    /// A row paired with its evaluated ordering keys, one per ORDER BY clause. Used only by the
+    /// bounded retention, which keeps at most k of these alive and never writes them to disk.
+    /// </summary>
+    private readonly record struct RankedRow(QueryResultRow Row, ColumnValue[] Keys);
+
+    /// <summary>
+    /// Orders <see cref="RankedRow"/> entries by their pre-evaluated keys. Each key comparison goes
+    /// through <see cref="QueryResultRowOrderComparer.CompareKey"/> — the same definition the full
+    /// sort's comparer uses — so the two paths agree on NULL placement, direction handling and the
+    /// multi-key walk.
+    /// </summary>
+    private sealed class RankedRowComparer : IComparer<RankedRow>
+    {
+        private readonly IReadOnlyList<QueryOrderBy> orderBy;
+
+        public RankedRowComparer(IReadOnlyList<QueryOrderBy> orderBy) => this.orderBy = orderBy;
+
+        public int Compare(RankedRow left, RankedRow right)
+        {
+            for (int i = 0; i < orderBy.Count; i++)
+            {
+                int comparison = QueryResultRowOrderComparer.CompareKey(left.Keys[i], right.Keys[i], orderBy[i].Type);
+
+                if (comparison != 0)
+                    return comparison;
+            }
+
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Evaluates every ordering key <b>once per input row</b> and pairs the row with its key array,
+    /// without touching the row itself. Key evaluation is shared with
+    /// <see cref="MaterializeSortKeysAsync"/> through <see cref="EvaluateKey"/>, so the bounded and
+    /// full-sort paths compute identical keys for identical rows.
+    /// </summary>
+    private static async IAsyncEnumerable<RankedRow> EvaluateSortKeysAsync(
+        QueryTicket ticket,
+        IReadOnlyList<QueryOrderBy> orderBy,
+        IAsyncEnumerable<QueryResultRow> cursor,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            ColumnValue[] keys = new ColumnValue[orderBy.Count];
+
+            for (int i = 0; i < orderBy.Count; i++)
+                keys[i] = EvaluateKey(ticket, orderBy[i], row);
+
+            yield return new RankedRow(row, keys);
+        }
+    }
+
+    /// <summary>
+    /// Retains the <paramref name="k"/> rows that rank first under <paramref name="comparer"/>, in
+    /// one pass over the input and with only <c>k</c> rows resident.
+    ///
+    /// <para>The alternative — sort everything, then throw all but <c>k</c> away — costs
+    /// <c>O(n log n)</c> time, <c>O(n)</c> memory, and spills to disk on a large table. This is
+    /// <c>O(n log k)</c> and never spills, which is what makes an exact nearest-neighbour query over
+    /// a large table finish at all.</para>
+    ///
+    /// <para>The heap is ordered <b>against</b> the query's ordering, so its head is the worst row
+    /// retained so far and a new row only has to beat that one to earn a place. The retained set is
+    /// then sorted with the query's own comparer before it is emitted — a heap yields its contents in
+    /// heap order, not sorted order, and emitting that directly would return the right k rows in the
+    /// wrong sequence.</para>
+    ///
+    /// <para>Ties are resolved by whichever row arrived first, which SQL leaves unspecified and which
+    /// need not match what the full sort would do. A query that needs a determinate order among equal
+    /// keys has to name a tie-breaking key.</para>
+    /// </summary>
+    private static async IAsyncEnumerable<T> TopKAsync<T>(
+        IAsyncEnumerable<T> input,
+        IComparer<T> comparer,
+        int k,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (k <= 0)
+            yield break;
+
+        IComparer<T> worstFirst = new ReversedComparer<T>(comparer);
+        PriorityQueue<T, T> retained = new(worstFirst);
+
+        await foreach (T row in input.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            if (retained.Count < k)
+            {
+                retained.Enqueue(row, row);
+                continue;
+            }
+
+            // Strictly better than the worst retained row, so it displaces it. Using strict
+            // comparison keeps an equal-ranking row out, which makes the first arrival win a tie.
+            if (comparer.Compare(row, retained.Peek()) < 0)
+                retained.DequeueEnqueue(row, row);
+        }
+
+        List<T> ordered = new(retained.Count);
+
+        while (retained.Count > 0)
+            ordered.Add(retained.Dequeue());
+
+        ordered.Sort(comparer);
+
+        foreach (T row in ordered)
             yield return row;
+    }
+
+    /// <summary>
+    /// Inverts an ordering, turning the shared ascending comparer into the max-heap the bounded
+    /// retention needs. Defined here rather than by flipping every clause's direction, so top-k and
+    /// the full sort keep comparing rows through exactly the same code.
+    /// </summary>
+    private sealed class ReversedComparer<T> : IComparer<T>
+    {
+        private readonly IComparer<T> inner;
+
+        public ReversedComparer(IComparer<T> inner) => this.inner = inner;
+
+        public int Compare(T? left, T? right) => inner.Compare(right, left);
+    }
+
+    private static bool HasComputedKey(IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        foreach (QueryOrderBy clause in orderBy)
+        {
+            if (clause.IsExpression)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Rewrites the ordering so every key names a materialized carrier column.
+    ///
+    /// <para>Column keys are carried too, not just computed ones. Reading them through the same
+    /// mechanism keeps a single comparison path for a mixed ordering such as
+    /// <c>ORDER BY l2_distance(v, @q), id</c>, where splitting the keys across two lookup rules
+    /// would be the kind of asymmetry that produces a subtly different order on one of them.</para>
+    /// </summary>
+    private static List<QueryOrderBy> BuildMaterializedOrder(IReadOnlyList<QueryOrderBy> orderBy)
+    {
+        List<QueryOrderBy> materialized = new(orderBy.Count);
+
+        for (int i = 0; i < orderBy.Count; i++)
+            materialized.Add(new QueryOrderBy(SortKeyPrefix + i, orderBy[i].Type));
+
+        return materialized;
+    }
+
+    /// <summary>
+    /// Evaluates every ordering key <b>once per input row</b> and attaches the results as internal
+    /// carrier columns.
+    ///
+    /// <para>Evaluating inside the comparer instead would call the expression O(n log n) times rather
+    /// than n — for a distance over 768 dimensions that is the difference between a scan and a
+    /// stall — and it would let one row's key be computed differently on two comparisons if the
+    /// expression were ever non-deterministic.</para>
+    ///
+    /// <para>The carrier travels as an ordinary column, so the existing spill encoder and k-way merge
+    /// round-trip it with no format change, and a spilled key is never recomputed. Only the full
+    /// sort pays the attach copy here: the bounded retention never spills, so it takes
+    /// <see cref="EvaluateSortKeysAsync"/> instead, and an ordinary column sort keeps the
+    /// slot-native comparison path untouched.</para>
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> MaterializeSortKeysAsync(
+        QueryTicket ticket,
+        IReadOnlyList<QueryOrderBy> orderBy,
+        IAsyncEnumerable<QueryResultRow> cursor,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            Dictionary<string, ColumnValue> carried = new(row.Row.Count + orderBy.Count, StringComparer.Ordinal);
+
+            foreach (KeyValuePair<string, ColumnValue> cell in row.Row)
+                carried[cell.Key] = cell.Value;
+
+            for (int i = 0; i < orderBy.Count; i++)
+                carried[SortKeyPrefix + i] = EvaluateKey(ticket, orderBy[i], row);
+
+            yield return new QueryResultRow(row.RowId, carried);
+        }
+    }
+
+    /// <summary>
+    /// The one definition of an ordering key's value: a column clause reads the row, an expression
+    /// clause evaluates per row. Both the carrier columns of the full sort and the key arrays of
+    /// the bounded retention come from here, so the two paths cannot compute different keys for
+    /// the same row.
+    /// </summary>
+    private static ColumnValue EvaluateKey(QueryTicket ticket, QueryOrderBy clause, QueryResultRow row) =>
+        clause.Expression is null
+            ? ReadColumnKey(row, clause.ColumnName)
+            : SqlExecutor.EvalExpr(clause.Expression, row.Row, ticket.Parameters, ticket.RowNameResolver);
+
+    /// <summary>
+    /// Reads a column key for the carrier, applying the same qualified-to-bare fallback the
+    /// name-based comparer uses (<c>u.position</c> falls back to <c>position</c>), and treating an
+    /// absent column as NULL rather than raising. A missing column here is not a sort failure: the
+    /// row simply has no value for that key, and SQL orders NULLs rather than rejecting them.
+    /// </summary>
+    private static ColumnValue ReadColumnKey(QueryResultRow row, string columnName)
+    {
+        if (row.Row.TryGetValue(columnName, out ColumnValue? value))
+            return value;
+
+        int dot = columnName.LastIndexOf('.');
+
+        if (dot >= 0 && dot < columnName.Length - 1 && row.Row.TryGetValue(columnName[(dot + 1)..], out value))
+            return value;
+
+        return ColumnValue.Null;
+    }
+
+    /// <summary>
+    /// Removes the carrier columns before the row leaves the sort operator, so a computed key can
+    /// never surface as a column of a <c>SELECT *</c> result.
+    /// </summary>
+    private static QueryResultRow StripSortKeys(QueryResultRow row)
+    {
+        Dictionary<string, ColumnValue> stripped = new(row.Row.Count, StringComparer.Ordinal);
+
+        foreach (KeyValuePair<string, ColumnValue> cell in row.Row)
+        {
+            if (!cell.Key.StartsWith(SortKeyPrefix, StringComparison.Ordinal))
+                stripped[cell.Key] = cell.Value;
+        }
+
+        return new QueryResultRow(row.RowId, stripped);
     }
 
     /// <summary>
@@ -470,6 +721,19 @@ internal sealed class QuerySorter
             this.orderBy = orderBy;
         }
 
+        /// <summary>
+        /// The one definition of a single-key comparison: <see cref="ColumnValue.CompareTo"/> for
+        /// the value order (including NULL placement) and a sign flip for direction. Shared with
+        /// <see cref="RankedRowComparer"/> so the bounded retention and the full sort cannot
+        /// disagree on how a key orders.
+        /// </summary>
+        internal static int CompareKey(ColumnValue left, ColumnValue right, OrderType direction)
+        {
+            int comparison = left.CompareTo(right);
+
+            return direction == OrderType.Ascending ? comparison : -comparison;
+        }
+
         public int Compare(QueryResultRow left, QueryResultRow right)
         {
             // Resolve ordinals lazily on first call with a QueryRow input.
@@ -505,9 +769,9 @@ internal sealed class QuerySorter
             {
                 ColumnValue leftValue  = GetSortValue(left,  clause.ColumnName);
                 ColumnValue rightValue = GetSortValue(right, clause.ColumnName);
-                int comparison = leftValue.CompareTo(rightValue);
-                if (comparison == 0) continue;
-                return clause.Type == OrderType.Ascending ? comparison : -comparison;
+                int comparison = CompareKey(leftValue, rightValue, clause.Type);
+                if (comparison != 0)
+                    return comparison;
             }
             return 0;
         }

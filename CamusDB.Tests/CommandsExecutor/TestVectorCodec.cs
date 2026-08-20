@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System;
+
 using NUnit.Framework;
 
 using CamusDB.Core;
@@ -179,5 +181,147 @@ internal sealed class TestVectorCodec
         Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue, ex!.Code);
         StringAssert.Contains("cosine_distance", ex.Message);
         StringAssert.Contains("argument 2", ex.Message);
+    }
+
+    // ── Accumulation kernels: vectorized against scalar ───────────────────────
+
+    /// <summary>
+    /// Relative tolerance between the vectorized and scalar kernels. Both accumulate in double;
+    /// only the summation order differs, so the allowed drift is tight.
+    /// </summary>
+    private const double KernelTolerance = 1e-9;
+
+    /// <summary>
+    /// Dimensions chosen to hit every loop shape: below one SIMD lane (scalar fallback), exact lane
+    /// multiples, and lane multiples plus a remainder (the scalar tail), for both 128-bit and
+    /// 256-bit lane widths.
+    /// </summary>
+    private static readonly int[] KernelDimensions = [1, 3, 4, 5, 7, 8, 9, 16, 33, 128, 768, 771];
+
+    private static byte[] PackRandom(System.Random random, int dimensions)
+    {
+        byte[] bytes = new byte[dimensions * 4];
+
+        for (int i = 0; i < dimensions; i++)
+        {
+            float element = (float)(random.NextDouble() * 200d - 100d);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(i * 4, 4), element);
+        }
+
+        return bytes;
+    }
+
+    private static void AssertClose(double expected, double actual)
+    {
+        double scale = System.Math.Max(1d, System.Math.Abs(expected));
+        Assert.That(actual, Is.EqualTo(expected).Within(KernelTolerance * scale));
+    }
+
+    [Test]
+    public void Kernels_VectorizedAndScalarFormsAgree_AcrossLaneShapes()
+    {
+        System.Random random = new(20260820);
+
+        foreach (int dimensions in KernelDimensions)
+        {
+            byte[] left = PackRandom(random, dimensions);
+            byte[] right = PackRandom(random, dimensions);
+
+            AssertClose(
+                VectorCodec.SumSquaredDifferencesScalar(Fn, left, right, dimensions),
+                VectorCodec.SumSquaredDifferences(Fn, left, right, dimensions));
+
+            AssertClose(
+                VectorCodec.DotProductScalar(Fn, left, right, dimensions),
+                VectorCodec.DotProduct(Fn, left, right, dimensions));
+
+            (double product, double leftSquares, double rightSquares) =
+                VectorCodec.CosineTerms(Fn, left, right, dimensions);
+            (double productScalar, double leftSquaresScalar, double rightSquaresScalar) =
+                VectorCodec.CosineTermsScalar(Fn, left, right, dimensions);
+
+            AssertClose(productScalar, product);
+            AssertClose(leftSquaresScalar, leftSquares);
+            AssertClose(rightSquaresScalar, rightSquares);
+        }
+    }
+
+    [Test]
+    public void Kernels_SubtractInDouble_SoAFiniteDifferenceCannotOverflowFloat()
+    {
+        // +float.MaxValue minus -float.MaxValue overflows a float subtraction to infinity. The
+        // scalar form widens each element before subtracting, so the vectorized form must too —
+        // a float-lane subtraction here would square infinity and return it.
+        const int dimensions = 8;
+
+        byte[] left = new byte[dimensions * 4];
+        byte[] right = new byte[dimensions * 4];
+
+        for (int i = 0; i < dimensions; i++)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(left.AsSpan(i * 4, 4), float.MaxValue);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(right.AsSpan(i * 4, 4), float.MinValue);
+        }
+
+        double result = VectorCodec.SumSquaredDifferences(Fn, left, right, dimensions);
+
+        Assert.IsTrue(double.IsFinite(result));
+        AssertClose(VectorCodec.SumSquaredDifferencesScalar(Fn, left, right, dimensions), result);
+    }
+
+    /// <summary>
+    /// A non-finite element must be rejected with the same error the scalar form raises — same
+    /// error code, same element index, same operand — wherever it sits: in a full SIMD chunk, in
+    /// the scalar tail, or in either operand.
+    /// </summary>
+    [Test]
+    public void Kernels_RejectNonFiniteElements_NamingTheSameElementAsTheScalarForm()
+    {
+        System.Random random = new(20260821);
+
+        // (dimensions, poisoned index) pairs covering a chunk element and a tail element.
+        (int dimensions, int poisonedIndex)[] cases = [(768, 5), (771, 770), (9, 8), (16, 0)];
+
+        byte[] nan = [0x00, 0x00, 0xC0, 0x7F];
+
+        foreach ((int dimensions, int poisonedIndex) in cases)
+        {
+            foreach (int poisonedOperand in (int[])[1, 2])
+            {
+                byte[] left = PackRandom(random, dimensions);
+                byte[] right = PackRandom(random, dimensions);
+
+                byte[] poisoned = poisonedOperand == 1 ? left : right;
+                nan.CopyTo(poisoned.AsSpan(poisonedIndex * 4, 4));
+
+                CamusDBException vectorizedError = Assert.Throws<CamusDBException>(
+                    () => VectorCodec.SumSquaredDifferences(Fn, left, right, dimensions))!;
+                CamusDBException scalarError = Assert.Throws<CamusDBException>(
+                    () => VectorCodec.SumSquaredDifferencesScalar(Fn, left, right, dimensions))!;
+
+                Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue, vectorizedError.Code);
+                Assert.AreEqual(scalarError.Message, vectorizedError.Message);
+
+                Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue,
+                    Assert.Throws<CamusDBException>(() => VectorCodec.DotProduct(Fn, left, right, dimensions))!.Code);
+                Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue,
+                    Assert.Throws<CamusDBException>(() => VectorCodec.CosineTerms(Fn, left, right, dimensions))!.Code);
+            }
+        }
+    }
+
+    [Test]
+    public void Kernels_RejectInfinityInsideAChunk()
+    {
+        // Infinity has the same all-ones exponent as NaN but a zero mantissa; the lane mask must
+        // catch both.
+        byte[] left = PackRandom(new System.Random(20260822), 16);
+        byte[] right = PackRandom(new System.Random(20260823), 16);
+
+        byte[] positiveInfinity = [0x00, 0x00, 0x80, 0x7F];
+        positiveInfinity.CopyTo(left.AsSpan(3 * 4, 4));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidVectorValue,
+            Assert.Throws<CamusDBException>(() => VectorCodec.SumSquaredDifferences(Fn, left, right, 16))!.Code);
     }
 }

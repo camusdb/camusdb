@@ -127,15 +127,7 @@ internal static class VectorScalarFunctions
 
         (byte[] left, byte[] right, int dimensions) = RequireVectorPair(calledName, arguments);
 
-        double sumOfSquares = 0d;
-
-        for (int index = 0; index < dimensions; index++)
-        {
-            double difference = VectorCodec.ReadElement(calledName, left, index, 1)
-                              - VectorCodec.ReadElement(calledName, right, index, 2);
-
-            sumOfSquares += difference * difference;
-        }
+        double sumOfSquares = VectorCodec.SumSquaredDifferences(calledName, left, right, dimensions);
 
         return new ColumnValue(ColumnType.Float64, Math.Sqrt(sumOfSquares));
     }
@@ -152,15 +144,7 @@ internal static class VectorScalarFunctions
 
         (byte[] left, byte[] right, int dimensions) = RequireVectorPair(calledName, arguments);
 
-        double product = 0d;
-
-        for (int index = 0; index < dimensions; index++)
-        {
-            product += VectorCodec.ReadElement(calledName, left, index, 1)
-                     * VectorCodec.ReadElement(calledName, right, index, 2);
-        }
-
-        return new ColumnValue(ColumnType.Float64, product);
+        return new ColumnValue(ColumnType.Float64, VectorCodec.DotProduct(calledName, left, right, dimensions));
     }
 
     /// <summary>
@@ -183,19 +167,8 @@ internal static class VectorScalarFunctions
 
         (byte[] left, byte[] right, int dimensions) = RequireVectorPair(calledName, arguments);
 
-        double product = 0d;
-        double leftSquares = 0d;
-        double rightSquares = 0d;
-
-        for (int index = 0; index < dimensions; index++)
-        {
-            double leftElement = VectorCodec.ReadElement(calledName, left, index, 1);
-            double rightElement = VectorCodec.ReadElement(calledName, right, index, 2);
-
-            product += leftElement * rightElement;
-            leftSquares += leftElement * leftElement;
-            rightSquares += rightElement * rightElement;
-        }
+        (double product, double leftSquares, double rightSquares) =
+            VectorCodec.CosineTerms(calledName, left, right, dimensions);
 
         double leftMagnitude = Math.Sqrt(leftSquares);
         double rightMagnitude = Math.Sqrt(rightSquares);
