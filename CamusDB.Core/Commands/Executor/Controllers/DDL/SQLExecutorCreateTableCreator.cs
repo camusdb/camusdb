@@ -367,6 +367,12 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                         $"Invalid string size '{nodeAst.yytext}': must be a positive integer");
                 return (ColumnType.String, n, null);
 
+            case NodeType.TypeBytesSized:
+                if (!int.TryParse(nodeAst.yytext, out int b) || b <= 0)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"Invalid bytes size '{nodeAst.yytext}': must be a positive integer");
+                return (ColumnType.Bytes, b, null);
+
             case NodeType.TypeArray:
             {
                 NodeAst elemNode = nodeAst.leftAst

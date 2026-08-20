@@ -288,7 +288,7 @@ internal class SqlAstRenderer
         NodeType.TypeObjectId  => "object_id",
         NodeType.TypeDate      => "date",
         NodeType.TypeDateTime  => "datetime",
-        NodeType.TypeBytes     => "bytes",
+        NodeType.TypeBytes or NodeType.TypeBytesSized => "bytes",
         NodeType.TypeUuid      => "uuid",
         _ => throw Unsupported(typeNode),
     };

@@ -1030,6 +1030,7 @@ field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            | TTYPE_BOOL { $$.n = NodeAst.TypeBool; }
            | TTYPE_FLOAT32 { $$.n = NodeAst.TypeFloat32; }
            | TTYPE_BYTES { $$.n = NodeAst.TypeBytes; }
+           | TTYPE_BYTES LPAREN TDIGIT RPAREN { $$.n = new(NodeType.TypeBytesSized, null, null, null, null, null, null, null, $3.s); }
            | TTYPE_DATE { $$.n = NodeAst.TypeDate; }
            | TTYPE_DATETIME { $$.n = NodeAst.TypeDateTime; }
            | TTYPE_UUID { $$.n = NodeAst.TypeUuid; }

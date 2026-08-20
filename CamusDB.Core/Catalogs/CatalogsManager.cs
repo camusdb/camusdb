@@ -693,17 +693,10 @@ public sealed class CatalogsManager
                 Payload = Serializator.Serialize(new SchemaAlterColumnPayload
                 {
                     TableName = tableName,
-                    Column = new SchemaColumnPayload
-                    {
-                        Id = ObjectIdGenerator.Generate().ToString(),
-                        Name = column.Name,
-                        Type = column.Type,
-                        NotNull = column.NotNull,
-                        DefaultValue = column.Default,
-                        DefaultFunction = column.DefaultFunction,
-                        State = initialState,
-                        NotNullConstraintName = column.NotNullConstraintName,
-                    }
+                    // Built through FromColumnInfo, never field by field: a hand-copied list silently
+                    // drops whatever it forgets, and MaxLength / ArrayElementType / Comment were all
+                    // lost here while the single-node path kept them. Only Id and State are ours.
+                    Column = SchemaColumnPayloadWithState(column, initialState)
                 })
             };
             ValidateSchemaDelta(database, entry);
@@ -714,6 +707,20 @@ public sealed class CatalogsManager
         }
 
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Builds the column payload for a staged <c>AddColumn</c> delta: every field the ticket carries,
+    /// plus a fresh column id and the caller's starting <see cref="SchemaElementState"/>. The staged
+    /// cluster path and the single-node path must produce identical columns, so both derive the
+    /// payload from <see cref="SchemaColumnPayload.FromColumnInfo"/> rather than listing fields.
+    /// </summary>
+    private static SchemaColumnPayload SchemaColumnPayloadWithState(ColumnInfo column, SchemaElementState initialState)
+    {
+        SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
+        payload.Id = ObjectIdGenerator.Generate().ToString();
+        payload.State = initialState;
+        return payload;
     }
 
     /// <summary>

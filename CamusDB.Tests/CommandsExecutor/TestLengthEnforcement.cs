@@ -48,6 +48,15 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         return (dbname, db, executor);
     }
 
+    private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)> SetupWithSizedBytes(int n)
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            $"CREATE TABLE t (id OID NOT NULL, v bytes({n}), PRIMARY KEY (id))", null));
+        return (dbname, db, executor);
+    }
+
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor)> SetupWithBareBytes()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
@@ -219,6 +228,57 @@ internal sealed class TestLengthEnforcement : SharedNodeBaseTest
         {
             { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
             { "v",  ColumnValue.Null }
+        });
+
+        Assert.AreEqual(1, rows.InsertedRows);
+    }
+
+    // ── bytes(N) on INSERT ────────────────────────────────────────────────────
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_InsertAtLimit_Succeeds()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedBytes(3072);
+
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
+        {
+            { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+            { "v",  new(new byte[3072]) }
+        });
+
+        Assert.AreEqual(1, rows.InsertedRows);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_InsertOverLimit_Throws()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedBytes(3072);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
+            {
+                { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                { "v",  new(new byte[3073]) }
+            }));
+
+        Assert.AreEqual(CamusDBErrorCodes.ValueTooLong, ex!.Code);
+        StringAssert.Contains("'v'", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_InsertUnderLimit_Succeeds()
+    {
+        // The declared size is a ceiling, not an exact width. A shorter value is accepted here;
+        // an exact vector dimension needs a CHECK constraint instead.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupWithSizedBytes(3072);
+
+        InsertResult rows = await Insert(executor, db, "t", new Dictionary<string, ColumnValue>()
+        {
+            { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+            { "v",  new(new byte[3068]) }
         });
 
         Assert.AreEqual(1, rows.InsertedRows);

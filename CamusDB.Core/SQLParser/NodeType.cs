@@ -539,4 +539,17 @@ public enum NodeType
     /// the same table.</para>
     /// </summary>
     ShowStatistics,
+
+    /// <summary>
+    /// <c>bytes(N)</c> in a column declaration, carrying <c>N</c> in <c>yytext</c>. Distinct from
+    /// <see cref="TypeBytes"/> only in that the size becomes the column's maximum length; the
+    /// resulting <c>ColumnType</c> is Bytes either way, so a CAST target ignores the size.
+    ///
+    /// <para>Declared here instead of beside <see cref="TypeStringSized"/> on purpose. Member
+    /// ordinals cross the wire: <c>NodeAstWireCodec</c> serializes a shipped filter AST as
+    /// <c>(int)nodeType</c>, and the query-fragment format version cannot detect a renumbering.
+    /// Inserting a member mid-enum would silently change how a peer running the previous build
+    /// reads every later node type. New members are appended.</para>
+    /// </summary>
+    TypeBytesSized,
 }

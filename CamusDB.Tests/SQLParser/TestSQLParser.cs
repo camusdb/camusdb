@@ -2338,6 +2338,50 @@ public class TestSQLParser
     }
 
     [Test]
+    public void CreateTable_BytesSized_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (embedding bytes(3072))");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+        var cols = CollectColumnTypes(ast.rightAst!);
+        NodeAst sizedNode = cols["embedding"];
+        Assert.AreEqual(NodeType.TypeBytesSized, sizedNode.nodeType);
+        Assert.AreEqual("3072", sizedNode.yytext);
+    }
+
+    [Test]
+    public void CreateTable_BareBytesAndSizedBytes_AreDistinctNodes()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (payload bytes, embedding bytes(3072))");
+        var cols = CollectColumnTypes(ast.rightAst!);
+
+        Assert.AreEqual(NodeType.TypeBytes, cols["payload"].nodeType);
+        Assert.IsNull(cols["payload"].yytext);
+
+        Assert.AreEqual(NodeType.TypeBytesSized, cols["embedding"].nodeType);
+        Assert.AreEqual("3072", cols["embedding"].yytext);
+    }
+
+    [Test]
+    public void AlterTableAddColumn_BytesSized_CarriesSizeOnTheTypeNode()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("ALTER TABLE t ADD COLUMN embedding bytes(3072)");
+        Assert.AreEqual(NodeType.AlterTableAddColumn, ast.nodeType);
+        Assert.AreEqual("embedding", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.TypeBytesSized, ast.extendedOne!.nodeType);
+        Assert.AreEqual("3072", ast.extendedOne!.yytext);
+    }
+
+    [Test]
+    public void Cast_BytesSized_ParsesCorrectly()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT CAST(v AS bytes(3072)) FROM t");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+        NodeAst castNode = ast.leftAst!;
+        Assert.AreEqual(NodeType.ExprCast, castNode.nodeType);
+        Assert.AreEqual(NodeType.TypeBytesSized, castNode.rightAst!.nodeType);
+    }
+
+    [Test]
     public void CreateTable_Char_AliasForString_ParsesCorrectly()
     {
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (name char)");

@@ -303,6 +303,23 @@ internal sealed class TestNewTypeLiterals : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
+    public async Task Cast_BytesSized_FromHexString()
+    {
+        // The size in a CAST target constrains nothing: it declares a column ceiling, so the
+        // cast resolves to plain Bytes and the two-byte result is not padded or rejected.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
+            "CREATE TABLE t (id OID NOT NULL, v string, PRIMARY KEY (id))");
+        await ExecInsert(executor, db, $"INSERT INTO t (id, v) VALUES (\"{OID}\", '0x0102')");
+
+        QueryResultRow row = await SelectOnlyRow(executor, db, "SELECT CAST(v AS bytes(3072)) FROM t");
+        ColumnValue col = row.Row["0"];
+
+        Assert.AreEqual(ColumnType.Bytes, col.Type);
+        Assert.AreEqual(new byte[] { 0x01, 0x02 }, col.BytesValue);
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task Cast_Date_UnparseableString_Throws()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(

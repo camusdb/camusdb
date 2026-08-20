@@ -186,6 +186,7 @@ internal static class CastScalarFunctions
             NodeType.TypeBytes     => ColumnType.Bytes,
             NodeType.TypeUuid      => ColumnType.Uuid,
             NodeType.TypeStringSized => ColumnType.String,
+            NodeType.TypeBytesSized  => ColumnType.Bytes,
             NodeType.Identifier    => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
             _ => throw UnknownTargetType(castName, targetTypeAst.nodeType.ToString()),
         };

@@ -147,6 +147,126 @@ internal sealed class TestColumnMetadata : SharedNodeBaseTest
         Assert.AreEqual(4096, col.MaxLength);
     }
 
+    [Test]
+    [NonParallelizable]
+    public async Task StringSized_ViaAlterAddColumn_YieldsMaxLength()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, PRIMARY KEY (id))");
+        await ExecDDL(executor, db, "ALTER TABLE t ADD COLUMN nm string(32)");
+
+        TableSchema schema = catalogs.GetTableSchema(db, "t");
+        TableColumnSchema col = schema.Columns!.Find(c => c.Name == "nm")!;
+
+        Assert.AreEqual(ColumnType.String, col.Type);
+        Assert.AreEqual(32, col.MaxLength);
+    }
+
+    // ── bytes(N) — sized bytes ────────────────────────────────────────────────
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_YieldsMaxLength()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, embedding bytes(3072), PRIMARY KEY (id))");
+
+        TableSchema schema = catalogs.GetTableSchema(db, "t");
+        TableColumnSchema col = schema.Columns!.Find(c => c.Name == "embedding")!;
+
+        Assert.AreEqual(ColumnType.Bytes, col.Type);
+        Assert.AreEqual(3072, col.MaxLength);
+        Assert.IsNull(col.ArrayElementType);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_ViaAlterAddColumn_YieldsMaxLength()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, PRIMARY KEY (id))");
+        await ExecDDL(executor, db, "ALTER TABLE t ADD COLUMN embedding bytes(3072)");
+
+        TableSchema schema = catalogs.GetTableSchema(db, "t");
+        TableColumnSchema col = schema.Columns!.Find(c => c.Name == "embedding")!;
+
+        Assert.AreEqual(ColumnType.Bytes, col.Type);
+        Assert.AreEqual(3072, col.MaxLength);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BareBytes_YieldsNullMaxLength()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, payload bytes, PRIMARY KEY (id))");
+
+        TableSchema schema = catalogs.GetTableSchema(db, "t");
+        TableColumnSchema col = schema.Columns!.Find(c => c.Name == "payload")!;
+
+        Assert.AreEqual(ColumnType.Bytes, col.Type);
+        Assert.IsNull(col.MaxLength);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_AboveDefaultCap_IsAcceptedAsTheCeiling()
+    {
+        // An explicit N is the column ceiling, matching string(N). It is not clamped to
+        // DefaultBytesMaxLength, which applies only when no size is declared.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+        int n = CamusDBConstants.DefaultBytesMaxLength + 1024;
+        await ExecDDL(executor, db, $"CREATE TABLE t (id OID NOT NULL, payload bytes({n}), PRIMARY KEY (id))");
+
+        TableSchema schema = catalogs.GetTableSchema(db, "t");
+        TableColumnSchema col = schema.Columns!.Find(c => c.Name == "payload")!;
+
+        Assert.AreEqual(n, col.MaxLength);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_ZeroSize_IsRejected()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor, _) = await Setup();
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecDDL(executor, db,
+                "CREATE TABLE t (id OID NOT NULL, payload bytes(0), PRIMARY KEY (id))"));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        StringAssert.Contains("positive integer", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_SizeAboveInt32Range_IsRejected()
+    {
+        // int.TryParse fails rather than wrapping, so an out-of-range size is a client error.
+        (_, DatabaseDescriptor db, CommandExecutor executor, _) = await Setup();
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecDDL(executor, db,
+                "CREATE TABLE t (id OID NOT NULL, payload bytes(99999999999), PRIMARY KEY (id))"));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        StringAssert.Contains("bytes size", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_ViaAlterAddColumn_ZeroSize_IsRejected()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor, _) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, PRIMARY KEY (id))");
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecDDL(executor, db, "ALTER TABLE t ADD COLUMN payload bytes(0)"));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        StringAssert.Contains("positive integer", ex.Message);
+    }
+
     // ── array<T> — element type plumbing ─────────────────────────────────────
 
     [Test]
@@ -253,6 +373,22 @@ internal sealed class TestColumnMetadata : SharedNodeBaseTest
     }
 
     // ── Schema persist/reload round-trip ─────────────────────────────────────
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_PersistsAndReloads()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, _) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, embedding bytes(3072), PRIMARY KEY (id))");
+
+        DatabaseDescriptor reopened = await executor.OpenDatabase(dbname);
+        CatalogsManager catalogs2 = new(logger);
+        TableSchema schema = catalogs2.GetTableSchema(reopened, "t");
+
+        TableColumnSchema col = schema.Columns!.Find(c => c.Name == "embedding")!;
+        Assert.AreEqual(ColumnType.Bytes, col.Type);
+        Assert.AreEqual(3072, col.MaxLength);
+    }
 
     [Test]
     [NonParallelizable]

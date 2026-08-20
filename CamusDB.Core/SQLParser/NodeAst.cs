@@ -110,7 +110,8 @@ public sealed class NodeAst
     public static readonly NodeAst TypeDate = Leaf(NodeType.TypeDate);
     public static readonly NodeAst TypeDateTime = Leaf(NodeType.TypeDateTime);
     public static readonly NodeAst TypeUuid = Leaf(NodeType.TypeUuid);
-    // TypeArray and TypeStringSized carry child data — construct them dynamically (no shared sentinel).
+    // TypeArray, TypeStringSized and TypeBytesSized carry child data — construct them dynamically
+    // (no shared sentinel).
 
     // ── DDL constraint sentinels ───────────────────────────────────────────────
 
