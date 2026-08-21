@@ -37,6 +37,9 @@ public sealed class TransferOperation : IWriteOperation
     private readonly int _maxRetries;
     private long _committedRows;
     private long _indeterminateTxns;
+    private long _retryAttempts;
+    private long _retriedTxns;
+    private long _maxAttemptsUsed;
 
     public TransferOperation(
         ConnectionSet connections, Dataset dataset, long rows,
@@ -60,6 +63,12 @@ public sealed class TransferOperation : IWriteOperation
 
     public long IndeterminateTxns => System.Threading.Interlocked.Read(ref _indeterminateTxns);
 
+    public long RetryAttempts => System.Threading.Interlocked.Read(ref _retryAttempts);
+
+    public long RetriedTxns => System.Threading.Interlocked.Read(ref _retriedTxns);
+
+    public long MaxAttemptsUsed => System.Threading.Interlocked.Read(ref _maxAttemptsUsed);
+
     public async Task<OperationResult> ExecuteAsync(WorkerShard shard, long baseRowIndex, CancellationToken ct)
     {
         // 'from' is the worker's own row; 'to' is derived across the whole keyspace so transfers from
@@ -80,7 +89,10 @@ public sealed class TransferOperation : IWriteOperation
                 .ConfigureAwait(false);
 
             if (done)
+            {
+                RecordAttempts(attempt);
                 return result;
+            }
 
             // Retryable conflict: back off briefly and try the whole transfer again from BEGIN.
             lastConflict = result;
@@ -88,6 +100,7 @@ public sealed class TransferOperation : IWriteOperation
         }
 
         // Exhausted the retry budget still conflicting — surface it like the baseline write would.
+        RecordAttempts(_maxRetries);
         return lastConflict;
     }
 
@@ -197,6 +210,31 @@ public sealed class TransferOperation : IWriteOperation
 
     /// <summary>A second row index across the whole keyspace, derived deterministically from the base
     /// and guaranteed distinct from <paramref name="fromIndex"/>.</summary>
+    /// <summary>
+    /// Records how many attempts one transfer consumed. Only the re-runs count as retries, so a
+    /// first-try success adds nothing. A conflict absorbed here never reaches the conflict counter,
+    /// which is why the contention signal has to be captured at this point.
+    /// </summary>
+    private void RecordAttempts(int attempts)
+    {
+        if (attempts > 1)
+        {
+            System.Threading.Interlocked.Add(ref _retryAttempts, attempts - 1);
+            System.Threading.Interlocked.Increment(ref _retriedTxns);
+        }
+
+        // Compare-and-swap loop: several workers can finish concurrently, so a plain read-then-write
+        // would lose the higher value in a race.
+        long observed = System.Threading.Interlocked.Read(ref _maxAttemptsUsed);
+        while (attempts > observed)
+        {
+            long previous = System.Threading.Interlocked.CompareExchange(ref _maxAttemptsUsed, attempts, observed);
+            if (previous == observed)
+                break;
+            observed = previous;
+        }
+    }
+
     private long SecondRow(long baseRowIndex, long fromIndex)
     {
         // Multiplicative hash spread across the keyspace; nudge off any self-collision.

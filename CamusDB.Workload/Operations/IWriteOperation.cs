@@ -29,5 +29,21 @@ public interface IWriteOperation
     /// run; reconciliation widens its expected version-sum delta to admit both outcomes.</summary>
     long IndeterminateTxns { get; }
 
+    /// <summary>Extra attempts spent on retryable conflicts across the whole run, counting only the
+    /// re-runs (a transfer that succeeds first try adds 0). A conflict absorbed by the retry loop never
+    /// reaches <c>metrics.Conflicts</c>, so without this counter contention is invisible: 0 conflicts
+    /// means "nothing exhausted its budget", not "nothing contended". The shard-disjoint baseline
+    /// cannot conflict and therefore always reports 0.</summary>
+    long RetryAttempts { get; }
+
+    /// <summary>Transactions that needed at least one retry, across the whole run. With
+    /// <see cref="RetryAttempts"/> this separates "many transfers retried once" from "one transfer
+    /// retried many times".</summary>
+    long RetriedTxns { get; }
+
+    /// <summary>Highest attempt number any single transaction reached. Equal to the retry budget when
+    /// some transfer exhausted it and surfaced a conflict.</summary>
+    long MaxAttemptsUsed { get; }
+
     Task<OperationResult> ExecuteAsync(WorkerShard shard, long baseRowIndex, CancellationToken ct);
 }

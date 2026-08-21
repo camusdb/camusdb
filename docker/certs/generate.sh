@@ -12,11 +12,16 @@
 #   - Default: the SANs come from san.cnf; edit that file if the node IPs/hostnames change,
 #     then rerun.
 #   - Parameterized (for N-node / orchestrated clusters): set NODES and the script generates
-#     the SAN list itself — DNS names camus1..camusN and container IPs SUBNET.FIRST_IP
-#     onward, with SPARE extra entries so nodes added later (join-existing) are already
-#     covered without regenerating and rebaking the image.
+#     the SAN list itself — DNS names camus1..camusN and container IPs FIRST_IP onward in
+#     every subnet named by SUBNETS, with SPARE extra entries so nodes added later
+#     (join-existing) are already covered without regenerating and rebaking the image.
 #
-#       NODES=5 SPARE=5 SUBNET=172.31.0 FIRST_IP=2 OUT_DIR=/tmp/certs ./generate.sh
+#       NODES=5 SPARE=5 SUBNETS="172.31.0 10.101.0" FIRST_IP=2 OUT_DIR=/tmp/certs ./generate.sh
+#
+#     SUBNETS takes a space-separated list. The subnet that docker/local.yml uses is always
+#     added to that list, because one certificate is shared by every local cluster: a
+#     regeneration for some other subnet must not strip the SANs docker/local.yml needs, or
+#     its nodes fail the inter-node handshake with RemoteCertificateNameMismatch.
 #
 # After regenerating, rebuild the images so the new .pfx is baked in:
 #   docker compose -f docker/local.yml build
@@ -30,14 +35,25 @@ cd "$(dirname "$0")"
 OUT_DIR="${OUT_DIR:-.}"
 mkdir -p "$OUT_DIR"
 
+# Subnet of the custom_net network in docker/local.yml. Update both files together.
+LOCAL_COMPOSE_SUBNET="172.31.0"
+
 if [ -n "${NODES:-}" ]; then
   SPARE="${SPARE:-5}"
-  SUBNET="${SUBNET:-172.31.0}"
+  # SUBNET stays supported for older callers; SUBNETS is the list form and wins when set.
+  SUBNETS="${SUBNETS:-${SUBNET:-10.101.0}}"
   FIRST_IP="${FIRST_IP:-2}"
   TOTAL=$((NODES + SPARE))
 
+  # The docker/local.yml subnet is not optional. Prepend it unless the caller already
+  # named it, so an explicit SUBNETS for another cluster still leaves local.yml usable.
+  for subnet in $SUBNETS; do
+    [ "$subnet" = "$LOCAL_COMPOSE_SUBNET" ] && LOCAL_COMPOSE_SUBNET=""
+  done
+  SUBNETS="$LOCAL_COMPOSE_SUBNET $SUBNETS"
+
   CNF="$OUT_DIR/san.generated.cnf"
-  echo "==> generating $CNF for $NODES nodes (+$SPARE spare) on $SUBNET.x"
+  echo "==> generating $CNF for $NODES nodes (+$SPARE spare) on: $SUBNETS"
 
   # Same DN/extensions as san.cnf; only the alt_names block is derived.
   cat > "$CNF" <<EOF
@@ -72,8 +88,18 @@ EOF
   i=1
   while [ "$i" -le "$TOTAL" ]; do
     echo "DNS.$((i + 1)) = camus$i" >> "$CNF"
-    echo "IP.$((i + 2))  = $SUBNET.$((FIRST_IP + i - 1))" >> "$CNF"
     i=$((i + 1))
+  done
+
+  # IP indices continue after the two fixed loopback entries above.
+  n=2
+  for subnet in $SUBNETS; do
+    i=1
+    while [ "$i" -le "$TOTAL" ]; do
+      n=$((n + 1))
+      echo "IP.$n  = $subnet.$((FIRST_IP + i - 1))" >> "$CNF"
+      i=$((i + 1))
+    done
   done
 else
   CNF=san.cnf
@@ -106,6 +132,6 @@ openssl pkcs12 -export \
 
 echo "==> verifying SANs"
 openssl x509 -in "$OUT_DIR/development-certificate.crt" -noout -text \
-  | grep -A1 "Subject Alternative Name"
+  | grep -A2 "Subject Alternative Name"
 
 echo "Done. Rebuild images: docker compose -f docker/local.yml build"

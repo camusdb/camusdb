@@ -64,6 +64,15 @@ public sealed class WriteOperation : IWriteOperation
     /// </summary>
     public long IndeterminateTxns => System.Threading.Interlocked.Read(ref _indeterminateTxns);
 
+    /// <summary>Always 0: the shard-disjoint baseline has no retry loop because it cannot conflict.</summary>
+    public long RetryAttempts => 0;
+
+    /// <summary>Always 0, for the same reason as <see cref="RetryAttempts"/>.</summary>
+    public long RetriedTxns => 0;
+
+    /// <summary>Always 1: every transaction is a single attempt.</summary>
+    public long MaxAttemptsUsed => 1;
+
     public async Task<OperationResult> ExecuteAsync(WorkerShard shard, long baseRowIndex, CancellationToken ct)
     {
         // Derive distinct in-shard target rows for a multi-row transaction from the base row.

@@ -6,10 +6,18 @@
 # The Subject Alternative Names below MUST cover every endpoint a node dials. In the
 # latest Kahuna/Kommander the Raft transport defaults to TLS (https) and CamusDB exposes
 # no insecure-validation bypass, so the presented cert is validated against the dialed
-# host. docker/local.yml nodes dial each other by container IP (172.31.0.2/.3/.4), so
-# those IPs must appear here or the inter-node TLS handshake fails and the cluster never
-# forms. If you change the node IPs, hostnames, or subnet in docker/local.yml, update the
-# alt_names block below and regenerate (see generate.sh).
+# host. docker/local.yml nodes dial each other by container IP, so those IPs must appear
+# here or the inter-node TLS handshake fails with RemoteCertificateNameMismatch and the
+# cluster never forms.
+#
+# One certificate serves every local cluster layout, so the alt_names block lists BOTH
+# subnets in use, each with spare addresses for nodes added later:
+#   172.31.0.2 .. 172.31.0.9   docker/local.yml
+#   10.101.0.2 .. 10.101.0.9   larger orchestrated clusters
+#
+# If you add a subnet, a node IP, or a hostname, extend the alt_names block below and
+# regenerate (see generate.sh). Never drop an existing entry: the same file is shared by
+# every local cluster, and removing a subnet breaks the clusters that use it.
 
 [req]
 default_bits       = 2048
@@ -34,12 +42,30 @@ extendedKeyUsage = serverAuth, clientAuth
 basicConstraints = critical, CA:TRUE
 
 [alt_names]
-DNS.1 = localhost
-DNS.2 = camus1
-DNS.3 = camus2
-DNS.4 = camus3
-IP.1  = 127.0.0.1
-IP.2  = ::1
-IP.3  = 172.31.0.2
-IP.4  = 172.31.0.3
-IP.5  = 172.31.0.4
+DNS.1  = localhost
+DNS.2  = camus1
+DNS.3  = camus2
+DNS.4  = camus3
+DNS.5  = camus4
+DNS.6  = camus5
+DNS.7  = camus6
+DNS.8  = camus7
+DNS.9  = camus8
+IP.1   = 127.0.0.1
+IP.2   = ::1
+IP.3   = 172.31.0.2
+IP.4   = 172.31.0.3
+IP.5   = 172.31.0.4
+IP.6   = 172.31.0.5
+IP.7   = 172.31.0.6
+IP.8   = 172.31.0.7
+IP.9   = 172.31.0.8
+IP.10  = 172.31.0.9
+IP.11  = 10.101.0.2
+IP.12  = 10.101.0.3
+IP.13  = 10.101.0.4
+IP.14  = 10.101.0.5
+IP.15  = 10.101.0.6
+IP.16  = 10.101.0.7
+IP.17  = 10.101.0.8
+IP.18  = 10.101.0.9

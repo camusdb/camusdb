@@ -105,6 +105,8 @@ public sealed class ResultWriter
         sb.AppendLine($"| Rows/s | {s.RowsPerSec:F1} |");
         sb.AppendLine($"| Offered / Started / Completed | {s.Offered} / {s.Started} / {s.Completed} |");
         sb.AppendLine($"| Failed (conflict/transient/indeterminate/domain/internal) | {s.Failed} ({s.Conflicts}/{s.Transient}/{s.Indeterminate}/{s.DomainErrors}/{s.InternalErrors}) |");
+        sb.AppendLine($"| Conflict retries (attempts/txns/deepest) | {s.RetryAttempts} / {s.RetriedTxns} / {s.MaxAttemptsUsed} |");
+        sb.AppendLine($"| Retries per write txn | {s.RetriesPerWriteTxn:F3} |");
         sb.AppendLine($"| Schedule drops | {s.ScheduleDrops} |").AppendLine();
 
         sb.AppendLine("## Latency (ms)").AppendLine();

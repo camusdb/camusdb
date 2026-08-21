@@ -56,10 +56,15 @@ public sealed record RunSummary(
     LatencySummary ScheduleDelay,
     bool ExpectFaults,
     bool Valid,
-    IReadOnlyList<string> ValidityWarnings)
+    IReadOnlyList<string> ValidityWarnings,
+    long RetryAttempts,
+    long RetriedTxns,
+    long MaxAttemptsUsed,
+    double RetriesPerWriteTxn)
 {
     public static RunSummary Build(
-        RunMetrics m, string mode, int targetOps, double measuredSeconds, bool expectFaults = false)
+        RunMetrics m, string mode, int targetOps, double measuredSeconds, bool expectFaults = false,
+        long retryAttempts = 0, long retriedTxns = 0, long maxAttemptsUsed = 0)
     {
         double secs = measuredSeconds <= 0 ? 1 : measuredSeconds;
         long completed = m.Completed;
@@ -108,6 +113,12 @@ public sealed record RunSummary(
         if (m.DomainErrors > 0 || m.InternalErrors > 0)
             warnings.Add($"{m.DomainErrors} domain and {m.InternalErrors} internal error(s) recorded (see errors.json).");
 
+        // Retries are the contention signal a contended write shape produces. They are informational,
+        // never a validity failure: the retry loop absorbing a conflict is the design working.
+        if (retryAttempts > 0)
+            warnings.Add($"{retryAttempts} conflict retry attempt(s) across {retriedTxns} transaction(s); " +
+                         $"deepest transaction used {maxAttemptsUsed} attempt(s).");
+
         return new RunSummary(
             secs, mode,
             m.Offered, m.Started, completed, m.CompletedRead, m.CompletedWrite,
@@ -120,6 +131,8 @@ public sealed record RunSummary(
             LatencySummary.From(m.UpdateLatency),
             LatencySummary.From(m.CommitLatency),
             LatencySummary.From(m.ScheduleDelay),
-            expectFaults, valid, warnings);
+            expectFaults, valid, warnings,
+            retryAttempts, retriedTxns, maxAttemptsUsed,
+            m.CompletedWrite == 0 ? 0 : (double)retryAttempts / m.CompletedWrite);
     }
 }

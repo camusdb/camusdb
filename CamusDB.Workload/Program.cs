@@ -165,7 +165,9 @@ public static class Program
         // that queries a cluster which may still be recovering from a fault. Writing the measured data
         // first means a reconciliation that cannot complete downgrades the verdict to "could not
         // verify" — it never discards a run that produced perfectly good data.
-        RunSummary summary = RunSummary.Build(metrics, o.Mode, o.TargetOps, measure.TotalSeconds, o.ExpectFaults);
+        RunSummary summary = RunSummary.Build(
+            metrics, o.Mode, o.TargetOps, measure.TotalSeconds, o.ExpectFaults,
+            writeOperation.RetryAttempts, writeOperation.RetriedTxns, writeOperation.MaxAttemptsUsed);
         RunManifest manifest = BuildManifest(o, dataset, locking, isolation);
 
         ResultWriter writer = new(o.Output);
@@ -329,6 +331,9 @@ public static class Program
         Console.WriteLine($"  Write p50/p99 (ms)  : {s.WriteLatency.P50:F2} / {s.WriteLatency.P99:F2}");
         Console.WriteLine($"  Commit p50/p99 (ms) : {s.WriteCommit.P50:F2} / {s.WriteCommit.P99:F2}");
         Console.WriteLine($"  Conflicts           : {s.Conflicts}");
+        Console.WriteLine($"  Conflict retries    : {s.RetryAttempts} over {s.RetriedTxns} txn(s)");
+        Console.WriteLine($"  Retries per write   : {s.RetriesPerWriteTxn:F3}");
+        Console.WriteLine($"  Max attempts used   : {s.MaxAttemptsUsed}");
         Console.WriteLine($"  Indeterminate       : {s.Indeterminate}");
         Console.WriteLine($"  Reconciliation      : {(r.Passed ? "PASS" : "FAIL")}");
         foreach (string f in r.Failures)
