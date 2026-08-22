@@ -61,6 +61,105 @@ public sealed class ClusterController : CommandsController
         };
     }
 
+    /// <summary>
+    /// Leader-side backfill refusal diagnostics — the query the refusal log line tells the
+    /// operator to run (<c>IRaft.GetBackfillStatuses</c>), previously unreachable from a running
+    /// node. Empty partitions list = this node refuses nobody. Each node reports only the
+    /// partitions it leads; union the answers across nodes for the full cluster picture.
+    /// </summary>
+    [HttpGet]
+    [Route("/v1/cluster/backfill-status")]
+    public JsonResult GetBackfillStatus()
+    {
+        IRaft raft = kahuna.Raft;
+
+        ClusterBackfillStatusResponse response = new()
+        {
+            LocalEndpoint = raft.GetLocalEndpoint(),
+            Initialized = raft.IsInitialized,
+        };
+
+        foreach (int partitionId in KnownPartitionIds(raft))
+        {
+            IReadOnlyList<RaftBackfillStatus> statuses = raft.GetBackfillStatuses(partitionId);
+            if (statuses.Count == 0)
+                continue;
+
+            ClusterPartitionBackfillModel partition = new()
+            {
+                PartitionId = partitionId,
+                CommitIndex = raft.GetCommitIndex(partitionId),
+            };
+
+            foreach (RaftBackfillStatus status in statuses)
+                partition.Peers.Add(new ClusterPeerBackfillModel
+                {
+                    FollowerEndpoint = status.FollowerEndpoint,
+                    AnchorIndex = status.AnchorIndex,
+                    FirstAvailableIndex = status.FirstAvailableIndex,
+                    LastCheckpoint = status.LastCheckpoint,
+                    Occurrences = status.Occurrences,
+                    FirstRefusedAt = status.FirstRefusedAt,
+                    LastRefusedAt = status.LastRefusedAt,
+                });
+
+            response.Partitions.Add(partition);
+        }
+
+        return new JsonResult(response);
+    }
+
+    /// <summary>
+    /// Leader-side snapshot transfer diagnostics (<c>IRaft.GetSnapshotStatuses</c>): whether a
+    /// rescue for a below-the-compaction-floor follower is in flight, backing off after failures,
+    /// or unproducible. Empty partitions list = no transfer activity and no failures. This is the
+    /// endpoint that distinguishes "escalation declined", "transfer failing" and "no escalation"
+    /// on a live cluster — the question the wedge investigations could not ask.
+    /// </summary>
+    [HttpGet]
+    [Route("/v1/cluster/snapshot-status")]
+    public JsonResult GetSnapshotStatus()
+    {
+        IRaft raft = kahuna.Raft;
+
+        ClusterSnapshotStatusResponse response = new()
+        {
+            LocalEndpoint = raft.GetLocalEndpoint(),
+            Initialized = raft.IsInitialized,
+        };
+
+        foreach (int partitionId in KnownPartitionIds(raft))
+        {
+            IReadOnlyList<RaftSnapshotStatus> statuses = raft.GetSnapshotStatuses(partitionId);
+            if (statuses.Count == 0)
+                continue;
+
+            ClusterPartitionSnapshotModel partition = new()
+            {
+                PartitionId = partitionId,
+                CommitIndex = raft.GetCommitIndex(partitionId),
+            };
+
+            foreach (RaftSnapshotStatus status in statuses)
+                partition.Peers.Add(new ClusterPeerSnapshotModel
+                {
+                    FollowerEndpoint = status.FollowerEndpoint,
+                    FailedAttempts = status.FailedAttempts,
+                    LastError = status.LastError,
+                    Unproducible = status.Unproducible,
+                    InFlight = status.InFlight,
+                    InFlightForMs = status.InFlightFor?.TotalMilliseconds,
+                    FirstFailureAt = status.FirstFailureAt,
+                    LastFailureAt = status.LastFailureAt,
+                    RetryBackoffRemainingMs = status.RetryBackoffRemaining.TotalMilliseconds,
+                });
+
+            response.Partitions.Add(partition);
+        }
+
+        return new JsonResult(response);
+    }
+
     [HttpGet]
     [Route("/v1/cluster/membership")]
     public JsonResult GetMembership()
@@ -291,7 +390,7 @@ public sealed class ClusterController : CommandsController
         // Neither NotMember (evicted while down) nor Leaving (decommissioned, on its way out) is a
         // serving role: reporting a decommissioned node as ready would keep load balancers routing
         // to a node the cluster already dropped.
-        return new()
+        ClusterHealthResponse response = new()
         {
             Ready = initialized
                 && localRole != nameof(ClusterMemberRole.NotMember)
@@ -300,6 +399,77 @@ public sealed class ClusterController : CommandsController
             LocalRole = localRole,
             HostedPartitions = hostedPartitions,
         };
+
+        // Replication liveness, joined into health so a stalled partition is externally
+        // detectable: a partition this node leads with an open backfill-refusal episode, or with
+        // a snapshot rescue that is failing or unproducible, is degraded even while its healthy
+        // quorum keeps committing — the Caraxes soaks watched exactly this state report every
+        // green signal for 83 dead minutes. Deliberately NOT a readiness condition (see the
+        // response model), and fail-open: a failure computing it must not flip a healthy probe.
+        try
+        {
+            foreach (int partitionId in KnownPartitionIds(raft))
+            {
+                IReadOnlyList<RaftBackfillStatus> backfill = raft.GetBackfillStatuses(partitionId);
+                IReadOnlyList<RaftSnapshotStatus> snapshots = raft.GetSnapshotStatuses(partitionId);
+
+                bool snapshotTrouble = false;
+                bool unproducible = false;
+                bool inFlight = false;
+                int failedAttempts = 0;
+
+                foreach (RaftSnapshotStatus status in snapshots)
+                {
+                    unproducible |= status.Unproducible;
+                    inFlight |= status.InFlight;
+                    if (status.FailedAttempts > failedAttempts)
+                        failedAttempts = status.FailedAttempts;
+                    snapshotTrouble |= status.Unproducible || status.FailedAttempts > 0;
+                }
+
+                // An in-flight transfer with no failures is the rescue working, not a stall.
+                if (backfill.Count == 0 && !snapshotTrouble)
+                    continue;
+
+                response.StalledPartitions.Add(new ClusterStalledPartitionModel
+                {
+                    PartitionId = partitionId,
+                    OpenBackfillRefusals = backfill.Count,
+                    SnapshotUnproducible = unproducible,
+                    SnapshotFailedAttempts = failedAttempts,
+                    SnapshotInFlight = inFlight,
+                    CommitIndex = raft.GetCommitIndex(partitionId),
+                });
+            }
+
+            response.CommitStalled = response.StalledPartitions.Count > 0;
+        }
+        catch (Exception)
+        {
+            response.CommitStalled = false;
+            response.StalledPartitions.Clear();
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// The partition ids worth querying for replication diagnostics: the system partition plus
+    /// every non-removed partition in the committed map. Non-hosted partitions answer with empty
+    /// statuses (and a -1 commit index), so callers need no hosting check.
+    /// </summary>
+    private static IEnumerable<int> KnownPartitionIds(IRaft raft)
+    {
+        yield return RaftSystemConfig.SystemPartition;
+
+        if (!raft.IsInitialized)
+            yield break;
+
+        foreach (RaftPartitionRange range in raft.GetPartitionMap())
+        {
+            if (range.State != RaftPartitionState.Removed)
+                yield return range.PartitionId;
+        }
     }
 
     /// <summary>

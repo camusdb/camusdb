@@ -47,10 +47,15 @@ if [ -n "${NODES:-}" ]; then
 
   # The docker/local.yml subnet is not optional. Prepend it unless the caller already
   # named it, so an explicit SUBNETS for another cluster still leaves local.yml usable.
+  # A duplicate entry would emit the same IP twice and break the openssl config, so
+  # the loop drops the prefix when the caller's list already covers that subnet.
+  prefix="$LOCAL_COMPOSE_SUBNET"
   for subnet in $SUBNETS; do
-    [ "$subnet" = "$LOCAL_COMPOSE_SUBNET" ] && LOCAL_COMPOSE_SUBNET=""
+    if [ "$subnet" = "$LOCAL_COMPOSE_SUBNET" ]; then
+      prefix=""
+    fi
   done
-  SUBNETS="$LOCAL_COMPOSE_SUBNET $SUBNETS"
+  SUBNETS="$prefix $SUBNETS"
 
   CNF="$OUT_DIR/san.generated.cnf"
   echo "==> generating $CNF for $NODES nodes (+$SPARE spare) on: $SUBNETS"

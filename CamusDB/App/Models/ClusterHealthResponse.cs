@@ -13,6 +13,15 @@ namespace CamusDB.App.Models;
 /// key/value request. <c>HostedPartitions</c> is informational only: under a replication factor a
 /// node hosting zero data partitions is still ready (it serves every key by forwarding), so probes
 /// must never gate on it.
+///
+/// <para><c>CommitStalled</c> is the replication-liveness signal readiness deliberately is not: it
+/// is true while this node leads a partition with an open backfill-refusal episode or a failing
+/// snapshot rescue. Such a partition may still commit through its healthy quorum, so this must not
+/// flip <c>Ready</c> (and does not change the HTTP status) — but it is exactly the degraded state
+/// that container liveness and <c>Ready</c> alone cannot see, and the state a monitor should alarm
+/// on before the next fault turns it into an outage. Details per partition are in
+/// <c>StalledPartitions</c>; the full per-peer picture is at <c>/v1/cluster/backfill-status</c> and
+/// <c>/v1/cluster/snapshot-status</c>.</para>
 /// </summary>
 public sealed class ClusterHealthResponse
 {
@@ -23,4 +32,8 @@ public sealed class ClusterHealthResponse
     public string LocalRole { get; set; } = "";
 
     public int HostedPartitions { get; set; }
+
+    public bool CommitStalled { get; set; }
+
+    public List<ClusterStalledPartitionModel> StalledPartitions { get; set; } = new();
 }
