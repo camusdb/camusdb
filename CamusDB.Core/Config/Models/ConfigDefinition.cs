@@ -352,6 +352,13 @@ public class ConfigDefinition
     public int PlanCacheMaxEntries { get; set; } = 512;
 
     /// <summary>
+    /// Enables reuse of a SELECT statement's binding across executions of the same cached SQL
+    /// text. On by default; it changes no statement semantics. Maps to
+    /// <c>CamusDBOptions.BoundQueryCacheEnabled</c>.
+    /// </summary>
+    public bool BoundQueryCacheEnabled { get; set; } = true;
+
+    /// <summary>
     /// Per-match timeout in milliseconds for the regex operators <c>~</c> / <c>~*</c> / <c>!~</c> /
     /// <c>!~*</c>; a match that exceeds it is rejected rather than allowed to run unbounded (ReDoS
     /// guard). Must be &gt; 0. Maps to <c>CamusDBOptions.RegexMatchTimeoutMs</c>.

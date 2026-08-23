@@ -33,11 +33,21 @@ public sealed class QueryRowNameResolver
     /// the linear column scan, and key formatting on every row. Caching successful resolutions
     /// collapses all of that to one dictionary probe. Only successes are stored: the three failure
     /// modes throw, so a repeated bad identifier must re-throw the same exception rather than read a
-    /// cached result. Safe as a plain <see cref="Dictionary{TKey,TValue}"/> because a resolver
-    /// instance is consumed by a single strictly-sequential scan; it is never touched by two threads
-    /// at once within one execution.
+    /// cached result. Safe as a plain <see cref="Dictionary{TKey,TValue}"/> because of a two-phase
+    /// life cycle: while the resolver belongs to a single binding pass it is touched by one thread
+    /// only, and once <see cref="FreezeForSharedReuse"/> marks it shared the dictionary is never
+    /// written again — concurrent executions then read it lock-free.
     /// </summary>
     private readonly Dictionary<string, string> lookupKeyMemo = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True once this resolver is published for reuse across concurrent executions of a cached
+    /// statement. From that point the memo dictionary is read-only: an identifier that was not
+    /// resolved during binding is recomputed on every call instead of being stored, because a
+    /// concurrent write to a plain dictionary would corrupt it. Binding resolves every identifier
+    /// the statement references, so in practice every post-freeze lookup hits the memo.
+    /// </summary>
+    private bool frozen;
 
     public QueryRowNameResolver(
         IReadOnlyList<BoundTableSource> sources,
@@ -105,9 +115,20 @@ public sealed class QueryRowNameResolver
 
         // Cache successes only. The failure modes above throw before reaching here, so a repeated
         // bad identifier keeps re-throwing the same exception instead of returning a stale result.
-        lookupKeyMemo[identifier] = lookupKey;
+        // A frozen resolver is shared by concurrent executions, so it must not write to the memo;
+        // it returns the recomputed key instead.
+        if (!frozen)
+            lookupKeyMemo[identifier] = lookupKey;
         return lookupKey;
     }
+
+    /// <summary>
+    /// Marks this resolver as shared: from now on the lookup memo is read-only. Call exactly once,
+    /// after binding has resolved every identifier the statement references and before the resolver
+    /// is published to the bound-query cache. Publication through the cache's internal lock makes the
+    /// memo contents visible to every later reader.
+    /// </summary>
+    internal void FreezeForSharedReuse() => frozen = true;
 
     public static string FormatQualifiedKey(string alias, string columnName) =>
         $"{alias}.{columnName}";

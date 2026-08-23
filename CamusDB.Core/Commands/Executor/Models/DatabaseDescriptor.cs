@@ -237,6 +237,15 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
+    /// <summary>
+    /// Bound SELECT statements reusable across executions of the same cached SQL text, keyed by the
+    /// parse-cache <see cref="SQLParser.NodeAst"/> instance. Lives on the descriptor so that closing,
+    /// dropping, or evicting this database releases every cached binding with it — a slot must never
+    /// outlive the descriptor whose tables it references. See <see cref="Queries.BoundQueryCache"/>
+    /// for the validation contract each hit must pass.
+    /// </summary>
+    internal Queries.BoundQueryCache BoundQueries { get; } = new();
+
     // -----------------------------------------------------------------------
     // Drop-quiesce: atomic ref-count + drain
     //

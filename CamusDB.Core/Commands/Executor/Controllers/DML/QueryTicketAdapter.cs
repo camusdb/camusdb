@@ -44,10 +44,11 @@ internal static class QueryTicketAdapter
         ExistsSubqueryRegistry? existsSubqueries,
         IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
         bool exclusivePredicateLocks = false,
-        bool suppressCacheHint = false) =>
+        bool suppressCacheHint = false,
+        SingleTableRequiredColumnsMemo? requiredColumnsMemo = null) =>
         ToQueryTicketInternal(
             bound.Query, ticket, bound.RowNames, existsSubqueries, semiJoinSpecs,
-            exclusivePredicateLocks, suppressCacheHint);
+            exclusivePredicateLocks, suppressCacheHint, requiredColumnsMemo);
 
     private static QueryTicket ToQueryTicketInternal(
         SelectQuery query,
@@ -56,7 +57,8 @@ internal static class QueryTicketAdapter
         ExistsSubqueryRegistry? existsSubqueries = null,
         IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
         bool exclusivePredicateLocks = false,
-        bool suppressCacheHint = false)
+        bool suppressCacheHint = false,
+        SingleTableRequiredColumnsMemo? requiredColumnsMemo = null)
     {
         TableSource tableSource = GetPrimaryTableSource(query.Source);
         NodeAst? where = query.Where?.Expression;
@@ -90,7 +92,8 @@ internal static class QueryTicketAdapter
             semiJoinSpecs: semiJoinSpecs,
             preparedInSets: preparedInSets,
             exclusivePredicateLocks: exclusivePredicateLocks,
-            cacheHint: suppressCacheHint ? null : query.CacheHint);
+            cacheHint: suppressCacheHint ? null : query.CacheHint,
+            requiredColumnsMemo: requiredColumnsMemo);
     }
 
     private static IReadOnlyDictionary<NodeAst, PreparedInSet>? BuildPreparedInSets(PredicateAnalysis analysis)
@@ -251,7 +254,12 @@ internal static class QueryTicketAdapter
         }
     }
 
-    private static bool ContainsSubquery(NodeAst? expression)
+    /// <summary>
+    /// True when <paramref name="expression"/> contains any subquery node, EXISTS included. Shared
+    /// with the bound-query cache's shape check: a WHERE that carries a subquery is rewritten with
+    /// materialized data values, so its bound form must never be reused across executions.
+    /// </summary>
+    internal static bool ContainsSubquery(NodeAst? expression)
     {
         if (expression is null)
             return false;

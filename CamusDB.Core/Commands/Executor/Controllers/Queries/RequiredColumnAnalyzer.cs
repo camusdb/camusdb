@@ -21,6 +21,23 @@ internal static class RequiredColumnAnalyzer
 {
     public static IReadOnlySet<string>? ComputeSingleTable(QueryTicket ticket)
     {
+        // A ticket produced from a cached bound statement carries a cross-execution memo: the
+        // analysis is a pure function of the cached projection/WHERE/ORDER BY/GROUP BY/HAVING
+        // structures and the shared resolver, so the first execution's result serves every later
+        // one. The memo also collapses the repeated calls within a single execution (plan-time
+        // covering checks plus projection pushdown). Null means "decode all columns" and is a
+        // valid memoized result, which is why presence is a separate flag.
+        SingleTableRequiredColumnsMemo? memo = ticket.RequiredColumnsMemo;
+        if (memo is not null && memo.TryGet(out IReadOnlySet<string>? memoized))
+            return memoized;
+
+        IReadOnlySet<string>? computed = ComputeSingleTableCore(ticket);
+        memo?.Set(computed);
+        return computed;
+    }
+
+    private static IReadOnlySet<string>? ComputeSingleTableCore(QueryTicket ticket)
+    {
         if (RequiresAllColumns(ticket.Projection))
             return null;
 

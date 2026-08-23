@@ -33,6 +33,18 @@ internal sealed class QueryBinder
         this.resolveOwner = resolveOwner;
     }
 
+    /// <summary>
+    /// Binds the query's sources to catalog objects and validates every column reference.
+    /// <para><b>Parameter independence (audited):</b> the result is a function of the query and the
+    /// catalog only. Nothing here reads a parameter value or transaction state, so a binding is
+    /// reusable across executions with different parameters — which the bound-query cache does for
+    /// single-table statements, guarded by the source table's schema stamp. Two caveats the cache
+    /// must respect (and does, by excluding derived sources): binding a derived source consults the
+    /// ambient <see cref="AuthorizationContext"/> to run a view body as its owner, and table opens
+    /// enforce the caller's privileges — the latter stays per-execution because a cache hit re-opens
+    /// the table through the same chokepoint. A change that makes the single-table path read
+    /// per-execution state must also make that shape ineligible for the cache.</para>
+    /// </summary>
     public async Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query)
     {
         List<BoundTableSource> sources = [];
@@ -324,6 +336,15 @@ internal sealed class QueryBinder
             $"Bound derived source not found for alias '{alias}'");
     }
 
+    /// <summary>
+    /// Validates projections, WHERE, GROUP BY, ORDER BY, HAVING, and DISTINCT against the resolved
+    /// sources.
+    /// <para><b>Parameter independence (audited):</b> validation walks identifiers and expression
+    /// structure only; placeholder nodes are never evaluated. It is also what populates the
+    /// resolver's lookup memo with every identifier the statement references, which is the
+    /// precondition for freezing that resolver when the binding is shared across concurrent
+    /// executions (<see cref="QueryRowNameResolver.FreezeForSharedReuse"/>).</para>
+    /// </summary>
     private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames)
     {
         foreach (ProjectionItem projection in query.Projections)

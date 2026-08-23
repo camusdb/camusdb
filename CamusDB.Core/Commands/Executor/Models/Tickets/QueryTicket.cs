@@ -103,6 +103,15 @@ public sealed class QueryTicket
     /// </summary>
     public CacheHintOptions? CacheHint { get; }
 
+    /// <summary>
+    /// Cross-execution memo for <see cref="RequiredColumnAnalyzer.ComputeSingleTable"/>, attached by
+    /// the bound-query cache. Only attach it for a statement with no API filters, no semi-join specs,
+    /// and no prepared EXISTS subqueries: those are the ticket inputs that can change the analysis
+    /// between executions, and the analysis result would otherwise be reused across tickets that
+    /// disagree on them. Null on every other path; the analysis then runs per call as before.
+    /// </summary>
+    internal Queries.SingleTableRequiredColumnsMemo? RequiredColumnsMemo { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -126,7 +135,8 @@ public sealed class QueryTicket
         IReadOnlySet<string>? locateColumns = null,
         bool exclusivePredicateLocks = false,
         IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = null,
-        CacheHintOptions? cacheHint = null)
+        CacheHintOptions? cacheHint = null,
+        Queries.SingleTableRequiredColumnsMemo? requiredColumnsMemo = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -151,5 +161,6 @@ public sealed class QueryTicket
         ExclusivePredicateLocks = exclusivePredicateLocks;
         PreparedInSets = preparedInSets;
         CacheHint = cacheHint;
+        RequiredColumnsMemo = requiredColumnsMemo;
     }
 }

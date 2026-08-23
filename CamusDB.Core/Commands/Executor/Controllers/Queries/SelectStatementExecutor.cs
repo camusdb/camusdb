@@ -648,7 +648,62 @@ internal sealed class SelectStatementExecutor
         bool suppressCacheHint = false,
         CacheMetadataHolder? metaOut = null)
     {
+        // Bound-statement reuse. The parse cache returns the same AST instance for repeated SQL
+        // text, so a probe on that instance finds the binding a previous execution built. A hit is
+        // only served after re-validation (same table descriptor instance, unchanged schema stamp)
+        // and after the per-execution guards below re-run inside the validation helper. The two
+        // metaOut inner-hint blocks further down are no-ops for a cached shape: eligibility
+        // requires no cache hint and no subquery in the WHERE, so there is nothing to surface.
+        BoundQuerySlot? slot = options.BoundQueryCacheEnabled ? database.BoundQueries.TryGet(ast) : null;
+
+        if (slot is { Eligible: true })
+        {
+            (BoundSelectQuery Bound, QueryTicket QueryTicket)? cached = await TryUseCachedBoundQueryAsync(
+                database, slot, ticket, exclusivePredicateLocks, suppressCacheHint).ConfigureAwait(false);
+
+            if (cached is not null)
+                return cached.Value;
+        }
+
+        // A slot marked ineligible records that this statement's shape can never be cached, so the
+        // shape analysis and stamping below are skipped for it on every execution.
+        bool attemptCache = options.BoundQueryCacheEnabled && (slot is null || slot.Eligible);
+
         SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(ast);
+
+        // The instance CreateSelectQuery produced. If the analysis/rewrite stages below return this
+        // same instance, none of them changed the statement, which is one of the cache's
+        // eligibility conditions: a rewritten WHERE carries materialized data values that must not
+        // outlive the execution that read them.
+        SelectQuery createdQuery = selectQuery;
+
+        // Shape eligibility, decided from the AST alone so the decision is stable across
+        // executions. Excluded here: AS OF SYSTEM TIME (per-execution snapshot), cache hints
+        // (result-cache path), non-table sources, subqueries in the WHERE, and session-scoped
+        // functions (conservatively excluded until their reuse is proven safe).
+        bool cacheCandidate = attemptCache
+            && ast.extendedSeven is null
+            && selectQuery.CacheHint is null
+            && selectQuery.Source is TableSource
+            && (selectQuery.Where is null || !QueryTicketAdapter.ContainsSubquery(selectQuery.Where.Expression))
+            && !ScalarFunctionEvaluator.ContainsSessionScopedFunction(ast);
+
+        // Schema stamp, read before the bind pipeline runs and re-checked at store time. Version
+        // and contents generation are monotonic, so equal values on both reads prove no schema
+        // change committed while the pipeline observed the schema — a torn binding is then
+        // impossible to cache. The open itself is the same call the binder makes a moment later
+        // (it resolves the cached AsyncLazy descriptor), so errors surface identically.
+        TableDescriptor? stampTable = null;
+        int stampVersion = 0;
+        long stampGeneration = 0;
+
+        if (cacheCandidate)
+        {
+            stampTable = await context.TableOpener
+                .Open(database, ((TableSource)selectQuery.Source).TableName).ConfigureAwait(false);
+            stampVersion = stampTable.Schema.Version;
+            stampGeneration = stampTable.Schema.ContentsGeneration;
+        }
 
         // Detect an inner subquery that carries a {cache=name} hint when the outer SELECT has none.
         // SubqueryRewriter executes all inner subqueries live and discards inner cache hints — they
@@ -689,11 +744,106 @@ internal sealed class SelectStatementExecutor
             boundQuery.RowNames,
             boundQuery.DerivedSources);
         IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
+
+        BoundQuerySlot? newSlot = attemptCache
+            ? TryStoreBoundQuerySlot(
+                database, ast, createdQuery, boundQuery, semiJoinSpecs, existsRegistry,
+                cacheCandidate, stampTable, stampVersion, stampGeneration)
+            : null;
+
         QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
-            boundQuery, ticket, existsRegistry, specs, exclusivePredicateLocks, suppressCacheHint);
+            boundQuery, ticket, existsRegistry, specs, exclusivePredicateLocks, suppressCacheHint,
+            newSlot?.RequiredColumns);
         PinSchemaVersions(database, boundQuery.Sources, ticket.TxnState);
 
         return (boundQuery, queryTicket);
+    }
+
+    /// <summary>
+    /// Serves a cached bound statement when its stamps still hold, or returns null so the caller
+    /// rebinds. The per-execution guards are deliberately NOT skipped on a hit: the table open is
+    /// the universal chokepoint that enforces the schema catch-up fence and per-table privileges,
+    /// the materialized-view readability guard re-runs, the query ticket (which carries transaction
+    /// state and parameter-value analysis) is rebuilt, and the schema version is re-pinned to this
+    /// execution's transaction. What a hit skips is only the work that is a pure function of the
+    /// AST and the stamped schema: query creation, source binding, name resolution, validation,
+    /// and — through the slot's memo — the required-column analysis.
+    /// </summary>
+    private async ValueTask<(BoundSelectQuery Bound, QueryTicket QueryTicket)?> TryUseCachedBoundQueryAsync(
+        DatabaseDescriptor database,
+        BoundQuerySlot slot,
+        ExecuteSQLTicket ticket,
+        bool exclusivePredicateLocks,
+        bool suppressCacheHint)
+    {
+        BoundSelectQuery bound = slot.Bound!;
+
+        TableDescriptor table = await context.TableOpener
+            .Open(database, bound.Sources[0].Source.TableName).ConfigureAwait(false);
+
+        // Fail closed on any drift. A replaced descriptor instance (drop/recreate, index DDL,
+        // element-state eviction) or a moved schema stamp (ALTER, RENAME, materialized-view
+        // refresh) discards the binding wholesale; the caller rebinds and stores a fresh slot.
+        if (!ReferenceEquals(table, slot.Table)
+            || table.Schema.Version != slot.SchemaVersion
+            || table.Schema.ContentsGeneration != slot.ContentsGeneration)
+            return null;
+
+        MaterializedViewAccessGuard.RequireReadable(table);
+
+        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
+            bound, ticket, existsSubqueries: null, semiJoinSpecs: null,
+            exclusivePredicateLocks, suppressCacheHint, slot.RequiredColumns);
+        PinSchemaVersions(database, bound.Sources, ticket.TxnState);
+
+        return (bound, queryTicket);
+    }
+
+    /// <summary>
+    /// Decides, after a full bind, whether the result may be published for reuse. A shape that can
+    /// never be cached (a stage rewrote the query, semi-join specs were extracted, EXISTS
+    /// subqueries were prepared, or more than one source bound) stores the shared ineligible
+    /// marker so later executions skip the analysis. An eligible shape is published only when the
+    /// schema stamp read before the pipeline still holds — a stamp that moved means a schema
+    /// change raced the bind, and a possibly-torn binding is dropped rather than cached (the next
+    /// execution simply tries again). Freezing the resolver must precede publication: from the
+    /// moment another execution can see it, its memo is read-only.
+    /// </summary>
+    private static BoundQuerySlot? TryStoreBoundQuerySlot(
+        DatabaseDescriptor database,
+        NodeAst ast,
+        SelectQuery createdQuery,
+        BoundSelectQuery boundQuery,
+        List<SemiJoinSpec> semiJoinSpecs,
+        ExistsSubqueryRegistry? existsRegistry,
+        bool cacheCandidate,
+        TableDescriptor? stampTable,
+        int stampVersion,
+        long stampGeneration)
+    {
+        bool shapeEligible = cacheCandidate
+            && ReferenceEquals(boundQuery.Query, createdQuery)
+            && semiJoinSpecs.Count == 0
+            && existsRegistry is null
+            && boundQuery.Sources.Count == 1
+            && boundQuery.DerivedSources.Count == 0;
+
+        if (!shapeEligible)
+        {
+            database.BoundQueries.Store(ast, BoundQuerySlot.Ineligible);
+            return null;
+        }
+
+        if (!ReferenceEquals(boundQuery.Sources[0].Table, stampTable)
+            || stampTable!.Schema.Version != stampVersion
+            || stampTable.Schema.ContentsGeneration != stampGeneration)
+            return null;
+
+        boundQuery.RowNames.FreezeForSharedReuse();
+
+        BoundQuerySlot slot = new(stampTable, boundQuery, stampVersion, stampGeneration);
+        database.BoundQueries.Store(ast, slot);
+        return slot;
     }
 
     /// <summary>

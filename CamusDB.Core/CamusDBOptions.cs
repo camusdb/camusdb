@@ -409,6 +409,21 @@ public sealed record CamusDBOptions
     public int SqlParserCacheSweepSeconds { get; init; } = 60;
 
     /// <summary>
+    /// Enables reuse of a SELECT statement's binding — source resolution, name resolution,
+    /// validation, and required-column analysis — across executions of the same cached SQL text.
+    /// Reuse is keyed by the parser cache's shared AST instance, is validated against the source
+    /// table's schema stamp on every execution, and applies only to single-table, no-subquery
+    /// SELECT statements; every other shape binds per execution as before. Per-execution guards
+    /// (privileges, the schema catch-up fence, schema-version pinning) always re-run.
+    /// <para>
+    /// On by default: like the parser cache above, this changes no statement semantics — it only
+    /// removes repeated recomputation. Set to <c>false</c> to force a full rebind per execution.
+    /// </para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public bool BoundQueryCacheEnabled { get; init; } = true;
+
+    /// <summary>
     /// Maximum number of rows the hash-join build phase may materialise before degrading, used
     /// only when <see cref="SpillEnabled"/> is <c>false</c>: the build falls back to a nested-loop
     /// join for correctness. When spill is enabled the build instead routes to the Grace/hybrid

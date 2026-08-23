@@ -285,6 +285,7 @@ public static class ConfigResolver
         CostBasedJoinOrderEnabled = config.CostBasedJoinOrderEnabled,
         PlanCacheEnabled = config.PlanCacheEnabled,
         PlanCacheMaxEntries = config.PlanCacheMaxEntries,
+        BoundQueryCacheEnabled = config.BoundQueryCacheEnabled,
 
         RegexMatchTimeoutMs = config.RegexMatchTimeoutMs,
         RegexCacheMaxEntries = config.RegexCacheMaxEntries,

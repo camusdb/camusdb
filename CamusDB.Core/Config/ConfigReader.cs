@@ -64,6 +64,7 @@ public class ConfigReader
         "cost_based_join_order_enabled",
         "plan_cache_enabled",
         "plan_cache_max_entries",
+        "bound_query_cache_enabled",
         "regex_match_timeout_ms",
         "regex_cache_max_entries",
         "raft_node_id",

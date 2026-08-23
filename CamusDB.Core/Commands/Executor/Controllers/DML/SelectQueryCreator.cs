@@ -20,6 +20,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 /// </summary>
 internal sealed class SelectQueryCreator
 {
+    /// <summary>
+    /// Builds the logical query from the AST.
+    /// <para><b>Parameter independence (audited):</b> the result is a pure function of the AST. No
+    /// code path here reads a ticket, a parameter dictionary, a transaction, or ambient session
+    /// state — placeholders stay placeholder nodes and resolve at evaluation time. The bound-query
+    /// cache relies on this: one execution's <see cref="SelectQuery"/> is reused verbatim by later
+    /// executions with different parameter values. A change that makes this method consult a
+    /// parameter value must also make the affected statement shape ineligible for that cache.</para>
+    /// </summary>
     public SelectQuery CreateSelectQuery(NodeAst ast)
     {
         if (ast.nodeType != NodeType.Select)
