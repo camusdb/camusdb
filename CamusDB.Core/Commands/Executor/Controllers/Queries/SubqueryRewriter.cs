@@ -37,6 +37,30 @@ internal sealed class SubqueryRewriter
     }
 
     /// <summary>
+    /// True when the expression tree contains a node this rewriter would act on. The rewrite walks
+    /// recurse through left/right children only, so this scan mirrors exactly that traversal: an
+    /// expression this scan clears is one the walk would have returned unchanged, node for node.
+    /// Checked before rewriting so the common no-subquery predicate — every point read and point
+    /// update — skips the recursive async walk, which allocated a <c>Task</c> and a state-machine
+    /// box per AST node per statement execution only to return the same references.
+    /// <paramref name="includeExists"/> selects the projection rewriter's wider trigger set (it also
+    /// resolves EXISTS); the WHERE rewriter leaves EXISTS to <see cref="ExistsSubqueryPreparer"/>.
+    /// </summary>
+    private static bool ContainsSubqueryToRewrite(NodeAst expr, bool includeExists)
+    {
+        if (expr.nodeType is NodeType.ExprScalarSubquery or NodeType.ExprInSubquery or NodeType.ExprNotInSubquery)
+            return true;
+
+        if (includeExists && expr.nodeType is NodeType.ExprExistsSubquery or NodeType.ExprExistsCorrelated)
+            return true;
+
+        if (expr.leftAst is not null && ContainsSubqueryToRewrite(expr.leftAst, includeExists))
+            return true;
+
+        return expr.rightAst is not null && ContainsSubqueryToRewrite(expr.rightAst, includeExists);
+    }
+
+    /// <summary>
     /// Rewrites an expression that appears in a projection position by pre-materializing any
     /// uncorrelated subquery it contains (scalar, <c>IN</c>/<c>NOT IN</c>, and <c>EXISTS</c>) into a
     /// literal, so the synchronous <c>SqlExecutor.EvalExpr</c> can finish the projection. Used by
@@ -44,11 +68,17 @@ internal sealed class SubqueryRewriter
     /// Unlike the WHERE rewriter (<see cref="RewriteSelectQueryAsync"/>), this also resolves EXISTS,
     /// because a FROM-less projection has no per-row EXISTS-preparer stage to fall back on.
     /// </summary>
-    public async Task<NodeAst> RewriteProjectionExpressionAsync(
+    public async ValueTask<NodeAst> RewriteProjectionExpressionAsync(
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket)
     {
+        // Nothing to rewrite anywhere below this node: return it unchanged without the recursive
+        // walk. Running the scan at every recursion level is deliberate — a subquery-free subtree
+        // exits here immediately, so the walk only descends where a rewrite can actually happen.
+        if (!ContainsSubqueryToRewrite(expr, includeExists: true))
+            return expr;
+
         switch (expr.nodeType)
         {
             case NodeType.ExprExistsSubquery:
@@ -109,26 +139,28 @@ internal sealed class SubqueryRewriter
     /// SELECT) would silently return wrong rows, so it instead surfaces the explicit
     /// "must be resolved" guard. Returns the same node reference when nothing was rewritten.
     /// </summary>
-    public Task<NodeAst> RewriteWhereExpressionAsync(
+    public ValueTask<NodeAst> RewriteWhereExpressionAsync(
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket)
-        => RewriteExpressionAsync(database, expr, ticket);
+        => ContainsSubqueryToRewrite(expr, includeExists: false)
+            ? new ValueTask<NodeAst>(RewriteExpressionAsync(database, expr, ticket))
+            : new ValueTask<NodeAst>(expr);
 
-    public async Task<SelectQuery> RewriteSelectQueryAsync(
+    public async ValueTask<SelectQuery> RewriteSelectQueryAsync(
         DatabaseDescriptor database,
         SelectQuery query,
         ExecuteSQLTicket ticket)
     {
         BoundPredicate? where = query.Where;
 
-        if (where is not null)
-        {
-            NodeAst rewritten = await RewriteExpressionAsync(database, where.Expression, ticket).ConfigureAwait(false);
-            where = new BoundPredicate(rewritten);
-        }
+        // No subquery in the WHERE (or no WHERE): the walk would return the same expression, so the
+        // query record itself is also unchanged — skip the walk and the record copy entirely.
+        if (where is null || !ContainsSubqueryToRewrite(where.Expression, includeExists: false))
+            return query;
 
-        return query with { Where = where };
+        NodeAst rewritten = await RewriteExpressionAsync(database, where.Expression, ticket).ConfigureAwait(false);
+        return query with { Where = new BoundPredicate(rewritten) };
     }
 
     private async Task<NodeAst> RewriteExpressionAsync(

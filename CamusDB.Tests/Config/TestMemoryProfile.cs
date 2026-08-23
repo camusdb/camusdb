@@ -87,10 +87,77 @@ public sealed class TestMemoryProfile
         Assert.That(dev.RocksDbSharedMemoryBudgetMb, Is.EqualTo(64));
         Assert.That(dev.RocksDbSharedMemtableBudgetMb, Is.EqualTo(16));
 
-        // The actor caches are budgeted as a layer and split, so the total is what the profile promises
-        // however many cores the machine running this has.
-        Assert.That(dev.MaxBytesPerActor * Math.Max(1, dev.KeyValueWorkers),
-            Is.LessThanOrEqualTo(Math.Max(32 * OneMb, dev.KeyValueWorkers * OneMb)));
+        // The actor caches are budgeted as a layer and split across the actor count Kahuna will
+        // actually run (the config leaves key_value_workers unset here, so the count is Kahuna's own
+        // default, not the unset 0), so the aggregate is what the profile promises however many cores
+        // the machine running this has.
+        int actors = EmbeddedKahunaOptionsBuilder.EffectiveActorCount(dev);
+        Assert.That(dev.MaxBytesPerActor * actors,
+            Is.LessThanOrEqualTo(Math.Max(32 * OneMb, actors * OneMb)));
+    }
+
+    [Test]
+    public void ProportionalFloorsHoldOnALargeMachine()
+    {
+        // 8 GiB: every proportional share clears its historic floor, so the sizing must be
+        // byte-for-byte what the plain clamps always produced — the yielding floors are inert.
+        EmbeddedKahunaOptions options = new() { KeyValueWorkers = 32 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 8L * 1024 * OneMb);
+
+        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(819));   // 10% of RAM
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(204)); // a quarter of the cache
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(16 * OneMb));       // 512 MiB layer / 32 actors
+        Assert.That(options.MaxEntriesPerActor, Is.EqualTo(32_768));         // bytes / 512
+    }
+
+    [Test]
+    public void ProportionalFloorsYieldInsideASmallContainer()
+    {
+        // 1536 MiB: the historic floors (320 MB cache, 128 MB memtables, 8 MB x 32 actors) all
+        // exceed their proportional shares. As plain clamps they claimed ~40% of the container in
+        // caches and the node was OOM-killed under load; the percentages must govern instead.
+        EmbeddedKahunaOptions options = new() { KeyValueWorkers = 32 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 1536 * OneMb);
+
+        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(153));  // 10%, not the 320 floor
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(38)); // a quarter, not the 128 floor
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(3 * OneMb));       // 96 MiB layer / 32, not 8 MiB
+        Assert.That(options.MaxEntriesPerActor, Is.EqualTo(6_144));         // derived, not the 10k floor
+
+        // The invariant the shared-bundle builder enforces at boot must hold at every size.
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(options.RocksDbSharedMemoryBudgetMb));
+    }
+
+    [Test]
+    public void ProportionalSizingStopsAtDegenerateFloors()
+    {
+        // 256 MiB: below every proportional share. The degenerate minimums keep each cache usable,
+        // and the memtable sub-budget stays inside the cache it is charged to.
+        EmbeddedKahunaOptions options = new() { KeyValueWorkers = 128 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 256 * OneMb);
+
+        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(64));
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(16));
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(OneMb));           // 64 MiB layer / 128 actors, floored
+        Assert.That(options.MaxEntriesPerActor, Is.EqualTo(2_048));
+    }
+
+    [Test]
+    public void ActorSplitAnticipatesKahunasWorkerDefault()
+    {
+        // key_value_workers unset: Kahuna fills its 32+ default only after these options reach it.
+        // The split must divide by that coming count — dividing by max(1, unset = 0) hands the whole
+        // layer to every actor, multiplying the layer by the actor count at runtime.
+        EmbeddedKahunaOptions options = new();
+        int actors = EmbeddedKahunaOptionsBuilder.EffectiveActorCount(options);
+        Assert.That(actors, Is.GreaterThanOrEqualTo(32));
+
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 8L * 1024 * OneMb);
+
+        // 512 MiB layer split across the actors Kahuna will run; the aggregate stays near the layer
+        // (per-actor floor rounding at most), never layer x actors.
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(Math.Max(512 * OneMb / actors, OneMb)));
+        Assert.That(options.MaxBytesPerActor * actors, Is.LessThanOrEqualTo(512 * OneMb + actors * OneMb));
     }
 
     [Test]

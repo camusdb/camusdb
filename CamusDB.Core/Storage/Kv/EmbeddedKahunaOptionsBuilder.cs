@@ -397,8 +397,9 @@ public static class EmbeddedKahunaOptionsBuilder
     /// <summary>
     /// Sizes the same four cache knobs as <see cref="ApplyMemoryProportionalDefaults"/>, but to small
     /// fixed budgets that ignore how much memory the machine has: about 64 MiB of RocksDB block cache
-    /// (16 MiB of it for memtables) and 32 MiB of key/value actor caches, roughly 96 MiB in total
-    /// against the ~1.5 GiB the proportional sizing takes on an 8 GiB box.
+    /// (16 MiB of it for memtables) and ~32 MiB of key/value actor caches (1 MiB per actor once the
+    /// 1 MiB floor binds, so a node running more than 32 actors gets proportionally more), roughly
+    /// 96 MiB in total against the ~1.3 GiB the proportional sizing takes on an 8 GiB box.
     ///
     /// <para>Selected by <c>memory_profile: dev</c> / <c>--memory-profile dev</c>, for a node sharing a
     /// machine with the application being developed against it. The budgets are ceilings on caching
@@ -429,7 +430,11 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
             baseline.RocksDbSharedMemtableBudgetMb = Math.Min(MemtableMb, baseline.RocksDbSharedMemoryBudgetMb);
 
-        int actorCount = Math.Max(1, baseline.KeyValueWorkers);
+        // Divide by the actor count the node will actually run, not the possibly-unset config value:
+        // Kahuna fills the worker default (32 or more) only after these options reach it, so dividing
+        // by max(1, unset = 0) would budget the whole 32 MiB layer to every actor and turn the
+        // profile's ~100 MiB promise into a gigabyte.
+        int actorCount = EffectiveActorCount(baseline);
 
         // Budgeted as a layer and split, matching the proportional path: a per-actor constant would be
         // multiplied by one actor per CPU, so the same profile would mean 32 MiB on a 4-core laptop and
@@ -453,21 +458,31 @@ public static class EmbeddedKahunaOptionsBuilder
     /// (and resolved a pipelining collapse to 3.4 tx/s that was pure read-I/O queueing).
     ///
     /// <para>Sizing policy, all against <see cref="GCMemoryInfo.TotalAvailableMemoryBytes"/> (which
-    /// respects container memory limits): RocksDB block cache = 10% of RAM clamped to [320 MB, 2 GB];
-    /// memtable budget = a quarter of that, clamped to [128 MB, 1 GB]; key/value actor caches = 6.25%
-    /// of RAM (at least 64 MB for the layer as a whole) divided across the shard actors and clamped to
-    /// [8 MB, 2 GB] per actor, with the per-actor entry cap derived at an assumed ~512 B/entry, clamped
-    /// to [10k, 4M]. Roughly 16% of RAM across
-    /// both cache layers at the defaults, and never more than 4 GB in total however large the machine
-    /// is. The fractions and the ceilings are deliberately modest: an unconfigured node is far more
-    /// often a developer workstation or a CI container sharing the box with a compiler and an IDE than
-    /// a dedicated database server, and an over-eager default there costs the whole machine. A
-    /// dedicated server should raise all four keys explicitly — see the worked example in
-    /// <c>config.yml</c>. Every value remains overridable via the corresponding <c>kahuna.*</c> key.</para>
+    /// respects container memory limits): RocksDB block cache = 10% of RAM; memtable budget = a
+    /// quarter of the block cache; key/value actor caches = 6.25% of RAM (at least 64 MB for the layer
+    /// as a whole) divided across the shard actors, with the per-actor entry cap derived at an assumed
+    /// ~512 B/entry. Ceilings: 2 GB block cache, 1 GB memtables, 2 GB per actor, 4M entries. Roughly
+    /// 16% of RAM across both cache layers at the defaults, and never more than 4 GB in total however
+    /// large the machine is. The fractions and the ceilings are deliberately modest: an unconfigured
+    /// node is far more often a developer workstation or a CI container sharing the box with a
+    /// compiler and an IDE than a dedicated database server, and an over-eager default there costs
+    /// the whole machine. A dedicated server should raise all four keys explicitly — see the worked
+    /// example in <c>config.yml</c>. Every value remains overridable via the corresponding
+    /// <c>kahuna.*</c> key.</para>
+    ///
+    /// <para>Floors yield on small machines (<see cref="ClampWithYieldingFloor"/>). The historic
+    /// floors — 320 MB block cache, 128 MB memtables, 8 MB per actor, 10k entries — apply only while
+    /// each fits its proportional share; below that the percentage governs, down to degenerate
+    /// minimums of 64 MB cache, 16 MB memtables, 1 MB per actor, and 2k entries. Fixed floors on a
+    /// small container are how this sizing used to overcommit: a 1536 MiB node took the 320 MB cache
+    /// floor (21% of the container, native memory) plus the 128 MB memtable floor plus per-actor
+    /// floors multiplied by 32+ actors inside the managed heap — roughly 40% of its memory pinned in
+    /// caches for a working set of a few MB — and was OOM-killed under load.</para>
     ///
     /// <para>Runs after every explicit override has been applied, and touches only knobs whose
     /// config value is null — an operator's explicit setting always wins. Must also run after the
-    /// <c>key_value_workers</c> override, since the per-actor split divides by the final actor count.</para>
+    /// <c>key_value_workers</c> override, since the per-actor split divides by the final actor count
+    /// (<see cref="EffectiveActorCount"/>).</para>
     /// </summary>
     private static void ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna)
     {
@@ -475,33 +490,77 @@ public static class EmbeddedKahunaOptionsBuilder
         if (totalRam <= 0)
             return; // Unknown memory size: keep the fixed baseline values.
 
+        ApplyMemoryProportionalDefaults(baseline, kahuna, totalRam);
+    }
+
+    /// <summary>
+    /// Core of the proportional sizing, driven by an explicit memory size. Split out (internal) so
+    /// tests can assert the floor behavior at container sizes the test machine does not have; the
+    /// public path above always passes the machine's real, limit-aware total.
+    /// </summary>
+    internal static void ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna, long totalRam)
+    {
         const long OneMb = 1024L * 1024;
 
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
-            baseline.RocksDbSharedMemoryBudgetMb = (int)Math.Clamp(totalRam / 10 / OneMb, 320, 2048);
+            baseline.RocksDbSharedMemoryBudgetMb = (int)(ClampWithYieldingFloor(
+                totalRam / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
-            baseline.RocksDbSharedMemtableBudgetMb = (int)Math.Clamp(baseline.RocksDbSharedMemoryBudgetMb / 4, 128, 1024);
+            baseline.RocksDbSharedMemtableBudgetMb = (int)ClampWithYieldingFloor(
+                baseline.RocksDbSharedMemoryBudgetMb / 4, historicFloor: 128, degenerateFloor: 16, ceiling: 1024);
 
-        int actorCount = Math.Max(1, baseline.KeyValueWorkers);
+        int actorCount = EffectiveActorCount(baseline);
 
         if (kahuna.MaxBytesPerActor is null)
         {
             // Budget the actor caches as a total and then split, instead of flooring each actor
-            // independently. A per-actor floor gets multiplied by the actor count — one per CPU by
-            // default — so on a machine with many cores relative to its RAM it silently overshoots
-            // the intended share of memory: a 64 MB floor across 16 actors claimed 1 GB of a 4 GB
-            // container, 25% of it, when the layer was meant to take 6.25%. The floor therefore
-            // applies to the whole layer; the per-actor minimum below only keeps an individual
-            // cache from shrinking to a size that cannot hold a useful working set.
+            // independently. A per-actor floor gets multiplied by the actor count — 32 or more by
+            // default — so on a machine with little RAM relative to its actor count it silently
+            // overshoots the intended share of memory: an 8 MB floor across 32 actors claims 256 MB
+            // of a 1.5 GB container, inside the managed heap, when the layer was meant to take
+            // 6.25%. The floor therefore applies to the whole layer; the per-actor floor yields to
+            // the split, down to a 1 MiB minimum that keeps an individual cache from shrinking to a
+            // size that cannot hold a useful working set at all.
             long actorLayerBytes = Math.Max(totalRam / 16, 64L * OneMb);
-            baseline.MaxBytesPerActor = Math.Clamp(actorLayerBytes / actorCount, 8L * OneMb, 2048L * OneMb);
+            baseline.MaxBytesPerActor = ClampWithYieldingFloor(
+                actorLayerBytes / actorCount, historicFloor: 8L * OneMb, degenerateFloor: OneMb, ceiling: 2048L * OneMb);
         }
 
-        // Kahuna evicts when *either* cap is exceeded, so the smaller of the two binds. Keep the entry
-        // floor below what the byte floor implies (8 MB at ~512 B/entry is ~16k entries) — a floor
-        // above it would be dead, describing a cache larger than its own byte budget allows.
+        // Kahuna evicts when *either* cap is exceeded, so the smaller of the two binds. The entry cap
+        // is derived from the byte cap at an assumed ~512 B/entry, and its floor yields with it so the
+        // two keep describing one cache: a fixed 10k-entry floor over a 1-3 MiB byte budget would
+        // describe a cache larger than its own byte budget allows.
         if (kahuna.MaxEntriesPerActor is null)
-            baseline.MaxEntriesPerActor = (int)Math.Clamp(baseline.MaxBytesPerActor / 512, 10_000, 4_000_000);
+            baseline.MaxEntriesPerActor = (int)ClampWithYieldingFloor(
+                baseline.MaxBytesPerActor / 512, historicFloor: 10_000, degenerateFloor: 2_000, ceiling: 4_000_000);
+    }
+
+    /// <summary>
+    /// The key/value shard actor count the node will actually run: the configured value when set,
+    /// else the default Kahuna's configuration validation fills in for an unset count (32, or 4 per
+    /// core when that is larger). The per-actor cache budgets are divided by this count <b>before</b>
+    /// the options reach Kahuna — the worker default is filled in later, inside Kahuna — so the
+    /// sizing here must anticipate that default rather than divide by the unset value: dividing by
+    /// <c>max(1, 0)</c> budgets the entire actor layer to every one of the 32+ actors, multiplying
+    /// the layer by the actor count. If Kahuna's default changes, this must change with it.
+    /// </summary>
+    internal static int EffectiveActorCount(EmbeddedKahunaOptions baseline) =>
+        baseline.KeyValueWorkers > 0 ? baseline.KeyValueWorkers : Math.Max(32, Environment.ProcessorCount * 4);
+
+    /// <summary>
+    /// Clamps a proportionally-sized budget between a floor and a ceiling, with a floor that yields
+    /// on small machines: the effective floor is <paramref name="historicFloor"/> or the proportional
+    /// value itself, whichever is smaller, and never below <paramref name="degenerateFloor"/>. On a
+    /// machine large enough that the proportional value reaches the historic floor this is exactly
+    /// <c>Math.Clamp(proportional, historicFloor, ceiling)</c>; on a smaller one the proportional
+    /// value governs, so a floor can never claim a multiple of its intended share of the machine's
+    /// memory. The degenerate floor is where shrinking stops, because a smaller cache no longer holds
+    /// a useful working set at all.
+    /// </summary>
+    internal static long ClampWithYieldingFloor(long proportional, long historicFloor, long degenerateFloor, long ceiling)
+    {
+        long floor = Math.Min(historicFloor, Math.Max(proportional, degenerateFloor));
+        return Math.Clamp(proportional, floor, ceiling);
     }
 }

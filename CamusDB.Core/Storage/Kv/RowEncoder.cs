@@ -44,8 +44,9 @@ public static class RowEncoder
     /// reallocating its plan arrays in row loops (analyze samples, DDL backfills, update/delete loads).
     /// Keyed weakly by the schema instance so a dropped/replaced schema's codecs are collected with it;
     /// keyed internally by version because a version's layout never changes (history is append-only).
-    /// The per-scan <see cref="RowDecodeState"/> plan cache still covers <see cref="DecodeToQueryRowAsync"/>;
-    /// this closes the remaining per-row rebuild on the dictionary decode/encode facades.
+    /// Full decode <b>plans</b> (which hold a codec plus layout/visibility decisions) are cached
+    /// separately in <see cref="SharedPlanCache"/>; this cache covers the encode facades and any
+    /// remaining plan-less decode.
     /// </summary>
     private static readonly ConditionalWeakTable<TableSchema, ConcurrentDictionary<int, CompiledRowCodec>> CodecCache = new();
 
@@ -55,6 +56,128 @@ public static class RowEncoder
         return perSchema.TryGetValue(version, out CompiledRowCodec? cached)
             ? cached
             : perSchema.GetOrAdd(version, CompiledRowCodec.Build(version, columns));
+    }
+
+    /// <summary>
+    /// Per-<see cref="TableSchema"/> cache of fully-built decode plans, shared across statements.
+    /// The per-scan <see cref="RowDecodeState"/>/<see cref="DictionaryDecodeState"/> memoisation only
+    /// helps loops that decode many rows; a point lookup (one row per statement) built a fresh plan —
+    /// including a <see cref="RowLayout"/> and its frozen name-index dictionary — on every execution,
+    /// which an allocation profile of a point-op workload measured as the single largest allocation
+    /// source in the engine. A plan is a pure function of its cache key: the stored schema version
+    /// (append-only history), the visibility schema version, and the required-column set. Plans are
+    /// immutable after build and the codec they hold is already shared, so cross-thread reuse is safe.
+    /// Keyed weakly by the schema instance so a dropped/replaced schema's plans are collected with it.
+    ///
+    /// <para>
+    /// Invalidation: two DDL paths mutate a <see cref="TableSchema"/> instance in ways a
+    /// version-keyed entry alone would not survive — column rename rewrites the <b>history</b>
+    /// snapshots in place (so an old stored version's decoded names change retroactively), and a
+    /// materialized-view refresh swaps the whole column set while reusing version numbers. Both bump
+    /// <see cref="TableSchema.Version"/> or <see cref="TableSchema.ContentsGeneration"/>, so the
+    /// cache holder records the (version, generation) pair it was built under and
+    /// <see cref="GetSharedPlans"/> discards the whole holder when either moves. DDL is rare; a
+    /// wholesale drop that also evicts still-valid old-version plans is the simple safe choice.
+    /// </para>
+    /// </summary>
+    private static readonly ConditionalWeakTable<TableSchema, StrongBox<SharedDecodePlans>> SharedPlanCache = new();
+
+    /// <summary>
+    /// Cap on cached plans per schema and plan kind. Point workloads produce a handful of distinct
+    /// required-column sets; the cap only guards against a flood of unique ad-hoc shapes. At the cap,
+    /// new shapes build without caching (same policy as the SQL parser cache's entry cap).
+    /// </summary>
+    private const int SharedPlanCacheCap = 256;
+
+    /// <summary>
+    /// The two per-schema plan dictionaries behind <see cref="SharedPlanCache"/>, stamped with the
+    /// schema shape they were built under so any in-place schema mutation retires them wholesale.
+    /// </summary>
+    private sealed class SharedDecodePlans
+    {
+        /// <summary><see cref="TableSchema.Version"/> at holder creation; a mismatch retires the holder.</summary>
+        public required int SchemaVersion { get; init; }
+
+        /// <summary><see cref="TableSchema.ContentsGeneration"/> at holder creation; a mismatch retires the holder.</summary>
+        public required long ContentsGeneration { get; init; }
+
+        public readonly ConcurrentDictionary<DecodePlanKey, RowDecodePlan> QueryPlans = new();
+        public readonly ConcurrentDictionary<DecodePlanKey, DictionaryDecodePlan> WritablePlans = new();
+    }
+
+    /// <summary>
+    /// Resolves the schema's current plan holder, replacing it when the schema's (version,
+    /// generation) stamp has moved since the holder was created. The replacement race is benign:
+    /// concurrent readers may briefly build into a holder another thread is retiring — those plans
+    /// are simply rebuilt on the next lookup. Coherence relies on the DDL apply paths bumping the
+    /// stamp as part of the same mutation, which every alter/rename/refresh apply does.
+    /// </summary>
+    private static SharedDecodePlans GetSharedPlans(TableSchema schema)
+    {
+        StrongBox<SharedDecodePlans> box = SharedPlanCache.GetValue(
+            schema,
+            static s => new StrongBox<SharedDecodePlans>(new SharedDecodePlans
+            {
+                SchemaVersion = s.Version,
+                ContentsGeneration = s.ContentsGeneration,
+            }));
+
+        SharedDecodePlans plans = box.Value!;
+        if (plans.SchemaVersion == schema.Version && plans.ContentsGeneration == schema.ContentsGeneration)
+            return plans;
+
+        SharedDecodePlans fresh = new()
+        {
+            SchemaVersion = schema.Version,
+            ContentsGeneration = schema.ContentsGeneration,
+        };
+        box.Value = fresh;
+        return fresh;
+    }
+
+    /// <summary>
+    /// Value key of one decode plan: everything the plan build reads besides the (immutable)
+    /// schema history. <see cref="RequiredColumns"/> is the canonical form of the caller's set —
+    /// ordinal-sorted and newline-joined — so value-equal sets share a plan regardless of iteration
+    /// order or set instance. Canonicalisation is deliberately case-<b>sensitive</b>: two sets that
+    /// differ only in casing get separate entries (at worst a duplicate plan), which is always safe
+    /// regardless of the comparer the caller's set was built with. <see cref="DecodeAll"/>
+    /// distinguishes "no required-column filter" from any real set.
+    /// </summary>
+    private readonly record struct DecodePlanKey(
+        int StoredVersion,
+        long? VisibilityVersion,
+        bool DecodeAll,
+        string RequiredColumns);
+
+    private static DecodePlanKey MakePlanKey(int storedVersion, long? visibilityVersion, IReadOnlySet<string>? requiredColumns)
+    {
+        if (requiredColumns is null)
+            return new DecodePlanKey(storedVersion, visibilityVersion, DecodeAll: true, string.Empty);
+
+        string[] names = new string[requiredColumns.Count];
+        int i = 0;
+        foreach (string name in requiredColumns)
+            names[i++] = name;
+        Array.Sort(names, StringComparer.Ordinal);
+
+        return new DecodePlanKey(storedVersion, visibilityVersion, DecodeAll: false, string.Join('\n', names));
+    }
+
+    /// <summary>
+    /// Test-only seam: returns the shared cached query plan for the given inputs, or null when none is
+    /// cached. Lets tests assert that repeated one-off decodes reuse one plan instance (and that
+    /// different inputs do not) without exposing the cache itself. Not for production use.
+    /// </summary>
+    internal static RowDecodePlan? PeekCachedQueryPlanForTest(TableSchema schema, int storedVersion, long? visibilityVersion, IReadOnlySet<string>? requiredColumns)
+    {
+        return SharedPlanCache.TryGetValue(schema, out StrongBox<SharedDecodePlans>? box)
+            && box.Value is SharedDecodePlans shared
+            && shared.SchemaVersion == schema.Version
+            && shared.ContentsGeneration == schema.ContentsGeneration
+            && shared.QueryPlans.TryGetValue(MakePlanKey(storedVersion, visibilityVersion, requiredColumns), out RowDecodePlan? plan)
+            ? plan
+            : null;
     }
 
     private enum ColumnVisibility
@@ -126,6 +249,8 @@ public static class RowEncoder
     /// every row at the same stored version shares one plan (usually a single entry). Create one
     /// instance per scan and pass it to <see cref="DecodeToQueryRowAsync"/>; never share it across
     /// scans that differ in those inputs, and never treat it as global transaction state.
+    /// A state miss falls back to the schema-shared plan cache (<see cref="SharedPlanCache"/>), so the
+    /// per-scan state is a fast path that skips key construction per row, not the only reuse.
     /// </summary>
     public sealed class RowDecodeState
     {
@@ -192,6 +317,8 @@ public static class RowEncoder
     /// stored version shares one plan (usually a single entry). Create one instance per chunk/scan loop
     /// and pass it to <see cref="DecodeWritableAsync"/>; never share it across loops that differ in
     /// those inputs, and never treat it as global transaction state.
+    /// A state miss falls back to the schema-shared plan cache (<see cref="SharedPlanCache"/>), so the
+    /// per-loop state is a fast path that skips key construction per row, not the only reuse.
     /// </summary>
     public sealed class DictionaryDecodeState
     {
@@ -441,33 +568,31 @@ public static class RowEncoder
 
         int schemaVersion = ReadRowHeader(data.Span);
 
-        if (decodeState is not null)
+        // Plan BUILDING may await lazy schema-history loading; plan EXECUTION below is fully
+        // synchronous and span-based, so no span crosses an await. The stateless path shares the
+        // per-schema plan cache: a point mutation (one row per statement) decodes through the same
+        // prebuilt plan on every execution instead of re-running schema-history lookups and
+        // per-column visibility resolution. Output is value-identical to the historical plan-less
+        // decode for the same inputs.
+        DictionaryDecodePlan? plan;
+        if (decodeState is null || !decodeState.Plans.TryGetValue(schemaVersion, out plan))
         {
-            // Plan BUILDING may await lazy schema-history loading; plan EXECUTION below is fully
-            // synchronous and span-based, so no span crosses an await.
-            if (!decodeState.Plans.TryGetValue(schemaVersion, out DictionaryDecodePlan? plan))
+            SharedDecodePlans shared = GetSharedPlans(schema);
+            DecodePlanKey key = MakePlanKey(schemaVersion, visibilitySchemaVersion, requiredColumns);
+
+            if (!shared.WritablePlans.TryGetValue(key, out plan))
             {
                 plan = await BuildDictionaryDecodePlanAsync(
                     schema, txId, schemaVersion, requiredColumns, visibilitySchemaVersion).ConfigureAwait(false);
-                decodeState.Plans.Add(schemaVersion, plan);
+
+                if (shared.WritablePlans.Count < SharedPlanCacheCap)
+                    shared.WritablePlans.TryAdd(key, plan);
             }
 
-            return ExecuteDictionaryDecodePlan(plan, data.Span);
+            decodeState?.Plans.Add(schemaVersion, plan);
         }
 
-        List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
-        List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
-            ? columns
-            : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
-        CompiledRowCodec codec = GetCodec(schema, schemaVersion, columns);
-        return DecodeColumns(
-            codec,
-            columns,
-            visibilityColumns,
-            data.Span,
-            requiredColumns,
-            ColumnVisibility.Writable,
-            injectMissingCurrentColumns: visibilitySchemaVersion is not null);
+        return ExecuteDictionaryDecodePlan(plan, data.Span);
     }
 
     /// <summary>
@@ -621,17 +746,29 @@ public static class RowEncoder
 
         // Resolve or build the decode plan for this stored schema version. Plan BUILDING may await lazy
         // schema-history loading; plan EXECUTION below is fully synchronous and span-based, so no span
-        // crosses an await.
+        // crosses an await. On a per-scan-state miss the schema-shared plan cache is consulted first:
+        // without it, a point lookup (one row per statement) rebuilt the plan — including the layout's
+        // frozen name-index dictionary — on every statement execution.
         RowDecodePlan plan;
         if (decodeState is null || !decodeState.Plans.TryGetValue(schemaVersion, out plan!))
         {
-            List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
-            List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
-                ? columns
-                : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
-            bool injectMissing = visibilitySchemaVersion is not null;
+            SharedDecodePlans shared = GetSharedPlans(schema);
+            DecodePlanKey key = MakePlanKey(schemaVersion, visibilitySchemaVersion, requiredColumns);
 
-            plan = BuildRowDecodePlan(schema, schemaVersion, columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
+            if (!shared.QueryPlans.TryGetValue(key, out plan!))
+            {
+                List<TableColumnSchema> columns = (await schema.GetSchemaHistoryAsync(txId, schemaVersion).ConfigureAwait(false)).Columns!;
+                List<TableColumnSchema>? visibilityColumns = visibilitySchemaVersion is null
+                    ? columns
+                    : await GetVisibilityColumnsAsync(schema, txId, visibilitySchemaVersion.Value).ConfigureAwait(false);
+                bool injectMissing = visibilitySchemaVersion is not null;
+
+                plan = BuildRowDecodePlan(schema, schemaVersion, columns, visibilityColumns, requiredColumns, ColumnVisibility.PublicOnly, injectMissing);
+
+                if (shared.QueryPlans.Count < SharedPlanCacheCap)
+                    shared.QueryPlans.TryAdd(key, plan);
+            }
+
             decodeState?.Plans.Add(schemaVersion, plan);
         }
 

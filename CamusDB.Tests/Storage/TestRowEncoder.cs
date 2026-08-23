@@ -195,6 +195,107 @@ public sealed class TestRowEncoder
         Assert.AreEqual("internal", writable["write_col"].StrValue);
     }
 
+    // ---- shared decode-plan cache -----------------------------------------
+
+    [Test]
+    public async Task DecodeToQueryRow_StatelessDecodes_ReuseOneCachedPlan()
+    {
+        TableSchema schema = MakeSchema(0, Col("id", ColumnType.Id), Col("balance", ColumnType.Integer64));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>
+        {
+            ["id"] = new(ColumnType.Id, rowId.ToString()),
+            ["balance"] = new(ColumnType.Integer64, 42L),
+        }, rowId);
+
+        HashSet<string> required = new(StringComparer.OrdinalIgnoreCase) { "balance" };
+
+        QueryRow first = await RowEncoder.DecodeToQueryRowAsync(
+            schema, HLCTimestamp.Zero, rowId, bytes, CamusDBOptions.Default, required, visibilitySchemaVersion: 0);
+
+        RowEncoder.RowDecodePlan? cached = RowEncoder.PeekCachedQueryPlanForTest(schema, 0, 0, required);
+        Assert.NotNull(cached, "a stateless decode must populate the shared plan cache");
+
+        // A second stateless decode — a different set instance with equal contents — hits the same plan.
+        QueryRow second = await RowEncoder.DecodeToQueryRowAsync(
+            schema, HLCTimestamp.Zero, rowId, bytes, CamusDBOptions.Default,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "balance" }, visibilitySchemaVersion: 0);
+
+        Assert.AreSame(cached, RowEncoder.PeekCachedQueryPlanForTest(schema, 0, 0, required));
+        Assert.AreEqual(42L, first["balance"].LongValue);
+        Assert.AreEqual(42L, second["balance"].LongValue);
+
+        // A different required-column set is a different key, never a hit on the first plan.
+        Assert.Null(RowEncoder.PeekCachedQueryPlanForTest(schema, 0, 0,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "id" }));
+    }
+
+    [Test]
+    public async Task SharedPlanCache_IsRetired_WhenSchemaMutatesInPlace()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("id", ColumnType.Id),
+            Col("shadow", ColumnType.String));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>
+        {
+            ["id"] = new(ColumnType.Id, rowId.ToString()),
+            ["shadow"] = new(ColumnType.String, "hidden"),
+        }, rowId);
+
+        QueryRow before = await RowEncoder.DecodeToQueryRowAsync(
+            schema, HLCTimestamp.Zero, rowId, bytes, CamusDBOptions.Default, requiredColumns: null, visibilitySchemaVersion: 0);
+        Assert.True(before.ContainsKey("shadow"));
+        Assert.NotNull(RowEncoder.PeekCachedQueryPlanForTest(schema, 0, 0, null));
+
+        // In-place DDL apply, the way the alter paths do it: bump the version, install the new layout.
+        List<TableColumnSchema> altered =
+        [
+            Col("id", ColumnType.Id),
+            Col("shadow", ColumnType.String, state: SchemaElementState.DeleteOnly),
+        ];
+        schema.Version = 1;
+        schema.Columns = altered;
+        schema.SchemaHistory!.Add(new TableSchemaHistory { Version = 1, Columns = altered });
+
+        // The version-stamped holder is retired wholesale: the old entry is no longer served.
+        Assert.Null(RowEncoder.PeekCachedQueryPlanForTest(schema, 0, 0, null));
+
+        // A decode at the new visibility version reflects the new element state.
+        QueryRow after = await RowEncoder.DecodeToQueryRowAsync(
+            schema, HLCTimestamp.Zero, rowId, bytes, CamusDBOptions.Default, requiredColumns: null, visibilitySchemaVersion: 1);
+        Assert.False(after.ContainsKey("shadow"));
+        Assert.True(after.ContainsKey("id"));
+    }
+
+    [Test]
+    public async Task DecodeWritable_StatelessDecodes_ShareThePlanAndStayValueIdentical()
+    {
+        TableSchema schema = MakeSchema(0,
+            Col("a", ColumnType.String),
+            Col("b", ColumnType.Integer64));
+        ObjectIdValue rowId = RowId();
+        byte[] bytes = RowEncoder.Encode(schema, new Dictionary<string, ColumnValue>
+        {
+            ["a"] = new(ColumnType.String, "x"),
+            ["b"] = new(ColumnType.Integer64, 7L),
+        }, rowId);
+
+        Dictionary<string, ColumnValue> first = await RowEncoder.DecodeWritableAsync(schema, HLCTimestamp.Zero, rowId, bytes);
+        Dictionary<string, ColumnValue> second = await RowEncoder.DecodeWritableAsync(schema, HLCTimestamp.Zero, rowId, bytes);
+
+        Assert.AreEqual(first.Count, second.Count);
+        Assert.AreEqual("x", second["a"].StrValue);
+        Assert.AreEqual(7L, second["b"].LongValue);
+
+        // A narrowed decode must never be served the decode-all plan.
+        Dictionary<string, ColumnValue> narrowed = await RowEncoder.DecodeWritableAsync(
+            schema, HLCTimestamp.Zero, rowId, bytes,
+            requiredColumns: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "b" });
+        Assert.False(narrowed.ContainsKey("a"));
+        Assert.AreEqual(7L, narrowed["b"].LongValue);
+    }
+
     [Test]
     public void Decode_DoesNotMapDroppedColumnBytesToReaddedSameNameColumn()
     {

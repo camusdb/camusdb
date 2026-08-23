@@ -48,18 +48,46 @@ internal sealed class SemiJoinAnalyzer
     /// Inspects <paramref name="query"/>'s WHERE clause for eligible IN / NOT IN predicates
     /// and returns a modified query (with those predicates removed) plus the extracted specs.
     /// </summary>
-    public async Task<(SelectQuery Query, List<SemiJoinSpec> Specs)> AnalyzeAsync(
+    public ValueTask<(SelectQuery Query, List<SemiJoinSpec> Specs)> AnalyzeAsync(
         DatabaseDescriptor database,
         SelectQuery query,
         ExecuteSQLTicket ticket)
     {
-        if (query.Source is not TableSource)
-            return (query, []);
+        // Only a top-level (AND-chain) IN / NOT IN subquery predicate can become a spec — the same
+        // positions FlattenAnd exposes. Without one, the flatten/partition lists and the async walk
+        // are pure per-statement garbage; return the query untouched, synchronously.
+        if (query.Source is not TableSource || query.Where is null || !HasTopLevelInSubquery(query.Where.Expression))
+            return new ValueTask<(SelectQuery, List<SemiJoinSpec>)>((query, []));
 
-        if (query.Where is null)
-            return (query, []);
+        return AnalyzeCoreAsync(database, query, ticket);
+    }
 
-        List<NodeAst> predicates = FlattenAnd(query.Where.Expression);
+    /// <summary>
+    /// True when the AND-chain of <paramref name="expr"/> contains an IN / NOT IN subquery predicate
+    /// at a position <c>FlattenAnd</c> would expose. Mirrors that traversal exactly: it descends only
+    /// through <see cref="NodeType.ExprAnd"/>, so a subquery nested under OR/NOT (which the analyzer
+    /// leaves in place) does not trigger the slow path.
+    /// </summary>
+    private static bool HasTopLevelInSubquery(NodeAst expr)
+    {
+        if (expr.nodeType is NodeType.ExprInSubquery or NodeType.ExprNotInSubquery)
+            return true;
+
+        if (expr.nodeType != NodeType.ExprAnd)
+            return false;
+
+        if (expr.leftAst is not null && HasTopLevelInSubquery(expr.leftAst))
+            return true;
+
+        return expr.rightAst is not null && HasTopLevelInSubquery(expr.rightAst);
+    }
+
+    private async ValueTask<(SelectQuery Query, List<SemiJoinSpec> Specs)> AnalyzeCoreAsync(
+        DatabaseDescriptor database,
+        SelectQuery query,
+        ExecuteSQLTicket ticket)
+    {
+        List<NodeAst> predicates = FlattenAnd(query.Where!.Expression);
         List<SemiJoinSpec> specs = [];
         List<NodeAst> remaining = [];
 

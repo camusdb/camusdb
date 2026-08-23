@@ -223,16 +223,20 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void UnsetSharedMemoryFields_SizeProportionallyToMachineMemory()
     {
         // Unset shared-memory knobs are sized against the machine (respecting container limits)
-        // rather than left at the fixed baseline: block cache = 10% of RAM clamped to [320 MB, 2 GB],
-        // memtable budget = a quarter of that clamped to [128 MB, 1 GB]. The expected values are
-        // recomputed here from the same input the builder reads, so the assertion holds on any
-        // machine — hardcoding the baseline is what made this test machine-dependent before.
+        // rather than left at the fixed baseline: block cache = 10% of RAM, memtable budget = a
+        // quarter of that, both with floors that yield below their proportional share (the exact
+        // small-container values are pinned in TestMemoryProfile, which drives the sizing with
+        // synthetic RAM sizes). The expected values are recomputed here from the same input the
+        // builder reads, so the assertion holds on any machine — hardcoding the baseline is what
+        // made this test machine-dependent before.
         const long OneMb = 1024L * 1024;
         long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
 
-        int expectedBlockCacheMb = (int)Math.Clamp(totalRam / 10 / OneMb, 320, 2048);
-        int expectedMemtableMb   = (int)Math.Clamp(expectedBlockCacheMb / 4, 128, 1024);
+        int expectedBlockCacheMb = (int)(EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(
+            totalRam / 10, 320 * OneMb, 64 * OneMb, 2048 * OneMb) / OneMb);
+        int expectedMemtableMb = (int)EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(
+            expectedBlockCacheMb / 4, 128, 16, 1024);
 
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna, CamusDBOptions.Default);
@@ -249,19 +253,21 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     [Test]
     public void UnsetSharedMemoryFields_StayWithinSizingClamps()
     {
-        // Guards the clamp bounds independently of the machine this runs on: a very small container
-        // must still get the 320/128 MB floor, and a very large host must not hand RocksDB more than
-        // the 2 GB / 1 GB ceiling — an unconfigured node usually shares a developer workstation or a
-        // CI container with the rest of the toolchain, so the ceiling matters more than the fraction.
+        // Guards the clamp bounds independently of the machine this runs on: even a very small
+        // container keeps the degenerate 64/16 MB minimums, and a very large host must not hand
+        // RocksDB more than the 2 GB / 1 GB ceiling — an unconfigured node usually shares a
+        // developer workstation or a CI container with the rest of the toolchain, so the ceiling
+        // matters more than the fraction. (The historic 320/128 MB floors yield below their
+        // proportional share, so they are deliberately NOT lower bounds here.)
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-clamps", kahuna, CamusDBOptions.Default);
 
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.InRange(320, 2048));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.InRange(128, 1024));
+        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.InRange(64, 2048));
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.InRange(16, 1024));
 
-        // The KV actor caches are the other half of the default footprint; their per-actor ceiling
-        // moved with the block cache, so pin it here too.
-        Assert.That(built.MaxBytesPerActor, Is.InRange(8L * 1024 * 1024, 2048L * 1024 * 1024));
+        // The KV actor caches are the other half of the default footprint; their bounds are the
+        // 1 MiB degenerate per-actor floor and the 2 GiB per-actor ceiling.
+        Assert.That(built.MaxBytesPerActor, Is.InRange(1024L * 1024, 2048L * 1024 * 1024));
     }
 
     [Test]
@@ -334,19 +340,20 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
-    public void LoweringOnlyTotalBudgetBelowMemtableDefault_IsRejectedAtBuild()
+    public void LoweringOnlyTotalBudget_ScalesTheMemtableDefaultWithIt()
     {
-        // Only the total budget is overridden (to below the baseline memtable default of 128). The raw
-        // config passes KahunaOptionsConfig.Validate (memtable is null there), but after merging onto the
-        // RocksDB baseline the effective pair is total=100 / memtable=128 — which Kahuna would reject with
-        // a raw ArgumentOutOfRangeException at node startup. The builder must catch it as a clean config error.
+        // Only the total budget is overridden, to below the historic 128 MB memtable floor. The
+        // derived memtable default is a quarter of the effective total with a floor that yields, so
+        // it follows the operator's total down (100 -> 25) instead of staying pinned at 128 and
+        // inverting the pair — an inversion Kahuna would reject with a raw
+        // ArgumentOutOfRangeException at node startup.
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemoryBudgetMb = 100 };
 
-        CamusDBException ex = Assert.Throws<CamusDBException>(
-            () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-total", kahuna, CamusDBOptions.Default))!;
-        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
-        Assert.That(ex.Message, Does.Contain("rocksdb_shared_memtable_budget_mb"));
-        Assert.That(ex.Message, Does.Contain("rocksdb_shared_memory_budget_mb"));
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/sm-merge-total", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(100));
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(25));
     }
 
     [Test]

@@ -30,26 +30,52 @@ internal sealed class ExistsSubqueryPreparer
         this.queryBinder = queryBinder;
     }
 
-    public async Task<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareAsync(
+    public ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareAsync(
         DatabaseDescriptor database,
         SelectQuery query,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         ExecuteSQLTicket ticket)
     {
-        if (query.Where is null)
-            return (query, null);
+        // No EXISTS anywhere in the WHERE (or no WHERE): the rewrite walk would traverse every node
+        // — allocating a Task and a state-machine box per node per statement execution — only to
+        // return the same references. The scan mirrors the walk's own left/right traversal, so an
+        // expression it clears is one the walk would have left untouched.
+        if (query.Where is null || !ContainsExistsSubquery(query.Where.Expression))
+            return new ValueTask<(SelectQuery, ExistsSubqueryRegistry?)>((query, null));
 
+        return PrepareCoreAsync(database, query, outerTableSources, outerDerivedSources, ticket);
+    }
+
+    /// <summary>Returns true when <paramref name="expr"/> or a left/right descendant is an EXISTS subquery.</summary>
+    private static bool ContainsExistsSubquery(NodeAst expr)
+    {
+        if (expr.nodeType == NodeType.ExprExistsSubquery)
+            return true;
+
+        if (expr.leftAst is not null && ContainsExistsSubquery(expr.leftAst))
+            return true;
+
+        return expr.rightAst is not null && ContainsExistsSubquery(expr.rightAst);
+    }
+
+    private async ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareCoreAsync(
+        DatabaseDescriptor database,
+        SelectQuery query,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        ExecuteSQLTicket ticket)
+    {
         ExistsRewriteContext context = new();
         NodeAst rewritten = await RewriteExpressionAsync(
             database,
-            query.Where.Expression,
+            query.Where!.Expression,
             outerTableSources,
             outerDerivedSources,
             ticket,
             context).ConfigureAwait(false);
 
-        if (ReferenceEquals(rewritten, query.Where.Expression) && context.Registry is null)
+        if (ReferenceEquals(rewritten, query.Where!.Expression) && context.Registry is null)
             return (query, null);
 
         return (query with { Where = new BoundPredicate(rewritten) }, context.Registry);

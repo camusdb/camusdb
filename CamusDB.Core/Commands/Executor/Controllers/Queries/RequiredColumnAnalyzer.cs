@@ -87,15 +87,13 @@ internal static class RequiredColumnAnalyzer
         if (where is not null && ContainsSubqueryNode(where))
             return null;
 
+        // Collect straight into the result set: the walker adds identifier names verbatim, so the
+        // per-source scratch sets this used to copy through added nothing but allocations on a path
+        // that runs once per UPDATE/DELETE statement.
         HashSet<string> required = new(StringComparer.OrdinalIgnoreCase);
 
         if (where is not null)
-        {
-            HashSet<string> refs = new(StringComparer.OrdinalIgnoreCase);
-            QueryExpressionWalker.CollectColumnReferences(where, refs);
-            foreach (string col in refs)
-                required.Add(col);
-        }
+            QueryExpressionWalker.CollectColumnReferences(where, required);
 
         if (filters is not null)
         {
@@ -106,12 +104,7 @@ internal static class RequiredColumnAnalyzer
         if (exprValues is not null)
         {
             foreach (KeyValuePair<string, NodeAst> kv in exprValues)
-            {
-                HashSet<string> refs = new(StringComparer.OrdinalIgnoreCase);
-                QueryExpressionWalker.CollectColumnReferences(kv.Value, refs);
-                foreach (string col in refs)
-                    required.Add(col);
-            }
+                QueryExpressionWalker.CollectColumnReferences(kv.Value, required);
         }
 
         return required;

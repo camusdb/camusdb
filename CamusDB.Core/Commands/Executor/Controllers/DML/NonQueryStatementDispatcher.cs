@@ -412,17 +412,35 @@ internal sealed class NonQueryStatementDispatcher
         Dictionary<string, NodeAst>? newExprValues = ticket.ExprValues;
         if (ticket.ExprValues is not null)
         {
-            Dictionary<string, NodeAst> rewritten = new(ticket.ExprValues.Count);
+            // Materialized only when a SET expression actually rewrote: the common parameterized
+            // UPDATE has no subquery anywhere, and eagerly copying the dictionary made every
+            // execution pay for the rare case.
+            Dictionary<string, NodeAst>? rewritten = null;
             foreach (KeyValuePair<string, NodeAst> entry in ticket.ExprValues)
             {
                 NodeAst resolved = await subqueryRewriter
                     .RewriteWhereExpressionAsync(database, entry.Value, sqlTicket)
                     .ConfigureAwait(false);
+
+                if (rewritten is not null)
+                {
+                    rewritten[entry.Key] = resolved;
+                    continue;
+                }
+
+                if (ReferenceEquals(resolved, entry.Value))
+                    continue;
+
+                // First rewritten entry: copy the whole original dictionary and take over. Entries
+                // visited before this one were resolved to their original references (or this branch
+                // would have run earlier), and entries after it are overwritten as the loop reaches
+                // them, so the copy is exact.
+                rewritten = new(ticket.ExprValues, ticket.ExprValues.Comparer);
                 rewritten[entry.Key] = resolved;
-                changed |= !ReferenceEquals(resolved, entry.Value);
+                changed = true;
             }
 
-            if (changed)
+            if (rewritten is not null)
                 newExprValues = rewritten;
         }
 
