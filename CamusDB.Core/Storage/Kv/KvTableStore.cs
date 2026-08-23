@@ -299,8 +299,17 @@ public sealed class KvTableStore
     {
         if (!options.KeyRangeShardingEnabled && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
-        return AcquireRangeLockAsync(tx, rowBucketPrefix, null, true, null, true, cancellationToken,
-            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
+        
+        return AcquireRangeLockAsync(
+            tx, 
+            rowBucketPrefix, 
+            null, 
+            true, 
+            null, 
+            true, 
+            cancellationToken,
+            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared
+        );
     }
 
     /// <summary>
@@ -321,8 +330,17 @@ public sealed class KvTableStore
     {
         if ((!options.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
             return Task.CompletedTask;
-        return AcquireRangeLockAsync(tx, BuildIndexBucketPrefix(indexId), null, true, null, true, cancellationToken,
-            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
+        
+        return AcquireRangeLockAsync(
+            tx, 
+            BuildIndexBucketPrefix(indexId), 
+            null, 
+            true, 
+            null, 
+            true, 
+            cancellationToken,
+            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared
+        );
     }
 
     /// <summary>
@@ -380,6 +398,7 @@ public sealed class KvTableStore
         string? startKey = fromEncoded is not null
             ? ((unique && !fromIsPrefixBound) || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + IndexKeySentinel)
             : null;
+        
         // End bound: the sentinel is appended ONLY when toInclusive=true, to cover all rowId suffixes
         // of the last value. When toInclusive=false ("<") it must be omitted: appending it would
         // extend the exclusive bound from {encode(V)} to {encode(V)+U+FFFF}, which includes
@@ -389,13 +408,21 @@ public sealed class KvTableStore
             ? ((unique && !toIsPrefixBound) || !toInclusive ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
 
-        return AcquireRangeLockAsync(tx, bucketPrefix, startKey, fromInclusive, endKey, toInclusive, cancellationToken,
-            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared);
+        return AcquireRangeLockAsync(
+            tx, 
+            bucketPrefix, 
+            startKey, 
+            fromInclusive, 
+            endKey, 
+            toInclusive, 
+            cancellationToken,
+            exclusive ? RangeLockMode.Exclusive : RangeLockMode.Shared
+        );
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsSerializableReadWrite(KvTransaction tx)
-        => tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite;
+        => tx is { IsolationLevel: CamusIsolationLevel.Serializable, TransactionMode: CamusTransactionMode.ReadWrite };
 
     /// <summary>
     /// Core range-lock implementation used by both the whole-bucket and bounded variants.
@@ -470,7 +497,16 @@ public sealed class KvTableStore
 
             if (type == KeyValueResponseType.Locked)
             {
-                tx.TrackRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, mode);
+                tx.TrackRangeLock(
+                    bucketPrefix, 
+                    startKey, 
+                    startInclusive, 
+                    endKey, 
+                    endInclusive, 
+                    KeyValueDurability.Persistent, 
+                    mode
+                );
+                
                 if (options.LockTracingEnabled && logger.IsEnabled(LogLevel.Debug))
                 {
                     string modeStr = mode.ToString();
@@ -567,9 +603,25 @@ public sealed class KvTableStore
         // Past the threshold: promote to a single whole-bucket Shared lock.
         // Old per-point entries remain tracked and are released at commit/rollback.
         if (tx.CountPointLocksForBucket(bucketPrefix) >= options.LockEscalationThreshold)
-            return AcquireRangeLockAsync(tx, bucketPrefix, null, true, null, true, cancellationToken);
+            return AcquireRangeLockAsync(
+                tx, 
+                bucketPrefix, 
+                null, 
+                true, 
+                null, 
+                true, 
+                cancellationToken
+            );
 
-        return AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken);
+        return AcquireRangeLockAsync(
+            tx, 
+            bucketPrefix, 
+            key, 
+            true, 
+            key, 
+            true, 
+            cancellationToken
+        );
     }
 
     /// <summary>
@@ -654,17 +706,24 @@ public sealed class KvTableStore
             await AcquireSharedPointLockAsync(tx, rowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
         BranchKvValue probe = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
-        if (probe.Kind == BranchKvKind.Tombstone) return null;   // explicitly deleted at this level
-        if (probe.HasPayload) return probe.Payload;              // found at this level
+        if (probe.Kind == BranchKvKind.Tombstone) 
+            return null;   // explicitly deleted at this level
+        
+        if (probe.HasPayload) 
+            return probe.Payload;              // found at this level
 
         // Miss at level-0: walk ancestry levels until a hit or a tombstone (stop walking).
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
         {
             BranchMetrics.RecordAncestorProbe();
             string ancestorKey = ancestorStore.BuildRowKey(rowId);
+            
             probe = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
-            if (probe.Kind == BranchKvKind.Tombstone) return null;
-            if (probe.HasPayload) return probe.Payload;
+            if (probe.Kind == BranchKvKind.Tombstone) 
+                return null;
+            
+            if (probe.HasPayload) 
+                return probe.Payload;
         }
 
         return null;
@@ -736,8 +795,14 @@ public sealed class KvTableStore
         while (pending.Count > 0)
         {
             List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
-                await kahuna.LocateAndTryGetManyValues(tx.TransactionId, tx.ReadTimestamp, pending, cancellationToken, readCoordinatorKey, readOperationId)
-                            .ConfigureAwait(false);
+                await kahuna.LocateAndTryGetManyValues(
+                    tx.TransactionId, 
+                    tx.ReadTimestamp, 
+                    pending, 
+                    cancellationToken, 
+                    readCoordinatorKey, 
+                    readOperationId
+                ).ConfigureAwait(false);
 
             List<(string key, long revision, KeyValueDurability durability)>? nextPending = null;
 
@@ -784,8 +849,7 @@ public sealed class KvTableStore
             BranchKvValue decoded = BranchKvValue.Miss;
 
             if (byKey.TryGetValue(rowKey, out (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) res)
-                && res.responseType == KeyValueResponseType.Get
-                && res.entry is not null)
+                && res is { responseType: KeyValueResponseType.Get, entry: not null })
             {
                 decoded = BranchKvCodec.Decode(res.entry.Value);
             }
@@ -810,8 +874,11 @@ public sealed class KvTableStore
                     BranchMetrics.RecordAncestorProbe();
                     string ancestorKey = ancestorStore.BuildRowKey(rowIds[i]);
                     decoded = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
-                    if (decoded.Kind == BranchKvKind.Tombstone) break;
-                    if (decoded.HasPayload) break;
+                    if (decoded.Kind == BranchKvKind.Tombstone) 
+                        break;
+                    
+                    if (decoded.HasPayload) 
+                        break;
                 }
             }
 
@@ -1019,17 +1086,34 @@ public sealed class KvTableStore
             // for the same key.
 
             int levelCount = 1 + ancestorStores.Length;
-            var iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
+            IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[] iters = new IAsyncEnumerator<(string rowIdHex, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
             // Every level is bounded identically, and each level builds the bound keys in its own
             // namespace. Applying the same bounds everywhere is what keeps nearest-wins intact: a
             // tombstone and the value it suppresses share a row id, so they are either both inside
             // the bounds or both outside — a bound can never admit one and drop the other.
-            iters[0] = ScanRowsRawAsync(tx.TransactionId, tx.ReadTimestamp, startHex, startInclusive, untilHex, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanRowsRawAsync(
+                tx.TransactionId, 
+                tx.ReadTimestamp, 
+                startHex, 
+                startInclusive, 
+                untilHex, 
+                cancellationToken, 
+                tx.FoldReads ? tx.CoordinatorKey : ""
+            ).GetAsyncEnumerator(cancellationToken);
+            
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
-                iters[ai + 1] = ancestorStore.ScanRowsRawAsync(HLCTimestamp.Zero, forkTimestamp, startHex, startInclusive, untilHex, cancellationToken).GetAsyncEnumerator(cancellationToken);
+                
+                iters[ai + 1] = ancestorStore.ScanRowsRawAsync(
+                    HLCTimestamp.Zero, 
+                    forkTimestamp, 
+                    startHex, 
+                    startInclusive, 
+                    untilHex, 
+                    cancellationToken
+                ).GetAsyncEnumerator(cancellationToken);
             }
 
             if (ancestorStores.Length > 0)
@@ -1197,8 +1281,11 @@ public sealed class KvTableStore
             await AcquireSharedPointLockAsync(tx, BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
         BranchKvValue idx = await ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
-        if (idx.Kind == BranchKvKind.Tombstone) return null;   // tombstone at this level
-        if (idx.HasPayload) return RowIdFromPayload(idx.Payload.Span);
+        if (idx.Kind == BranchKvKind.Tombstone) 
+            return null;   // tombstone at this level
+        
+        if (idx.HasPayload) 
+            return RowIdFromPayload(idx.Payload.Span);
 
         // Miss at level-0: walk ancestry.
         foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)

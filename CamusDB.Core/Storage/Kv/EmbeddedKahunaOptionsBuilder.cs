@@ -380,9 +380,7 @@ public static class EmbeddedKahunaOptionsBuilder
         // the fully-merged pair — after the sizing defaults, not before them — is what makes the check
         // see the values the node will actually be built with, and it fails fast with a clear config
         // error instead.
-        if (baseline.RocksDbSharedMemoryEnabled
-            && baseline.Storage == "rocksdb"
-            && baseline.WalStorage == "rocksdb"
+        if (baseline is { RocksDbSharedMemoryEnabled: true, Storage: "rocksdb", WalStorage: "rocksdb" }
             && baseline.RocksDbSharedMemtableBudgetMb > baseline.RocksDbSharedMemoryBudgetMb)
         {
             throw new CamusDBException(

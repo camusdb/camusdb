@@ -340,12 +340,26 @@ public sealed class KvTransactionsManager : IDisposable
         // TransactionId = ClientId = the Kahuna handle. Used for every internally-begun and autocommit
         // transaction, and whenever deferral was not requested.
         TransactionHandle handle = await StartKahunaTransactionAsync(
-            uniqueId, "start Kahuna transaction", lockingMode, readValidationMode, decisionDurabilityMode,
-            priorityMode, cancellationToken).ConfigureAwait(false);
+            uniqueId, 
+            "start Kahuna transaction", 
+            lockingMode, 
+            readValidationMode, 
+            decisionDurabilityMode,
+            priorityMode, 
+            cancellationToken
+        ).ConfigureAwait(false);
 
-        KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: false, level, mode,
-            mutationLimit: mutationLimit, locking: lockingMode, readValidation: readValidationMode,
-            priority: priorityMode)
+        KvTransaction tx = new(
+            handle.TransactionId, 
+            uniqueId, 
+            isReadOnly: false, 
+            level, 
+            mode,
+            mutationLimit: mutationLimit, 
+            locking: lockingMode, 
+            readValidation: readValidationMode,
+            priority: priorityMode
+        )
         {
             WriteAdmissionGate = EnsureDiskSpaceForWrites
         };
@@ -371,16 +385,24 @@ public sealed class KvTransactionsManager : IDisposable
     /// <see cref="CommitAsync"/>).</para>
     /// </summary>
     private async Task<KvTransaction> BeginSerializableReadOnlyAsync(
-        TransactionPriority priority, CancellationToken cancellationToken)
+        TransactionPriority priority, 
+        CancellationToken cancellationToken
+    )
     {
         string uniqueId = Guid.NewGuid().ToString("N");
 
         // A serializable read-only snapshot acquires no locks and writes nothing, so the locking mode
         // is immaterial; pessimistic keeps the start options identical to the read-write default.
         TransactionHandle handle = await StartKahunaTransactionAsync(
-            uniqueId, "mint read-timestamp for serializable RO transaction",
-            KeyValueTransactionLocking.Pessimistic, ReadValidation.None, DecisionDurability.BestEffort,
-            priority, cancellationToken).ConfigureAwait(false);
+            uniqueId, 
+            "mint read-timestamp for serializable RO transaction",
+            KeyValueTransactionLocking.Pessimistic, 
+            ReadValidation.None, 
+            DecisionDurability.BestEffort,
+            priority, 
+            cancellationToken
+        ).ConfigureAwait(false);
+        
         Kommander.Time.HLCTimestamp t = handle.TransactionId;
 
         // Keep the Kahuna transaction alive as the tracking handle — its HLC timestamp T doubles as
@@ -395,7 +417,9 @@ public sealed class KvTransactionsManager : IDisposable
             readTimestamp:   t,
             priority:        priority
         );
+        
         Track(tx);
+        
         return tx;
     }
 
@@ -418,9 +442,14 @@ public sealed class KvTransactionsManager : IDisposable
     /// is surfaced immediately.</para>
     /// </summary>
     private async Task<TransactionHandle> StartKahunaTransactionAsync(
-        string uniqueId, string operation, KeyValueTransactionLocking locking,
-        ReadValidation readValidation, DecisionDurability decisionDurability,
-        TransactionPriority priority, CancellationToken cancellationToken)
+        string uniqueId, 
+        string operation, 
+        KeyValueTransactionLocking locking,
+        ReadValidation readValidation, 
+        DecisionDurability decisionDurability,
+        TransactionPriority priority, 
+        CancellationToken cancellationToken
+    )
     {
         KeyValueResponseType type = KeyValueResponseType.MustRetry;
         TransactionHandle handle = default;
@@ -542,13 +571,25 @@ public sealed class KvTransactionsManager : IDisposable
         TransactionPriority priorityMode = priority ?? options.DefaultTransactionPriority;
 
         TransactionHandle handle = await StartKahunaTransactionAsync(
-            uniqueId, "start read-only transaction",
-            KeyValueTransactionLocking.Pessimistic, ReadValidation.None, DecisionDurability.BestEffort,
-            priorityMode, cancellationToken).ConfigureAwait(false);
+            uniqueId, 
+            "start read-only transaction",
+            KeyValueTransactionLocking.Pessimistic, 
+            ReadValidation.None, 
+            DecisionDurability.BestEffort,
+            priorityMode, 
+            cancellationToken
+        ).ConfigureAwait(false);
 
-        KvTransaction tx = new(handle.TransactionId, uniqueId, isReadOnly: true,
-            transactionMode: CamusTransactionMode.ReadOnly, priority: priorityMode);
+        KvTransaction tx = new(
+            handle.TransactionId, 
+            uniqueId, 
+            isReadOnly: true,
+            transactionMode: CamusTransactionMode.ReadOnly, 
+            priority: priorityMode
+        );
+        
         Track(tx);
+        
         return tx;
     }
 
@@ -585,6 +626,7 @@ public sealed class KvTransactionsManager : IDisposable
             // otherwise return the current local HLC so RC reads also emit a usable token.
             if (!tx.ReadTimestamp.IsNull())
                 return tx.ReadTimestamp;
+            
             return mintLocalT?.Invoke(null) ?? Kommander.Time.HLCTimestamp.Zero;
         }
 
@@ -602,8 +644,7 @@ public sealed class KvTransactionsManager : IDisposable
         // roundtrip. Promoted ReadCommitted+ReadOnly scan transactions are excluded: they may hold
         // shared range locks that the coordinator's finalize must release, so they go through the
         // normal commit path below.
-        if (tx.IsReadOnly && tx.TransactionMode == CamusTransactionMode.ReadOnly &&
-            tx.IsolationLevel == CamusIsolationLevel.Serializable)
+        if (tx is { IsReadOnly: true, TransactionMode: CamusTransactionMode.ReadOnly, IsolationLevel: CamusIsolationLevel.Serializable })
         {
             tx.Status = KvTransactionStatus.Committed;
             Untrack(tx);
@@ -634,8 +675,7 @@ public sealed class KvTransactionsManager : IDisposable
             // never expire while still considered "live" — that would silently break serializable
             // isolation. The staged writes/locks/session are handed to a coordinator rollback (not just
             // abandoned to the reaper); the caller then rolls back and retries from BeginAsync.
-            if (tx.IsolationLevel == CamusIsolationLevel.Serializable &&
-                tx.TransactionMode == CamusTransactionMode.ReadWrite &&
+            if (tx is { IsolationLevel: CamusIsolationLevel.Serializable, TransactionMode: CamusTransactionMode.ReadWrite } &&
                 tx.IsExpired(options.MaxSerializableTransactionLifetimeMs))
             {
                 tx.Status = KvTransactionStatus.Finalizing;
@@ -649,8 +689,11 @@ public sealed class KvTransactionsManager : IDisposable
                 {
                     // Never let cleanup mask the lifetime error the caller must see.
                 }
+                
                 tx.Status = KvTransactionStatus.RolledBack;
+                
                 Untrack(tx);
+                
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionLifetimeExceeded,
                     $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
@@ -675,6 +718,7 @@ public sealed class KvTransactionsManager : IDisposable
         List<(string key, KeyValueDurability durability)>? modKeys = null;
         List<string>? keyspaces = null;
         bool markedInFlight = false;
+        
         if (_cache is not null && !tx.IsReadOnly)
         {
             modKeys = await CloseServerWorkingSetAsync(tx, cancellationToken).ConfigureAwait(false);
@@ -731,8 +775,11 @@ public sealed class KvTransactionsManager : IDisposable
                 // handle.
                 commitRequestIssued = true;
                 commitAttempts++;
-                (result, string? anchor) = await kahuna.LocateAndCommitTransaction(tx.Handle, cancellationToken)
-                    .ConfigureAwait(false);
+                
+                (result, string? anchor) = await kahuna.LocateAndCommitTransaction(
+                        tx.Handle, 
+                        cancellationToken
+                    ).ConfigureAwait(false);
 
                 // Fold the coordinator's canonical record anchor onto the handle the moment it is known —
                 // including alongside a non-terminal MustRetry — so a finalize retried after the live
@@ -750,9 +797,14 @@ public sealed class KvTransactionsManager : IDisposable
             if (result == KeyValueResponseType.Committed)
             {
                 tx.Status = KvTransactionStatus.Committed;
+                
                 long committedElapsedMs = commitTimer.GetElapsedMilliseconds();
+                
                 Diagnostics.ServerDiagnostics.RecordCommitDuration(
-                    Diagnostics.ServerDiagnostics.Tags.Outcome.Ok, committedElapsedMs);
+                    Diagnostics.ServerDiagnostics.Tags.Outcome.Ok, 
+                    committedElapsedMs
+                );
+                
                 Diagnostics.ServerDiagnostics.RecordStagedMutations(tx.MutationCount);
                 if (logger.IsEnabled(LogLevel.Debug))
                     Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, committedElapsedMs);
@@ -809,6 +861,7 @@ public sealed class KvTransactionsManager : IDisposable
                     _cache!.PublishGate.AbortWrite(keyspaces!);
                 else
                     _cache!.PublishGate.FenceAndInvalidate(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
+                
                 markedInFlight = false;
             }
 
@@ -885,8 +938,10 @@ public sealed class KvTransactionsManager : IDisposable
             tx.CaptureRecordAnchor(snapshot.RecordAnchorKey);
 
             List<(string key, KeyValueDurability durability)> serverKeys = new(snapshot.ModifiedKeys.Count);
+            
             foreach (KeyValueTransactionModifiedKey k in snapshot.ModifiedKeys)
                 serverKeys.Add((k.Key ?? string.Empty, k.Durability));
+            
             return serverKeys;
         }
 
@@ -905,7 +960,8 @@ public sealed class KvTransactionsManager : IDisposable
     /// is defined once and all three sites (dep collector, gate keyspaces, dep-index matching) agree.
     /// </summary>
     private static List<string> ExtractUniqueKeyspaces(
-        List<(string key, KeyValueDurability _)> modKeys)
+        List<(string key, KeyValueDurability _)> modKeys
+    )
     {
         HashSet<string> seen = new(StringComparer.Ordinal);
         List<string> result = [];
@@ -993,7 +1049,9 @@ public sealed class KvTransactionsManager : IDisposable
     /// acknowledged, and only then <c>RolledBack</c>.
     /// </summary>
     private async Task<(KeyValueResponseType Result, int Attempts, long ElapsedMs)> RollbackHandleWithRetryAsync(
-        KvTransaction tx, CancellationToken cancellationToken)
+        KvTransaction tx, 
+        CancellationToken cancellationToken
+    )
     {
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
         ValueStopwatch rollbackRetryTimer = ValueStopwatch.StartNew();

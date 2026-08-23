@@ -227,7 +227,7 @@ public sealed class StatisticsManager
 
         lock (entry.ColumnStatsLock)
         {
-            return entry.ColumnStats.TryGetValue(columnName, out ColumnMinMax? mm) ? mm : null;
+            return entry.ColumnStats.GetValueOrDefault(columnName);
         }
     }
 
@@ -260,6 +260,7 @@ public sealed class StatisticsManager
                     $"Column name '{col}' contains the key-tuple delimiter ',' — cannot build an unambiguous signature.",
                     nameof(columns));
         }
+        
         return string.Join(",", columns);
     }
 
@@ -845,7 +846,7 @@ public sealed class StatisticsManager
             if (!database.TableDescriptors.TryGetValue(tableId, out Nito.AsyncEx.AsyncLazy<TableDescriptor>? lazy))
             {
                 lazy = database.TableDescriptors.Values
-                    .FirstOrDefault(l => l.IsStarted && l.Task.IsCompletedSuccessfully && l.Task.Result.Id == tableId);
+                    .FirstOrDefault(l => l is { IsStarted: true, Task.IsCompletedSuccessfully: true } && l.Task.Result.Id == tableId);
             }
 
             if (lazy is null || !lazy.IsStarted || !lazy.Task.IsCompletedSuccessfully)

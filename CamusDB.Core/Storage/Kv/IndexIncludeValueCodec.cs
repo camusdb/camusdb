@@ -29,7 +29,7 @@ namespace CamusDB.Core.Storage.Kv;
 public static class IndexIncludeValueCodec
 {
     /// <summary>An empty tuple — the value of an index with no INCLUDE columns.</summary>
-    public static readonly byte[] Empty = [];
+    private static readonly byte[] Empty = [];
 
     /// <summary>
     /// Encodes the include tuple for <paramref name="includeColumns"/> by reading each column's value

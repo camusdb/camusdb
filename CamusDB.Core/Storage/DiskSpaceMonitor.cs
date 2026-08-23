@@ -40,7 +40,7 @@ public sealed class DiskSpaceMonitor
 
     private readonly ILogger logger;
 
-    private readonly object sampleSync = new();
+    private readonly Lock sampleSync = new();
 
     /// <summary><see cref="Environment.TickCount64"/> of the last probe; 0 = never sampled.</summary>
     private long lastSampleTicks;

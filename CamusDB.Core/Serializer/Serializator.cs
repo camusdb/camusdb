@@ -42,7 +42,7 @@ public sealed class Serializator
 
     private static bool WriteInt(byte[] buffer, int number, ref int pointer)
     {
-        if (number < 0 || number >= 0x7FFF)
+        if (number is < 0 or >= 0x7FFF)
         {
             WriteType(buffer, SerializatorTypes.TypeInteger32, ref pointer);
             WriteInt32(buffer, number, ref pointer);

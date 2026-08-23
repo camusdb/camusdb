@@ -80,7 +80,7 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
     /// acquisition treats the marker as claimable by compare-and-set. Both operations stay conditional,
     /// and a released span is available immediately.</para>
     /// </summary>
-    private static readonly byte[] FreeMarker = System.Text.Encoding.UTF8.GetBytes("~camusdb-lease-free");
+    private static readonly byte[] FreeMarker = "~camusdb-lease-free"u8.ToArray();
 
     /// <summary>
     /// One successful acquisition. Identity matters as much as content: renewer teardown removes this
@@ -135,8 +135,15 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, key, value, null, -1,
-                KeyValueFlags.SetIfNotExists, leaseMs, KeyValueDurability.Persistent, cancellationToken
+                HLCTimestamp.Zero, 
+                key, 
+                value, 
+                null, 
+                -1,
+                KeyValueFlags.SetIfNotExists, 
+                leaseMs, 
+                KeyValueDurability.Persistent, 
+                cancellationToken
             ).ConfigureAwait(false);
 
             if (type == KeyValueResponseType.Set)
@@ -151,8 +158,15 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
                 // release left behind, which is ours for the taking. Compare-and-set distinguishes them
                 // without a read, and without any window in which two acquirers could both succeed.
                 (KeyValueResponseType freeType, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                    HLCTimestamp.Zero, key, value, FreeMarker, -1,
-                    KeyValueFlags.SetIfEqualToValue, leaseMs, KeyValueDurability.Persistent, cancellationToken
+                    HLCTimestamp.Zero, 
+                    key, 
+                    value, 
+                    FreeMarker, 
+                    -1,
+                    KeyValueFlags.SetIfEqualToValue, 
+                    leaseMs, 
+                    KeyValueDurability.Persistent, 
+                    cancellationToken
                 ).ConfigureAwait(false);
 
                 if (freeType == KeyValueResponseType.Set)
@@ -218,8 +232,14 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
         try
         {
             await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, key, FreeMarker, acquisition.Value, -1,
-                KeyValueFlags.SetIfEqualToValue, ReleaseExpiryMs, KeyValueDurability.Persistent,
+                HLCTimestamp.Zero, 
+                key, 
+                FreeMarker, 
+                acquisition.Value, 
+                -1,
+                KeyValueFlags.SetIfEqualToValue, 
+                ReleaseExpiryMs, 
+                KeyValueDurability.Persistent,
                 CancellationToken.None
             ).ConfigureAwait(false);
         }
@@ -302,8 +322,14 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
         while (!ct.IsCancellationRequested)
         {
             (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, key, acquisition.Value, acquisition.Value, -1,
-                KeyValueFlags.SetIfEqualToValue, leaseMs, KeyValueDurability.Persistent, ct
+                HLCTimestamp.Zero, 
+                key, 
+                acquisition.Value, 
+                acquisition.Value, -1,
+                KeyValueFlags.SetIfEqualToValue, 
+                leaseMs, 
+                KeyValueDurability.Persistent, 
+                ct
             ).ConfigureAwait(false);
 
             if (type == KeyValueResponseType.Set)

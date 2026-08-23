@@ -99,8 +99,8 @@ public sealed class TablePlacement
         new(
             keySpace,
             isKeyRange: false,
-            spans: new[]
-            {
+            spans:
+            [
                 new PlacementSpan(
                     StartKey: null,
                     EndKey: null,
@@ -110,6 +110,6 @@ public sealed class TablePlacement
                     ReplicaEndpoints: [],
                     LeaderIsLocal: true,
                     HostedLocally: true)
-            },
+            ],
             capturedAtTicks: Environment.TickCount64);
 }

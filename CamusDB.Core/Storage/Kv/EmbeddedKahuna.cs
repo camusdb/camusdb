@@ -32,14 +32,14 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 public sealed class EmbeddedKahuna : IAsyncDisposable
 {
-    public const string SchemaChangeLogType = "SchemaChange";
+    private const string SchemaChangeLogType = "SchemaChange";
 
     /// <summary>
     /// Raft log type carrying replicated cluster-setting changes. A separate consumer log type on
     /// the same generic <c>OnReplicationReceived</c> hook the schema log rides — dispatch is by
     /// <see cref="RaftLog.LogType"/>, so the two never see each other's entries.
     /// </summary>
-    public const string ClusterSettingsLogType = "ClusterSettings";
+    private const string ClusterSettingsLogType = "ClusterSettings";
 
     /// <summary>
     /// Prefix whose hash selects the single Raft partition that carries every cluster-settings log
@@ -60,7 +60,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     // witness nodes must not appear in the schema ack gate because they are never real schema participants.
     private readonly bool isClusterMode;
 
-    private readonly object schemaSubscriptionsSync = new();
+    private readonly Lock schemaSubscriptionsSync = new();
     private readonly List<SchemaApplySubscription> schemaSubscriptions = new();
     private ISchemaReplicationForwarder? schemaReplicationForwarder;
 
@@ -87,7 +87,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     // live OnReplicationReceived delta could interleave. Both ApplyAsync and RestoreAsync are
     // idempotent for already-applied versions, so the worst-case outcome is a benign skip or
     // a loud "out of order" throw rather than silent corruption.
-    private readonly object _walRestoreBufferLock = new();
+    private readonly Lock _walRestoreBufferLock = new();
     private readonly Dictionary<int, List<byte[]>> _walRestoreBuffer = new();
     private readonly HashSet<int> _walRestoreCompletedPartitions = new();
     private readonly HashSet<int> _walRestoreDrainedPartitions = new();
@@ -102,15 +102,15 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     // exactly the window a node that was down during a change catches up in — would be silently
     // dropped. All settings traffic lives on one partition, so the buffer needs no per-partition
     // keying; completion is tracked for the settings partition alone.
-    private readonly object _settingsRestoreLock = new();
+    private readonly Lock _settingsRestoreLock = new();
     private readonly List<byte[]> _settingsRestoreBuffer = new();
     private bool _settingsRestoreCompleted;
     private bool _settingsRestoreDrained;
     private Func<int, RaftLog, Task<bool>>? _settingsRestoreLogHandler;
     private Action<int>? _settingsRestoreFinishedHandler;
 
-    private readonly object settingsSubscriptionsSync = new();
-    private readonly List<ClusterSettingsSubscription> settingsSubscriptions = new();
+    private readonly Lock settingsSubscriptionsSync = new();
+    private readonly List<ClusterSettingsSubscription> settingsSubscriptions = [];
 
     // Completes when StartAsync has finished electing leaders for every partition (system + all data
     // partitions). Background startup work fired from constructors — the database-registry load, the
@@ -1205,7 +1205,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// is deliberately no raw-entry forwarding here.
     /// </summary>
     public async Task<SchemaReplicationResult> ReplicateClusterSettingsChangeAsync(
-        byte[] entry, CancellationToken cancellationToken = default)
+        byte[] entry, 
+        CancellationToken cancellationToken = default
+    )
     {
         int partitionId = ClusterSettingsLogPartition();
         string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
@@ -1224,7 +1226,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
 
         (bool committed, RaftOperationStatus status, long commitLogId) =
-            await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+            await Raft.CommitLogs(partitionId, proposal.TicketId, cancellationToken).ConfigureAwait(false);
 
         if (committed && status == RaftOperationStatus.Success)
         {
@@ -1232,7 +1234,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
         }
 
-        await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+        await Raft.RollbackLogs(partitionId, proposal.TicketId, cancellationToken).ConfigureAwait(false);
         return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
     }
 
@@ -1501,7 +1503,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
 
         (bool committed, RaftOperationStatus status, long commitLogId) =
-            await Raft.CommitLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+            await Raft.CommitLogs(partitionId, proposal.TicketId, cancellationToken).ConfigureAwait(false);
 
         if (committed && status == RaftOperationStatus.Success)
         {
@@ -1510,7 +1512,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             return new(SchemaReplicationOutcome.Committed, partitionId, commitLogId, leader, status.ToString());
         }
 
-        await Raft.RollbackLogs(partitionId, proposal.TicketId).ConfigureAwait(false);
+        await Raft.RollbackLogs(partitionId, proposal.TicketId, cancellationToken).ConfigureAwait(false);
         return new(ToOutcome(status), partitionId, proposal.LogIndex, leader, status.ToString());
     }
 

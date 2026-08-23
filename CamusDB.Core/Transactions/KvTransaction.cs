@@ -316,7 +316,8 @@ public sealed class KvTransaction
     /// </summary>
     public void ReserveMutations(int count)
     {
-        if (mutationLimit <= 0 || count == 0) return;
+        if (mutationLimit <= 0 || count == 0) 
+            return;
 
         WriteAdmissionGate?.Invoke();
 
@@ -561,8 +562,14 @@ public sealed class KvTransaction
     /// escalation heuristic would count one key twice.</para>
     /// </summary>
     public void TrackRangeLock(
-        string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
-        KeyValueDurability durability, RangeLockMode mode = RangeLockMode.Shared)
+        string prefix, 
+        string? startKey, 
+        bool startInclusive, 
+        string? endKey, 
+        bool endInclusive,
+        KeyValueDurability durability, 
+        RangeLockMode mode = RangeLockMode.Shared
+    )
     {
         lock (trackSync)
         {
@@ -588,11 +595,13 @@ public sealed class KvTransaction
         {
             if (acquiredRangeLocks is null)
                 return false;
+            
             foreach (RangeLockBounds b in acquiredRangeLocks)
             {
                 if (b.Prefix == prefix && b.StartKey is null && b.EndKey is null)
                     return true;
             }
+            
             return false;
         }
     }
@@ -639,6 +648,7 @@ public sealed class KvTransaction
         {
             if (acquiredRangeLocks is null)
                 return 0;
+            
             int count = 0;
             foreach (RangeLockBounds b in acquiredRangeLocks)
             {
