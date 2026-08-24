@@ -819,6 +819,14 @@ public sealed class KvTableStore
                     continue;
                 }
 
+                // Same rule as ProbeRaw: only a confirmed answer may reach the decode loop below,
+                // which treats every unmatched key as an absent row. A per-key Errored (a dropped
+                // actor response) that lands in byKey decodes as Miss — an unknown converted into a
+                // definitive absence, with no folded observation for commit validation to catch.
+                if (responseType is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
+                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                        $"Batch read of key {key} returned {responseType} — retry the operation from BeginAsync");
+
                 byKey[key] = (responseType, entry);
             }
 
@@ -3232,8 +3240,21 @@ public sealed class KvTableStore
             throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
                 $"Read of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
 
-        if (type != KeyValueResponseType.Get || entry is null)
-            return BranchKvValue.Miss;  // Kahuna miss — continue ancestry walk
+        // Only a confirmed answer may shape the result. Anything else — an exhausted MustRetry /
+        // WaitingForReplication (a foreign 2PC intent that stalled past the whole retry budget),
+        // Errored, or any future non-confirmed type — means the key's state is UNKNOWN, not absent.
+        // Returning Miss here turned that unknown into a definitive "row does not exist": an UPDATE's
+        // locate phase then matched 0 rows and reported success, and because the transient read folds
+        // no observation (the coordinator cancels a MustRetry completion), commit validation had
+        // nothing to catch — the transaction committed with the write silently dropped. That is a
+        // real, observed atomicity violation (bank soak run K lost 3 units of SUM(balance)), so the
+        // unknown must fail the statement instead, exactly as GetRowsBatch already does on exhaustion.
+        if (type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                $"Read of key {key} did not return a confirmed result ({type}) — retry the operation from BeginAsync");
+
+        if (entry is null || type == KeyValueResponseType.DoesNotExist)
+            return BranchKvValue.Miss;  // confirmed Kahuna miss — continue ancestry walk
 
         return BranchKvCodec.Decode(entry.Value);
     }

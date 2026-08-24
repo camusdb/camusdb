@@ -185,7 +185,15 @@ public sealed class TransferOperation : IWriteOperation
             update.Transaction = tx;
             update.Parameters.Add("@b", ColumnType.Integer64, balance + delta);
             update.Parameters.Add("@id", ColumnType.Id, id);
-            await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            int modified = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+            // Tripwire for the run-K atomicity bug class: the SELECT above just proved the row exists,
+            // so an UPDATE matching 0 rows means the engine lost the row mid-transaction (an exhausted
+            // transient read converted into a miss, before that conversion was fixed). Committing the
+            // other leg anyway is exactly a silent SUM(balance) drift; fail the transfer loudly instead.
+            if (modified != 1)
+                throw new InvalidOperationException(
+                    $"transfer UPDATE matched {modified} rows for existing id {id} — refusing to commit a partial transfer");
         }
         t.UpdateMs += t.Tick();
     }
