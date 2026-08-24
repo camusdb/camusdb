@@ -192,6 +192,23 @@ internal sealed class TableIndexAdder
         return columnValues.GetValueOrDefault(name);
     }
 
+    /// <summary>
+    /// Returns true when any of the index's key columns is absent from the row or holds a NULL value.
+    /// Such a row is exempt from a unique index (NULLs are distinct) and is skipped during backfill,
+    /// which keeps a freshly built index identical to one populated row by row on the insert path.
+    /// </summary>
+    private static bool HasNullKeyColumn(Dictionary<string, ColumnValue> row, ColumnIndexInfo[] columns)
+    {
+        foreach (ColumnIndexInfo columnIndex in columns)
+        {
+            ColumnValue? value = GetColumnValue(row, columnIndex.Name);
+            if (value is null || value.Type == ColumnType.Null)
+                return true;
+        }
+
+        return false;
+    }
+
     internal async Task<int> AddIndex(
         CatalogsManager catalogs,
         KvTransaction tx,
@@ -353,37 +370,46 @@ internal sealed class TableIndexAdder
                         visibilitySchemaVersion: table.Schema.Version,
                         decodeState: decodeState).ConfigureAwait(false);
 
-                    int i = 0;
-                    ColumnValue[] columnValues = unique
-                        ? new ColumnValue[ticket.Columns.Length]
-                        : new ColumnValue[ticket.Columns.Length + 1];
-
-                    foreach (ColumnIndexInfo columnIndex in ticket.Columns)
+                    // NULLs are distinct: a unique index holds no entry for a row with a NULL (or
+                    // absent) value in any key column, so several such rows can coexist. The insert
+                    // path applies the same rule, which keeps a backfilled index identical to one
+                    // built row by row. A non-unique index keeps every row (the row id breaks ties).
+                    // The row itself is not skipped: the cursor bookkeeping below still advances.
+                    if (!unique || !HasNullKeyColumn(row, ticket.Columns))
                     {
-                        ColumnValue? keyValue = GetColumnValue(row, columnIndex.Name);
+                        int i = 0;
+                        ColumnValue[] columnValues = unique
+                            ? new ColumnValue[ticket.Columns.Length]
+                            : new ColumnValue[ticket.Columns.Length + 1];
 
-                        if (keyValue is null)
-                            throw new CamusDBException(
-                                CamusDBErrorCodes.InvalidInternalOperation,
-                                $"A null value was found for key field '{columnIndex.Name}'"
-                            );
+                        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
+                        {
+                            ColumnValue? keyValue = GetColumnValue(row, columnIndex.Name);
 
-                        columnValues[i++] = keyValue;
+                            if (keyValue is null)
+                                throw new CamusDBException(
+                                    CamusDBErrorCodes.InvalidInternalOperation,
+                                    $"A null value was found for key field '{columnIndex.Name}'"
+                                );
+
+                            columnValues[i++] = keyValue;
+                        }
+
+                        if (!unique)
+                            columnValues[i] = new(ColumnType.Id, rowId.ToString());
+
+                        CompositeColumnValue compositeKey = new(columnValues);
+
+                        // Materialize the stored/payload (INCLUDE) values for a covering index. Unlike key
+                        // columns, included columns may be NULL (they are payload, not part of the key).
+                        // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
+                        byte[]? includeTuple = ticket.IncludeColumns.Length > 0
+                            ? IndexIncludeValueCodec.EncodeTupleChecked(ticket.IncludeColumns, row, ticket.IndexName, state.Database.Options)
+                            : null;
+
+                        await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique, includeTuple: includeTuple).ConfigureAwait(false);
                     }
 
-                    if (!unique)
-                        columnValues[i] = new(ColumnType.Id, rowId.ToString());
-
-                    CompositeColumnValue compositeKey = new(columnValues);
-
-                    // Materialize the stored/payload (INCLUDE) values for a covering index. Unlike key
-                    // columns, included columns may be NULL (they are payload, not part of the key).
-                    // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
-                    byte[]? includeTuple = ticket.IncludeColumns.Length > 0
-                        ? IndexIncludeValueCodec.EncodeTupleChecked(ticket.IncludeColumns, row, ticket.IndexName, state.Database.Options)
-                        : null;
-
-                    await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique, includeTuple: includeTuple).ConfigureAwait(false);
                     state.LastBackfilledRowId = rowId.ToString();
 
                     lastRowId = rowId;

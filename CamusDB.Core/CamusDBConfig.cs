@@ -26,7 +26,7 @@ namespace CamusDB.Core;
 /// <list type="bullet">
 ///   <item><see cref="Ambient"/> — read by the regex helpers reached from the static expression
 ///   evaluator, which has no per-query context to carry options through. Giving the evaluator such a
-///   context is the remaining work; see the configuration-injection spec.</item>
+///   context is the remaining work.</item>
 ///   <item><see cref="DataDirectory"/> — an async-local override so concurrently running tests get
 ///   isolated directories without a shared static.</item>
 /// </list>
