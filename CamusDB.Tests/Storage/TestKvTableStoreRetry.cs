@@ -102,7 +102,30 @@ public sealed class TestKvTableStoreRetry
         {
             if (InjectGetValueFaults-- > 0)
                 return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
+            if (InjectGetValueTerminalFaults-- > 0)
+                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((GetValueTerminalType, null));
             return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct, coordinatorKey, operationId);
+        }
+
+        // ---- intercepted: single-key get, non-confirmed terminal answer ----
+        // Unlike InjectGetValueFaults (a transient the retry loop must absorb), this makes the get
+        // return a NON-confirmed terminal type (e.g. Errored) that the retry loop does not retry.
+        // ProbeRaw must surface it as TransactionMustRetry, never as a row miss.
+        public int InjectGetValueTerminalFaults;
+        public KeyValueResponseType GetValueTerminalType = KeyValueResponseType.Errored;
+
+        // ---- intercepted: batch get, per-key non-confirmed answer ----
+        public int InjectGetManyErroredFaults;
+
+        public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
+            HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys,
+            CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            if (InjectGetManyErroredFaults-- > 0)
+                return Task.FromResult(keys
+                    .Select(k => (KeyValueResponseType.Errored, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))
+                    .ToList());
+            return inner.LocateAndTryGetManyValues(txId, readTimestamp, keys, ct, coordinatorKey, operationId);
         }
 
         // ---- intercepted: single-key set ----
@@ -337,6 +360,109 @@ public sealed class TestKvTableStoreRetry
         await CommitTransaction(stub, readTx);
 
         Assert.IsNull(result, "Row must be absent after DeleteRow");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unknown-is-not-absent tests
+    //
+    // Regression for the bank-soak atomicity violation (soak run K, SUM(balance) −3): an exhausted
+    // transient or a non-confirmed terminal read answer was converted into a definitive row miss.
+    // An UPDATE's locate phase then matched 0 rows and reported success, and because the transient
+    // read folds no coordinator observation, commit validation could not catch the dropped write.
+    // A read that cannot confirm the key's state must FAIL the statement, never report absence.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task GetRow_ExhaustedMustRetry_ThrowsInsteadOfReportingMiss()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_unknown_get");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+
+        KvTransaction writeTx = await BeginTransaction(stub, "unk_get_w");
+        await store.InsertRow(writeTx, rowId, [1, 2, 3]);
+        await CommitTransaction(stub, writeTx);
+
+        // Never stops faulting: the whole retry budget is consumed and the read stays MustRetry.
+        stub.InjectGetValueFaults = int.MaxValue;
+
+        KvTransaction readTx = await BeginTransaction(stub, "unk_get_r");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.GetRow(readTx, rowId))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code,
+            "an exhausted transient must surface as a retryable failure, not as a missing row");
+
+        stub.InjectGetValueFaults = 0;
+        await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task GetRow_ErroredAnswer_ThrowsInsteadOfReportingMiss()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_unknown_err");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+
+        KvTransaction writeTx = await BeginTransaction(stub, "unk_err_w");
+        await store.InsertRow(writeTx, rowId, [4, 5, 6]);
+        await CommitTransaction(stub, writeTx);
+
+        // Errored is terminal (the retry loop does not absorb it) but NOT a confirmed absence.
+        stub.InjectGetValueTerminalFaults = 1;
+
+        KvTransaction readTx = await BeginTransaction(stub, "unk_err_r");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.GetRow(readTx, rowId))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code,
+            "an Errored read answer must surface as a retryable failure, not as a missing row");
+
+        await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task GetRow_ConfirmedAbsence_StillReadsAsMiss()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_confirmed_miss");
+        await using EmbeddedKahuna __ = node;
+
+        // A key that was never written: the node answers DoesNotExist — a confirmed absence — and
+        // the unknown-is-not-absent rule must NOT turn that into an error.
+        KvTransaction readTx = await BeginTransaction(stub, "miss_r");
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, Generate());
+        await CommitTransaction(stub, readTx);
+
+        Assert.IsNull(result, "a confirmed absence still reads as a missing row");
+    }
+
+    [Test]
+    public async Task GetRowsBatch_ErroredKey_ThrowsInsteadOfReportingMiss()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_unknown_batch");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+
+        KvTransaction writeTx = await BeginTransaction(stub, "unk_batch_w");
+        await store.InsertRow(writeTx, rowId, [7, 8, 9]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.InjectGetManyErroredFaults = 1;
+
+        KvTransaction readTx = await BeginTransaction(stub, "unk_batch_r");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.GetRowsBatch(readTx, [rowId]))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code,
+            "a per-key Errored batch answer must surface as a retryable failure, not as a missing row");
+
+        await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
     }
 
     // -----------------------------------------------------------------------
