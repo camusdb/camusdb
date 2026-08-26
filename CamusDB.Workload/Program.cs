@@ -129,8 +129,12 @@ public static class Program
         // The bank transfer contends across the whole keyspace and conserves SUM(balance); the accounts
         // write stays shard-disjoint and conflict-free. Both report as writes, so scheduling and metrics
         // are identical either way.
+        // The transfer ledger journals every terminal transfer attempt so a conservation deficit can be
+        // attributed to exact rows and moments; see TransferLedger. Only the bank workload keeps one.
+        Metrics.TransferLedger? transferLedger = bank ? new Metrics.TransferLedger() : null;
+
         IWriteOperation writeOperation = bank
-            ? new TransferOperation(connections, dataset, o.Rows, locking, isolation)
+            ? new TransferOperation(connections, dataset, o.Rows, locking, isolation, ledger: transferLedger)
             : new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation);
         OperationDispatcher dispatcher = new(
             new ReadOperation(connections, dataset),
@@ -172,6 +176,9 @@ public static class Program
 
         ResultWriter writer = new(o.Output);
         await writer.WriteAsync(manifest, summary, intervals, metrics.Errors, ct).ConfigureAwait(false);
+
+        if (transferLedger is not null)
+            await transferLedger.WriteAsync(o.Output, dataset, o.Rows, ct).ConfigureAwait(false);
 
         // Time anchor for aligning intervals.csv (second 0 == MeasureStartUtc) with wall-clock event
         // streams. Kept as a small standalone artifact so it can be added without disturbing the
