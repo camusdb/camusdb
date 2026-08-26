@@ -103,6 +103,12 @@ public sealed class StatisticsManager
         // reference so it cannot re-create the persisted stats key after the drop deleted it.
         public volatile bool Dropped;
 
+        // The relation's ContentsGeneration when this entry was loaded — i.e. which physical
+        // contents these counters describe. Stamped into every flush and compared against the live
+        // relation, so a blob written for a generation that has since been replaced is ignored
+        // rather than believed.
+        public long ContentsGeneration;
+
         // Serializes flushes for this entry so the delta baselines below have a single writer.
         public readonly SemaphoreSlim FlushLock = new(1, 1);
 
@@ -1034,7 +1040,10 @@ public sealed class StatisticsManager
             return null;
         }
 
-        return persisted is null ? null : FromPersisted(persisted);
+        if (persisted is null || persisted.ContentsGeneration != table.Schema.ContentsGeneration)
+            return null;
+
+        return FromPersisted(persisted);
     }
 
     /// <summary>
@@ -1383,7 +1392,15 @@ public sealed class StatisticsManager
             KeyNdv                = keyNdvSnapshot,
             MutationsSinceAnalyze = Interlocked.Read(ref entry.MutationsSinceAnalyze),
             LastAnalyzedAt        = ReadLastAnalyzedAt(entry),
+            ContentsGeneration    = entry.ContentsGeneration,
         };
+
+        // The counters in this entry were measured against a generation the relation has since left.
+        // Writing them would republish the very distribution the swap invalidated, under a stamp that
+        // makes it look current. The eviction the replicated apply performs normally prevents this;
+        // this covers a flush that was already past that point.
+        if (entry.ContentsGeneration != LiveContentsGeneration(database, table.Id))
+            return;
 
         // Consume the ANALYZE overwrite flag; restored in the catch so a failed flush retries
         // with the same semantics.
@@ -1436,7 +1453,9 @@ public sealed class StatisticsManager
                     TableStatistics? persisted = MetaJsonSerializer.DeserializeCompat(
                         persistedEntry.Value, MetaJsonContext.Default.TableStatistics);
 
-                    if (persisted is not null)
+                    // Merging across generations would add this generation's delta onto the previous
+                    // generation's base. The stale blob is overwritten wholesale instead.
+                    if (persisted is not null && persisted.ContentsGeneration == snapshot.ContentsGeneration)
                         toWrite = MergeForFlush(snapshot, persisted, entry);
                 }
             }
@@ -1506,6 +1525,7 @@ public sealed class StatisticsManager
 
         TableStatistics merged = new()
         {
+            ContentsGeneration = local.ContentsGeneration,
             RowCount = Math.Max(0, persistedRow + (local.RowCount - entry.FlushedRowCount)),
             MutationsSinceAnalyze = Math.Max(0,
                 Math.Max(0, persisted.MutationsSinceAnalyze) + (local.MutationsSinceAnalyze - entry.FlushedMutations)),
@@ -1673,6 +1693,27 @@ public sealed class StatisticsManager
         => EnsureLoadedAsync(database, table.Id, table.Name);
 
     /// <summary>
+    /// The live contents generation of the relation with this id, or zero when the relation is not in
+    /// the schema (dropped, or a caller that only has an id).
+    /// </summary>
+    /// <remarks>
+    /// Resolved by id rather than by name because a relation can be renamed between a flush being
+    /// scheduled and running, and because the statistics cache is keyed by id throughout. Zero is the
+    /// right answer for a relation nobody can find: it matches a legacy blob, so a missing relation
+    /// never causes statistics to be silently discarded.
+    /// </remarks>
+    private static long LiveContentsGeneration(DatabaseDescriptor database, string tableId)
+    {
+        foreach (Catalogs.Models.TableSchema candidate in database.Schema.Tables.Values)
+        {
+            if (string.Equals(candidate.Id, tableId, StringComparison.Ordinal))
+                return candidate.ContentsGeneration;
+        }
+
+        return 0;
+    }
+
+    /// <summary>
     /// Merges the persisted Kahuna base into the cached entry and marks it <c>Loaded</c>, at most
     /// once per table. Concurrent callers serialize on the entry's load lock and the losers see
     /// <c>Loaded == true</c> when they acquire it, so every caller that awaits this observes a
@@ -1697,7 +1738,23 @@ public sealed class StatisticsManager
             if (entry.Loaded)
                 return;
 
+            long liveGeneration = LiveContentsGeneration(database, tableId);
+            entry.ContentsGeneration = liveGeneration;
+
             TableStatistics? loaded = await LoadFromKahunaByIdAsync(database, tableId).ConfigureAwait(false);
+
+            // A blob written for a contents generation the relation has left behind describes rows
+            // that are no longer readable through this relation. Discard it: the new generation has
+            // not been measured, and "unknown" is the honest answer, not the old distribution.
+            if (loaded is not null && loaded.ContentsGeneration != liveGeneration)
+            {
+                if (_logger.IsEnabled(LogLevel.Debug))
+                    _logger.LogDebug(
+                        "Ignoring statistics for table {Table}: blob describes contents generation {BlobGeneration}, table is at {LiveGeneration}",
+                        tableLabel, loaded.ContentsGeneration, liveGeneration);
+
+                loaded = null;
+            }
 
             if (loaded is not null)
             {

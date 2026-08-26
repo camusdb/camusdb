@@ -552,4 +552,16 @@ public enum NodeType
     /// reads every later node type. New members are appended.</para>
     /// </summary>
     TypeBytesSized,
+
+    /// <summary>
+    /// <c>TRUNCATE [TABLE] name</c>. <c>leftAst</c> = the table name node.
+    ///
+    /// <para>Empties a base table by replacing the physical key-space its rows live in, so the
+    /// statement's synchronous cost does not grow with the row count. The relation keeps its
+    /// identity, its name and all of its schema metadata; only the contents generation moves.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    TruncateTable,
 }

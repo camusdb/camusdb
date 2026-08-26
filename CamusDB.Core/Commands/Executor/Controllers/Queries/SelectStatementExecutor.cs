@@ -1201,8 +1201,26 @@ internal sealed class SelectStatementExecutor
             PinSchemaVersion(database, source.Table, tx);
     }
 
+    /// <summary>
+    /// Pins what this transaction assumed about a table when it resolved it: the row-layout version,
+    /// and — for a writer — the contents generation it is writing into.
+    /// </summary>
+    /// <remarks>
+    /// <para>The two pins answer different questions. The version pin catches a column layout that
+    /// changed underneath the transaction. The contents pin catches the whole key-space moving: a
+    /// <c>TRUNCATE</c> keeps the relation's id, name and version, so nothing the version pin looks at
+    /// would differ, while the rows the transaction addressed are in storage nothing reads any more.
+    /// It is a secondary guard behind the durable range fence, not a replacement for it — a check made
+    /// here and a commit made later leave a window that only the fence closes.</para>
+    ///
+    /// <para>The contents pin is taken for read-write transactions only. A reader that bound the old
+    /// generation before the cut is entitled to finish against its snapshot, so failing its commit
+    /// would turn a legal read into a spurious error.</para>
+    /// </remarks>
     internal static void PinSchemaVersion(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx)
     {
+        RequireSnapshotWithinContentsGeneration(table, tx);
+
         string resource = $"{database.Id}/{table.Id}";
         tx.PinSchemaVersion(
             resource,
@@ -1211,6 +1229,52 @@ internal sealed class SelectStatementExecutor
             () => database.Schema.Tables.TryGetValue(table.Name, out TableSchema? current)
                   && current.Id == table.Id
         );
+
+        if (tx.TransactionMode != CamusTransactionMode.ReadWrite)
+            return;
+
+        string pinnedStorageId = table.Schema.EffectiveStorageId;
+        tx.PinSchemaVersion(
+            $"{resource}#contents",
+            table.Schema.ContentsGeneration,
+            () => table.Schema.ContentsGeneration,
+            () => string.Equals(table.Schema.EffectiveStorageId, pinnedStorageId, StringComparison.Ordinal)
+        );
+    }
+
+    /// <summary>
+    /// Refuses a read pinned to a point in time before the table's current contents generation began.
+    /// </summary>
+    /// <remarks>
+    /// <para>Placed on the binding path, and called from <see cref="PinSchemaVersion"/> so it cannot be
+    /// forgotten: every statement shape that reads a relation — a point read, a scan, each side of a
+    /// join, a subquery, a cached bound plan — resolves it through here. A per-statement copy of the
+    /// check would be one statement short sooner or later.</para>
+    ///
+    /// <para>The alternative is worse than an error. A <c>TRUNCATE</c> moves the rows into a key-space
+    /// the live schema cannot name any more, so a snapshot from before the cut would scan the new,
+    /// empty generation and answer "no rows" — indistinguishable from a correct empty answer for a
+    /// point in time when the table was full.</para>
+    ///
+    /// <para>Equality passes: the cut is the instant the new generation became valid, so a read exactly
+    /// at it correctly observes the new, empty contents. After several truncates only the latest cut is
+    /// known, so every snapshot before it is refused — conservative, and honest about what the engine
+    /// can still locate.</para>
+    /// </remarks>
+    private static void RequireSnapshotWithinContentsGeneration(TableDescriptor table, KvTransaction tx)
+    {
+        if (table.Schema.ContentsValidFrom is not { } cut)
+            return;
+
+        HLCTimestamp snapshot = tx.ReadTimestamp;
+        if (snapshot.IsNull() || snapshot == HLCTimestamp.Zero || snapshot >= cut)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SnapshotPrecedesContentsGeneration,
+            $"Cannot read table '{table.Name}' AS OF SYSTEM TIME {snapshot}: its contents were replaced at " +
+            $"{cut}, and the rows it held before that point are no longer reachable through this table. " +
+            "Read at or after that timestamp, or recover the retired contents with CREATE TABLE … RELINK TO.");
     }
 
     /// <summary>

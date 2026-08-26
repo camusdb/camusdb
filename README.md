@@ -66,7 +66,7 @@ CamusDB's engine is written in modern C# on .NET: the SQL parser, the query plan
 
 Features
 --------
-- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, prepared statements, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
+- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, TRUNCATE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, prepared statements, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
 - **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
 - **Copy-on-write database branching** — fork a database instantly with `CREATE DATABASE feature_x BRANCH FROM prod`; inspect the tree with `SHOW BRANCHES FROM db` and `SHOW ANCESTORS FROM db`.
 - **Recovering dropped objects** — deferred physical deletion with `RELINK TO '<id>'` recovery, `SHOW ORPHAN DATABASES` / `SHOW ORPHAN TABLES`, and a background reclaimer.
@@ -79,7 +79,7 @@ Features
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
 - **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, per-column ascending/descending ordered indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); there is no magic creation. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
-- **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, and `SHOW CREATE TABLE`.
+- **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, TRUNCATE TABLE, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, and `SHOW CREATE TABLE`.
 - **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
 - **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
@@ -278,6 +278,20 @@ CREATE DATABASE app RELINK TO '<id>';    -- recover a dropped database
 ```
 
 A background reclaimer garbage-collects orphans once their retention window elapses; until then, a drop is reversible.
+
+Emptying a Table
+----------------
+
+`TRUNCATE` empties a base table without reading or deleting a single row. It replaces the physical key-space the table's rows and index entries live in, so the statement costs the same on an empty table and on a billion-row one. The table keeps its name, its id, its columns, its indexes and its grants; only its contents generation moves.
+
+```sql
+TRUNCATE TABLE events;                   -- constant in row count; no mutation limit to hit
+TRUNCATE events;                         -- the TABLE keyword is optional
+```
+
+The previous contents are retained as recoverable retired contents, exactly like a deferred drop: `SHOW ORPHAN TABLES` lists them, `CREATE TABLE events_before RELINK TO '<id>'` brings them back as a separate table, and the background reclaimer purges them once retention elapses. A time-travel read of a point before the truncate is refused rather than answered with a misleading empty result.
+
+See [docs/truncate-table.md](docs/truncate-table.md) for privileges, transaction rules, concurrency semantics, branch behavior, and recovery.
 
 Time-Travel Reads
 -----------------

@@ -95,6 +95,17 @@ SHOW ORPHAN DATABASES;
 | `dropped_at` | UTC ISO-8601 timestamp of the drop (`yyyy-MM-ddTHH:mm:ss.fffZ`). |
 | `expires_at` | When the garbage collector becomes eligible to reclaim it, or `never` when automatic reclamation is disabled (see [Retention](#retention-and-the-garbage-collector)). Advisory — recovery works right up until the data is actually purged. |
 
+`SHOW ORPHAN TABLES` carries one extra column, `kind`, because two different things can be retained:
+
+| `kind` | What it is | Is `former_name` a live table? |
+|--------|------------|-------------------------------|
+| `dropped table` | A table that was dropped. | No — the name was freed. |
+| `retired contents` | One set of contents a **still-live** table stopped reading after a [`TRUNCATE`](truncate-table.md). | **Yes** — that table still exists and is simply empty. |
+
+Recovering `retired contents` publishes the retained rows as a **separate new table** with a fresh
+relation id; the table named in `former_name` is not affected. See
+[`TRUNCATE TABLE` → Recovering the previous contents](truncate-table.md#recovering-the-previous-contents).
+
 ---
 
 ## Recovering with `RELINK`

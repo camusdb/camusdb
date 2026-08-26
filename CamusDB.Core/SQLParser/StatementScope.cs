@@ -67,6 +67,7 @@ public static class StatementScope
     public static bool IsSchemaDdl(NodeType nodeType) => nodeType is
         NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink or
         NodeType.DropTable or NodeType.DropTableIfExists or
+        NodeType.TruncateTable or
         NodeType.AlterTableAddColumn or NodeType.AlterTableDropColumn or
         NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists or
         NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists or

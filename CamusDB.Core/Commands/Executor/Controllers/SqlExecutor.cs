@@ -99,6 +99,17 @@ internal sealed class SqlExecutor()
     }
 
     /// <summary>
+    /// Creates a ticket to empty a table from the AST representation of a <c>TRUNCATE</c> statement.
+    /// </summary>
+    internal TruncateTableTicket CreateTruncateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        if (ast?.leftAst?.yytext is not { Length: > 0 } tableName)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Invalid truncate table AST");
+
+        return new(ticket.DatabaseName, tableName);
+    }
+
+    /// <summary>
     /// Creates a ticket to alter a table from the AST representation of a SQL statement.
     /// </summary>
     /// <param name="ticket"></param>

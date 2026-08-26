@@ -381,6 +381,61 @@ public sealed class SchemaDdlForwardController : CommandsController
     }
 
     [HttpPost]
+    [Route("/internal/schema-ddl/truncate-table")]
+    public async Task<JsonResult> ForwardTruncateTable()
+    {
+        ForwardTruncateTableRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<ForwardTruncateTableRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("ForwardTruncateTable request is null");
+
+            if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
+
+        try
+        {
+            TruncateTableTicket ticket = new(
+                databaseName: req.DatabaseName,
+                tableName: req.TableName
+            );
+
+            bool result = await executor.TruncateTable(ticket).ConfigureAwait(false);
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+    }
+
+    [HttpPost]
     [Route("/internal/schema-ddl/relink-table")]
     public async Task<JsonResult> ForwardRelinkTable()
     {

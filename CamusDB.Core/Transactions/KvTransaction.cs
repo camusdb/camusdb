@@ -162,6 +162,25 @@ public sealed class KvTransaction
     public bool IsReadOnly { get; }
 
     /// <summary>
+    /// True when a client explicitly opened this transaction and owns its commit or rollback —
+    /// <c>BEGIN</c> / <c>START TRANSACTION</c> — as opposed to a transaction the server wrapped
+    /// around one autocommit statement.
+    /// </summary>
+    /// <remarks>
+    /// The engine cannot tell the two apart from the transaction itself: both are ordinary read-write
+    /// transactions with a real identity. Only the transport that created it knows, so the transport
+    /// marks it with <see cref="MarkSessionOwned"/>. A statement whose effects the caller's
+    /// <c>ROLLBACK</c> could not undo reads this and refuses rather than promising otherwise.
+    /// </remarks>
+    public bool IsSessionOwned { get; private set; }
+
+    /// <summary>
+    /// Marks this transaction as explicitly opened by a client. Called once by the transport that
+    /// handled the <c>BEGIN</c>, before any statement runs against it.
+    /// </summary>
+    public void MarkSessionOwned() => IsSessionOwned = true;
+
+    /// <summary>
     /// Isolation level for this transaction. Defaults to <see cref="CamusIsolationLevel.ReadCommitted"/>.
     /// May be upgraded via <c>SET TRANSACTION ISOLATION LEVEL</c> before any locks are acquired —
     /// the SQL handler calls <see cref="ApplyIsolationLevel"/> which guards against mid-flight changes.

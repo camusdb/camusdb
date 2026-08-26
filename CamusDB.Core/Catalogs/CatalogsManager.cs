@@ -204,6 +204,124 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
+    /// Publishes a retired contents generation as a <b>new</b> relation, so the rows a
+    /// <c>TRUNCATE</c> made unreachable can be read again.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A fresh logical id is mandatory.</b> The retired key-space is named by a storage id,
+    /// and on a relation's first truncate that storage id <em>is</em> the still-live source relation's
+    /// id. Reusing it would publish a second relation under an id that is already live — two names for
+    /// one identity, with the grants and dependencies of the source silently attached to the recovery.
+    /// The recovered relation therefore gets a new id and points at the retired key-space through
+    /// <see cref="TableSchema.StorageId"/>, which is exactly the separation that made the truncate
+    /// cheap in the first place.</para>
+    ///
+    /// <para>The captured column layouts are copied under the new id because the retained rows carry
+    /// the source relation's schema versions, and the append-only history keys that describe those
+    /// versions live under the source's id — where the recovered relation cannot reach them.</para>
+    ///
+    /// <para>Order is reattach, then delete the record. A crash in between leaves a live relation with
+    /// a stale record; the collector recognises that from <see cref="OrphanTableRecord.RelinkTargetId"/>
+    /// and removes the record without touching the storage the recovery now owns.</para>
+    /// </remarks>
+    public async Task<TableSchema> RelinkRetiredContents(
+        DatabaseDescriptor database, OrphanTableRecord orphan, string newTableId, string newName, KvTransaction tx)
+    {
+        TableSchema captured = orphan.Schema;
+
+        OrphanTableRecord published = new()
+        {
+            Kind = orphan.Kind,
+            TableId = newTableId,
+            FormerName = orphan.FormerName,
+            DroppedAt = orphan.DroppedAt,
+            SourceTableId = orphan.SourceTableId,
+            RetiredStorageId = orphan.RetiredStorageId,
+            RelinkTargetId = newTableId,
+            Schema = new()
+            {
+                Id = newTableId,
+                // The recovered relation reads the retired key-space; its own id names nothing on disk.
+                StorageId = orphan.RetiredStorageId,
+                Version = captured.Version,
+                Name = newName,
+                Columns = captured.Columns,
+                Indexes = captured.Indexes,
+                CheckConstraints = captured.CheckConstraints,
+                Settings = captured.Settings,
+                Comment = captured.Comment,
+                Kind = captured.Kind,
+                ViewDefinition = captured.ViewDefinition,
+                IsPopulated = captured.IsPopulated,
+                RefreshedAt = captured.RefreshedAt,
+            }
+        };
+
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = RelinkTableEntry(database, published, newName, tx);
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+
+        TableSchema reattached = GetTableSchema(database, newName);
+
+        RegisterTableSystemObject(database, reattached);
+        await PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
+
+        // Copy the captured layouts under the new id so a row written under an older version of the
+        // source relation still decodes through the recovered one.
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        foreach (TableSchemaHistory history in captured.SchemaHistory ?? [])
+        {
+            byte[] historyBytes = MetaJsonSerializer.Serialize(history, MetaJsonContext.Default.TableSchemaHistory);
+            await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, newTableId, history.Version), historyBytes).ConfigureAwait(false);
+        }
+
+        // Addressed by the key-space it protected, not by the relation that now owns it.
+        await DeleteTableOrphanAsync(database, orphan.RetiredStorageId, tx).ConfigureAwait(false);
+
+        return reattached;
+    }
+
+    /// <summary>
+    /// Stamps a retired-contents record with the relation a recovery is about to publish, in its own
+    /// committed transaction.
+    /// </summary>
+    /// <remarks>
+    /// Written <b>before</b> the relation is published, so a crash between the two leaves evidence.
+    /// Without it the collector cannot tell a recovery that half-finished from one that never started,
+    /// and would purge the storage the half-finished recovery is about to hand back.
+    /// </remarks>
+    public async Task RecordRelinkTargetAsync(DatabaseDescriptor database, OrphanTableRecord orphan, string targetId)
+    {
+        orphan.RelinkTargetId = targetId;
+
+        byte[] bytes = MetaJsonSerializer.Serialize(orphan, MetaJsonContext.Default.OrphanTableRecord);
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            await WriteMetaKey(database.Kahuna.Kahuna, tx, OrphanKey(database.Id, orphan.RetiredStorageId), bytes).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// Adds (or re-adds) the system-schema table object for <paramref name="tableSchema"/>, keyed by its
     /// immutable id. Shared by table creation and relink so both keep <c>SystemSchema.Tables</c> in sync
     /// with the live schema. In-memory only; the caller persists via <see cref="PersistSystemMetaAsync"/>.
@@ -1277,6 +1395,65 @@ public sealed class CatalogsManager
         await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Proposes the contents swap that empties <paramref name="tableName"/> and waits until this node
+    /// has applied it, then persists the checkpoint that makes the retired generation recoverable.
+    /// </summary>
+    /// <remarks>
+    /// <para>Every value the delta carries is minted by the caller, before this is called and after it
+    /// holds the exclusive fence over the old row key-space. That ordering is what makes
+    /// <paramref name="contentsValidFrom"/> a real linearization cut: no write into the old generation
+    /// can commit on the far side of it.</para>
+    ///
+    /// <para>Returns nothing on purpose. Once the schema entry commits the truncate has happened
+    /// cluster-wide and cannot be undone; a caller that treated a later local failure as "it did not
+    /// happen" would be wrong. The caller confirms the outcome by reading the applied storage id.</para>
+    /// </remarks>
+    public async Task TruncateTableContentsAsync(
+        DatabaseDescriptor database,
+        string tableId,
+        string tableName,
+        string expectedStorageId,
+        long expectedContentsGeneration,
+        string newStorageId,
+        HLCTimestamp contentsValidFrom,
+        string[] retiredIndexIds,
+        string[] newIndexIds)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = new()
+            {
+                Ts = contentsValidFrom,
+                Database = database.Id,
+                FromVersion = database.Schema.SchemaVersion,
+                ToVersion = database.Schema.SchemaVersion + 1,
+                Op = SchemaOp.TruncateTable,
+                Payload = Serializator.Serialize(new SchemaTruncateTablePayload
+                {
+                    TableId = tableId,
+                    TableName = tableName,
+                    ExpectedStorageId = expectedStorageId,
+                    ExpectedContentsGeneration = expectedContentsGeneration,
+                    NewStorageId = newStorageId,
+                    ContentsValidFrom = contentsValidFrom,
+                    RetiredIndexIds = retiredIndexIds,
+                    NewIndexIds = newIndexIds,
+                })
+            };
+            ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
     public async Task ReplicateSetCommentAsync(
         DatabaseDescriptor database,
         string tableName,
@@ -1462,6 +1639,9 @@ public sealed class CatalogsManager
         if (TestPersistCheckpointException is { } fault)
             throw fault;
 
+        // Before the transaction opens, never inside it — see the method's remarks.
+        await PreloadContentsRetirementHistoriesAsync(database).ConfigureAwait(false);
+
         // High priority: this persists the KV checkpoint for a schema change that Raft has already
         // committed. Delaying it behind a queue of ordinary traffic stalls DDL for the whole cluster,
         // and the commit here is already bounded by CheckpointCommitTimeout — so waiting at the
@@ -1508,6 +1688,16 @@ public sealed class CatalogsManager
                 if (persisted is not null)
                     await PersistSchemaTableAsync(database, persisted, entry.ToVersion, tx).ConfigureAwait(false);
             }
+            else if (entry.Op == SchemaOp.TruncateTable)
+            {
+                // Keyed by id, like the materialized-view arm: a truncate keeps the relation's name,
+                // but a concurrent rename must not be able to send this checkpoint elsewhere.
+                SchemaTruncateTablePayload truncatePayload = DecodePayload<SchemaTruncateTablePayload>(entry);
+                TableSchema? truncated = FindRelationById(database.Schema, truncatePayload.TableId);
+
+                if (truncated is not null)
+                    await PersistSchemaTableAsync(database, truncated, entry.ToVersion, tx).ConfigureAwait(false);
+            }
             else if (entry.Op == SchemaOp.DropTable)
             {
                 if (droppedTableId is not null)
@@ -1536,8 +1726,15 @@ public sealed class CatalogsManager
                 await PersistRenameDependentViewsAsync(database, entry, tx).ConfigureAwait(false);
             }
 
+            // In the same transaction as the live table meta above, so the relation can never be
+            // durable on its new key-space without the old one being recoverable.
+            IReadOnlyList<ContentsRetirementIntent> retirements =
+                await PersistContentsRetirementsAsync(database, tx).ConfigureAwait(false);
+
             using CancellationTokenSource cts = new(CheckpointCommitTimeout);
             await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
+
+            database.CompleteContentsRetirements(retirements);
         }
         finally
         {
@@ -1598,6 +1795,7 @@ public sealed class CatalogsManager
         SchemaOp.SetTableSettings => DecodePayload<SchemaSetTableSettingsPayload>(entry).TableName,
         SchemaOp.SetComment => DecodePayload<SchemaSetCommentPayload>(entry).TableName,
         SchemaOp.SetColumnNotNull => DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
+        SchemaOp.TruncateTable => DecodePayload<SchemaTruncateTablePayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Cannot resolve table name for schema operation '{entry.Op}'"
@@ -1653,6 +1851,9 @@ public sealed class CatalogsManager
             SchemaOp.CreateView or SchemaOp.ReplaceView => schema.Views.ContainsKey(DecodePayload<SchemaViewPayload>(entry).ViewName),
             SchemaOp.DropView => !schema.Views.ContainsKey(DecodePayload<SchemaDropViewPayload>(entry).ViewName),
             SchemaOp.RenameView => schema.Views.ContainsKey(DecodePayload<SchemaRenamePayload>(entry).NewName),
+            // A truncate does not move TableSchema.Version, so the fallback below would answer
+            // "applied" for any unrelated DDL that did. The storage id is the only proof.
+            SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -1759,6 +1960,7 @@ public sealed class CatalogsManager
             SchemaOp.RenameView => ApplyRenameView(schema, DecodePayload<SchemaRenamePayload>(entry)),
             SchemaOp.SetViewDefinition => ApplySetViewDefinition(schema, DecodePayload<SchemaSetViewDefinitionPayload>(entry)),
             SchemaOp.SetMaterializedViewState => ApplySetMaterializedViewState(schema, DecodePayload<SchemaSetMatViewStatePayload>(entry)),
+            SchemaOp.TruncateTable => ApplyTruncateTable(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -2376,6 +2578,272 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
+    /// Applies a TruncateTable delta: moves the relation onto the fresh, empty key-space the payload
+    /// names, advances its contents generation, and records the timestamp that generation is valid
+    /// from. Nothing else about the relation changes — not its id, not its name, not its columns,
+    /// indexes, constraints or schema version.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Compare-and-swap, in both directions.</b> A relation already sitting on the new
+    /// storage id is a re-delivered entry: returning without touching it is what stops a replay from
+    /// retiring a second key-space. A relation sitting on neither the expected nor the new id lost a
+    /// race with another contents change, and applying anyway would move it off a generation this
+    /// entry never described — so that is refused rather than forced.</para>
+    ///
+    /// <para>A relation that is no longer in the schema was dropped after the entry was proposed. That
+    /// is a no-op rather than a failure: a delta that cannot find its target must never wedge the
+    /// apply pipeline.</para>
+    ///
+    /// <para>Pure by construction. This runs inside the schema partition's commit pipeline on every
+    /// node, so it reads no KV and writes none — everything it needs is in the payload. The retired
+    /// key-space is made recoverable afterwards, from the intent captured by
+    /// <see cref="CaptureContentsRetirementIntent"/>.</para>
+    /// </remarks>
+    private static TableSchema? ApplyTruncateTable(Schema schema, SchemaTruncateTablePayload payload)
+    {
+        TableSchema? live = FindRelationById(schema, payload.TableId);
+
+        if (live is null)
+            return null;
+
+        if (string.Equals(live.EffectiveStorageId, payload.NewStorageId, StringComparison.Ordinal))
+            return null;
+
+        if (!string.Equals(live.EffectiveStorageId, payload.ExpectedStorageId, StringComparison.Ordinal) ||
+            live.ContentsGeneration != payload.ExpectedContentsGeneration)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"The contents of '{live.Name}' changed while it was being truncated, so this truncate was " +
+                "discarded rather than applied to a generation it does not describe. Retry it.");
+
+        live.StorageId = payload.NewStorageId;
+        live.ContentsGeneration++;
+        live.ContentsValidFrom = payload.ContentsValidFrom;
+
+        return live;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="payload"/>'s contents swap is present in <paramref name="schema"/>.
+    /// </summary>
+    /// <remarks>
+    /// A truncate deliberately does not bump <see cref="TableSchema.Version"/>, so the generic
+    /// "the version moved" test would report success the moment any other DDL advanced it. The target
+    /// storage id is the only thing that proves this particular delta landed. A relation that is gone
+    /// counts as applied, matching the no-op arm of <see cref="ApplyTruncateTable"/> — otherwise a
+    /// proposer would wait for a transition that can never happen.
+    /// </remarks>
+    private static bool WasTruncateApplied(Schema schema, SchemaTruncateTablePayload payload)
+    {
+        TableSchema? live = FindRelationById(schema, payload.TableId);
+        return live is null || string.Equals(live.EffectiveStorageId, payload.NewStorageId, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Records, in memory, the contents generation a TruncateTable delta is about to detach — so the
+    /// durable retirement can be written later, by whichever path gets there first.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Call this under the schema lock, immediately before applying the delta.</b> It reads
+    /// the pre-swap schema: that is where the retired generation's column layout, index list and
+    /// schema version still are. After the swap the relation describes the new, empty key-space and
+    /// nothing left in memory says what the old one contained.</para>
+    ///
+    /// <para>Guarded by the same compare-and-swap the apply uses, so it is silent on a replay and on a
+    /// relation that has already moved on. That guard is also what keeps a replayed entry from
+    /// resurrecting an orphan record that retention has already purged: after a checkpoint the stored
+    /// schema names the new storage id, so the expectation no longer matches.</para>
+    ///
+    /// <para>Index ids come from the payload, not from the live schema, because the retired generation
+    /// owns entries for every index it ever had — including ones dropped before the truncate, which
+    /// the live schema no longer names.</para>
+    /// </remarks>
+    internal static void CaptureContentsRetirementIntent(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        if (entry.Op != SchemaOp.TruncateTable)
+            return;
+
+        SchemaTruncateTablePayload payload = DecodePayload<SchemaTruncateTablePayload>(entry);
+
+        TableSchema? live = FindRelationById(database.Schema, payload.TableId);
+        if (live is null)
+            return;
+
+        if (!string.Equals(live.EffectiveStorageId, payload.ExpectedStorageId, StringComparison.Ordinal) ||
+            live.ContentsGeneration != payload.ExpectedContentsGeneration)
+            return;
+
+        // The record has to present itself as a relation whose id *is* the retired key-space: that is
+        // what a recovery reads its rows through, and what the collector purges.
+        TableSchema retired = SchemaReplicator.CloneTable(live);
+        retired.Id = payload.ExpectedStorageId;
+        retired.StorageId = null;
+        retired.Name = payload.TableName;
+        retired.ContentsValidFrom = null;
+        // A loader bound to the live relation would go on serving the live table's history keys after
+        // this snapshot is persisted; the checkpoint fills the layouts in explicitly instead.
+        retired.SchemaHistoryLoader = null;
+
+        database.AddContentsRetirement(new ContentsRetirementIntent
+        {
+            SourceTableId = payload.TableId,
+            SourceTableName = payload.TableName,
+            RetiredStorageId = payload.ExpectedStorageId,
+            RetiredIndexIds = payload.RetiredIndexIds,
+            NewStorageId = payload.NewStorageId,
+            NewIndexIds = payload.NewIndexIds,
+            RetiredAt = payload.ContentsValidFrom,
+            RetiredSchema = retired,
+        });
+    }
+
+    /// <summary>
+    /// Writes the durable half of every contents generation this node has detached but not yet
+    /// recorded, in the caller's transaction. Returns what it wrote so the caller can forget those
+    /// intents once the transaction has actually committed.
+    /// </summary>
+    /// <remarks>
+    /// <para>Both the live checkpoint and post-restore reconciliation call this, and they must produce
+    /// the same metadata — a crash between the schema-log commit and the checkpoint has to cost a
+    /// delay, not a lost key-space. Writing them all in one transaction also keeps a run of truncates
+    /// that committed between two checkpoints atomic: either every intermediate generation becomes
+    /// recoverable or none does.</para>
+    ///
+    /// <para>Idempotent. Every write is a fixed key with fixed content, so re-running after a failed
+    /// commit overwrites with the same bytes.</para>
+    /// </remarks>
+    private async Task<IReadOnlyList<ContentsRetirementIntent>> PersistContentsRetirementsAsync(
+        DatabaseDescriptor database, KvTransaction tx)
+    {
+        ContentsRetirementIntent[] pending = database.PendingContentsRetirements();
+        if (pending.Length == 0)
+            return pending;
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        foreach (ContentsRetirementIntent intent in pending)
+        {
+            byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
+            {
+                Kind = OrphanKind.RetiredContents,
+                // The record is addressed by the key-space it protects. Storage ids are globally
+                // allocated, so this cannot collide with another relation's record even though on a
+                // first truncate it is also the still-live source relation's id.
+                TableId = intent.RetiredStorageId,
+                SourceTableId = intent.SourceTableId,
+                RetiredStorageId = intent.RetiredStorageId,
+                FormerName = intent.SourceTableName,
+                DroppedAt = intent.RetiredAt,
+                Schema = intent.RetiredSchema,
+            }, MetaJsonContext.Default.OrphanTableRecord);
+
+            await WriteMetaKey(kahuna, tx, OrphanKey(database.Id, intent.RetiredStorageId), orphanBytes).ConfigureAwait(false);
+
+            // Freeze what the retired generation owns. Recomputing it at reclaim time from the live
+            // schema would miss every index dropped before the truncate, leaking those entries.
+            byte[] retiredCatalog = MetaJsonSerializer.Serialize(intent.RetiredIndexIds, MetaJsonContext.Default.StringArray);
+            await WriteMetaKey(kahuna, tx, KeyspaceCatalogKey(database.Id, intent.RetiredStorageId), retiredCatalog).ConfigureAwait(false);
+
+            // Seed the new generation's catalog in the same step, so a DROP DATABASE that runs before
+            // the next schema persist still finds the new key-space.
+            byte[] newCatalog = MetaJsonSerializer.Serialize(intent.NewIndexIds, MetaJsonContext.Default.StringArray);
+            await WriteMetaKey(kahuna, tx, KeyspaceCatalogKey(database.Id, intent.NewStorageId), newCatalog).ConfigureAwait(false);
+        }
+
+        return pending;
+    }
+
+    /// <summary>
+    /// Loads the column layouts every pending retirement needs to carry, <b>before</b> the checkpoint
+    /// transaction opens.
+    /// </summary>
+    /// <remarks>
+    /// <para>The timing is the whole point, and getting it wrong hangs the node. These reads use the
+    /// non-transactional snapshot, which cannot see a transaction's own unresolved write intents — it
+    /// waits for them to resolve. Run inside the checkpoint transaction, after that transaction has
+    /// already staged a meta write, the scan would wait on an intent only its own caller could
+    /// resolve, and the caller is the thing waiting. Read first, write second.</para>
+    ///
+    /// <para>Idempotent and cheap to repeat: a retry after a failed checkpoint simply reloads the same
+    /// append-only layouts.</para>
+    /// </remarks>
+    private async Task PreloadContentsRetirementHistoriesAsync(DatabaseDescriptor database)
+    {
+        foreach (ContentsRetirementIntent intent in database.PendingContentsRetirements())
+        {
+            // The retained rows were written under the source relation's schema versions, and the
+            // history keys that describe those versions are append-only under the source relation's
+            // id. A recovery publishes the contents under a *new* relation id, so it cannot reach
+            // them there — they are copied into the record instead.
+            intent.RetiredSchema.SchemaHistory =
+                await LoadAllSchemaHistoryAsync(database, intent.SourceTableId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Reads every persisted column layout recorded for <paramref name="tableId"/>, oldest version
+    /// first. Used when a retired contents generation has to carry its own decoding history.
+    /// </summary>
+    private static async Task<List<TableSchemaHistory>> LoadAllSchemaHistoryAsync(DatabaseDescriptor database, string tableId)
+    {
+        string prefix = HistoryKeyPrefix(database.Id, tableId);
+        List<TableSchemaHistory> history = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in database.Kahuna.Kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, MetaBucketPrefix(database.Id), null, true, null, true, 512,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        {
+            if (!key.StartsWith(prefix, StringComparison.Ordinal) || entry.Value is not { Length: > 0 })
+                continue;
+
+            history.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.TableSchemaHistory));
+        }
+
+        history.Sort(static (a, b) => a.Version.CompareTo(b.Version));
+        return history;
+    }
+
+    /// <summary>
+    /// Reads the persisted grow-only index-id catalog for one storage generation, unioned with the
+    /// indexes the relation currently has.
+    /// </summary>
+    /// <remarks>
+    /// Called by the proposer, never from apply. The result is frozen into the schema-log payload so
+    /// every node — including one replaying the entry long afterwards — retires exactly the same set
+    /// of index key-spaces without reading anything.
+    /// </remarks>
+    internal async Task<string[]> ReadStorageIndexCatalogAsync(DatabaseDescriptor database, TableSchema tableSchema)
+    {
+        HashSet<string> ids = [];
+
+        string storageId = tableSchema.EffectiveStorageId;
+
+        foreach (string candidateKey in string.Equals(storageId, tableSchema.Id, StringComparison.Ordinal)
+                     ? new[] { KeyspaceCatalogKey(database.Id, storageId) }
+                     : [KeyspaceCatalogKey(database.Id, storageId), KeyspaceCatalogKey(database.Id, tableSchema.Id ?? "")])
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, candidateKey, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+            if (type == KeyValueResponseType.Get && entry?.Value is { Length: > 0 } bytes)
+            {
+                foreach (string id in MetaJsonSerializer.Deserialize(bytes, MetaJsonContext.Default.StringArray))
+                    ids.Add(id);
+            }
+        }
+
+        if (tableSchema.Indexes is not null)
+        {
+            foreach (TableIndexSchema index in tableSchema.Indexes)
+                if (!string.IsNullOrEmpty(index.Id))
+                    ids.Add(index.Id);
+        }
+
+        return [.. ids];
+    }
+
+    /// <summary>
     /// Finds a live relation by its immutable id. Used where a name would be the wrong key because the
     /// operation can outlive a concurrent rename.
     /// </summary>
@@ -2969,12 +3437,23 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
-    /// Returns the meta key that stores the grow-only set of all index ids ever allocated for
-    /// <paramref name="tableId"/>. The catalog is written on every schema persist so that
+    /// Returns the meta key that stores the grow-only set of all index ids ever allocated for one
+    /// <b>storage generation</b>. The catalog is written on every schema persist so that
     /// DROP DATABASE can discover and purge overlay entries for indexes that were dropped
     /// before the database itself was dropped.
+    ///
+    /// <para><paramref name="storageId"/> is the <c>EffectiveStorageId</c>, not the relation id. The
+    /// catalog names the key-space it describes, and a relation may own several over its life — one
+    /// per contents swap. Keying it by identity instead would make every generation of one relation
+    /// share a single entry, so retiring a generation could not record what that generation owned, and
+    /// the whole-database purge (which reads the key suffix as the bucket to sweep) would sweep an
+    /// empty prefix named after the identity while the real rows stayed behind.</para>
+    ///
+    /// <para>The two coincide for every relation that never swapped, which is why existing catalogs
+    /// keep working; where they differ, <see cref="WriteKeyspaceCatalogAsync"/> falls back to the
+    /// legacy identity-keyed entry and copies it forward.</para>
     /// </summary>
-    private static string KeyspaceCatalogKey(string dbId, string tableId) => $"{dbId}/meta/keyspace:{tableId}";
+    private static string KeyspaceCatalogKey(string dbId, string storageId) => $"{dbId}/meta/keyspace:{storageId}";
 
     /// <summary>
     /// Persists the system schema metadata. Schema table metadata is stored per object
@@ -3476,6 +3955,9 @@ public sealed class CatalogsManager
         IKahuna kahuna = database.Kahuna.Kahuna;
         long schemaVersion = database.Schema.SchemaVersion;
 
+        // Before the transaction opens, never inside it — see the method's remarks.
+        await PreloadContentsRetirementHistoriesAsync(database).ConfigureAwait(false);
+
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
         ).ConfigureAwait(false);
@@ -3508,8 +3990,17 @@ public sealed class CatalogsManager
                 }
             }
 
+            // Reconciled here, in the transaction that also rewrites the table blobs, and before any
+            // of those blobs can overwrite a pre-swap table meta. A replay that recreated the live
+            // generation without recreating the retired one's record would leave that key-space
+            // unreachable: nothing in the schema names it any more.
+            IReadOnlyList<ContentsRetirementIntent> retirements =
+                await PersistContentsRetirementsAsync(database, tx).ConfigureAwait(false);
+
             using CancellationTokenSource cts = new(CheckpointCommitTimeout);
             await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
+
+            database.CompleteContentsRetirements(retirements);
         }
         finally
         {
@@ -4047,7 +4538,8 @@ public sealed class CatalogsManager
         if (string.IsNullOrEmpty(tableSchema.Id))
             return;
 
-        string catalogKey = KeyspaceCatalogKey(dbId, tableSchema.Id);
+        string storageId = tableSchema.EffectiveStorageId;
+        string catalogKey = KeyspaceCatalogKey(dbId, storageId);
 
         // Load existing catalog to accumulate ids from previously dropped indexes.
         // This read uses HLCTimestamp.Zero (non-transactional) because the caller holds
@@ -4066,6 +4558,23 @@ public sealed class CatalogsManager
             string[]? existingIds = MetaJsonSerializer.Deserialize(existingBytes, MetaJsonContext.Default.StringArray);
             foreach (string id in existingIds)
                 allIndexIds.Add(id);
+        }
+        else if (!string.Equals(storageId, tableSchema.Id, StringComparison.Ordinal))
+        {
+            // Compatibility: relations swapped before the catalog was keyed by storage generation
+            // have their only entry under the relation id. Read it once and let this write copy it
+            // forward to the storage-keyed entry.
+            (KeyValueResponseType legacyType, ReadOnlyKeyValueEntry? legacyEntry) =
+                await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, KeyspaceCatalogKey(dbId, tableSchema.Id), -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            if (legacyType == KeyValueResponseType.Get && legacyEntry?.Value is { Length: > 0 } legacyBytes)
+            {
+                foreach (string id in MetaJsonSerializer.Deserialize(legacyBytes, MetaJsonContext.Default.StringArray))
+                    allIndexIds.Add(id);
+            }
         }
 
         // Union with live indexes in the current schema.

@@ -241,6 +241,25 @@ internal sealed class TtlScheduler : IAsyncDisposable
                 manifest = null;
             }
 
+            // Discard a run planned against a contents generation the table has left behind. Its spans
+            // were computed for rows that a TRUNCATE moved out of reach, and driving it now would let a
+            // worker delete from either the new generation (under a plan that never described it) or
+            // the retired one (which a recovery is entitled to get back intact). The generation check
+            // is the durable guard; the cleanup below is convenience, so a crash before it is harmless.
+            if (manifest is not null && !ManifestMatchesContents(manifest, table))
+            {
+                if (!await IsLeaderAsync(ct).ConfigureAwait(false))
+                    continue; // let the leader retire it; working it would touch the wrong key-space
+
+                if (logger.IsEnabled(LogLevel.Information))
+                    logger.LogInformation(
+                        "TTL run {Run} for table {Table} was planned against contents generation {Planned}; the table is at {Live}. Retiring the run",
+                        manifest.RunId, manifest.TableName, manifest.ContentsGeneration, table.Schema.ContentsGeneration);
+
+                await coordinator.DeleteRunAsync(database.Id, manifest.TableId, manifest.SpanCount, ct).ConfigureAwait(false);
+                manifest = null;
+            }
+
             // A run describes one predicate. If the table's expiration column or grace period has since
             // changed, finishing this run would apply the old meaning to its remaining spans while rows
             // it already passed were judged by the old one and never revisited — one run, two answers.
@@ -492,6 +511,8 @@ internal sealed class TtlScheduler : IAsyncDisposable
             RunId = ObjectIdGenerator.Generate().ToString(),
             TableId = table.Id,
             TableName = table.Name,
+            StorageId = table.Schema.EffectiveStorageId,
+            ContentsGeneration = table.Schema.ContentsGeneration,
             HorizonNode = now.N,
             HorizonPhysical = now.L,
             HorizonCounter = now.C,
@@ -634,6 +655,12 @@ internal sealed class TtlScheduler : IAsyncDisposable
 
         try
         {
+            // Re-checked per span, not only once per tick: a truncate can land between two spans of the
+            // same run, and every span that starts after it would otherwise delete under a plan that no
+            // longer describes the table's contents.
+            if (!ManifestMatchesContents(manifest, table))
+                return;
+
             (long spanDeleted, long spanSkipped, long spanFailed) = await sweeper.SweepSpanAsync(
                 database, table, manifest, ttl, spanIndex, claimToken,
                 selectLimiter, deleteLimiter, ct).ConfigureAwait(false);
@@ -714,6 +741,8 @@ internal sealed class TtlScheduler : IAsyncDisposable
         RunId = source.RunId,
         TableId = source.TableId,
         TableName = source.TableName,
+        StorageId = source.StorageId,
+        ContentsGeneration = source.ContentsGeneration,
         HorizonNode = source.HorizonNode,
         HorizonPhysical = source.HorizonPhysical,
         HorizonCounter = source.HorizonCounter,
@@ -724,6 +753,23 @@ internal sealed class TtlScheduler : IAsyncDisposable
         GraceMs = source.GraceMs,
         PredicateFingerprint = source.PredicateFingerprint,
     };
+
+    /// <summary>
+    /// Whether a run still describes the table's current physical contents.
+    /// </summary>
+    /// <remarks>
+    /// A manifest written before storage generations were recorded carries an empty storage id and a
+    /// zero generation, which is exactly what a relation whose contents were never replaced reports —
+    /// so an old manifest on an untouched table keeps matching, and nothing has to be migrated.
+    /// </remarks>
+    private static bool ManifestMatchesContents(TtlRunManifest manifest, TableDescriptor table)
+    {
+        if (manifest.ContentsGeneration != table.Schema.ContentsGeneration)
+            return false;
+
+        return string.IsNullOrEmpty(manifest.StorageId)
+            || string.Equals(manifest.StorageId, table.Schema.EffectiveStorageId, StringComparison.Ordinal);
+    }
 
     private HLCTimestamp Now() =>
         sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());

@@ -166,6 +166,12 @@ public sealed class SchemaReplicator
             // proposer persists the checkpoint after the replication round-trip returns —
             // see CatalogsManager.ReplicateAndWaitLocalApplyAsync. The committed schema log
             // remains the source of truth; the KV checkpoint is a load-time optimization.
+            // Before the mutation, never after: the retired generation's column layout, index list
+            // and schema version only exist in the pre-swap schema. Persisting is forbidden from
+            // here (this runs inside the schema partition's commit pipeline), so the intent is
+            // recorded in memory and written by the checkpoint that follows.
+            CatalogsManager.CaptureContentsRetirementIntent(database, entry);
+
             TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
             InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
 
@@ -234,6 +240,22 @@ public sealed class SchemaReplicator
             database.TableDescriptors.TryRemove(payload.TableName, out _);
             if (entry.Op == SchemaOp.RenameTable)
                 database.TableDescriptors.TryRemove(payload.NewName, out _);
+        }
+
+        // A truncate leaves the relation's name, id and schema version untouched and changes only the
+        // key-space its rows live in — so nothing a descriptor, a cached result or a costed plan keys
+        // on would otherwise look different. Eviction happens here, in the replicated callback, so it
+        // runs on every node: the proposer reaches this same callback, and a node that did not issue
+        // the statement would otherwise keep answering from rows the swap retired.
+        if (entry.Op == SchemaOp.TruncateTable && tableSchema?.Name is not null)
+        {
+            database.TableDescriptors.TryRemove(tableSchema.Name, out _);
+
+            if (tableSchema.Id is { Length: > 0 } truncatedRelationId)
+            {
+                database.Cache?.InvalidateByTableId(database.Id, truncatedRelationId);
+                database.EvictTableStatistics?.Invoke(truncatedRelationId);
+            }
         }
 
         // A materialized-view refresh swap moves a different relation — a different table id, and so a
@@ -375,6 +397,11 @@ public sealed class SchemaReplicator
                 );
             }
 
+            // Replay records one intent per unapplied swap. Several truncates can sit between the
+            // last checkpoint and the committed head; only the final storage id ends up live, so each
+            // intermediate generation needs its own record or its rows become unreachable.
+            CatalogsManager.CaptureContentsRetirementIntent(database, entry);
+
             CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
@@ -410,8 +437,24 @@ public sealed class SchemaReplicator
             SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
             SchemaOp.RenameTable or SchemaOp.RenameColumn or SchemaOp.RenameIndex => WasRenamed(schema, DecodePayload<SchemaRenamePayload>(entry)),
+            // A truncate leaves TableSchema.Version alone, so the version fallback below would call a
+            // re-delivered entry "already applied" only by accident. Compare the storage id instead.
+            SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
+    }
+
+    private static bool WasTruncateApplied(Schema schema, SchemaTruncateTablePayload payload)
+    {
+        foreach (TableSchema candidate in schema.Tables.Values)
+        {
+            if (string.Equals(candidate.Id, payload.TableId, StringComparison.Ordinal))
+                return string.Equals(candidate.EffectiveStorageId, payload.NewStorageId, StringComparison.Ordinal);
+        }
+
+        // Gone from the schema: dropped after the entry was proposed. ApplyTruncateTable treats that
+        // as a no-op, so treating it as applied here keeps the two consistent.
+        return true;
     }
 
     private static bool WasRenamed(Schema schema, SchemaRenamePayload payload)
@@ -508,7 +551,12 @@ public sealed class SchemaReplicator
         Comment = view.Comment
     };
 
-    private static TableSchema CloneTable(TableSchema table)
+    /// <summary>
+    /// Copies a table deeply enough that applying a delta to the clone cannot be observed through the
+    /// live schema. Also used to snapshot a relation before a contents swap detaches its key-space,
+    /// where the copy becomes the retired generation's self-contained definition.
+    /// </summary>
+    internal static TableSchema CloneTable(TableSchema table)
     {
         return new()
         {
@@ -542,7 +590,8 @@ public sealed class SchemaReplicator
             Kind = table.Kind,
             ViewDefinition = table.ViewDefinition,
             IsPopulated = table.IsPopulated,
-            RefreshedAt = table.RefreshedAt
+            RefreshedAt = table.RefreshedAt,
+            ContentsValidFrom = table.ContentsValidFrom
         };
     }
 

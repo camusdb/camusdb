@@ -64,6 +64,13 @@ an earlier point.
   historical `UPDATE`/`DELETE`.
 - **Only past instants.** A value resolving to a future time, or to a time at or before the Unix
   epoch, is rejected.
+- **A truncated table cannot be read before its current contents began.** `TRUNCATE` replaces the
+  key-space a table's rows live in, and a live schema can locate only the current one. A snapshot
+  earlier than that cut is refused with `CADB0537`
+  (`SnapshotPrecedesContentsGeneration`, HTTP 400) rather than answered with an empty result, which
+  would be indistinguishable from a correct empty answer. A snapshot exactly at the cut is allowed
+  and observes the new, empty contents. To read the older rows, recover them under a new table with
+  `CREATE TABLE … RELINK TO` — see [`TRUNCATE TABLE`](truncate-table.md#time-travel).
 - **Retention bounds how far back you can look.** The snapshot can only resolve against revisions the
   storage layer still retains. A timestamp older than the retained history simply returns an empty
   result (there is no error for "too old"). By default Kahuna keeps all persisted revisions, so in

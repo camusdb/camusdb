@@ -28,6 +28,13 @@ public interface ISchemaDdlForwarder
 
     Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Forwards <c>TRUNCATE</c>. Only the schema leader may run it: it allocates the new storage id
+    /// and holds the exclusive fence over the old row key-space while the delta commits, and a
+    /// follower holding a local fence while waiting on the leader would fence nothing.
+    /// </summary>
+    Task<bool?> ForwardTruncateTableAsync(string leader, TruncateTableTicket ticket, string operationId, CancellationToken cancellationToken);
+
     Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken);
 
     Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken);

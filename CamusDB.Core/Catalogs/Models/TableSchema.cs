@@ -41,8 +41,10 @@ public sealed class TableSchema
     /// The key-space this relation's rows and index entries actually live under, when that is not
     /// <see cref="Id"/>. Null — the case for every ordinary table — means the two are the same.
     ///
-    /// <para>They come apart for exactly one reason: a materialized-view refresh builds its new
-    /// contents in a fresh key-space and then adopts it. <see cref="Id"/> has to stay put across that,
+    /// <para>They come apart when a relation's <em>contents</em> are replaced while its
+    /// <em>identity</em> must survive: a materialized-view refresh builds its new contents in a fresh
+    /// key-space and then adopts it, and a <c>TRUNCATE</c> adopts a fresh empty one.
+    /// <see cref="Id"/> has to stay put across that,
     /// because it is the relation's <b>identity</b> — privilege grants, the views that depend on it,
     /// the result cache and the statistics are all keyed by it, and changing it would silently revoke
     /// every grant on the materialized view and orphan everything else, as though a refresh had
@@ -59,16 +61,30 @@ public sealed class TableSchema
     public string EffectiveStorageId => string.IsNullOrEmpty(StorageId) ? Id ?? "" : StorageId;
 
     /// <summary>
-    /// Advances every time a materialized view's contents are replaced. Zero on an ordinary table.
+    /// Advances every time this relation's contents are replaced wholesale — a materialized-view
+    /// refresh, or a <c>TRUNCATE</c>. Zero on a relation whose contents were never replaced.
     ///
     /// <para>Identity cannot double as a contents version. <see cref="Id"/> deliberately survives a
     /// refresh so grants and dependencies survive with it, and <see cref="Version"/> describes the row
-    /// <em>encoding</em>, which a refresh does not change — so after a swap every field a cache or a
-    /// plan would key on looks exactly as it did before, while the rows underneath are entirely
+    /// <em>encoding</em>, which a contents swap does not change — so after a swap every field a cache
+    /// or a plan would key on looks exactly as it did before, while the rows underneath are entirely
     /// different ones in a different key-space. This is the field that differs, and it is what lets
     /// anything holding a result computed from the old contents notice.</para>
     /// </summary>
     public long ContentsGeneration { get; set; }
+
+    /// <summary>
+    /// The HLC timestamp at which the current <see cref="StorageId"/> generation became valid, or
+    /// null on a relation whose contents were never replaced.
+    ///
+    /// <para>It is minted only after the exclusive fence over the whole old row key-space is held,
+    /// so no write into the previous generation can commit after it. That makes it a true
+    /// linearization cut for the contents, which is what lets a time-travel read decide honestly
+    /// whether it can be answered: a snapshot at or after the cut reads the current generation, and
+    /// a snapshot before it names rows that live in a key-space the live schema can no longer
+    /// locate. The latter is rejected rather than answered with zero rows.</para>
+    /// </summary>
+    public HLCTimestamp? ContentsValidFrom { get; set; }
 
     /// <summary>
     /// Advances on <b>every</b> replicated change to this relation's metadata — columns, indexes,

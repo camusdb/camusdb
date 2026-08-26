@@ -259,6 +259,11 @@ internal sealed class StatementAuthorizer
         NodeType.CreateTable or NodeType.CreateTableIfNotExists or NodeType.CreateTableRelink
             or NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists => Privilege.CreateTable,
         NodeType.DropTable or NodeType.DropTableIfExists => Privilege.Drop,
+        // TRUNCATE needs DELETE *and* DROP. Only one privilege can ride the ambient scope the
+        // per-table chokepoint reads, so this names DELETE and the truncate path checks DROP
+        // itself — separately, because two privileges granted in two statements live in two
+        // grant records and a combined mask would match neither.
+        NodeType.TruncateTable => Privilege.Delete,
         NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists
             or NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists
             or NodeType.AlterTableDropIndex => Privilege.Index,

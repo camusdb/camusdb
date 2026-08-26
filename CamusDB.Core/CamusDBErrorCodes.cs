@@ -394,6 +394,29 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string InsufficientDiskSpace = "CADB0536";
 
+    /// <summary>
+    /// An <c>AS OF SYSTEM TIME</c> read named a point in time before the table's current contents
+    /// generation began.
+    ///
+    /// <para><c>TRUNCATE</c> replaces the key-space a relation's rows live in and records the
+    /// timestamp the new key-space became valid. A live schema can locate only the current
+    /// key-space, so a snapshot from before that cut has nowhere to read the old rows from.
+    /// Returning an empty result instead would be indistinguishable from a correct empty answer,
+    /// which is the failure this code exists to prevent. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string SnapshotPrecedesContentsGeneration = "CADB0537";
+
+    /// <summary>
+    /// A statement that owns its own internal transaction was issued inside an explicit,
+    /// caller-owned transaction.
+    ///
+    /// <para><c>TRUNCATE</c> is the one statement in this class today. It commits a replicated
+    /// schema entry, and that entry cannot be rolled back by a later <c>ROLLBACK</c> of the
+    /// caller's transaction — so accepting it there would promise rollback semantics the engine
+    /// cannot honor. Commit or roll back first, then run the statement. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string StatementNotAllowedInTransaction = "CADB0538";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -548,6 +571,8 @@ public static class CamusDBErrorCodes
         ConcurrentSchemaChange => 409,
         SequenceUnavailable => 503,
         InsufficientDiskSpace => 507,
+        SnapshotPrecedesContentsGeneration => 400,
+        StatementNotAllowedInTransaction => 400,
         PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

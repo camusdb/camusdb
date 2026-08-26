@@ -784,7 +784,7 @@ internal sealed class SchemaQuerier
         await Task.CompletedTask;
 
         foreach (OrphanDatabaseRecord orphan in orphans)
-            yield return OrphanRow(orphan.Id, orphan.FormerName, orphan.DroppedAt);
+            yield return OrphanRow(orphan.Id, kind: "", orphan.FormerName, orphan.DroppedAt);
     }
 
     /// <summary>
@@ -952,7 +952,10 @@ internal sealed class SchemaQuerier
     internal async IAsyncEnumerable<QueryResultRow> ShowOrphanTables(DatabaseDescriptor database)
     {
         foreach (OrphanTableRecord orphan in await catalogs.LoadTableOrphansAsync(database).ConfigureAwait(false))
-            yield return OrphanRow(orphan.TableId, orphan.FormerName, orphan.DroppedAt);
+        {
+            string kind = orphan.Kind == OrphanKind.RetiredContents ? "retired contents" : "dropped table";
+            yield return OrphanRow(orphan.TableId, kind, orphan.FormerName, orphan.DroppedAt);
+        }
     }
 
     /// <summary>
@@ -962,18 +965,24 @@ internal sealed class SchemaQuerier
     /// the literal <c>"never"</c> when automatic reclamation is disabled
     /// (<see cref="CamusDBOptions.OrphanRetentionMs"/> &lt;= 0).
     /// </summary>
-    private QueryResultRow OrphanRow(string id, string formerName, HLCTimestamp droppedAt)
+    private QueryResultRow OrphanRow(string id, string kind, string formerName, HLCTimestamp droppedAt)
     {
         long retentionMs = options.OrphanRetentionMs;
         string expiresAt = retentionMs > 0 ? IsoFromUnixMs(droppedAt.L + retentionMs) : "never";
 
-        return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+        Dictionary<string, ColumnValue> row = new(StringComparer.OrdinalIgnoreCase)
         {
             { "id",          new ColumnValue(ColumnType.String, id) },
             { "former_name", new ColumnValue(ColumnType.String, formerName) },
             { "dropped_at",  new ColumnValue(ColumnType.String, IsoFromUnixMs(droppedAt.L)) },
             { "expires_at",  new ColumnValue(ColumnType.String, expiresAt) },
-        });
+        };
+
+        // Only the table listing distinguishes kinds; a database is always a dropped database.
+        if (kind.Length > 0)
+            row["kind"] = new ColumnValue(ColumnType.String, kind);
+
+        return new QueryResultRow(default, row);
     }
 
     /// <summary>Formats Unix-epoch milliseconds (the HLC physical component) as UTC ISO-8601 with millisecond precision.</summary>

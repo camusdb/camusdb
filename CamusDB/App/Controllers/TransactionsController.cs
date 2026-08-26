@@ -69,7 +69,7 @@ public sealed class TransactionsController : CommandsController
             // write/lock/folded-read.
             KvTransaction txState = await transactions.StartAsync(
                 request.DatabaseName, isolationLevel, transactionMode, locking, deferStart: true,
-                priority: priority).ConfigureAwait(false);
+                priority: priority, sessionOwned: true).ConfigureAwait(false);
 
             return new JsonResult(new StartTransactionResponse("ok", txState.ClientId.L, txState.ClientId.C));
         }

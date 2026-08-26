@@ -103,6 +103,12 @@ public sealed class HttpTransactionCoordinator
     /// start). Pass it only for explicit interactive transactions (<c>/start-transaction</c>);
     /// autocommit statements start eagerly.</para>
     /// </summary>
+    /// <param name="sessionOwned">
+    /// True when the caller is handling an explicit <c>BEGIN</c> / <c>START TRANSACTION</c> and the
+    /// client will commit or roll the transaction back itself. The transaction is marked so a
+    /// statement that cannot honour a later <c>ROLLBACK</c> — <c>TRUNCATE</c> — can refuse to run
+    /// inside it. Leave false for the server-side transaction wrapped around one autocommit statement.
+    /// </param>
     public async Task<KvTransaction> StartAsync(
         string databaseName,
         CamusIsolationLevel? isolationLevel,
@@ -110,6 +116,7 @@ public sealed class HttpTransactionCoordinator
         KeyValueTransactionLocking? locking = null,
         bool deferStart = false,
         TransactionPriority? priority = null,
+        bool sessionOwned = false,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(databaseName))
@@ -120,6 +127,9 @@ public sealed class HttpTransactionCoordinator
         KvTransaction tx = await database.Transactions.BeginAsync(
             isolationLevel, transactionMode, locking: locking, deferStart: deferStart,
             priority: priority, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (sessionOwned)
+            tx.MarkSessionOwned();
+
         Register(database.Transactions, tx);
         return tx;
     }

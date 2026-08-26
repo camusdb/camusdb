@@ -37,6 +37,7 @@
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
+%token TTRUNCATE
 %token TCASE TWHEN TTHEN TELSE TEND
 %token TINCLUDE
 %token TASOFSYSTEMTIME
@@ -61,6 +62,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | insert_stmt { $$.n = $1.n; }
         | create_table_stmt { $$.n = $1.n; }
         | drop_table_stmt { $$.n = $1.n; }
+        | truncate_table_stmt { $$.n = $1.n; }
         | create_database_stmt { $$.n = $1.n; }
         | drop_database_stmt { $$.n = $1.n; }
         | rename_database_stmt { $$.n = $1.n; }
@@ -402,6 +404,14 @@ opt_with_data : TWITH TIDENTIFIER
                 }
               | { $$.s = null; }
               ;
+
+/* TRUNCATE [TABLE] name — empties a base table by replacing its physical contents generation.
+   The TABLE keyword is optional, matching PostgreSQL and MySQL. Exactly one target: several
+   tables in one statement are out of scope, and widening any_identifier to a list later is not a
+   breaking grammar change. */
+truncate_table_stmt : TTRUNCATE TTABLE any_identifier { $$.n = new(NodeType.TruncateTable, $3.n, null, null, null, null, null, null, null); }
+                    | TTRUNCATE any_identifier { $$.n = new(NodeType.TruncateTable, $2.n, null, null, null, null, null, null, null); }
+                    ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
                 | TDROP TTABLE any_identifier TFORCE { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, "force"); }

@@ -87,4 +87,19 @@ public sealed class TableStatistics
     /// </summary>
     [JsonPropertyName("lastAnalyzedAt")]
     public HLCTimestamp LastAnalyzedAt { get; set; }
+
+    /// <summary>
+    /// The <c>ContentsGeneration</c> of the relation these counters describe. Zero on a blob written
+    /// before this field existed, which is also the generation of every relation whose contents were
+    /// never replaced — so old blobs keep matching their tables.
+    ///
+    /// <para>Statistics are keyed by the relation's identity, and a <c>TRUNCATE</c> or a
+    /// materialized-view refresh keeps that identity while replacing every row underneath it. Without
+    /// this field the blob would survive the swap and describe a distribution that no longer exists —
+    /// and it would be believed, because nothing else about the relation looks different. A blob whose
+    /// generation does not match the live relation is ignored, not corrected: the correct row count
+    /// for a generation nobody has measured is "unknown", not the previous one's.</para>
+    /// </summary>
+    [JsonPropertyName("contentsGen")]
+    public long ContentsGeneration { get; set; }
 }

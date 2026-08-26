@@ -35,6 +35,42 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// </summary>
 public sealed class OrphanTableRecord
 {
+    /// <summary>
+    /// What this record stands for. Absent (the legacy shape, and the default) means
+    /// <see cref="OrphanKind.DroppedTable"/>.
+    ///
+    /// <para>The distinction matters because reclamation asks a different question of each kind. A
+    /// dropped table is gone from the live schema, so a live meta key at its id proves a relink
+    /// finished and the record is stale. Retired contents belong to a relation that is still live at
+    /// that very id on its first truncate, so the same test would discard the record and leak the
+    /// data it protects.</para>
+    /// </summary>
+    public OrphanKind Kind { get; set; }
+
+    /// <summary>
+    /// For <see cref="OrphanKind.RetiredContents"/>, the still-live relation whose contents these
+    /// were. Empty for a dropped table.
+    /// </summary>
+    public string SourceTableId { get; set; } = "";
+
+    /// <summary>
+    /// For <see cref="OrphanKind.RetiredContents"/>, the physical key-space that holds the retained
+    /// rows and index entries. Empty for a dropped table, whose data lives under
+    /// <see cref="TableId"/> (or the storage id carried by <see cref="Schema"/>).
+    /// </summary>
+    public string RetiredStorageId { get; set; } = "";
+
+    /// <summary>
+    /// The logical id of the relation a recovery published for this record, written <b>before</b> that
+    /// relation is published so a crash mid-recovery is resumable. Null until a recovery starts.
+    ///
+    /// <para>This is the only proof that retired contents were relinked. A live relation at
+    /// <see cref="SourceTableId"/> proves nothing — for a truncate that relation never stopped being
+    /// live — so reclamation must look here, and must additionally confirm the named relation's
+    /// effective storage really is <see cref="RetiredStorageId"/>.</para>
+    /// </summary>
+    public string? RelinkTargetId { get; set; }
+
     /// <summary>Preserved table id (short base-62 or legacy 24-hex). Never reused; relink re-attaches a new name to it.</summary>
     public string TableId { get; set; } = "";
 

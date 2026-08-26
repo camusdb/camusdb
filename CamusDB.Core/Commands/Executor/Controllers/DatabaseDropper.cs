@@ -393,8 +393,12 @@ internal sealed class DatabaseDropper
     internal async Task<bool> PurgeTableKeyspaceAsync(
         IKahuna kahuna, string dbId, string tableId, string? storageId = null, CancellationToken ct = default)
     {
-        string catalogKey = $"{dbId}/meta/keyspace:{tableId}";
         string dataId = string.IsNullOrEmpty(storageId) ? tableId : storageId;
+
+        // The catalog names the storage generation it describes. A relation whose contents were
+        // swapped has one entry per generation, so the entry to read is the one for the key-space
+        // this purge is about to sweep — not the relation's identity.
+        string catalogKey = $"{dbId}/meta/keyspace:{dataId}";
 
         // Collect index ids from the keyspace catalog (grow-only; survives DROP TABLE). A failed read
         // means index buckets may be missed, so it counts against completion.
@@ -410,6 +414,19 @@ internal sealed class DatabaseDropper
                 indexIds = [.. MetaJsonSerializer.Deserialize(catEntry.Value, MetaJsonContext.Default.StringArray)];
 
             catalogRead = catType is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist;
+
+            // Compatibility: a relation swapped before the catalog was keyed by storage generation has
+            // its only entry under the relation id. Reading it keeps an old swapped materialized view's
+            // index buckets purgeable.
+            if (indexIds.Count == 0 && !string.Equals(dataId, tableId, StringComparison.Ordinal))
+            {
+                (KeyValueResponseType legacyType, ReadOnlyKeyValueEntry? legacyEntry) = await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, $"{dbId}/meta/keyspace:{tableId}", -1, HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+
+                if (legacyType == KeyValueResponseType.Get && legacyEntry?.Value is { Length: > 0 })
+                    indexIds = [.. MetaJsonSerializer.Deserialize(legacyEntry.Value, MetaJsonContext.Default.StringArray)];
+            }
         }
         catch (OperationCanceledException)
         {
@@ -432,6 +449,7 @@ internal sealed class DatabaseDropper
         {
             $"{dbId}:stats:{tableId}",
             catalogKey,
+            $"{dbId}/meta/keyspace:{tableId}",
             $"{dbId}/meta/table:{tableId}",
         })
             complete &= await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false);
@@ -441,6 +459,64 @@ internal sealed class DatabaseDropper
             return false;
 
         return await DeleteExactVerifiedAsync(kahuna, $"{dbId}/meta/orphan:{tableId}", ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Physically reclaims one retired contents generation: its row bucket, every index bucket the
+    /// frozen catalog names, the catalog itself, and finally the record that protected it.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Deliberately narrower than <see cref="PurgeTableKeyspaceAsync"/>.</b> That method also
+    /// deletes the relation's meta key and statistics blob, which is right for a dropped relation and
+    /// catastrophic here: the relation that owned this generation is still live, and on its first
+    /// truncate the retired key-space carries that relation's own id. Deleting by id would remove a
+    /// live table from the catalog.</para>
+    ///
+    /// <para>The record is deleted last and only when everything else is verified gone, so an
+    /// interrupted purge is finished by a later sweep rather than losing track of what is left.</para>
+    /// </remarks>
+    internal async Task<bool> PurgeRetiredContentsAsync(
+        IKahuna kahuna, string dbId, string retiredStorageId, CancellationToken ct = default)
+    {
+        string catalogKey = $"{dbId}/meta/keyspace:{retiredStorageId}";
+
+        List<string> indexIds = [];
+        bool catalogRead = false;
+        try
+        {
+            (KeyValueResponseType catType, ReadOnlyKeyValueEntry? catEntry) = await kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+
+            if (catType == KeyValueResponseType.Get && catEntry?.Value is { Length: > 0 })
+                indexIds = [.. MetaJsonSerializer.Deserialize(catEntry.Value, MetaJsonContext.Default.StringArray)];
+
+            catalogRead = catType is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to read the keyspace catalog for retired contents {StorageId} in database {Id}", retiredStorageId, dbId);
+        }
+
+        bool complete = catalogRead;
+        complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{retiredStorageId}:r", $"{dbId}:{retiredStorageId}:r/", ct).ConfigureAwait(false);
+
+        foreach (string indexId in indexIds)
+            complete &= await PurgeBucketAsync(
+                kahuna, dbId,
+                $"{dbId}:{retiredStorageId}:i:{indexId}",
+                $"{dbId}:{retiredStorageId}:i:{indexId}/", ct).ConfigureAwait(false);
+
+        complete &= await DeleteExactVerifiedAsync(kahuna, catalogKey, ct).ConfigureAwait(false);
+
+        if (!complete)
+            return false;
+
+        return await DeleteExactVerifiedAsync(kahuna, $"{dbId}/meta/orphan:{retiredStorageId}", ct).ConfigureAwait(false);
     }
 
     // Test-only: counts the number of delete batches the purge has issued, so a test with a low

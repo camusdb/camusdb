@@ -107,6 +107,13 @@ public sealed class ForwardDropTableRequest
     public bool Force { get; set; }
 }
 
+public sealed class ForwardTruncateTableRequest
+{
+    public string OperationId { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public string TableName { get; set; } = "";
+}
+
 public sealed class ForwardRelinkTableRequest
 {
     public string OperationId { get; set; } = "";

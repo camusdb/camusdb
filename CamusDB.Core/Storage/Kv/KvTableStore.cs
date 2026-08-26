@@ -313,6 +313,35 @@ public sealed class KvTableStore
     }
 
     /// <summary>
+    /// Takes an <b>unconditional exclusive</b> lock over this table's entire row key range for
+    /// <paramref name="tx"/>, in every routing mode and at every isolation level.
+    /// </summary>
+    /// <remarks>
+    /// <para>This is the write fence a contents swap needs, and it is deliberately not
+    /// <see cref="AcquireRowRangeLockAsync"/>. That method is a scan helper: in hash routing it takes
+    /// no lock at all unless the transaction is Serializable read-write, because an ordinary scan has
+    /// no phantom to protect against. A truncate does — it is about to make every row in the range
+    /// unreachable, so a writer that staged a row into the old key-space and commits afterwards would
+    /// have its write acknowledged into storage nothing reads. Kahuna's durable range-lock write fence
+    /// aborts exactly those writers, optimistic and pessimistic alike, and makes later ones wait.</para>
+    ///
+    /// <para>The lock is registered on the transaction, renewed by the coordinator for the session's
+    /// lifetime, and released when the transaction finalizes. Hold it across the schema-log commit and
+    /// the checkpoint: the cut timestamp is only a valid linearization point while it is held.</para>
+    /// </remarks>
+    public Task AcquireExclusiveRowSpaceFenceAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+        => AcquireRangeLockAsync(
+            tx,
+            rowBucketPrefix,
+            null,
+            true,
+            null,
+            true,
+            cancellationToken,
+            RangeLockMode.Exclusive
+        );
+
+    /// <summary>
     /// Locks an index's entire key range for <paramref name="tx"/> (serializable index
     /// scan / phantom protection over the index bucket). Used for full-index scans where no
     /// tighter bound is known. For bounded range scans use

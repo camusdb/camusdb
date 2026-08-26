@@ -466,3 +466,57 @@ public sealed class SchemaSetCommentPayload
     /// <summary>The comment text, or null to remove an existing comment.</summary>
     public string? Comment { get; set; }
 }
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.TruncateTable"/>: everything a node needs to move a base table
+/// onto a fresh, empty key-space and to describe the key-space it stops reading.
+///
+/// <para>The payload is deliberately self-contained. Apply runs inside the schema partition's commit
+/// pipeline, where a KV read would deadlock it, so every value the transition and the later
+/// retirement need is minted by the proposer and carried here: the new storage id, the cut
+/// timestamp, and the frozen list of index ids the retired generation ever owned. A node that
+/// replays this entry from an older checkpoint therefore reconstructs the same retirement metadata
+/// as the node that proposed it, without reading anything.</para>
+///
+/// <para><see cref="ExpectedStorageId"/> and <see cref="ExpectedContentsGeneration"/> make apply a
+/// compare-and-swap. Without them a re-delivered entry would retire a second key-space, and an entry
+/// that raced another contents change would move the table off a generation it never described.</para>
+/// </summary>
+public sealed class SchemaTruncateTablePayload
+{
+    /// <summary>The relation's immutable id. Keyed by id, not name, so a concurrent rename cannot
+    /// send this delta to the wrong relation.</summary>
+    public string TableId { get; set; } = "";
+
+    /// <summary>The relation's name when the delta was proposed — for diagnostics and for the
+    /// retired generation's orphan record, never for routing.</summary>
+    public string TableName { get; set; } = "";
+
+    /// <summary>The <c>EffectiveStorageId</c> the proposer observed. Apply refuses a mismatch.</summary>
+    public string ExpectedStorageId { get; set; } = "";
+
+    /// <summary>The <c>ContentsGeneration</c> the proposer observed. Apply refuses a mismatch.</summary>
+    public long ExpectedContentsGeneration { get; set; }
+
+    /// <summary>The fresh, empty key-space the relation adopts.</summary>
+    public string NewStorageId { get; set; } = "";
+
+    /// <summary>
+    /// The timestamp the new generation becomes valid at, minted only after the exclusive fence over
+    /// the whole old row key-space is held. See <see cref="TableSchema.ContentsValidFrom"/>.
+    /// </summary>
+    public HLCTimestamp ContentsValidFrom { get; set; }
+
+    /// <summary>
+    /// Every index id the retired generation ever allocated, frozen at proposal time. This is what
+    /// tells reclamation which index key-spaces the retired generation owns; recomputing it later
+    /// from the live schema would miss an index dropped before the truncate.
+    /// </summary>
+    public string[] RetiredIndexIds { get; set; } = [];
+
+    /// <summary>
+    /// The index ids the new generation starts with — the currently live ones. Carried so the new
+    /// generation's keyspace catalog can be initialized without a read.
+    /// </summary>
+    public string[] NewIndexIds { get; set; } = [];
+}

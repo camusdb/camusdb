@@ -238,6 +238,49 @@ public sealed record DatabaseDescriptor : IDisposable
     public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
 
     /// <summary>
+    /// Contents generations this node's schema apply has detached from a live relation but has not yet
+    /// made recoverable on disk. Drained by the checkpoint that follows the apply, and by the
+    /// reconciliation that follows a WAL restore.
+    ///
+    /// <para>The list exists because apply may not write: it runs inside the schema partition's commit
+    /// pipeline, and a KV write from there deadlocks the partition. Entries are appended in retirement
+    /// order, so several generations retired between two checkpoints are persisted in that order.</para>
+    /// </summary>
+    private readonly List<Catalogs.Models.ContentsRetirementIntent> pendingContentsRetirements = [];
+
+    /// <summary>Records a detached contents generation for the next durable checkpoint to write.</summary>
+    internal void AddContentsRetirement(Catalogs.Models.ContentsRetirementIntent intent)
+    {
+        lock (pendingContentsRetirements)
+            pendingContentsRetirements.Add(intent);
+    }
+
+    /// <summary>
+    /// The retirements still waiting to be written, oldest first.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a snapshot rather than a drain. The caller writes these inside a transaction that
+    /// may still fail or time out, and an intent removed before its commit succeeded would leave a
+    /// retired key-space with no record — unreachable and never reclaimed. The caller calls
+    /// <see cref="CompleteContentsRetirements"/> only after the commit returns.
+    /// </remarks>
+    internal Catalogs.Models.ContentsRetirementIntent[] PendingContentsRetirements()
+    {
+        lock (pendingContentsRetirements)
+            return [.. pendingContentsRetirements];
+    }
+
+    /// <summary>Drops the retirements whose durable record is now committed.</summary>
+    internal void CompleteContentsRetirements(IReadOnlyList<Catalogs.Models.ContentsRetirementIntent> written)
+    {
+        lock (pendingContentsRetirements)
+        {
+            foreach (Catalogs.Models.ContentsRetirementIntent intent in written)
+                pendingContentsRetirements.Remove(intent);
+        }
+    }
+
+    /// <summary>
     /// Bound SELECT statements reusable across executions of the same cached SQL text, keyed by the
     /// parse-cache <see cref="SQLParser.NodeAst"/> instance. Lives on the descriptor so that closing,
     /// dropping, or evicting this database releases every cached binding with it — a slot must never

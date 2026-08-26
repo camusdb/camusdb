@@ -83,6 +83,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TransactionAlreadyCompleted => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.DatabaseHasLiveDescendants  => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.StatementNotAllowedInTransaction => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.SnapshotPrecedesContentsGeneration => StatusCode.FailedPrecondition,
 
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
         CamusDBErrorCodes.TransactionConflict        => StatusCode.Aborted,

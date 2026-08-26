@@ -81,6 +81,28 @@ internal sealed class DdlForwardingCoordinator
             () => ForwardedRenameTableApplied(database, ticket)
         );
 
+    /// <summary>
+    /// Forwards a <c>TRUNCATE</c> and waits until this node can see the new contents generation.
+    /// </summary>
+    /// <remarks>
+    /// The "applied" test compares the relation's contents generation against what it was before the
+    /// forward, captured here. Nothing else works: a truncate keeps the relation's name, id and schema
+    /// version, so every predicate the other statements use would already be true before the leader
+    /// did anything.
+    /// </remarks>
+    internal Task<bool?> TryForwardTruncateTableAsync(DatabaseDescriptor database, TruncateTableTicket ticket)
+    {
+        database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? before);
+        long generationBefore = before?.ContentsGeneration ?? -1;
+        string? storageBefore = before?.EffectiveStorageId;
+
+        return TryForwardDdlAsync(
+            database,
+            (leader, opId, ct) => schemaDdlForwarder!.ForwardTruncateTableAsync(leader, ticket, opId, ct),
+            () => ForwardedTruncateTableApplied(database, ticket, generationBefore, storageBefore)
+        );
+    }
+
     internal Task<bool?> TryForwardRelinkTableAsync(DatabaseDescriptor database, RelinkTableTicket ticket)
         => TryForwardDdlAsync(
             database,
@@ -267,6 +289,16 @@ internal sealed class DdlForwardingCoordinator
     {
         return database.Schema.Tables.ContainsKey(ticket.NewName)
             && !database.Schema.Tables.ContainsKey(ticket.TableName);
+    }
+
+    private static bool ForwardedTruncateTableApplied(
+        DatabaseDescriptor database, TruncateTableTicket ticket, long generationBefore, string? storageBefore)
+    {
+        if (!database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? current))
+            return false;
+
+        return current.ContentsGeneration > generationBefore
+            || !string.Equals(current.EffectiveStorageId, storageBefore, StringComparison.Ordinal);
     }
 
     private static bool ForwardedRelinkTableApplied(DatabaseDescriptor database, RelinkTableTicket ticket)

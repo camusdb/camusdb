@@ -40,6 +40,25 @@ internal sealed class TtlRunManifest
     /// <summary>Table name at the time the run was minted — for diagnostics only, never for routing.</summary>
     public string TableName { get; set; } = "";
 
+    /// <summary>
+    /// The physical key-space the run was planned against (<c>EffectiveStorageId</c>). Empty on a
+    /// manifest written before this field existed.
+    /// </summary>
+    public string StorageId { get; set; } = "";
+
+    /// <summary>
+    /// The contents generation the run was planned against.
+    /// </summary>
+    /// <remarks>
+    /// <para>A run is keyed by the relation's identity, and a <c>TRUNCATE</c> keeps that identity while
+    /// replacing every row. Without this the run would survive the swap and go on deleting — from the
+    /// new generation under a horizon and a span plan computed for a different set of rows, and,
+    /// worse, from whatever it still holds a descriptor for, which is the retired generation a
+    /// recovery is entitled to get back. A mismatch makes the run inert immediately; the deletes stop
+    /// before the manifest is cleaned up, so a crash that prevents the cleanup is harmless.</para>
+    /// </remarks>
+    public long ContentsGeneration { get; set; }
+
     /// <summary>Node component of the run's expiry horizon (<see cref="HLCTimestamp.N"/>).</summary>
     public int HorizonNode { get; set; }
 

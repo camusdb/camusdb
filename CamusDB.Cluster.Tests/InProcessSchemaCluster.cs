@@ -308,6 +308,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         public async Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken ct)
             => await (await LeaderAsync(ticket.DatabaseName)).Executor.DropTable(ticket).ConfigureAwait(false);
 
+        public async Task<bool?> ForwardTruncateTableAsync(string leader, TruncateTableTicket ticket, string operationId, CancellationToken ct)
+            => await (await LeaderAsync(ticket.DatabaseName)).Executor.TruncateTable(ticket).ConfigureAwait(false);
+
         public async Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken ct)
             => await (await LeaderAsync(ticket.DatabaseName)).Executor.RelinkTable(ticket).ConfigureAwait(false);
 

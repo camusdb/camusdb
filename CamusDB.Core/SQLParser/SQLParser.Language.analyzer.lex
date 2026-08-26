@@ -53,6 +53,7 @@ TDrop 		    (D|d)(R|r)(O|o)(P|p)
 TForce 		    (F|f)(O|o)(R|r)(C|c)(E|e)
 TRelink 		(R|r)(E|e)(L|l)(I|i)(N|n)(K|k)
 TOrphan 		(O|o)(R|r)(P|p)(H|h)(A|a)(N|n)
+TTruncate 		(T|t)(R|r)(U|u)(N|n)(C|c)(A|a)(T|t)(E|e)
 TColumn 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)
 TLimit          (L|l)(I|i)(M|m)(I|i)(T|t)
 TOffset         (O|o)(F|f)(F|f)(S|s)(E|e)(T|t)
@@ -311,6 +312,7 @@ TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 {TForce} { return (int)Token.TFORCE; }
 {TRelink} { return (int)Token.TRELINK; }
 {TOrphan} { return (int)Token.TORPHAN; }
+{TTruncate} { return (int)Token.TTRUNCATE; }
 
 {TColumn} { return (int)Token.TCOLUMN; }
 

@@ -186,9 +186,15 @@ internal static class DerivedTableSchemaBuilder
         new("value",   ColumnType.String),
     ];
 
+    // SHOW ORPHAN TABLES: one row per recoverable retained key-space. `kind` distinguishes the two
+    // things that can be retained, which look identical without it — a relation that was dropped, and
+    // one contents generation a still-live relation stopped reading after a TRUNCATE. For the second,
+    // `former_name` is the name of a table that still exists, so an operator reading the list without
+    // `kind` would take it for a dropped table.
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowOrphanTablesSchema =
     [
         new("id",          ColumnType.String),
+        new("kind",        ColumnType.String),
         new("former_name", ColumnType.String),
         new("dropped_at",  ColumnType.String),
         new("expires_at",  ColumnType.String),

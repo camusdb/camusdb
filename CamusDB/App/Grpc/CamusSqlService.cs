@@ -921,7 +921,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             ParseLevelMode(request);
 
         KvTransaction tx = await transactions.StartAsync(
-            request.Database, level, mode, locking, deferStart: true, priority: priority, cancellationToken: ct).ConfigureAwait(false);
+            request.Database, level, mode, locking, deferStart: true, priority: priority,
+            sessionOwned: true, cancellationToken: ct).ConfigureAwait(false);
 
         TxnHandle handle = new()
         {
@@ -1036,7 +1037,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             EnginePriority? priority = ToPriority(request.Priority);
 
             KvTransaction tx = await transactions.StartAsync(
-                request.Database, level, mode, locking, deferStart: true, priority: priority).ConfigureAwait(false);
+                request.Database, level, mode, locking, deferStart: true, priority: priority,
+                sessionOwned: true).ConfigureAwait(false);
 
             return new TxnHandle
             {

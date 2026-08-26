@@ -864,6 +864,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     public Task<bool> DropTable(DropTableTicket ticket) => schemaDdl.DropTable(ticket);
 
     /// <summary>
+    /// Empties a base table by replacing the key-space its rows live in. The relation keeps its
+    /// identity, name and schema; only its contents generation moves.
+    /// </summary>
+    public Task<bool> TruncateTable(TruncateTableTicket ticket) => schemaDdl.TruncateTable(ticket);
+
+    /// <summary>
     /// Recovers an orphaned (deferred-dropped) table by reattaching it to the schema under a new name,
     /// reusing its preserved id and retained row/index data.
     /// </summary>

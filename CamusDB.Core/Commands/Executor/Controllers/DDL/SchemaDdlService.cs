@@ -16,6 +16,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
+using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -877,6 +878,185 @@ internal sealed class SchemaDdlService
     }
 
     /// <summary>
+    /// Empties a base table by replacing the physical key-space its rows and index entries live in.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The cost does not grow with the row count</b>, because no row and no index entry is
+    /// read or deleted. What the statement waits for instead is the exclusive fence over the old row
+    /// key-space, the replicated schema entry, and the checkpoint that makes the retired generation
+    /// recoverable — so it is constant in cardinality, not constant in wall-clock time.</para>
+    ///
+    /// <para><b>Order is the whole design.</b> The fence is taken <em>before</em> the cut timestamp is
+    /// minted and before anything is proposed. Kahuna's durable range-lock write fence aborts any
+    /// transaction — optimistic or pessimistic — that staged a write into the old key-space before the
+    /// fence was acquired, and makes later writers wait. That is what stops a writer from having a row
+    /// acknowledged into storage nothing reads afterwards, and it is what makes the cut a real
+    /// linearization point rather than a hopeful one.</para>
+    ///
+    /// <para><b>Once the schema entry commits, the truncate has happened.</b> It is cluster-wide and
+    /// irrevocable at that point, so a later failure to finalize the fence-owning transaction is
+    /// logged and the committed outcome is reported. Reporting a rollback there would tell the caller
+    /// the table still holds rows it no longer holds.</para>
+    /// </remarks>
+    public async Task<bool> TruncateTable(TruncateTableTicket ticket)
+    {
+        context.Validator.Validate(ticket);
+
+        DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+
+        bool? forwarded = await ddlForwarding.TryForwardTruncateTableAsync(database, ticket).ConfigureAwait(false);
+        if (forwarded is not null)
+            return forwarded.Value;
+
+        TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+        RequireTruncatableRelation(table);
+        RequireTruncatePrivileges(database, table);
+
+        // Allocated before the DDL transaction, like a table id on CREATE: only the leader allocates,
+        // and the value rides the replicated payload so every node adopts the same key-space.
+        DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
+        string newStorageId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
+
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+
+        KvTransaction fenceTx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            mutationLimitOverride: 0
+        ).ConfigureAwait(false);
+
+        bool deltaCommitted = false;
+        try
+        {
+            // Both index lists are read under the DDL gate, not before it. An ADD INDEX that landed
+            // between the read and the proposal would leave its entries out of the retired
+            // generation's frozen catalog — unnamed, and so never reclaimed — and out of the new
+            // generation's seeded one. The gate is what excludes it: index DDL takes the same
+            // semaphore, and cluster-wide it serializes through this node as the schema leader.
+            //
+            // The retired list comes from the persisted catalog rather than the live index list,
+            // because the retired generation owns entries for every index it ever had, and one
+            // dropped before the truncate is named nowhere else. Reading it before the fence
+            // transaction stages anything keeps the read off its own write intents.
+            string[] retiredIndexIds = await catalogs.ReadStorageIndexCatalogAsync(database, table.Schema).ConfigureAwait(false);
+
+            string[] newIndexIds = table.Schema.Indexes is null
+                ? []
+                : [.. table.Schema.Indexes.Where(index => !string.IsNullOrEmpty(index.Id)).Select(index => index.Id!)];
+
+            await table.Store.AcquireExclusiveRowSpaceFenceAsync(fenceTx).ConfigureAwait(false);
+
+            // Re-read under the fence. Between resolving the descriptor and holding the fence another
+            // contents change may have landed; proposing the values read earlier would ask apply to
+            // swap a generation this statement never saw, and apply would refuse it anyway.
+            string expectedStorageId = table.Schema.EffectiveStorageId;
+            long expectedGeneration = table.Schema.ContentsGeneration;
+
+            HLCTimestamp cut = context.SharedNode is null
+                ? fenceTx.TransactionId
+                : context.SharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(context.SharedNode.Raft.GetLocalNodeId());
+
+            await catalogs.TruncateTableContentsAsync(
+                database,
+                table.Id,
+                table.Name,
+                expectedStorageId,
+                expectedGeneration,
+                newStorageId,
+                cut,
+                retiredIndexIds,
+                newIndexIds
+            ).ConfigureAwait(false);
+
+            deltaCommitted = true;
+
+            using CancellationTokenSource cts = new(DdlCommitTimeout);
+            await database.Transactions.CommitAsync(fenceTx, cts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(fenceTx).ConfigureAwait(false);
+
+            if (!deltaCommitted)
+                throw;
+
+            context.Logger.LogWarning(
+                ex,
+                "TRUNCATE of table {Table} in database {Database} committed its schema entry but failed to " +
+                "finalize the fence-owning transaction; the truncate stands and the fence expires on its own",
+                table.Name, database.Name);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
+        }
+
+        database.Cache?.InvalidateByTableId(database.Id, table.Id);
+        return true;
+    }
+
+    /// <summary>
+    /// Refuses a <c>TRUNCATE</c> whose target is not an ordinary base table.
+    /// </summary>
+    /// <remarks>
+    /// A materialized view is stored as a relation and already uses the same storage-swap machinery
+    /// for its own refresh, so a truncate would contend with the refresh path for one field and would
+    /// retire the view's contents outside the refresh's lease and fence. A plain view never reaches
+    /// here: resolving one for a write already reports that it is a view.
+    /// </remarks>
+    private static void RequireTruncatableRelation(TableDescriptor table)
+    {
+        if (!table.Schema.IsMaterializedView)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.ViewNotUpdatable,
+            $"'{table.Name}' is a materialized view and cannot be truncated; its contents come from its " +
+            $"defining query. Use REFRESH MATERIALIZED VIEW {table.Name} WITH NO DATA to empty it.");
+    }
+
+    /// <summary>
+    /// Requires DELETE <b>and</b> DROP on the target.
+    /// </summary>
+    /// <remarks>
+    /// <para>The two are checked one at a time on purpose. A privilege test asks whether a single
+    /// grant record carries the whole requested mask, so <c>Delete | Drop</c> as one mask refuses a
+    /// principal who was granted DELETE in one statement and DROP in another — a perfectly ordinary
+    /// way to hold both.</para>
+    ///
+    /// <para>DELETE is also the privilege the per-table chokepoint checks while resolving the table,
+    /// so on a request that carries a caller it is verified twice. That is cheap, and it keeps the two
+    /// checks reading the same ambient scope.</para>
+    ///
+    /// <para><b>An absent scope is not an unauthenticated caller.</b> It means no request-level entry
+    /// point published one — an internal caller, or the schema leader running a statement a follower
+    /// already authorized before forwarding it. The per-table chokepoint treats that the same way, and
+    /// diverging here would fail every forwarded truncate on an authenticated cluster.</para>
+    /// </remarks>
+    private static void RequireTruncatePrivileges(DatabaseDescriptor database, TableDescriptor table)
+    {
+        if (!database.Options.AuthenticationEnabled)
+            return;
+
+        AuthorizationScope scope = AuthorizationContext.Current;
+        if (scope.Principal is not { } principal || scope.RequiredPrivilege is null)
+            return;
+
+        foreach (Privilege required in TruncateRequiredPrivileges)
+        {
+            if (!principal.HasPrivilege(required, database.Id, table.Id))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege,
+                    $"Missing {required} privilege on table '{database.Name}.{table.Name}'");
+        }
+    }
+
+    /// <summary>Both privileges <c>TRUNCATE</c> requires, checked independently. Never OR them.</summary>
+    private static readonly Privilege[] TruncateRequiredPrivileges = [Privilege.Delete, Privilege.Drop];
+
+    /// <summary>
     /// Recovers an orphaned (deferred-dropped) table by reattaching it to the schema under a new name,
     /// reusing its preserved id and retained row/index data. Like other table DDL it forwards to the
     /// schema leader in cluster mode. Fails with <see cref="CamusDBErrorCodes.OrphanNotFound"/> if no
@@ -909,6 +1089,14 @@ internal sealed class SchemaDdlService
 
         try
         {
+            // Load the record first: retired contents and a dropped relation are recovered differently,
+            // and the liveness tests below are only meaningful for a dropped relation. For retired
+            // contents the source relation is normally still live at this very id.
+            OrphanTableRecord? record = await catalogs.TryGetTableOrphanAsync(database, ticket.OrphanTableId).ConfigureAwait(false);
+
+            if (record is { Kind: OrphanKind.RetiredContents })
+                return await RelinkRetiredContentsAsync(database, record, ticket, currentOptions).ConfigureAwait(false);
+
             // Idempotency by id: if a live table already has this id — a relink that committed its apply
             // but crashed before deleting the orphan record — don't reattach a second alias.
             TableSchema? liveWithId = null;
@@ -932,7 +1120,7 @@ internal sealed class SchemaDdlService
                     CamusDBErrorCodes.TableAlreadyExists,
                     $"Table '{ticket.NewTableName}' already exists");
 
-            OrphanTableRecord? orphan = await catalogs.TryGetTableOrphanAsync(database, ticket.OrphanTableId).ConfigureAwait(false);
+            OrphanTableRecord? orphan = record;
             if (orphan is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.OrphanNotFound,
@@ -954,6 +1142,74 @@ internal sealed class SchemaDdlService
         {
             await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
         }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Recovers one retired contents generation as a new relation, under the caller's fence.
+    /// </summary>
+    /// <remarks>
+    /// <para>Resumable at every crash point. The target id is written into the record before the
+    /// relation is published, so a retry finishes what a crash interrupted instead of allocating a
+    /// second target; and a target that is already live with the retired storage means the recovery
+    /// completed and only the record was left behind.</para>
+    /// </remarks>
+    private async Task<bool> RelinkRetiredContentsAsync(
+        DatabaseDescriptor database, OrphanTableRecord record, RelinkTableTicket ticket, CamusDBOptions currentOptions)
+    {
+        TableSchema? existingTarget = null;
+        if (record.RelinkTargetId is { Length: > 0 } recordedTarget)
+        {
+            foreach (TableSchema live in database.Schema.Tables.Values)
+            {
+                if (string.Equals(live.Id, recordedTarget, StringComparison.Ordinal))
+                {
+                    existingTarget = live;
+                    break;
+                }
+            }
+        }
+
+        if (existingTarget is not null)
+        {
+            // The relation was already published for this record. Finish idempotently rather than
+            // publishing a second one; the record is the only thing still outstanding.
+            if (!string.Equals(existingTarget.Name, ticket.NewTableName, StringComparison.OrdinalIgnoreCase))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TableAlreadyExists,
+                    $"The retired contents of table id '{ticket.OrphanTableId}' were already recovered as '{existingTarget.Name}'");
+
+            await DeleteTableOrphanRecordAsync(database, record.RetiredStorageId).ConfigureAwait(false);
+            return true;
+        }
+
+        if (catalogs.TableExists(database, ticket.NewTableName))
+            throw new CamusDBException(
+                CamusDBErrorCodes.TableAlreadyExists,
+                $"Table '{ticket.NewTableName}' already exists");
+
+        int maxTables = currentOptions.MaxTablesPerDatabase;
+        if (maxTables > 0 && database.Schema.Tables.Count >= maxTables)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SchemaLimitExceeded,
+                $"Database '{ticket.DatabaseName}' would exceed the maximum of {maxTables} tables per database");
+
+        // A recorded target that is not live means a previous attempt crashed before publishing.
+        // Reuse its id so the retry converges instead of leaving a second allocated id behind.
+        DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
+        string targetId = record.RelinkTargetId is { Length: > 0 } resumed
+            ? resumed
+            : await registry.AllocateTableIdAsync().ConfigureAwait(false);
+
+        // Durable before the relation exists: this is the only signal that separates a recovery in
+        // progress from one that never started, and the collector must not purge the storage in between.
+        await catalogs.RecordRelinkTargetAsync(database, record, targetId).ConfigureAwait(false);
+
+        await ExecuteDdlInTransaction(database,
+            tx => catalogs.RelinkRetiredContents(database, record, targetId, ticket.NewTableName, tx),
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, targetId)
+        ).ConfigureAwait(false);
 
         return true;
     }

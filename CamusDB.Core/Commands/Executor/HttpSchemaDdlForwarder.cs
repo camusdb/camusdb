@@ -114,6 +114,18 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         return await PostAsync(leader, "drop-table", request, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<bool?> ForwardTruncateTableAsync(string leader, TruncateTableTicket ticket, string operationId, CancellationToken cancellationToken)
+    {
+        ForwardTruncateTableRequest request = new()
+        {
+            OperationId = operationId,
+            DatabaseName = ticket.DatabaseName,
+            TableName = ticket.TableName,
+        };
+
+        return await PostAsync(leader, "truncate-table", request, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken cancellationToken)
     {
         ForwardRelinkTableRequest request = new()

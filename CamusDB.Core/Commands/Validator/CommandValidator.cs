@@ -194,6 +194,12 @@ public sealed class CommandValidator
         validator.Validate(ticket);
     }
 
+    public void Validate(TruncateTableTicket ticket)
+    {
+        TruncateTableValidator validator = new(options);
+        validator.Validate(ticket);
+    }
+
     public void Validate(InsertTicket ticket)
     {
         insertValidator.Validate(ticket);

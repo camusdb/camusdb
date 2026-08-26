@@ -151,5 +151,18 @@ public enum SchemaOp
     /// since-invalidated flag back to populated would leave the cluster claiming data that is not
     /// there. Does not bump <c>TableSchema.Version</c> — neither flag affects row encoding.</para>
     /// </summary>
-    SetMaterializedViewState = 21
+    SetMaterializedViewState = 21,
+
+    /// <summary>
+    /// Replace a base table's physical contents generation, emptying it
+    /// (payload: <c>SchemaTruncateTablePayload</c>).
+    ///
+    /// <para>Apply is a compare-and-swap on <c>StorageId</c> and <c>ContentsGeneration</c>, so a
+    /// re-delivered entry performs one transition rather than retiring a second key-space, and an
+    /// entry that lost a race against another schema change is refused rather than applied to the
+    /// wrong generation. Does <b>not</b> bump <c>TableSchema.Version</c>: emptying a table does not
+    /// change how a row is encoded, which is also why nothing may test "did this apply?" by looking
+    /// at the version.</para>
+    /// </summary>
+    TruncateTable = 22
 }

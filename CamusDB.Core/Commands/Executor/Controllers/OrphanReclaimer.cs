@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using Kahuna.Server.KeyValues;
@@ -318,6 +319,14 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
                     if (!await TableOrphanExistsAsync(db.Id, orphan.TableId, ct).ConfigureAwait(false))
                         continue; // reclaimed meanwhile
 
+                    if (orphan.Kind == OrphanKind.RetiredContents)
+                    {
+                        if (await ReclaimRetiredContentsAsync(db.Id, orphan, ct).ConfigureAwait(false))
+                            reclaimed++;
+
+                        continue;
+                    }
+
                     // The table is live again (relink re-persisted its meta key) but a crash left the
                     // orphan record — clean it instead of purging live data. The per-table meta key is the
                     // authoritative liveness signal.
@@ -357,6 +366,79 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         }
 
         return reclaimed;
+    }
+
+    /// <summary>
+    /// Reclaims one retired contents generation, or recognises that a recovery already took it.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The liveness test used for a dropped table is wrong here and must not be reused.</b> A
+    /// dropped table is gone from the catalog, so a live meta key at its id proves a recovery finished.
+    /// Retired contents belong to a relation that never stopped being live, and on a first truncate the
+    /// retired key-space is named by that relation's own id — so that test would fire on every truncate
+    /// and delete the record without reclaiming a byte, leaking a full copy of the table each time.</para>
+    ///
+    /// <para>The only proof of a recovery is <see cref="OrphanTableRecord.RelinkTargetId"/>, and it is
+    /// believed only when the relation it names is live <em>and</em> actually reads this key-space. A
+    /// target recorded but never published (a recovery that crashed) leaves the storage reclaimable,
+    /// which is correct: the recovery can be retried until retention runs out.</para>
+    /// </remarks>
+    private async Task<bool> ReclaimRetiredContentsAsync(string dbId, OrphanTableRecord orphan, CancellationToken ct)
+    {
+        string retiredStorageId = orphan.RetiredStorageId;
+
+        if (string.IsNullOrEmpty(retiredStorageId))
+        {
+            logger.LogWarning(
+                "Retired-contents record {TableId} in database {DbId} names no storage generation; leaving it for inspection",
+                orphan.TableId, dbId);
+            return false;
+        }
+
+        if (orphan.RelinkTargetId is { Length: > 0 } target
+            && await RelationReadsStorageAsync(dbId, target, retiredStorageId, ct).ConfigureAwait(false))
+        {
+            // Recovered: the storage belongs to a live relation now, so only the record is stale.
+            await DeleteTableOrphanRecordAsync(dbId, orphan.TableId, ct).ConfigureAwait(false);
+            return false;
+        }
+
+        if (await databaseDropper.PurgeRetiredContentsAsync(sharedNode.Kahuna, dbId, retiredStorageId, ct).ConfigureAwait(false))
+        {
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation(
+                    "Reclaimed retired contents {StorageId} of table {SourceTableId} (name '{Name}') in database {DbId}",
+                    retiredStorageId, orphan.SourceTableId, orphan.FormerName, dbId);
+
+            return true;
+        }
+
+        logger.LogWarning(
+            "Purge of retired contents {StorageId} in database {DbId} is incomplete; keeping the record for the next sweep",
+            retiredStorageId, dbId);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether a live relation with this id exists and reads <paramref name="storageId"/>.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are required. A relation can exist at the recorded target id without owning this
+    /// key-space — the id was reallocated, or a recovery was rolled back and the id reused — and
+    /// treating that as "recovered" would abandon the storage permanently.
+    /// </remarks>
+    private async Task<bool> RelationReadsStorageAsync(string dbId, string tableId, string storageId, CancellationToken ct)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await sharedNode.Kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, $"{dbId}/meta/table:{tableId}", -1, HLCTimestamp.Zero,
+            KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+
+        if (type != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 })
+            return false;
+
+        TableSchema live = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.TableSchema);
+        return string.Equals(live.EffectiveStorageId, storageId, StringComparison.Ordinal);
     }
 
     // ── Raw KV helpers for the per-database meta namespace ({dbId}/meta/orphan:{tableId}) ──────────

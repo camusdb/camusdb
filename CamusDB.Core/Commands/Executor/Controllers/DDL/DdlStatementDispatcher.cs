@@ -535,6 +535,25 @@ internal sealed class DdlStatementDispatcher
                     ).ConfigureAwait(false);
                 }
 
+            case NodeType.TruncateTable:
+                {
+                    TruncateTableTicket truncateTicket = sqlExecutor.CreateTruncateTableTicket(ticket, ast);
+                    context.Validator.Validate(truncateTicket);
+
+                    // Refused here rather than inside the executor because this is where the caller's
+                    // own transaction is visible. Once TRUNCATE's replicated schema entry commits it
+                    // is irrevocable, so a later ROLLBACK of the caller's transaction could not undo
+                    // it — accepting the statement would promise semantics the engine cannot honour.
+                    if (ticket.TxnState is { IsSessionOwned: true })
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                            "TRUNCATE cannot run inside an explicit transaction: it commits a replicated schema " +
+                            "change that a later ROLLBACK cannot undo. Commit or roll back first, then run it.");
+
+                    bool truncated = await schemaDdl.TruncateTable(truncateTicket).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, truncated);
+                }
+
             case NodeType.DropTable:
             case NodeType.DropTableIfExists:
                 {
