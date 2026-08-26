@@ -35,6 +35,7 @@ public sealed class TransferOperation : IWriteOperation
     private readonly Dataset _dataset;
     private readonly long _rows;
     private readonly int _maxRetries;
+    private readonly Metrics.TransferLedger? _ledger;
     private long _committedRows;
     private long _indeterminateTxns;
     private long _retryAttempts;
@@ -45,12 +46,14 @@ public sealed class TransferOperation : IWriteOperation
         ConnectionSet connections, Dataset dataset, long rows,
         CamusLocking locking = CamusLocking.Optimistic,
         CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
-        int maxRetries = 10)
+        int maxRetries = 10,
+        Metrics.TransferLedger? ledger = null)
     {
         _connections = connections;
         _dataset = dataset;
         _rows = Math.Max(2, rows);
         _maxRetries = Math.Max(1, maxRetries);
+        _ledger = ledger;
         _options = new CamusTransactionOptions
         {
             IsolationLevel = isolationLevel,
@@ -85,7 +88,7 @@ public sealed class TransferOperation : IWriteOperation
 
         for (int attempt = 1; attempt <= _maxRetries; attempt++)
         {
-            (bool done, OperationResult result) = await TryOnceAsync(lowIndex, highIndex, lowDelta, highDelta, ct)
+            (bool done, OperationResult result) = await TryOnceAsync(lowIndex, highIndex, lowDelta, highDelta, attempt, ct)
                 .ConfigureAwait(false);
 
             if (done)
@@ -100,12 +103,13 @@ public sealed class TransferOperation : IWriteOperation
         }
 
         // Exhausted the retry budget still conflicting — surface it like the baseline write would.
+        _ledger?.Record(lowIndex, highIndex, lowDelta, _maxRetries, "conflict-final", lastConflict.ErrorCode);
         RecordAttempts(_maxRetries);
         return lastConflict;
     }
 
     private async Task<(bool Done, OperationResult Result)> TryOnceAsync(
-        long lowIndex, long highIndex, long lowDelta, long highDelta, CancellationToken ct)
+        long lowIndex, long highIndex, long lowDelta, long highDelta, int attempt, CancellationToken ct)
     {
         CamusConnection conn = _connections.NextWrite();
         Timing t = new() { Ts = Stopwatch.GetTimestamp() };
@@ -137,6 +141,7 @@ public sealed class TransferOperation : IWriteOperation
             commitMs = t.Tick();
 
             System.Threading.Interlocked.Add(ref _committedRows, 2);
+            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, "committed", null);
             return (true, new OperationResult(OperationKind.Write, OperationStatus.Ok, null, beginMs, t.ReadMs, t.UpdateMs, commitMs));
         }
         catch (Exception ex)
@@ -148,6 +153,7 @@ public sealed class TransferOperation : IWriteOperation
                 // The atomic commit may already have applied both legs or neither; either keeps the sum
                 // conserved. Leave it for the server's reaper and carry the ambiguity into reconciliation.
                 System.Threading.Interlocked.Increment(ref _indeterminateTxns);
+                _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, "indeterminate", code);
                 return (true, OperationResult.Failure(OperationKind.Write, status, code));
             }
 
@@ -155,6 +161,8 @@ public sealed class TransferOperation : IWriteOperation
             catch { /* abandoned; the server reaper resolves it */ }
 
             // A conflict is retried by the caller; any other definite abort is surfaced now.
+            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt,
+                status == OperationStatus.Conflict ? "conflict-retry" : "error", code);
             return status == OperationStatus.Conflict
                 ? (false, OperationResult.Failure(OperationKind.Write, status, code))
                 : (true, OperationResult.Failure(OperationKind.Write, status, code));

@@ -187,6 +187,16 @@ public sealed class Dataset
                     try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
                     catch { /* the batch is retried from a new transaction regardless */ }
 
+                    // A duplicate on a seed id means this batch is already committed. Seed ids are
+                    // deterministic, only this seeder writes them, and each batch commits in one
+                    // transaction — so a collision can only come from a batch whose earlier commit
+                    // was reported indeterminate (the outcome was lost in transit but the commit
+                    // landed) or from a batch a prior seed pass completed. The rows are present;
+                    // move to the next batch instead of failing the whole init. The end-of-run
+                    // reconciliation still verifies the row count, so a wrong skip cannot pass.
+                    if (IsDuplicateSeedRow(ex))
+                        break;
+
                     // The ct.IsCancellationRequested guard keeps the workload's own SIGINT (also a
                     // canceled task) from being retried.
                     OperationStatus status = ErrorClassifier.Classify(ex).Status;
@@ -203,6 +213,21 @@ public sealed class Dataset
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// True when an exception is CamusDB's duplicate-unique-key error (CADB0300) for this table's
+    /// primary key. Mirrors <see cref="IsMissingTable"/>: the gRPC client does not always carry the
+    /// server error code across the wire, so the message is checked when the code is absent.
+    /// </summary>
+    private static bool IsDuplicateSeedRow(Exception ex)
+    {
+        if (ex is not CamusException camus)
+            return false;
+        if (camus.Code == "CADB0300")
+            return true;
+        return camus.Message.Contains("Duplicate entry", StringComparison.OrdinalIgnoreCase)
+            && camus.Message.Contains(TableName, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Bounded retries per seeding batch for a conflict / transient abort before a persistent failure is surfaced.</summary>
