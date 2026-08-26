@@ -1,7 +1,7 @@
 CamusDB
 =======
 
-CamusDB is an open-source NewSQL distributed database written in C# on .NET. It pairs a familiar SQL interface with a Raft-replicated, transactional key-value storage layer, and makes a few deliberately opinionated choices: **serializable isolation and strong consistency are the default**, not an opt-in; databases can be **branched copy-on-write like code**; and **dropped objects are recoverable** instead of instantly destroyed.
+CamusDB is an open-source NewSQL distributed database written in C# on .NET. It pairs a familiar SQL interface with a Raft-replicated, transactional key-value storage layer, and makes a few deliberately opinionated choices: **serializable isolation and strong consistency are the default**, not an opt-in; databases can be **branched copy-on-write like code**; and **dropped objects are recoverable** instead of instantly destroyed. Development is driven by performance, Jepsen-style testing, chaos engineering, fault injection, and degraded-state testing.
 
 **While CamusDB is actively used in production, some of its features are considered alpha — use it with caution.** APIs and storage formats may change between versions.
 
