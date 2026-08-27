@@ -7,6 +7,9 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Apply;
+using CamusDB.Core.Catalogs.Meta;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
@@ -31,15 +34,26 @@ public sealed class CatalogsManager
 {
     private readonly ILogger<ICamusDB> logger;
 
+    private readonly SchemaCheckpointWriter checkpoints;
+
+    private readonly SchemaChangePublisher publisher;
+
     /// <summary>
-    /// Test hook: when non-null, thrown by <see cref="PersistSchemaCheckpointAsync"/> on every
-    /// call. Use in DS11.5a tests to simulate exhausted persist retries without a real KV fault.
+    /// Test hook, written through to <see cref="SchemaCheckpointWriter"/>: when non-null, every
+    /// checkpoint persist throws it instead of writing, so a test can drive the exhausted-retry path
+    /// without a real KV fault. Kept on the facade because that is where the tests reach it.
     /// </summary>
-    internal Exception? TestPersistCheckpointException;
+    internal Exception? TestPersistCheckpointException {
+        get => checkpoints.TestPersistCheckpointException;
+        set => checkpoints.TestPersistCheckpointException = value;
+    }
 
     public CatalogsManager(ILogger<ICamusDB> logger)
     {
         this.logger = logger;
+
+        checkpoints = new(logger);
+        publisher = new(checkpoints, logger);
     }
 
     /// <summary>
@@ -107,15 +121,15 @@ public sealed class CatalogsManager
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = CreateTableEntry(database, ticket, tx, tableId);
-            ValidateSchemaDelta(database, entry);
+            entry = SchemaChangeEntryFactory.CreateTableEntry(database, ticket, tx, tableId);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return GetTableSchema(database, ticket.TableName);
     }
 
@@ -126,15 +140,15 @@ public sealed class CatalogsManager
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = AlterTableEntry(database, ticket, tx);
-            ValidateSchemaDelta(database, entry);
+            entry = SchemaChangeEntryFactory.AlterTableEntry(database, ticket, tx);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return GetTableSchema(database, ticket.TableName);
     }
 
@@ -145,15 +159,15 @@ public sealed class CatalogsManager
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = DropTableEntry(database, tableName, tx, deferred);
-            ValidateSchemaDelta(database, entry);
+            entry = SchemaChangeEntryFactory.DropTableEntry(database, tableName, tx, deferred);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return null;
     }
 
@@ -179,15 +193,15 @@ public sealed class CatalogsManager
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = RelinkTableEntry(database, orphan, newName, tx);
-            ValidateSchemaDelta(database, entry);
+            entry = SchemaChangeEntryFactory.RelinkTableEntry(database, orphan, newName, tx);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
 
         TableSchema reattached = GetTableSchema(database, newName);
 
@@ -262,15 +276,15 @@ public sealed class CatalogsManager
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = RelinkTableEntry(database, published, newName, tx);
-            ValidateSchemaDelta(database, entry);
+            entry = SchemaChangeEntryFactory.RelinkTableEntry(database, published, newName, tx);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
 
         TableSchema reattached = GetTableSchema(database, newName);
 
@@ -283,7 +297,7 @@ public sealed class CatalogsManager
         foreach (TableSchemaHistory history in captured.SchemaHistory ?? [])
         {
             byte[] historyBytes = MetaJsonSerializer.Serialize(history, MetaJsonContext.Default.TableSchemaHistory);
-            await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, newTableId, history.Version), historyBytes).ConfigureAwait(false);
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.HistoryKey(database.Id, newTableId, history.Version), historyBytes).ConfigureAwait(false);
         }
 
         // Addressed by the key-space it protected, not by the relation that now owns it.
@@ -312,7 +326,7 @@ public sealed class CatalogsManager
         ).ConfigureAwait(false);
         try
         {
-            await WriteMetaKey(database.Kahuna.Kahuna, tx, OrphanKey(database.Id, orphan.RetiredStorageId), bytes).ConfigureAwait(false);
+            await MetaKeyWriter.WriteMetaKey(database.Kahuna.Kahuna, tx, MetaKeys.OrphanKey(database.Id, orphan.RetiredStorageId), bytes).ConfigureAwait(false);
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
@@ -345,331 +359,6 @@ public sealed class CatalogsManager
         }
     }
 
-    private static SchemaChangeLogEntry RelinkTableEntry(DatabaseDescriptor database, OrphanTableRecord orphan, string newName, KvTransaction tx)
-    {
-        TableSchema src = orphan.Schema;
-
-        SchemaColumnPayload[] columns = [.. (src.Columns ?? []).Select(c => new SchemaColumnPayload
-        {
-            Id = c.Id,
-            Name = c.Name,
-            Type = c.Type,
-            NotNull = c.NotNull,
-            DefaultValue = c.DefaultValue,
-            DefaultFunction = c.DefaultFunction,
-            State = c.State,
-            MaxLength = c.MaxLength,
-            ArrayElementType = c.ArrayElementType,
-            NotNullConstraintName = c.NotNullConstraintName,
-            Comment = c.Comment,
-        })];
-
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.RelinkTable,
-            Payload = Serializator.Serialize(new SchemaRelinkTablePayload
-            {
-                // Preserve the original id so the reattached table's store reads the retained rows/indexes.
-                TableId = orphan.TableId,
-                TableName = newName,
-                // Preserve the schema version so rows keep decoding under the version they were written.
-                Version = src.Version,
-                Columns = columns,
-                Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes] : null,
-                CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
-                // Preserve table settings (e.g. the auto-analyze opt-out) across deferred drop + relink.
-                Settings = src.Settings is { Count: > 0 } ? new Dictionary<string, string>(src.Settings, StringComparer.Ordinal) : null,
-                // Preserve the table comment too, so a relinked table comes back documented.
-                Comment = src.Comment,
-                // A materialized view must come back as one. Without these it would relink as an
-                // ordinary table: writable, no longer refreshable, and — because a refreshed
-                // materialized view's rows live under a key-space that is not its id — pointed at an
-                // empty key-space, so it would also read as empty while its rows sat untouched.
-                StorageId = src.StorageId,
-                Kind = src.Kind,
-                ViewDefinition = src.ViewDefinition,
-                IsPopulated = src.IsPopulated,
-                RefreshedAt = src.RefreshedAt,
-            })
-        };
-    }
-
-    private static SchemaChangeLogEntry CreateTableEntry(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx, string tableId)
-    {
-        SchemaColumnPayload[] columns = [.. ticket.Columns.Select(column =>
-        {
-            SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
-            payload.Id = ObjectIdGenerator.Generate().ToString();
-            return payload;
-        })];
-
-        // Fold inline PRIMARY KEY / UNIQUE / INDEX constraints into this single CreateTable delta so
-        // creating a table is exactly one schema version. The table is empty, so each index is born
-        // at Public with nothing to backfill. Index ids and column ids are generated here and carried
-        // in the payload so every node applies identical definitions.
-        TableIndexSchema[]? indexes = BuildInlineIndexes(ticket, columns, database.Options);
-
-        // Fold CHECK constraints declared in the CREATE TABLE into the same single delta so the
-        // table is created with its constraints already in place.
-        CheckConstraintSchema[]? checkConstraints = BuildInlineCheckConstraints(ticket);
-
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
-            {
-                TableId = tableId,
-                TableName = ticket.TableName,
-                Columns = columns,
-                Indexes = indexes,
-                CheckConstraints = checkConstraints,
-                Comment = ticket.Comment,
-                Kind = ticket.Kind,
-                ViewDefinition = ticket.ViewDefinition,
-                // Never true at creation: even WITH DATA creates the relation empty and then refreshes
-                // it, so a refresh that fails leaves a materialized view that admits it holds nothing
-                // rather than one that claims data it never received.
-                IsPopulated = false,
-                Settings = ticket.Settings is null
-                    ? null
-                    : new Dictionary<string, string>(ticket.Settings, StringComparer.Ordinal)
-            })
-        };
-    }
-
-    /// <summary>
-    /// Translates a CREATE TABLE ticket's inline constraints into fully-resolved index definitions
-    /// (Public state, generated index id, column ids resolved against <paramref name="columns"/>).
-    /// Mirrors the validation the standalone AddIndex path performs (column existence, duplicate
-    /// index name) since those constraints no longer flow through it.
-    /// </summary>
-    private static TableIndexSchema[]? BuildInlineIndexes(CreateTableTicket ticket, SchemaColumnPayload[] columns, CamusDBOptions options)
-    {
-        if (ticket.Constraints.Length == 0)
-            return null;
-
-        Dictionary<string, string> columnIdByName = new(columns.Length, StringComparer.Ordinal);
-        foreach (SchemaColumnPayload column in columns)
-            columnIdByName[column.Name] = column.Id!;
-
-        List<TableIndexSchema> indexes = new(ticket.Constraints.Length);
-        HashSet<string> seenNames = new(StringComparer.Ordinal);
-
-        foreach (ConstraintInfo constraint in ticket.Constraints)
-        {
-            if (!seenNames.Add(constraint.Name))
-            {
-                string msg = constraint.Type == ConstraintType.PrimaryKey
-                    ? $"Primary key already exists on table '{ticket.TableName}'"
-                    : $"Index '{constraint.Name}' already exists on table '{ticket.TableName}'";
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, msg);
-            }
-
-            IndexType indexType = constraint.Type switch
-            {
-                ConstraintType.PrimaryKey => IndexType.Unique,
-                ConstraintType.IndexUnique => IndexType.Unique,
-                ConstraintType.IndexMulti => IndexType.Multi,
-                _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown constraint: " + constraint.Type)
-            };
-
-            // Combined key+include column ceiling (mirrors the standalone/cluster add path). A covering
-            // index duplicates every included value into each entry, so its column count is bounded.
-            int maxIndexColumns = options.MaxIndexColumns;
-            if (maxIndexColumns > 0)
-            {
-                int totalColumns = constraint.Columns.Length + constraint.IncludeColumns.Length;
-                if (totalColumns > maxIndexColumns)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.SchemaLimitExceeded,
-                        $"Index '{constraint.Name}' spans {totalColumns} columns ({constraint.Columns.Length} key + {constraint.IncludeColumns.Length} INCLUDE), exceeding the maximum of {maxIndexColumns}");
-            }
-
-            IndexColumnOrder.RejectDescendingOnUnsupportedType(
-                constraint.Columns,
-                constraint.Name,
-                name =>
-                {
-                    foreach (SchemaColumnPayload column in columns)
-                        if (string.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
-                            return column.Type;
-                    return null;
-                });
-
-            string[] columnIds = new string[constraint.Columns.Length];
-            for (int i = 0; i < constraint.Columns.Length; i++)
-            {
-                string columnName = constraint.Columns[i].Name;
-                if (!columnIdByName.TryGetValue(columnName, out string? columnId))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"Column '{columnName}' does not exist on table '{ticket.TableName}'");
-                columnIds[i] = columnId;
-            }
-
-            string[]? includeColumnIds = ResolveInlineIncludeColumnIds(ticket, constraint, columnIdByName);
-
-            indexes.Add(new TableIndexSchema(
-                ObjectIdGenerator.Generate().ToString(),
-                constraint.Name,
-                columnIds,
-                indexType,
-                SchemaElementState.Public,
-                startOffset: null,
-                columnDirections: IndexColumnOrder.Extract(constraint.Columns),
-                includeColumnIds: includeColumnIds,
-                comment: constraint.Comment
-            ));
-        }
-
-        return [.. indexes];
-    }
-
-    /// <summary>
-    /// Resolves and validates the stored/payload (INCLUDE) columns of an inline covering-index
-    /// constraint declared in CREATE TABLE: each must exist, must not duplicate another include column,
-    /// and must not also be a key column of the same index. Returns their column ids in declared order,
-    /// or null when the constraint has no INCLUDE clause. (Column public-state is not checked here
-    /// because every column in a fresh CREATE TABLE is public.)
-    /// </summary>
-    private static string[]? ResolveInlineIncludeColumnIds(
-        CreateTableTicket ticket,
-        ConstraintInfo constraint,
-        Dictionary<string, string> columnIdByName)
-    {
-        if (constraint.IncludeColumns.Length == 0)
-            return null;
-
-        HashSet<string> keyColumns = new(StringComparer.Ordinal);
-        foreach (ColumnIndexInfo keyColumn in constraint.Columns)
-            keyColumns.Add(keyColumn.Name);
-
-        HashSet<string> seen = new(StringComparer.Ordinal);
-        string[] includeColumnIds = new string[constraint.IncludeColumns.Length];
-
-        for (int i = 0; i < constraint.IncludeColumns.Length; i++)
-        {
-            string includeName = constraint.IncludeColumns[i];
-
-            if (!seen.Add(includeName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Duplicate INCLUDE column '{includeName}' on index '{constraint.Name}'");
-
-            if (keyColumns.Contains(includeName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Column '{includeName}' is already indexed as a key column of index '{constraint.Name}'");
-
-            if (!columnIdByName.TryGetValue(includeName, out string? columnId))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"INCLUDE column '{includeName}' does not exist on table '{ticket.TableName}'");
-
-            includeColumnIds[i] = columnId;
-        }
-
-        return includeColumnIds;
-    }
-
-    /// <summary>
-    /// Converts the <see cref="CheckConstraintInfo"/> array on the ticket into a
-    /// <see cref="CheckConstraintSchema"/> array suitable for inclusion in the
-    /// <see cref="SchemaCreateTablePayload"/>. Returns null when the ticket has no check constraints
-    /// (backward-compatible: absent in old payloads → treated as no checks).
-    /// The <c>ParsedCondition</c> field is not included; it is rebuilt at apply time.
-    /// </summary>
-    private static CheckConstraintSchema[]? BuildInlineCheckConstraints(CreateTableTicket ticket)
-    {
-        if (ticket.CheckConstraints.Length == 0)
-            return null;
-
-        return [.. ticket.CheckConstraints.Select(cc => new CheckConstraintSchema
-        {
-            Name = cc.Name,
-            Expression = cc.Expression,
-            ReferencedColumns = cc.ReferencedColumns
-        })];
-    }
-
-    private static SchemaChangeLogEntry AlterTableEntry(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)
-    {
-        if (ticket.Operation == AlterTableOperation.RenameColumn)
-        {
-            return new()
-            {
-                Ts = tx.TransactionId,
-                Database = database.Id,
-                FromVersion = database.Schema.SchemaVersion,
-                ToVersion = database.Schema.SchemaVersion + 1,
-                Op = SchemaOp.RenameColumn,
-                Payload = Serializator.Serialize(new SchemaRenamePayload
-                {
-                    TableName = ticket.TableName,
-                    Kind = SchemaRenameKind.Column,
-                    ElementName = ticket.Column.Name,
-                    NewName = ticket.NewName ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "NewName is required for RenameColumn")
-                })
-            };
-        }
-
-        SchemaOp op = ticket.Operation switch
-        {
-            AlterTableOperation.AddColumn => SchemaOp.AddColumn,
-            AlterTableOperation.DropColumn => SchemaOp.DropColumn,
-            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter table operation '{ticket.Operation}'")
-        };
-
-        SchemaColumnPayload column = SchemaColumnPayload.FromColumnInfo(ticket.Column);
-        if (op == SchemaOp.AddColumn)
-            column.Id = ObjectIdGenerator.Generate().ToString();
-
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = op,
-            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
-            {
-                TableName = ticket.TableName,
-                Column = column
-            })
-        };
-    }
-
-    private static SchemaChangeLogEntry RenameTableEntry(
-        DatabaseDescriptor database,
-        RenameTableTicket ticket,
-        KvTransaction tx,
-        Dictionary<string, ViewDefinition>? dependentViews)
-    {
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.RenameTable,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
-            {
-                TableName = ticket.TableName,
-                Kind = SchemaRenameKind.Table,
-                NewName = ticket.NewName,
-                DependentViewDefinitions = dependentViews
-            })
-        };
-    }
-
     private async Task<bool> RenameTableReplicatedAsync(
         DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx,
         Dictionary<string, ViewDefinition>? dependentViews)
@@ -679,15 +368,15 @@ public sealed class CatalogsManager
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = RenameTableEntry(database, ticket, tx, dependentViews);
-            ValidateSchemaDelta(database, entry);
+            entry = SchemaChangeEntryFactory.RenameTableEntry(database, ticket, tx, dependentViews);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return true;
     }
 
@@ -729,28 +418,15 @@ public sealed class CatalogsManager
                 })
             };
 
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         return true;
-    }
-
-    private static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx, bool deferred)
-    {
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.DropTable,
-            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = tableName, Deferred = deferred })
-        };
     }
 
     /// <summary>
@@ -772,15 +448,15 @@ public sealed class CatalogsManager
         try
         {
             entry = ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
-                ? DropIndexEntry(database, ticket, tx)
-                : AddIndexEntry(database, ticket, table, tx);
+                ? SchemaChangeEntryFactory.DropIndexEntry(database, ticket, tx)
+                : SchemaChangeEntryFactory.AddIndexEntry(database, ticket, table, tx);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -814,31 +490,17 @@ public sealed class CatalogsManager
                     // Built through FromColumnInfo, never field by field: a hand-copied list silently
                     // drops whatever it forgets, and MaxLength / ArrayElementType / Comment were all
                     // lost here while the single-node path kept them. Only Id and State are ours.
-                    Column = SchemaColumnPayloadWithState(column, initialState)
+                    Column = SchemaChangeEntryFactory.SchemaColumnPayloadWithState(column, initialState)
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Builds the column payload for a staged <c>AddColumn</c> delta: every field the ticket carries,
-    /// plus a fresh column id and the caller's starting <see cref="SchemaElementState"/>. The staged
-    /// cluster path and the single-node path must produce identical columns, so both derive the
-    /// payload from <see cref="SchemaColumnPayload.FromColumnInfo"/> rather than listing fields.
-    /// </summary>
-    private static SchemaColumnPayload SchemaColumnPayloadWithState(ColumnInfo column, SchemaElementState initialState)
-    {
-        SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
-        payload.Id = ObjectIdGenerator.Generate().ToString();
-        payload.State = initialState;
-        return payload;
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -874,14 +536,14 @@ public sealed class CatalogsManager
                     ElementKind = elementKind,
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -924,14 +586,14 @@ public sealed class CatalogsManager
                     )
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -961,162 +623,15 @@ public sealed class CatalogsManager
                     IndexName = indexName
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
-
-    private static SchemaChangeLogEntry AddIndexEntry(
-        DatabaseDescriptor database,
-        AlterIndexTicket ticket,
-        TableDescriptor table,
-        KvTransaction tx
-    )
-    {
-        // The completed index lives in table.Schema.Indexes (written by TableIndexAdder).
-        TableIndexSchema? indexSchema = table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))
-            ?? throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Index '{ticket.IndexName}' not found in table schema after local apply — cannot build replication entry"
-            );
-
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.AddIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
-            {
-                TableName = ticket.TableName,
-                IndexName = ticket.IndexName,
-                Index = indexSchema
-            })
-        };
-    }
-
-    private static SchemaChangeLogEntry DropIndexEntry(
-        DatabaseDescriptor database,
-        AlterIndexTicket ticket,
-        KvTransaction tx
-    )
-    {
-        return new()
-        {
-            Ts = tx.TransactionId,
-            Database = database.Id,
-            FromVersion = database.Schema.SchemaVersion,
-            ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.DropIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
-            {
-                TableName = ticket.TableName,
-                IndexName = ticket.IndexName
-            })
-        };
-    }
-
-    private async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
-    {
-        // Replicating the schema-log delta (and the checkpoint persist below) re-enters the
-        // schema partition's serial, inline apply pipeline — which yields on the schema lock. Doing
-        // it while the lock is held deadlocks that pipeline (the root cause). DDL proposers must
-        // build/validate + apply the delta under the lock, then RELEASE before calling this. A
-        // non-zero depth here is a bug.
-        System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
-            $"ReplicateAndWaitLocalApplyAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
-        );
-
-        if (database.SchemaSubsystemDegraded)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Schema subsystem for database '{database.Name}' is degraded; DDL proposals are rejected until the node recovers"
-            );
-
-        await WaitForPreviousVersionAcksAsync(database, entry).ConfigureAwait(false);
-
-        // For DropTable the table is removed from the in-memory schema during apply, so capture
-        // its immutable id now (the checkpoint delete needs it once the table is gone).
-        string? droppedTableId = entry.Op == SchemaOp.DropTable
-            ? ResolveTableId(database, DecodePayload<SchemaDropTablePayload>(entry).TableName)
-            : null;
-
-        // Same reason as droppedTableId: apply removes the view from the in-memory map, and the
-        // checkpoint still has to delete its meta key by id afterwards.
-        string? droppedViewId = entry.Op == SchemaOp.DropView
-            && database.Schema.Views.TryGetValue(DecodePayload<SchemaDropViewPayload>(entry).ViewName, out ViewSchema? viewBeingDropped)
-                ? viewBeingDropped.Id
-                : null;
-
-        byte[] bytes = Serializator.Serialize(entry);
-        SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Id, bytes, CancellationToken.None).ConfigureAwait(false);
-
-        if (result.Outcome != SchemaReplicationOutcome.Committed)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Schema change '{entry.Op}' for database '{database.Name}' was not committed: {result.Outcome} {result.Status}"
-            );
-
-        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (database.Schema.SchemaVersion >= entry.ToVersion && WasSchemaDeltaApplied(database.Schema, entry))
-                break;
-
-            await Task.Delay(25).ConfigureAwait(false);
-        }
-
-        if (database.Schema.SchemaVersion < entry.ToVersion || !WasSchemaDeltaApplied(database.Schema, entry))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Timed out waiting for local schema apply for database '{database.Name}' version {entry.ToVersion}"
-            );
-
-        // Persist the durable KV checkpoint from this proposer context — NOT from the schema
-        // apply callback, which runs inside the schema partition's commit pipeline and would
-        // deadlock when its KV writes re-enter the same partition. The committed schema log is
-        // already the source of truth; the checkpoint is a load-time optimization, so on a
-        // persist failure we retry and then surface a typed error.
-        await PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId, droppedViewId).ConfigureAwait(false);
-
-        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
-            database.Id,
-            entry.ToVersion,
-            database.Kahuna.SchemaAckWaitTimeout,
-            cancellationToken: CancellationToken.None
-        ).ConfigureAwait(false);
-
-        if (!acked)
-        {
-            string timedOutLaggards = FormatLaggards(database.Kahuna.LastGateLaggards);
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' " +
-                $"version {entry.ToVersion}; nodes that never acked: {timedOutLaggards}"
-            );
-        }
-
-        if (database.Kahuna.LastGateOutcome == SchemaAckOutcome.QuorumBackstop)
-            logger.LogWarning(
-                "Schema ack post-commit gate for database '{Database}' version {Version} " +
-                "completed via QuorumBackstop — these live nodes did not ack within the " +
-                "backstop window ({BackstopMs}ms) and are lagging (will be fenced until they apply " +
-                "the committed schema entry): {Laggards}",
-                database.Name, entry.ToVersion,
-                (long)database.Kahuna.SchemaAckQuorumBackstopDelay.TotalMilliseconds,
-                FormatLaggards(database.Kahuna.LastGateLaggards)
-            );
-    }
-
-    private static string FormatLaggards(IReadOnlyList<string> laggards)
-        => laggards.Count == 0 ? "(none)" : string.Join(", ", laggards);
 
     /// <summary>
     /// Proposes a <see cref="SchemaOp.SetTableSettings"/> delta and replicates it to all cluster nodes,
@@ -1157,14 +672,14 @@ public sealed class CatalogsManager
                     RemovedKeys = removedKeys is null ? [] : [.. removedKeys]
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1229,14 +744,14 @@ public sealed class CatalogsManager
                     Comment = comment
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>Proposes a <see cref="SchemaOp.DropView"/> delta and waits for it to apply locally.</summary>
@@ -1258,14 +773,14 @@ public sealed class CatalogsManager
                 Op = SchemaOp.DropView,
                 Payload = Serializator.Serialize(new SchemaDropViewPayload { ViewName = viewName })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>Proposes a <see cref="SchemaOp.RenameView"/> delta and waits for it to apply locally.</summary>
@@ -1297,14 +812,14 @@ public sealed class CatalogsManager
                     DependentViewDefinitions = dependentViews
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1331,14 +846,14 @@ public sealed class CatalogsManager
                     Definition = definition
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1385,14 +900,14 @@ public sealed class CatalogsManager
                     ExpectedMetadataGeneration = expectedMetadataGeneration
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1444,14 +959,14 @@ public sealed class CatalogsManager
                     NewIndexIds = newIndexIds,
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     public async Task ReplicateSetCommentAsync(
@@ -1480,14 +995,14 @@ public sealed class CatalogsManager
                     Comment = comment
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1521,14 +1036,14 @@ public sealed class CatalogsManager
                     ReferencedColumns = referencedColumns
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1561,1376 +1076,14 @@ public sealed class CatalogsManager
                     ReferencedColumns = []
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
-
-    private static string? ResolveTableId(DatabaseDescriptor database, string tableName)
-        => database.Schema.Tables.TryGetValue(tableName, out TableSchema? table) ? table.Id : null;
-
-    private async Task PersistSchemaCheckpointWithRetryAsync(
-        DatabaseDescriptor database,
-        SchemaChangeLogEntry entry,
-        string? droppedTableId,
-        string? droppedViewId
-    )
-    {
-        const int maxAttempts = 3;
-
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId).ConfigureAwait(false);
-                return;
-            }
-            catch (Exception ex) when (attempt < maxAttempts)
-            {
-                logger.LogWarning(
-                    ex,
-                    "Schema checkpoint persist attempt {Attempt} failed for database {DbName} version {Version}; retrying",
-                    attempt,
-                    database.Name,
-                    entry.ToVersion
-                );
-
-                await Task.Delay(50 * attempt).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                // Persist exhausted — the Raft commit already succeeded and the change is
-                // live cluster-wide, so do NOT surface this to the client. Mark this node's
-                // schema subsystem degraded and request a deferred schema-partition step-down.
-                // The step-down is deferred (fired after the in-flight DDL CommitAsync) because
-                // in single-partition clusters the schema and KV partitions are the same: stepping
-                // down before CommitAsync would invalidate the in-flight KV transaction.
-                // Restart replay will recover the checkpoint on the next open.
-                Log.LogSchemaCheckpointExhausted(logger, ex, maxAttempts, database.Name, entry.ToVersion);
-
-                database.MarkSchemaSubsystemDegraded();
-                database.RequestDeferredSchemaStepDown();
-
-                return; // swallow: committed log is the source of truth; degraded flag gates future DDL
-            }
-        }
-    }
-
-    // Schema checkpoint commits must be bounded — an unbounded CommitAsync(CT.None)
-    // hangs indefinitely when the schema partition Raft actor is stalled, converting a
-    // transient cluster hiccup into a permanent 60s test timeout (or production DDL hang).
-    // 30 s gives an in-process cluster sufficient headroom on a loaded CI runner;
-    // the outer retry loop treats a timeout as a persist failure and eventually takes
-    // the persist-exhausted path, keeping DDL liveness intact.
-    private static readonly TimeSpan CheckpointCommitTimeout = TimeSpan.FromSeconds(30);
-
-    private async Task PersistSchemaCheckpointAsync(
-        DatabaseDescriptor database,
-        SchemaChangeLogEntry entry,
-        string? droppedTableId,
-        string? droppedViewId
-    )
-    {
-        if (TestPersistCheckpointException is { } fault)
-            throw fault;
-
-        // Before the transaction opens, never inside it — see the method's remarks.
-        await PreloadContentsRetirementHistoriesAsync(database).ConfigureAwait(false);
-
-        // High priority: this persists the KV checkpoint for a schema change that Raft has already
-        // committed. Delaying it behind a queue of ordinary traffic stalls DDL for the whole cluster,
-        // and the commit here is already bounded by CheckpointCommitTimeout — so waiting at the
-        // admission gate would eat that budget and turn a busy node into a persist failure.
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            priority: TransactionPriority.High
-        ).ConfigureAwait(false);
-
-        try
-        {
-            // View ops write the view meta key family, not a table blob. They are checked first
-            // because GetEntryTableName below has no answer for them — a view is not a table, and
-            // asking it for one would throw on every view DDL.
-            if (entry.Op is SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.RenameView or SchemaOp.SetViewDefinition)
-            {
-                string viewName = GetEntryViewName(entry);
-                if (database.Schema.Views.TryGetValue(viewName, out ViewSchema? viewSchema))
-                    await PersistSchemaViewAsync(database, viewSchema, tx).ConfigureAwait(false);
-
-                await PersistRenameDependentViewsAsync(database, entry, tx).ConfigureAwait(false);
-            }
-            else if (entry.Op == SchemaOp.DropView)
-            {
-                // Null means the view was already gone when this entry was applied — an idempotent
-                // re-delivery. There is no key left to delete, so only the version advances.
-                if (droppedViewId is not null)
-                    await DeleteSchemaViewAsync(database, droppedViewId, tx).ConfigureAwait(false);
-            }
-            else if (entry.Op == SchemaOp.SetMaterializedViewState)
-            {
-                // Keyed by table id, so resolve the relation the same way apply did rather than by
-                // name — a concurrent rename must not send this checkpoint to the wrong relation.
-                SchemaSetMatViewStatePayload matViewPayload = DecodePayload<SchemaSetMatViewStatePayload>(entry);
-
-                // Keyed by the materialized view's own id in both cases: a swap keeps that id and
-                // changes only which key-space it reads, so the checkpoint always writes the same key.
-                TableSchema? persisted = FindRelationById(database.Schema, matViewPayload.TableId);
-
-                if (persisted is not null && !string.IsNullOrEmpty(matViewPayload.SwapToTableId))
-                    await RetireReplacedMaterializedViewStorageAsync(
-                        database, persisted, matViewPayload.SwapToTableId, entry, tx).ConfigureAwait(false);
-
-                if (persisted is not null)
-                    await PersistSchemaTableAsync(database, persisted, entry.ToVersion, tx).ConfigureAwait(false);
-            }
-            else if (entry.Op == SchemaOp.TruncateTable)
-            {
-                // Keyed by id, like the materialized-view arm: a truncate keeps the relation's name,
-                // but a concurrent rename must not be able to send this checkpoint elsewhere.
-                SchemaTruncateTablePayload truncatePayload = DecodePayload<SchemaTruncateTablePayload>(entry);
-                TableSchema? truncated = FindRelationById(database.Schema, truncatePayload.TableId);
-
-                if (truncated is not null)
-                    await PersistSchemaTableAsync(database, truncated, entry.ToVersion, tx).ConfigureAwait(false);
-            }
-            else if (entry.Op == SchemaOp.DropTable)
-            {
-                if (droppedTableId is not null)
-                {
-                    SchemaDropTablePayload dropPayload = DecodePayload<SchemaDropTablePayload>(entry);
-                    // A deferred drop co-commits the orphan record with the meta-key delete in THIS
-                    // checkpoint transaction, so the detach can never be durable without the recovery
-                    // record. FormerName + DroppedAt come from the replicated entry so they are identical
-                    // regardless of which node persists.
-                    await PersistDroppedTableAsync(
-                        database, droppedTableId, entry.ToVersion, tx,
-                        deferred: dropPayload.Deferred,
-                        formerName: dropPayload.TableName,
-                        droppedAt: entry.Ts).ConfigureAwait(false);
-                }
-            }
-            else
-            {
-                string tableName = GetEntryTableName(entry);
-                if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
-                    await PersistSchemaTableAsync(database, tableSchema, entry.ToVersion, tx).ConfigureAwait(false);
-
-                // A rename carries its dependents' rewritten bodies, so they are checkpointed in the
-                // very transaction that persists the rename. Splitting them would put back on disk the
-                // same half-applied state the single delta removes from memory.
-                await PersistRenameDependentViewsAsync(database, entry, tx).ConfigureAwait(false);
-            }
-
-            // In the same transaction as the live table meta above, so the relation can never be
-            // durable on its new key-space without the old one being recoverable.
-            IReadOnlyList<ContentsRetirementIntent> retirements =
-                await PersistContentsRetirementsAsync(database, tx).ConfigureAwait(false);
-
-            using CancellationTokenSource cts = new(CheckpointCommitTimeout);
-            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
-
-            database.CompleteContentsRetirements(retirements);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Persists the view bodies a rename rewrote, in the caller's checkpoint transaction. A no-op for
-    /// any other operation, and for a rename nothing depended on.
-    /// </summary>
-    private async Task PersistRenameDependentViewsAsync(
-        DatabaseDescriptor database, SchemaChangeLogEntry entry, KvTransaction tx)
-    {
-        if (entry.Op is not (SchemaOp.RenameTable or SchemaOp.RenameView))
-            return;
-
-        SchemaRenamePayload payload = DecodePayload<SchemaRenamePayload>(entry);
-
-        if (payload.DependentViewDefinitions is not { Count: > 0 } rewrites)
-            return;
-
-        foreach (string viewName in rewrites.Keys)
-        {
-            if (database.Schema.Views.TryGetValue(viewName, out ViewSchema? dependent))
-                await PersistSchemaViewAsync(database, dependent, tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// The name the view lives under <b>after</b> the entry has been applied — which for a rename is
-    /// the new name, since the checkpoint has to find the view in the map to persist it.
-    /// </summary>
-    private static string GetEntryViewName(SchemaChangeLogEntry entry) => entry.Op switch
-    {
-        SchemaOp.CreateView or SchemaOp.ReplaceView => DecodePayload<SchemaViewPayload>(entry).ViewName,
-        SchemaOp.RenameView => DecodePayload<SchemaRenamePayload>(entry).NewName,
-        SchemaOp.SetViewDefinition => DecodePayload<SchemaSetViewDefinitionPayload>(entry).ViewName,
-        _ => throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            $"Cannot resolve view name for schema operation '{entry.Op}'"
-        )
-    };
-
-    private static string GetEntryTableName(SchemaChangeLogEntry entry) => entry.Op switch
-    {
-        SchemaOp.CreateTable => DecodePayload<SchemaCreateTablePayload>(entry).TableName,
-        SchemaOp.RelinkTable => DecodePayload<SchemaRelinkTablePayload>(entry).TableName,
-        SchemaOp.AddColumn or SchemaOp.DropColumn => DecodePayload<SchemaAlterColumnPayload>(entry).TableName,
-        SchemaOp.SetElementState => DecodePayload<SchemaElementStatePayload>(entry).TableName,
-        SchemaOp.DropTable => DecodePayload<SchemaDropTablePayload>(entry).TableName,
-        SchemaOp.AddIndex or SchemaOp.DropIndex => DecodePayload<SchemaIndexPayload>(entry).TableName,
-        // For RenameColumn/RenameIndex the table name is unchanged; for RenameTable the table
-        // lives under the new name after apply, so use NewName so the persist path finds it.
-        SchemaOp.RenameTable => DecodePayload<SchemaRenamePayload>(entry).NewName,
-        SchemaOp.RenameColumn or SchemaOp.RenameIndex => DecodePayload<SchemaRenamePayload>(entry).TableName,
-        SchemaOp.AddCheckConstraint or SchemaOp.DropCheckConstraint => DecodePayload<SchemaCheckConstraintPayload>(entry).TableName,
-        SchemaOp.SetTableSettings => DecodePayload<SchemaSetTableSettingsPayload>(entry).TableName,
-        SchemaOp.SetComment => DecodePayload<SchemaSetCommentPayload>(entry).TableName,
-        SchemaOp.SetColumnNotNull => DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
-        SchemaOp.TruncateTable => DecodePayload<SchemaTruncateTablePayload>(entry).TableName,
-        _ => throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            $"Cannot resolve table name for schema operation '{entry.Op}'"
-        )
-    };
-
-    private static async Task WaitForPreviousVersionAcksAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
-    {
-        // Safety: this is the PRE-PROPOSAL gate that enforces the two-version invariant.
-        // The quorum backstop MUST NOT fire here — allowing quorum-only convergence on this gate
-        // would let the proposer advance N→N+1 while a minority sits at N−1, breaking the
-        // invariant and exposing those nodes to mis-decode. enforceFullConvergence=true disables
-        // the backstop for this call while keeping it active for the post-commit gate below.
-        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
-            database.Id,
-            entry.FromVersion,
-            database.Kahuna.SchemaAckWaitTimeout,
-            enforceFullConvergence: true,
-            cancellationToken: CancellationToken.None
-        ).ConfigureAwait(false);
-
-        if (acked)
-            return;
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            $"Timed out waiting for live schema apply acknowledgements before proposing schema change '{entry.Op}' for database '{database.Name}' from version {entry.FromVersion}"
-        );
-    }
-
-    private static void ValidateSchemaDelta(DatabaseDescriptor database, SchemaChangeLogEntry entry)
-    {
-        // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema.
-        Schema clone = SchemaReplicator.CloneSchema(database.Schema);
-        ApplySchemaDelta(clone, database, entry);
-    }
-
-    private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
-    {
-        return entry.Op switch
-        {
-            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
-            SchemaOp.RelinkTable => schema.Tables.ContainsKey(DecodePayload<SchemaRelinkTablePayload>(entry).TableName),
-            SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
-            SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
-            SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
-            SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
-            SchemaOp.AddIndex => HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
-            SchemaOp.DropIndex => !HasIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
-            SchemaOp.RenameTable or SchemaOp.RenameColumn or SchemaOp.RenameIndex => WasRenamed(schema, DecodePayload<SchemaRenamePayload>(entry)),
-            // View ops check the view map, not the table map — WasRenamed above would look in the
-            // wrong place for a RenameView and report "not applied" forever.
-            SchemaOp.CreateView or SchemaOp.ReplaceView => schema.Views.ContainsKey(DecodePayload<SchemaViewPayload>(entry).ViewName),
-            SchemaOp.DropView => !schema.Views.ContainsKey(DecodePayload<SchemaDropViewPayload>(entry).ViewName),
-            SchemaOp.RenameView => schema.Views.ContainsKey(DecodePayload<SchemaRenamePayload>(entry).NewName),
-            // A truncate does not move TableSchema.Version, so the fallback below would answer
-            // "applied" for any unrelated DDL that did. The storage id is the only proof.
-            SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
-            _ => schema.SchemaVersion >= entry.ToVersion
-        };
-    }
-
-    private static bool WasRenamed(Schema schema, SchemaRenamePayload payload)
-    {
-        return payload.Kind switch
-        {
-            SchemaRenameKind.Table =>
-                schema.Tables.ContainsKey(payload.NewName) && !schema.Tables.ContainsKey(payload.TableName),
-            SchemaRenameKind.Column =>
-                schema.Tables.TryGetValue(payload.TableName, out TableSchema? ct) &&
-                ct.Columns is not null &&
-                ct.Columns.Any(c => string.Equals(c.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)),
-            SchemaRenameKind.Index =>
-                schema.Tables.TryGetValue(payload.TableName, out TableSchema? it) &&
-                it.Indexes is not null &&
-                it.Indexes.Any(ix => string.Equals(ix.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)),
-            _ => false
-        };
-    }
-
-    private static bool HasIndex(Schema schema, SchemaIndexPayload payload)
-    {
-        return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
-               table.Indexes is not null &&
-               table.Indexes.Any(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)
-    {
-        return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
-               table.Columns is not null &&
-               table.Columns.Any(column => string.Equals(column.Name, payload.Column.Name, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static bool HasElementState(Schema schema, SchemaElementStatePayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? table))
-            return payload.State == SchemaElementState.Absent;
-
-        if (payload.ElementKind == SchemaElementKind.Index)
-        {
-            TableIndexSchema? index = table.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-            return payload.State == SchemaElementState.Absent
-                ? index is null
-                : index?.State == payload.State;
-        }
-
-        if (table.Columns is null)
-            return payload.State == SchemaElementState.Absent;
-
-        TableColumnSchema? column = table.Columns.FirstOrDefault(column => string.Equals(column.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-        return payload.State == SchemaElementState.Absent
-            ? column is null
-            : column?.State == payload.State;
-    }
-
-    /// <summary>
-    /// Applies <paramref name="entry"/> to <paramref name="schema"/> without a database context. Valid
-    /// for every op except <see cref="SchemaOp.RelinkTable"/>, which needs a database to configure the
-    /// reattached table's history loader. Used by unit tests that exercise the pure apply logic on a bare
-    /// schema.
-    /// </summary>
-    public static TableSchema? ApplySchemaDelta(Schema schema, SchemaChangeLogEntry entry)
-    {
-        if (entry.Op == SchemaOp.RelinkTable)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "RelinkTable requires a database context to apply; use the 3-argument overload.");
-
-        return ApplySchemaDelta(schema, database: null!, entry);
-    }
-
-    /// <summary>
-    /// Applies <paramref name="entry"/> to <paramref name="schema"/> (which is either the live
-    /// <c>database.Schema</c> for a real apply, or a throwaway clone for dry-run validation).
-    /// <paramref name="database"/> is used only by <see cref="SchemaOp.RelinkTable"/> to configure the
-    /// reattached table's lazy history loader; it must not be treated as the mutation target.
-    /// </summary>
-    public static TableSchema? ApplySchemaDelta(Schema schema, DatabaseDescriptor database, SchemaChangeLogEntry entry)
-    {
-        TableSchema? tableSchema = entry.Op switch
-        {
-            SchemaOp.CreateTable => ApplyCreateTable(schema, DecodePayload<SchemaCreateTablePayload>(entry)),
-            SchemaOp.RelinkTable => ApplyRelinkTable(schema, database, DecodePayload<SchemaRelinkTablePayload>(entry)),
-            SchemaOp.DropTable => ApplyDropTable(schema, DecodePayload<SchemaDropTablePayload>(entry)),
-            SchemaOp.AddColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
-            SchemaOp.DropColumn => ApplyAlterColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
-            SchemaOp.SetElementState => ApplyElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
-            SchemaOp.AddIndex => ApplyAddIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
-            SchemaOp.DropIndex => ApplyDropIndex(schema, DecodePayload<SchemaIndexPayload>(entry)),
-            SchemaOp.RenameTable => ApplyRenameTable(schema, DecodePayload<SchemaRenamePayload>(entry)),
-            SchemaOp.RenameColumn => ApplyRenameColumn(schema, DecodePayload<SchemaRenamePayload>(entry)),
-            SchemaOp.RenameIndex => ApplyRenameIndex(schema, DecodePayload<SchemaRenamePayload>(entry)),
-            SchemaOp.AddCheckConstraint => ApplyAddCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
-            SchemaOp.DropCheckConstraint => ApplyDropCheckConstraint(schema, DecodePayload<SchemaCheckConstraintPayload>(entry)),
-            SchemaOp.SetColumnNotNull => ApplySetColumnNotNull(schema, DecodePayload<SchemaSetColumnNotNullPayload>(entry)),
-            SchemaOp.SetTableSettings => ApplySetTableSettings(schema, DecodePayload<SchemaSetTableSettingsPayload>(entry)),
-            SchemaOp.SetComment => ApplySetComment(schema, DecodePayload<SchemaSetCommentPayload>(entry)),
-            SchemaOp.CreateView => ApplyCreateView(schema, DecodePayload<SchemaViewPayload>(entry), replacing: false),
-            SchemaOp.ReplaceView => ApplyCreateView(schema, DecodePayload<SchemaViewPayload>(entry), replacing: true),
-            SchemaOp.DropView => ApplyDropView(schema, DecodePayload<SchemaDropViewPayload>(entry)),
-            SchemaOp.RenameView => ApplyRenameView(schema, DecodePayload<SchemaRenamePayload>(entry)),
-            SchemaOp.SetViewDefinition => ApplySetViewDefinition(schema, DecodePayload<SchemaSetViewDefinitionPayload>(entry)),
-            SchemaOp.SetMaterializedViewState => ApplySetMaterializedViewState(schema, DecodePayload<SchemaSetMatViewStatePayload>(entry)),
-            SchemaOp.TruncateTable => ApplyTruncateTable(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
-            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
-        };
-
-        // Same reasoning as the generation bump below, and for the same reason it lives here: every
-        // op that can create, drop or rename a relation lands in this method, and a stored view body
-        // resolves the relations it reads through this index. Rebuilt before the version advances so
-        // a lock-free reader sees either the pre-delta index or the post-delta one, never a torn one.
-        schema.RebuildRelationNameIndex();
-
-        schema.SchemaVersion = entry.ToVersion;
-
-        // One place, deliberately. Every op that touches a relation lands here, so a generation bump
-        // cannot be forgotten by an apply arm — and a forgotten bump is indistinguishable from "nothing
-        // changed" to anything doing a compare-and-swap against it.
-        if (tableSchema is not null)
-            tableSchema.MetadataGeneration++;
-
-        return tableSchema;
-    }
-
-    private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
-        => entry.GetPayload<T>();
-
-    private static TableSchema ApplyCreateTable(Schema schema, SchemaCreateTablePayload payload)
-    {
-        if (schema.Tables.ContainsKey(payload.TableName))
-            throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
-
-        // One table id maps to at most one live name. A relink reuses the orphan's id; reject if that id
-        // is already live under another name so a stale-orphan relink cannot mint a second alias for one
-        // physical keyspace. (A fresh CREATE always allocates an unregistered id, so this never fires.)
-        if (!string.IsNullOrWhiteSpace(payload.TableId))
-        {
-            foreach (TableSchema live in schema.Tables.Values)
-                if (string.Equals(live.Id, payload.TableId, StringComparison.Ordinal))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.TableAlreadyExists,
-                        $"Table id '{payload.TableId}' is already live under name '{live.Name}'");
-        }
-
-        TableSchema tableSchema = new()
-        {
-            Id = string.IsNullOrWhiteSpace(payload.TableId) ? ObjectIdGenerator.Generate().ToString() : payload.TableId,
-            Version = 0,
-            Name = payload.TableName,
-            Columns = new(payload.Columns.Length),
-            Comment = payload.Comment,
-            Settings = payload.Settings is null
-                ? null
-                : new Dictionary<string, string>(payload.Settings, StringComparer.Ordinal),
-            // A materialized view is created through this same op — it is a relation — and carries
-            // its defining query with it so every node can render SHOW CREATE and refuse DML on it
-            // without a second round of replication.
-            Kind = payload.Kind,
-            ViewDefinition = payload.ViewDefinition,
-            IsPopulated = payload.IsPopulated,
-            SchemaHistory = []
-        };
-
-        foreach (SchemaColumnPayload column in payload.Columns)
-        {
-            tableSchema.Columns.Add(
-                new TableColumnSchema(
-                    id: string.IsNullOrWhiteSpace(column.Id) ? ObjectIdGenerator.Generate().ToString() : column.Id,
-                    name: column.Name,
-                    type: column.Type,
-                    notNull: column.NotNull,
-                    defaultValue: column.DefaultValue,
-                    state: column.State,
-                    maxLength: column.MaxLength,
-                    arrayElementType: column.ArrayElementType,
-                    defaultFunction: column.DefaultFunction,
-                    notNullConstraintName: column.NotNullConstraintName,
-                    comment: column.Comment
-                )
-            );
-        }
-
-        // Every time a change is made to the table schema, an instance is added
-        // to the history that allows reading records with old schema versions.
-        TableSchemaHistory schemaHistory = new()
-        {
-            Version = 0,
-            Columns = tableSchema.Columns,
-        };
-
-        tableSchema.SchemaHistory.Add(schemaHistory);
-
-        // Inline constraints folded into the CreateTable delta (see BuildInlineIndexes). The table
-        // is empty so the indexes are already Public — no backfill, no separate AddIndex delta.
-        if (payload.Indexes is { Length: > 0 })
-            tableSchema.Indexes = [.. payload.Indexes];
-
-        // CHECK constraints folded in by BuildInlineCheckConstraints. Rebuild AST cache so
-        // enforcement is immediately available on the node that created the table.
-        if (payload.CheckConstraints is { Length: > 0 })
-        {
-            tableSchema.CheckConstraints = [.. payload.CheckConstraints];
-            ParseCheckConstraintAsts(tableSchema);
-        }
-
-        schema.Tables.Add(payload.TableName, tableSchema);
-
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Reattaches an orphaned table to the live schema, preserving its original id, column ids, index
-    /// definitions, check constraints, and — critically — its real schema <see cref="TableSchema.Version"/>.
-    /// Unlike <see cref="ApplyCreateTable"/> it does <b>not</b> synthesize a version-0 history (which
-    /// would both mislabel post-<c>ALTER</c> rows and overwrite the retained version-0 history key);
-    /// instead it leaves <see cref="TableSchema.SchemaHistory"/> null and configures the lazy loader that
-    /// reads the retained on-disk history keys, exactly like a table loaded from disk. Runs on every node
-    /// (proposer + followers) through the replicated apply, so all reconstruct an identical table.
-    /// </summary>
-    private static TableSchema ApplyRelinkTable(Schema schema, DatabaseDescriptor database, SchemaRelinkTablePayload payload)
-    {
-        if (schema.Tables.ContainsKey(payload.TableName))
-            throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
-
-        // One table id maps to at most one live name — reject a stale-orphan relink that would alias.
-        if (!string.IsNullOrWhiteSpace(payload.TableId))
-        {
-            foreach (TableSchema live in schema.Tables.Values)
-                if (string.Equals(live.Id, payload.TableId, StringComparison.Ordinal))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.TableAlreadyExists,
-                        $"Table id '{payload.TableId}' is already live under name '{live.Name}'");
-        }
-
-        TableSchema tableSchema = new()
-        {
-            Id = string.IsNullOrWhiteSpace(payload.TableId) ? ObjectIdGenerator.Generate().ToString() : payload.TableId,
-            Version = payload.Version,   // preserve the real version so rows decode against the right layout
-            Name = payload.TableName,
-            Columns = new(payload.Columns.Length),
-            Comment = payload.Comment,
-            StorageId = payload.StorageId,
-            Kind = payload.Kind,
-            ViewDefinition = payload.ViewDefinition,
-            IsPopulated = payload.IsPopulated,
-            RefreshedAt = payload.RefreshedAt,
-            SchemaHistory = null,        // lazy-loaded from the retained {dbId}/meta/history:{tableId}:* keys
-        };
-
-        foreach (SchemaColumnPayload column in payload.Columns)
-        {
-            tableSchema.Columns.Add(
-                new TableColumnSchema(
-                    id: string.IsNullOrWhiteSpace(column.Id) ? ObjectIdGenerator.Generate().ToString() : column.Id,
-                    name: column.Name,
-                    type: column.Type,
-                    notNull: column.NotNull,
-                    defaultValue: column.DefaultValue,
-                    state: column.State,
-                    maxLength: column.MaxLength,
-                    arrayElementType: column.ArrayElementType,
-                    defaultFunction: column.DefaultFunction,
-                    notNullConstraintName: column.NotNullConstraintName,
-                    comment: column.Comment
-                )
-            );
-        }
-
-        if (payload.Indexes is { Length: > 0 })
-            tableSchema.Indexes = [.. payload.Indexes];
-
-        if (payload.CheckConstraints is { Length: > 0 })
-        {
-            tableSchema.CheckConstraints = [.. payload.CheckConstraints];
-            ParseCheckConstraintAsts(tableSchema);
-        }
-
-        if (payload.Settings is { Count: > 0 })
-            tableSchema.Settings = new Dictionary<string, string>(payload.Settings, StringComparer.Ordinal);
-
-        // Configure the lazy history loader (as for a disk-loaded table) so rows written under versions
-        // older than the current one decode against their retained on-disk history layout.
-        ConfigureSchemaHistoryLoader(database, tableSchema);
-
-        schema.Tables.Add(payload.TableName, tableSchema);
-
-        return tableSchema;
-    }
-
-    private static TableSchema? ApplyDropTable(Schema schema, SchemaDropTablePayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            return null;
-
-        schema.Tables.Remove(payload.TableName);
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies an AddIndex delta. Idempotent: if an entry with the same name already exists
-    /// (e.g. the proposer already applied it locally before proposing), it is replaced.
-    /// TableSchema.Version is intentionally NOT bumped — see TableSchema.Version doc.
-    /// </summary>
-    private static TableSchema ApplyAddIndex(Schema schema, SchemaIndexPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        if (payload.Index is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AddIndex payload for '{payload.IndexName}' carries no index definition");
-
-        tableSchema.Indexes ??= [];
-        tableSchema.Indexes.RemoveAll(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
-        tableSchema.Indexes.Add(payload.Index);
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a DropIndex delta. Idempotent: if the index is already absent the operation
-    /// is a no-op. Returns the table even when the index was absent, because the schema
-    /// version must still advance and the checkpoint must still be persisted.
-    /// </summary>
-    private static TableSchema? ApplyDropIndex(Schema schema, SchemaIndexPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            return null;
-
-        tableSchema.Indexes?.RemoveAll(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a <see cref="SchemaOp.SetTableSettings"/> delta by merging the payload's settings into
-    /// <see cref="TableSchema.Settings"/> and removing the payload's reset keys. Idempotent; does not
-    /// bump <see cref="TableSchema.Version"/>.
-    /// </summary>
-    private static TableSchema ApplySetTableSettings(Schema schema, SchemaSetTableSettingsPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        Dictionary<string, string> merged = tableSchema.Settings is null
-            ? new Dictionary<string, string>(StringComparer.Ordinal)
-            : new Dictionary<string, string>(tableSchema.Settings, StringComparer.Ordinal);
-
-        // Defensive: only apply recognized, lowercase-canonical keys, so a malformed log entry from an
-        // older/other proposer cannot inject divergent settings semantics on apply. The *value* is
-        // stored as proposed — the proposer already canonicalized it, and case is significant for a
-        // value that names a column, so lowercasing here would silently break a camelCase column name.
-        foreach (KeyValuePair<string, string> kv in payload.Settings)
-        {
-            string key = (kv.Key ?? "").Trim().ToLowerInvariant();
-            if (TableSettings.Recognized.ContainsKey(key))
-                merged[key] = (kv.Value ?? "").Trim();
-        }
-
-        foreach (string rawKey in payload.RemovedKeys)
-            merged.Remove((rawKey ?? "").Trim().ToLowerInvariant());
-
-        tableSchema.Settings = merged;
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a <see cref="SchemaOp.SetComment"/> delta: attaches or removes a free-text comment on
-    /// the table, one of its columns, or one of its indexes. A null <c>payload.Comment</c> means
-    /// remove, and is deliberately not conflated with the empty string.
-    ///
-    /// <para>Replay-safe by construction: every branch is a pure overwrite, and a column or index
-    /// that no longer exists is a silent no-op rather than a throw. That matters because a
-    /// re-delivered entry (Raft redelivery, WAL replay) can arrive after a later DROP COLUMN /
-    /// DROP INDEX has already been applied — throwing there would wedge the apply pipeline on an
-    /// operation that carries no data.</para>
-    ///
-    /// <para>Does not bump <see cref="TableSchema.Version"/>: comments do not affect row encoding.
-    /// The database schema version is advanced centrally by <see cref="ApplySchemaDelta"/>.</para>
-    /// </summary>
-    private static TableSchema? ApplySetComment(Schema schema, SchemaSetCommentPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        switch (payload.Target)
-        {
-            case CommentTarget.Table:
-                tableSchema.Comment = payload.Comment;
-                break;
-
-            case CommentTarget.Column:
-                {
-                    if (tableSchema.Columns is null)
-                        break;
-
-                    int idx = tableSchema.Columns.FindIndex(
-                        c => string.Equals(c.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-
-                    if (idx < 0)
-                        break;
-
-                    TableColumnSchema old = tableSchema.Columns[idx];
-                    tableSchema.Columns[idx] = new TableColumnSchema(
-                        id: old.Id,
-                        name: old.Name,
-                        type: old.Type,
-                        notNull: old.NotNull,
-                        defaultValue: old.DefaultValue,
-                        state: old.State,
-                        maxLength: old.MaxLength,
-                        arrayElementType: old.ArrayElementType,
-                        defaultFunction: old.DefaultFunction,
-                        notNullConstraintName: old.NotNullConstraintName,
-                        comment: payload.Comment
-                    );
-                    break;
-                }
-
-            case CommentTarget.Index:
-                {
-                    if (tableSchema.Indexes is null)
-                        break;
-
-                    int idx = tableSchema.Indexes.FindIndex(
-                        ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-
-                    if (idx < 0)
-                        break;
-
-                    TableIndexSchema old = tableSchema.Indexes[idx];
-                    tableSchema.Indexes[idx] = new TableIndexSchema(
-                        id: old.Id,
-                        name: old.Name,
-                        columnIds: old.ColumnIds,
-                        type: old.Type,
-                        state: old.State,
-                        startOffset: old.StartOffset,
-                        columnDirections: old.ColumnDirections,
-                        includeColumnIds: old.IncludeColumnIds,
-                        comment: payload.Comment
-                    );
-                    break;
-                }
-
-            default:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Unsupported comment target '{payload.Target}' in the schema log");
-        }
-
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a CreateView or ReplaceView delta. Returns null because a view is not a relation and
-    /// there is no <see cref="TableSchema"/> checkpoint to persist from this apply — the proposer
-    /// persists the view's own meta key afterward.
-    /// </summary>
-    /// <remarks>
-    /// The two ops differ only in how they treat an existing name, and that difference is the whole
-    /// reason they are separate ops: a create must refuse a taken name, while a replace must
-    /// overwrite it while <b>preserving the existing view's id</b>. Minting a fresh id on replace
-    /// would silently break every dependent that recorded the old one, and every dependency check
-    /// that scans for it.
-    /// </remarks>
-    private static TableSchema? ApplyCreateView(Schema schema, SchemaViewPayload payload, bool replacing)
-    {
-        schema.Views.TryGetValue(payload.ViewName, out ViewSchema? existing);
-
-        if (existing is null)
-        {
-            // A name held by a table (or a materialized view) is not ours to take, on either op.
-            if (schema.Tables.ContainsKey(payload.ViewName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TableAlreadyExists,
-                    $"Relation '{payload.ViewName}' already exists");
-        }
-        else if (!replacing)
-        {
-            // Idempotent replay of a create: the same id landing twice is a re-delivery, not a
-            // conflict, and must not wedge the apply pipeline.
-            if (string.Equals(existing.Id, payload.ViewId, StringComparison.Ordinal))
-                return null;
-
-            throw new CamusDBException(
-                CamusDBErrorCodes.ViewAlreadyExists,
-                $"Relation '{payload.ViewName}' already exists");
-        }
-
-        schema.Views[payload.ViewName] = new ViewSchema
-        {
-            Id = existing?.Id ?? payload.ViewId,
-            Name = payload.ViewName,
-            Definition = payload.Definition,
-            Comment = payload.Comment ?? existing?.Comment,
-        };
-
-        return null;
-    }
-
-    /// <summary>
-    /// Applies a DropView delta. Idempotent: a view that is already gone is a no-op rather than a
-    /// failure, so a re-delivered entry — or one that arrives after the view was dropped by a later,
-    /// already-applied entry — cannot wedge the apply pipeline.
-    /// </summary>
-    private static TableSchema? ApplyDropView(Schema schema, SchemaDropViewPayload payload)
-    {
-        schema.Views.Remove(payload.ViewName);
-        return null;
-    }
-
-    /// <summary>
-    /// Applies a RenameView delta by swapping the map key. The view's id is deliberately unchanged,
-    /// so dependents that recorded it keep resolving across the rename.
-    /// </summary>
-    /// <summary>
-    /// Applies the dependent-view conversions carried by a rename, in the same apply as the rename
-    /// itself. Idempotent: overwriting a definition with the one already stored is a no-op, so a
-    /// re-delivered entry replays harmlessly. A view that is no longer present is skipped rather than
-    /// failing — it was dropped after the entry was proposed, and a rename must not wedge on that.
-    /// </summary>
-    private static void ApplyDependentViewRewrites(Schema schema, SchemaRenamePayload payload)
-    {
-        if (payload.DependentViewDefinitions is not { Count: > 0 } rewrites)
-            return;
-
-        foreach ((string viewName, ViewDefinition definition) in rewrites)
-        {
-            if (schema.Views.TryGetValue(viewName, out ViewSchema? view))
-                view.Definition = definition;
-        }
-    }
-
-    private static TableSchema? ApplyRenameView(Schema schema, SchemaRenamePayload payload)
-    {
-        if (!schema.Views.TryGetValue(payload.TableName, out ViewSchema? view))
-        {
-            // Already renamed by an earlier delivery of this same entry.
-            if (schema.Views.ContainsKey(payload.NewName))
-                return null;
-
-            throw new CamusDBException(
-                CamusDBErrorCodes.ViewDoesntExist,
-                $"View '{payload.TableName}' does not exist");
-        }
-
-        if (schema.Tables.ContainsKey(payload.NewName) || schema.Views.ContainsKey(payload.NewName))
-            throw new CamusDBException(
-                CamusDBErrorCodes.ViewAlreadyExists,
-                $"Relation '{payload.NewName}' already exists");
-
-        schema.Views.Remove(payload.TableName);
-        view.Name = payload.NewName;
-        schema.Views[payload.NewName] = view;
-
-        ApplyDependentViewRewrites(schema, payload);
-
-        return null;
-    }
-
-    /// <summary>
-    /// Applies a SetViewDefinition delta — the dependent-view rewrite that rides along with a base
-    /// table or column rename. Idempotent: replaying it simply writes the same body again, and a
-    /// view that no longer exists is a no-op rather than a failure, so a rename entry re-delivered
-    /// after a later DROP VIEW cannot wedge apply.
-    /// </summary>
-    private static TableSchema? ApplySetViewDefinition(Schema schema, SchemaSetViewDefinitionPayload payload)
-    {
-        if (schema.Views.TryGetValue(payload.ViewName, out ViewSchema? view))
-            view.Definition = payload.Definition;
-
-        return null;
-    }
-
-    /// <summary>
-    /// Applies a SetMaterializedViewState delta: the populated flag, the snapshot the contents are
-    /// consistent as of, and — for the swap half of a build-and-swap refresh — the id of the freshly
-    /// built relation the live name should now point at.
-    /// </summary>
-    /// <remarks>
-    /// Keyed by table id, not name, so a refresh that raced a rename still marks the relation it
-    /// actually built. Returns the affected <see cref="TableSchema"/> so the proposer persists the
-    /// updated checkpoint; a relation whose id is not found is a no-op (it was dropped) rather than
-    /// a failure.
-    /// </remarks>
-    private static TableSchema? ApplySetMaterializedViewState(Schema schema, SchemaSetMatViewStatePayload payload)
-    {
-        TableSchema? live = FindRelationById(schema, payload.TableId);
-
-        // Not found means the relation was dropped, or this entry is a replay of a swap that already
-        // moved the name onto a different id. Both are no-ops: the flags this entry carries describe
-        // a relation that is no longer the one answering to the name.
-        if (live is null)
-            return null;
-
-        if (string.IsNullOrEmpty(payload.SwapToTableId))
-        {
-            live.IsPopulated = payload.IsPopulated;
-            live.RefreshedAt = payload.RefreshedAt;
-            return live;
-        }
-
-        // Compare-and-swap on the relation's metadata. The staging relation was built from a copy of
-        // this layout taken when the rebuild started; publishing that copy over a definition that has
-        // since changed would silently erase the change — an index created during the rebuild would
-        // vanish from the schema, and its entries were never written to the new key-space either.
-        // Refused rather than merged: a heuristic merge would have to guess which side of a conflict
-        // the user meant, and guessing wrong here loses data rather than an operation.
-        if (payload.ExpectedMetadataGeneration is { } expected && live.MetadataGeneration != expected)
-            throw new CamusDBException(
-                CamusDBErrorCodes.ConcurrentSchemaChange,
-                $"The definition of materialized view '{live.Name}' changed while it was being refreshed, so the " +
-                "rebuild was discarded rather than published over it. Retry the refresh.");
-
-        // Contents may only move forward in time. Two runs that both got past the fence — a lease that
-        // lapsed under a stalled node, say — would otherwise race at the swap, and the one that finished
-        // last would win regardless of which read the newer source. Ordering by the source snapshot
-        // makes the outcome depend on the data rather than on scheduling.
-        if (payload.RefreshedAt is { } incoming && live.RefreshedAt is { } published
-            && incoming < published)
-            throw new CamusDBException(
-                CamusDBErrorCodes.ConcurrentSchemaChange,
-                $"A newer refresh of materialized view '{live.Name}' has already been published, so this " +
-                "older rebuild was discarded rather than overwriting it.");
-
-        TableSchema? built = FindRelationById(schema, payload.SwapToTableId);
-
-        if (built is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Cannot swap materialized view '{live.Name}': the rebuilt relation '{payload.SwapToTableId}' is not in the schema");
-
-        // What moves is the *contents*: the key-space the rows were written into, and the column and
-        // index definitions they were encoded against. What deliberately stays is the materialized
-        // view's identity — its id, and with it every privilege grant, dependency edge, cached result
-        // and statistic that names it. A refresh replaces what a materialized view holds; it does not
-        // replace the materialized view, and treating it as a new object would silently revoke every
-        // grant on it.
-        live.StorageId = built.EffectiveStorageId;
-        live.Columns = built.Columns;
-        live.Indexes = built.Indexes;
-        live.CheckConstraints = built.CheckConstraints;
-        live.Version = built.Version;
-        live.SchemaHistory = built.SchemaHistory;
-        live.SchemaHistoryLoader = built.SchemaHistoryLoader;
-        live.IsPopulated = payload.IsPopulated;
-        live.RefreshedAt = payload.RefreshedAt;
-
-        // Bumped on every node as part of the same apply, so the generation is identical everywhere
-        // rather than depending on which node happened to propose the refresh.
-        live.ContentsGeneration++;
-
-        // The relation the rebuild was staged under has served its purpose; only the materialized view
-        // answers for that key-space now.
-        schema.Tables.Remove(built.Name!);
-
-        return live;
-    }
-
-    /// <summary>
-    /// Completes the durable half of a materialized-view refresh swap: retires the key-space the view
-    /// has just stopped reading, and removes the meta key of the relation the rebuild was staged
-    /// under.
-    ///
-    /// <para>Runs in the same checkpoint transaction that publishes the view's new schema, so the
-    /// switch-over is one durable step — a crash cannot leave the view pointing at a key-space that
-    /// has already been retired, or leave both key-spaces live with nothing recording which is which.</para>
-    ///
-    /// <para>The retirement is a <b>deferred</b> drop: the previous contents keep their orphan record,
-    /// stay <c>RELINK</c>-able for the retention window, and are then reclaimed by the ordinary orphan
-    /// collector. Without it every refresh would leak a complete copy of the materialized view.</para>
-    /// </summary>
-    /// <remarks>
-    /// The replaced key-space has no meta key of its own — the view's single meta key described it —
-    /// so its orphan record is built from the schema that key <em>still</em> holds at this point: the
-    /// checkpoint has not overwritten it yet. Idempotent on replay: a record whose key-space no longer
-    /// appears in the stored schema means this already ran, and writing it again would resurrect a
-    /// reference to storage the collector may have purged.
-    /// </remarks>
-    private async Task RetireReplacedMaterializedViewStorageAsync(
-        DatabaseDescriptor database,
-        TableSchema view,
-        string stagingTableId,
-        SchemaChangeLogEntry entry,
-        KvTransaction tx)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? stored) = await kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, TableKey(database.Id, view.Id!), -1, HLCTimestamp.Zero,
-            KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-
-        if (getType == KeyValueResponseType.Get && stored?.Value is { Length: > 0 })
-        {
-            TableSchema previous = MetaJsonSerializer.Deserialize(stored.Value, MetaJsonContext.Default.TableSchema);
-            string retiredStorageId = previous.EffectiveStorageId;
-
-            // Equal means the stored schema already names the new key-space: this entry is a replay.
-            if (!string.Equals(retiredStorageId, view.EffectiveStorageId, StringComparison.Ordinal))
-            {
-                // The orphan record stands for the retired key-space, so it must present itself as a
-                // relation whose id *is* that key-space — that is what relink and the collector act on.
-                previous.Id = retiredStorageId;
-                previous.StorageId = null;
-
-                byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
-                {
-                    TableId = retiredStorageId,
-                    FormerName = view.Name ?? "",
-                    DroppedAt = entry.Ts,
-                    Schema = previous,
-                }, MetaJsonContext.Default.OrphanTableRecord);
-
-                await WriteMetaKey(kahuna, tx, OrphanKey(database.Id, retiredStorageId), orphanBytes).ConfigureAwait(false);
-            }
-        }
-
-        // The staging relation is gone from the schema; its meta key must go with it, or a reopen
-        // would load a relation that no statement can reach and that owns the view's live key-space.
-        await DeleteMetaKey(kahuna, tx, TableKey(database.Id, stagingTableId)).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Applies a TruncateTable delta: moves the relation onto the fresh, empty key-space the payload
-    /// names, advances its contents generation, and records the timestamp that generation is valid
-    /// from. Nothing else about the relation changes — not its id, not its name, not its columns,
-    /// indexes, constraints or schema version.
-    /// </summary>
-    /// <remarks>
-    /// <para><b>Compare-and-swap, in both directions.</b> A relation already sitting on the new
-    /// storage id is a re-delivered entry: returning without touching it is what stops a replay from
-    /// retiring a second key-space. A relation sitting on neither the expected nor the new id lost a
-    /// race with another contents change, and applying anyway would move it off a generation this
-    /// entry never described — so that is refused rather than forced.</para>
-    ///
-    /// <para>A relation that is no longer in the schema was dropped after the entry was proposed. That
-    /// is a no-op rather than a failure: a delta that cannot find its target must never wedge the
-    /// apply pipeline.</para>
-    ///
-    /// <para>Pure by construction. This runs inside the schema partition's commit pipeline on every
-    /// node, so it reads no KV and writes none — everything it needs is in the payload. The retired
-    /// key-space is made recoverable afterwards, from the intent captured by
-    /// <see cref="CaptureContentsRetirementIntent"/>.</para>
-    /// </remarks>
-    private static TableSchema? ApplyTruncateTable(Schema schema, SchemaTruncateTablePayload payload)
-    {
-        TableSchema? live = FindRelationById(schema, payload.TableId);
-
-        if (live is null)
-            return null;
-
-        if (string.Equals(live.EffectiveStorageId, payload.NewStorageId, StringComparison.Ordinal))
-            return null;
-
-        if (!string.Equals(live.EffectiveStorageId, payload.ExpectedStorageId, StringComparison.Ordinal) ||
-            live.ContentsGeneration != payload.ExpectedContentsGeneration)
-            throw new CamusDBException(
-                CamusDBErrorCodes.ConcurrentSchemaChange,
-                $"The contents of '{live.Name}' changed while it was being truncated, so this truncate was " +
-                "discarded rather than applied to a generation it does not describe. Retry it.");
-
-        live.StorageId = payload.NewStorageId;
-        live.ContentsGeneration++;
-        live.ContentsValidFrom = payload.ContentsValidFrom;
-
-        return live;
-    }
-
-    /// <summary>
-    /// Whether <paramref name="payload"/>'s contents swap is present in <paramref name="schema"/>.
-    /// </summary>
-    /// <remarks>
-    /// A truncate deliberately does not bump <see cref="TableSchema.Version"/>, so the generic
-    /// "the version moved" test would report success the moment any other DDL advanced it. The target
-    /// storage id is the only thing that proves this particular delta landed. A relation that is gone
-    /// counts as applied, matching the no-op arm of <see cref="ApplyTruncateTable"/> — otherwise a
-    /// proposer would wait for a transition that can never happen.
-    /// </remarks>
-    private static bool WasTruncateApplied(Schema schema, SchemaTruncateTablePayload payload)
-    {
-        TableSchema? live = FindRelationById(schema, payload.TableId);
-        return live is null || string.Equals(live.EffectiveStorageId, payload.NewStorageId, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Records, in memory, the contents generation a TruncateTable delta is about to detach — so the
-    /// durable retirement can be written later, by whichever path gets there first.
-    /// </summary>
-    /// <remarks>
-    /// <para><b>Call this under the schema lock, immediately before applying the delta.</b> It reads
-    /// the pre-swap schema: that is where the retired generation's column layout, index list and
-    /// schema version still are. After the swap the relation describes the new, empty key-space and
-    /// nothing left in memory says what the old one contained.</para>
-    ///
-    /// <para>Guarded by the same compare-and-swap the apply uses, so it is silent on a replay and on a
-    /// relation that has already moved on. That guard is also what keeps a replayed entry from
-    /// resurrecting an orphan record that retention has already purged: after a checkpoint the stored
-    /// schema names the new storage id, so the expectation no longer matches.</para>
-    ///
-    /// <para>Index ids come from the payload, not from the live schema, because the retired generation
-    /// owns entries for every index it ever had — including ones dropped before the truncate, which
-    /// the live schema no longer names.</para>
-    /// </remarks>
-    internal static void CaptureContentsRetirementIntent(DatabaseDescriptor database, SchemaChangeLogEntry entry)
-    {
-        if (entry.Op != SchemaOp.TruncateTable)
-            return;
-
-        SchemaTruncateTablePayload payload = DecodePayload<SchemaTruncateTablePayload>(entry);
-
-        TableSchema? live = FindRelationById(database.Schema, payload.TableId);
-        if (live is null)
-            return;
-
-        if (!string.Equals(live.EffectiveStorageId, payload.ExpectedStorageId, StringComparison.Ordinal) ||
-            live.ContentsGeneration != payload.ExpectedContentsGeneration)
-            return;
-
-        // The record has to present itself as a relation whose id *is* the retired key-space: that is
-        // what a recovery reads its rows through, and what the collector purges.
-        TableSchema retired = SchemaReplicator.CloneTable(live);
-        retired.Id = payload.ExpectedStorageId;
-        retired.StorageId = null;
-        retired.Name = payload.TableName;
-        retired.ContentsValidFrom = null;
-        // A loader bound to the live relation would go on serving the live table's history keys after
-        // this snapshot is persisted; the checkpoint fills the layouts in explicitly instead.
-        retired.SchemaHistoryLoader = null;
-
-        database.AddContentsRetirement(new ContentsRetirementIntent
-        {
-            SourceTableId = payload.TableId,
-            SourceTableName = payload.TableName,
-            RetiredStorageId = payload.ExpectedStorageId,
-            RetiredIndexIds = payload.RetiredIndexIds,
-            NewStorageId = payload.NewStorageId,
-            NewIndexIds = payload.NewIndexIds,
-            RetiredAt = payload.ContentsValidFrom,
-            RetiredSchema = retired,
-        });
-    }
-
-    /// <summary>
-    /// Writes the durable half of every contents generation this node has detached but not yet
-    /// recorded, in the caller's transaction. Returns what it wrote so the caller can forget those
-    /// intents once the transaction has actually committed.
-    /// </summary>
-    /// <remarks>
-    /// <para>Both the live checkpoint and post-restore reconciliation call this, and they must produce
-    /// the same metadata — a crash between the schema-log commit and the checkpoint has to cost a
-    /// delay, not a lost key-space. Writing them all in one transaction also keeps a run of truncates
-    /// that committed between two checkpoints atomic: either every intermediate generation becomes
-    /// recoverable or none does.</para>
-    ///
-    /// <para>Idempotent. Every write is a fixed key with fixed content, so re-running after a failed
-    /// commit overwrites with the same bytes.</para>
-    /// </remarks>
-    private async Task<IReadOnlyList<ContentsRetirementIntent>> PersistContentsRetirementsAsync(
-        DatabaseDescriptor database, KvTransaction tx)
-    {
-        ContentsRetirementIntent[] pending = database.PendingContentsRetirements();
-        if (pending.Length == 0)
-            return pending;
-
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        foreach (ContentsRetirementIntent intent in pending)
-        {
-            byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
-            {
-                Kind = OrphanKind.RetiredContents,
-                // The record is addressed by the key-space it protects. Storage ids are globally
-                // allocated, so this cannot collide with another relation's record even though on a
-                // first truncate it is also the still-live source relation's id.
-                TableId = intent.RetiredStorageId,
-                SourceTableId = intent.SourceTableId,
-                RetiredStorageId = intent.RetiredStorageId,
-                FormerName = intent.SourceTableName,
-                DroppedAt = intent.RetiredAt,
-                Schema = intent.RetiredSchema,
-            }, MetaJsonContext.Default.OrphanTableRecord);
-
-            await WriteMetaKey(kahuna, tx, OrphanKey(database.Id, intent.RetiredStorageId), orphanBytes).ConfigureAwait(false);
-
-            // Freeze what the retired generation owns. Recomputing it at reclaim time from the live
-            // schema would miss every index dropped before the truncate, leaking those entries.
-            byte[] retiredCatalog = MetaJsonSerializer.Serialize(intent.RetiredIndexIds, MetaJsonContext.Default.StringArray);
-            await WriteMetaKey(kahuna, tx, KeyspaceCatalogKey(database.Id, intent.RetiredStorageId), retiredCatalog).ConfigureAwait(false);
-
-            // Seed the new generation's catalog in the same step, so a DROP DATABASE that runs before
-            // the next schema persist still finds the new key-space.
-            byte[] newCatalog = MetaJsonSerializer.Serialize(intent.NewIndexIds, MetaJsonContext.Default.StringArray);
-            await WriteMetaKey(kahuna, tx, KeyspaceCatalogKey(database.Id, intent.NewStorageId), newCatalog).ConfigureAwait(false);
-        }
-
-        return pending;
-    }
-
-    /// <summary>
-    /// Loads the column layouts every pending retirement needs to carry, <b>before</b> the checkpoint
-    /// transaction opens.
-    /// </summary>
-    /// <remarks>
-    /// <para>The timing is the whole point, and getting it wrong hangs the node. These reads use the
-    /// non-transactional snapshot, which cannot see a transaction's own unresolved write intents — it
-    /// waits for them to resolve. Run inside the checkpoint transaction, after that transaction has
-    /// already staged a meta write, the scan would wait on an intent only its own caller could
-    /// resolve, and the caller is the thing waiting. Read first, write second.</para>
-    ///
-    /// <para>Idempotent and cheap to repeat: a retry after a failed checkpoint simply reloads the same
-    /// append-only layouts.</para>
-    /// </remarks>
-    private async Task PreloadContentsRetirementHistoriesAsync(DatabaseDescriptor database)
-    {
-        foreach (ContentsRetirementIntent intent in database.PendingContentsRetirements())
-        {
-            // The retained rows were written under the source relation's schema versions, and the
-            // history keys that describe those versions are append-only under the source relation's
-            // id. A recovery publishes the contents under a *new* relation id, so it cannot reach
-            // them there — they are copied into the record instead.
-            intent.RetiredSchema.SchemaHistory =
-                await LoadAllSchemaHistoryAsync(database, intent.SourceTableId).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Reads every persisted column layout recorded for <paramref name="tableId"/>, oldest version
-    /// first. Used when a retired contents generation has to carry its own decoding history.
-    /// </summary>
-    private static async Task<List<TableSchemaHistory>> LoadAllSchemaHistoryAsync(DatabaseDescriptor database, string tableId)
-    {
-        string prefix = HistoryKeyPrefix(database.Id, tableId);
-        List<TableSchemaHistory> history = [];
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in database.Kahuna.Kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero, MetaBucketPrefix(database.Id), null, true, null, true, 512,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-        {
-            if (!key.StartsWith(prefix, StringComparison.Ordinal) || entry.Value is not { Length: > 0 })
-                continue;
-
-            history.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.TableSchemaHistory));
-        }
-
-        history.Sort(static (a, b) => a.Version.CompareTo(b.Version));
-        return history;
-    }
-
-    /// <summary>
-    /// Reads the persisted grow-only index-id catalog for one storage generation, unioned with the
-    /// indexes the relation currently has.
-    /// </summary>
-    /// <remarks>
-    /// Called by the proposer, never from apply. The result is frozen into the schema-log payload so
-    /// every node — including one replaying the entry long afterwards — retires exactly the same set
-    /// of index key-spaces without reading anything.
-    /// </remarks>
-    internal async Task<string[]> ReadStorageIndexCatalogAsync(DatabaseDescriptor database, TableSchema tableSchema)
-    {
-        HashSet<string> ids = [];
-
-        string storageId = tableSchema.EffectiveStorageId;
-
-        foreach (string candidateKey in string.Equals(storageId, tableSchema.Id, StringComparison.Ordinal)
-                     ? new[] { KeyspaceCatalogKey(database.Id, storageId) }
-                     : [KeyspaceCatalogKey(database.Id, storageId), KeyspaceCatalogKey(database.Id, tableSchema.Id ?? "")])
-        {
-            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
-                HLCTimestamp.Zero, candidateKey, -1, HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-
-            if (type == KeyValueResponseType.Get && entry?.Value is { Length: > 0 } bytes)
-            {
-                foreach (string id in MetaJsonSerializer.Deserialize(bytes, MetaJsonContext.Default.StringArray))
-                    ids.Add(id);
-            }
-        }
-
-        if (tableSchema.Indexes is not null)
-        {
-            foreach (TableIndexSchema index in tableSchema.Indexes)
-                if (!string.IsNullOrEmpty(index.Id))
-                    ids.Add(index.Id);
-        }
-
-        return [.. ids];
-    }
-
-    /// <summary>
-    /// Finds a live relation by its immutable id. Used where a name would be the wrong key because the
-    /// operation can outlive a concurrent rename.
-    /// </summary>
-    private static TableSchema? FindRelationById(Schema schema, string tableId)
-    {
-        foreach (TableSchema candidate in schema.Tables.Values)
-        {
-            if (string.Equals(candidate.Id, tableId, StringComparison.Ordinal))
-                return candidate;
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Applies an AddCheckConstraint delta. Idempotent: an existing constraint with the same name
-    /// is replaced. Rebuilds the <c>ParsedCondition</c> AST cache so enforcement is immediately
-    /// available on the applying node. Does not bump <c>TableSchema.Version</c> — check constraints
-    /// do not affect row encoding.
-    /// </summary>
-    private static TableSchema ApplyAddCheckConstraint(Schema schema, SchemaCheckConstraintPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        CheckConstraintSchema check = new()
-        {
-            Name = payload.ConstraintName,
-            Expression = payload.Expression,
-            ReferencedColumns = payload.ReferencedColumns
-        };
-
-        if (!string.IsNullOrEmpty(payload.Expression))
-            check.ParsedCondition = SQLParserProcessor.ParseCondition(payload.Expression);
-
-        tableSchema.CheckConstraints ??= [];
-        tableSchema.CheckConstraints.RemoveAll(c => string.Equals(c.Name, payload.ConstraintName, StringComparison.OrdinalIgnoreCase));
-        tableSchema.CheckConstraints.Add(check);
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a DropCheckConstraint delta. Idempotent: if the constraint is already absent the
-    /// operation is a no-op. Returns the table even when absent so the schema version still advances.
-    /// </summary>
-    private static TableSchema? ApplyDropCheckConstraint(Schema schema, SchemaCheckConstraintPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            return null;
-
-        tableSchema.CheckConstraints?.RemoveAll(c => string.Equals(c.Name, payload.ConstraintName, StringComparison.OrdinalIgnoreCase));
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a SetColumnNotNull delta. Replaces the target column with an updated copy that has
-    /// the new <c>NotNull</c> flag and <c>NotNullConstraintName</c>. Idempotent: setting the flag
-    /// to its current value is a no-op. Does not bump <c>TableSchema.Version</c> because the NOT
-    /// NULL flag is not encoded in row bytes.
-    /// </summary>
-    private static TableSchema ApplySetColumnNotNull(Schema schema, SchemaSetColumnNotNullPayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        if (tableSchema.Columns is null)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
-
-        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ColumnName, StringComparison.OrdinalIgnoreCase));
-        if (idx < 0)
-            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ColumnName}' does not exist on table '{payload.TableName}'");
-
-        TableColumnSchema old = tableSchema.Columns[idx];
-        tableSchema.Columns[idx] = new TableColumnSchema(
-            id: old.Id,
-            name: old.Name,
-            type: old.Type,
-            notNull: payload.NotNull,
-            defaultValue: old.DefaultValue,
-            state: old.State,
-            maxLength: old.MaxLength,
-            arrayElementType: old.ArrayElementType,
-            defaultFunction: old.DefaultFunction,
-            notNullConstraintName: payload.ConstraintName,
-            comment: old.Comment
-        );
-        return tableSchema;
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -2965,599 +1118,168 @@ public sealed class CatalogsManager
                     ConstraintName = constraintName
                 })
             };
-            ValidateSchemaDelta(database, entry);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally
         {
             database.Schema.ReleaseLock();
         }
 
-        await ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Rebuilds the transient <see cref="CheckConstraintSchema.ParsedCondition"/> AST cache for
-    /// every check constraint on <paramref name="tableSchema"/> whose cache is null. Called after
-    /// the JSON checkpoint is deserialized (the field is <c>[JsonIgnore]</c> and therefore absent
-    /// in the persisted form) and after <c>ApplyCreateTable</c> copies constraints from the payload.
-    /// </summary>
-    internal static void ParseCheckConstraintAsts(TableSchema tableSchema)
-    {
-        if (tableSchema.CheckConstraints is null || tableSchema.CheckConstraints.Count == 0)
-            return;
-
-        foreach (CheckConstraintSchema check in tableSchema.CheckConstraints)
-        {
-            if (check.ParsedCondition is not null || string.IsNullOrEmpty(check.Expression))
-                continue;
-
-            check.ParsedCondition = SQLParserProcessor.ParseCondition(check.Expression);
-        }
-    }
-
-    /// <summary>
-    /// Re-keys <c>schema.Tables</c> and mutates <c>TableSchema.Name</c> in place. The same
-    /// <c>TableSchema</c> instance is preserved so pin/visibility closures keep tracking it.
-    /// No version bump — the re-key already invalidates pinned txns (old key gone).
-    /// </summary>
-    private static TableSchema ApplyRenameTable(Schema schema, SchemaRenamePayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        if (schema.Tables.ContainsKey(payload.NewName))
-            throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.NewName}' already exists");
-
-        // Coordinator jobs are keyed by table name. If any child column or index is
-        // mid-ladder (non-terminal state), renaming the table would orphan the job because
-        // ResumeJobsAsync resolves Schema.Tables[oldName] → gone after the rename.
-        if (tableSchema.Columns is not null)
-        {
-            TableColumnSchema? midLadder = tableSchema.Columns
-                .FirstOrDefault(c => c.State != SchemaElementState.Public && c.State != SchemaElementState.Absent);
-            if (midLadder is not null)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                    $"Cannot rename table '{payload.TableName}': column '{midLadder.Name}' has an in-flight schema change (state: {midLadder.State}). Wait for it to reach Public before renaming.");
-        }
-
-        if (tableSchema.Indexes is not null)
-        {
-            TableIndexSchema? midLadder = tableSchema.Indexes
-                .FirstOrDefault(ix => ix.State != SchemaElementState.Public && ix.State != SchemaElementState.Absent);
-            if (midLadder is not null)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                    $"Cannot rename table '{payload.TableName}': index '{midLadder.Name}' has an in-flight schema change (state: {midLadder.State}). Wait for it to reach Public before renaming.");
-        }
-
-        schema.Tables.Remove(payload.TableName);
-        tableSchema.Name = payload.NewName;
-        schema.Tables.Add(payload.NewName, tableSchema);
-
-        // Same apply as the rename: no node ever sees a dependent body naming the old relation, and
-        // there is no interval in which the freed name could be claimed by something else and read
-        // through a stale body.
-        ApplyDependentViewRewrites(schema, payload);
-
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Replaces a column record in the table's column list, preserving the immutable <c>Id</c>.
-    /// Bumps <c>TableSchema.Version</c> and records a history entry so pins re-validate and
-    /// the row decoder picks up the new name on next access.
-    /// </summary>
-    private static TableSchema ApplyRenameColumn(Schema schema, SchemaRenamePayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        if (string.IsNullOrEmpty(payload.ElementName))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column name is required for RenameColumn");
-
-        if (tableSchema.Columns is null)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
-
-        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-        if (idx < 0)
-            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ElementName}' does not exist in table '{payload.TableName}'");
-
-        if (tableSchema.Columns.Any(c => string.Equals(c.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)))
-            throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, $"Column '{payload.NewName}' already exists in table '{payload.TableName}'");
-
-        TableColumnSchema current = tableSchema.Columns[idx];
-
-        if (current.State != SchemaElementState.Public && current.State != SchemaElementState.Absent)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                $"Cannot rename column '{payload.ElementName}': it has an in-flight schema change (state: {current.State}). Wait for it to reach Public before renaming.");
-
-        List<TableColumnSchema> columns = [.. tableSchema.Columns];
-        columns[idx] = new TableColumnSchema(
-            id: current.Id,
-            name: payload.NewName,
-            type: current.Type,
-            notNull: current.NotNull,
-            defaultValue: current.DefaultValue,
-            state: current.State,
-            maxLength: current.MaxLength,
-            arrayElementType: current.ArrayElementType,
-            defaultFunction: current.DefaultFunction,
-            notNullConstraintName: current.NotNullConstraintName,
-            comment: current.Comment
-        );
-
-        tableSchema.Version++;
-        tableSchema.Columns = columns;
-        tableSchema.SchemaHistory ??= [];
-
-        // Rename is purely a label change: positional encoding means every historical snapshot
-        // must also reflect the new name so rows written under any previous version decode correctly.
-        foreach (TableSchemaHistory history in tableSchema.SchemaHistory)
-        {
-            if (history.Columns is null) continue;
-            int hIdx = history.Columns.FindIndex(c => c.Id == current.Id);
-            if (hIdx < 0) continue;
-            TableColumnSchema hCol = history.Columns[hIdx];
-            history.Columns[hIdx] = new TableColumnSchema(
-                id: hCol.Id, name: payload.NewName, type: hCol.Type,
-                notNull: hCol.NotNull, defaultValue: hCol.DefaultValue, state: hCol.State,
-                maxLength: hCol.MaxLength, arrayElementType: hCol.ArrayElementType,
-                defaultFunction: hCol.DefaultFunction,
-                notNullConstraintName: hCol.NotNullConstraintName,
-                comment: hCol.Comment);
-        }
-
-        tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
-
-        // Storage parameters that name a column store the NAME, not the immutable column id, so a
-        // rename would otherwise leave ttl_expiration_expression pointing at a column that no longer
-        // exists — and a dangling TTL configuration fails only in the background sweep, silently.
-        // Carrying it across keeps the rename a pure label change from the user's point of view.
-        if (tableSchema.Settings is not null &&
-            tableSchema.Settings.TryGetValue(TableSettings.TtlExpirationExpressionKey, out string? ttlColumn) &&
-            string.Equals(ttlColumn, payload.ElementName, StringComparison.OrdinalIgnoreCase))
-        {
-            Dictionary<string, string> settings = new(tableSchema.Settings, StringComparer.Ordinal)
-            {
-                [TableSettings.TtlExpirationExpressionKey] = payload.NewName
-            };
-            tableSchema.Settings = settings;
-        }
-
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Replaces an index entry with a renamed copy, preserving the immutable <c>Id</c>,
-    /// <c>ColumnIds</c>, <c>Type</c>, <c>State</c>, and <c>StartOffset</c>.
-    /// Does NOT bump <c>TableSchema.Version</c> — indexes are not part of row encoding.
-    /// </summary>
-    private static TableSchema ApplyRenameIndex(Schema schema, SchemaRenamePayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        if (string.IsNullOrEmpty(payload.ElementName))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Index name is required for RenameIndex");
-
-        if (tableSchema.Indexes is null || tableSchema.Indexes.Count == 0)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no indexes");
-
-        int idx = tableSchema.Indexes.FindIndex(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-        if (idx < 0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{payload.ElementName}' does not exist on table '{payload.TableName}'");
-
-        if (tableSchema.Indexes.Any(ix => string.Equals(ix.Name, payload.NewName, StringComparison.OrdinalIgnoreCase)))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{payload.NewName}' already exists on table '{payload.TableName}'");
-
-        TableIndexSchema current = tableSchema.Indexes[idx];
-
-        if (current.State != SchemaElementState.Public && current.State != SchemaElementState.Absent)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                $"Cannot rename index '{payload.ElementName}': it has an in-flight schema change (state: {current.State}). Wait for it to reach Public before renaming.");
-
-        tableSchema.Indexes[idx] = new TableIndexSchema(
-            id: current.Id,
-            name: payload.NewName,
-            columnIds: current.ColumnIds,
-            type: current.Type,
-            state: current.State,
-            startOffset: current.StartOffset,
-            columnDirections: current.ColumnDirections,
-            includeColumnIds: current.IncludeColumnIds,
-            comment: current.Comment
-        );
-
-        // TableSchema.Version is intentionally NOT bumped: indexes are not part of row encoding.
-        return tableSchema;
-    }
-
-    private static TableSchema ApplyAlterColumn(Schema schema, SchemaAlterColumnPayload payload, SchemaOp op)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        tableSchema.Version++;
-
-        switch (op)
-        {
-            case SchemaOp.AddColumn:
-                AddColumn(tableSchema, payload.Column);
-                break;
-
-            case SchemaOp.DropColumn:
-                DropColumn(tableSchema, payload.Column.Name);
-                break;
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter table operation '{op}'");
-        }
-
-        TableSchemaHistory schemaHistory = new()
-        {
-            Version = tableSchema.Version,
-            Columns = tableSchema.Columns,
-        };
-
-        tableSchema.SchemaHistory ??= [];
-        tableSchema.SchemaHistory.Add(schemaHistory);
-
-        return tableSchema;
-    }
-
-    private static void AddColumn(TableSchema tableSchema, SchemaColumnPayload newColumn)
-    {
-        bool hasColumn = false;
-
-        List<TableColumnSchema> tableColumns = new(tableSchema.Columns!.Count);
-
-        foreach (TableColumnSchema column in tableSchema.Columns!)
-        {
-            if (string.Equals(newColumn.Name, column.Name, StringComparison.OrdinalIgnoreCase))
-                hasColumn = true;
-            else
-                tableColumns.Add(column);
-        }
-
-        if (hasColumn)
-            throw new CamusDBException(CamusDBErrorCodes.DuplicateColumn, $"Duplicate column '{newColumn.Name}'");
-
-        tableColumns.Add(
-            new TableColumnSchema(
-                id: string.IsNullOrWhiteSpace(newColumn.Id) ? ObjectIdGenerator.Generate().ToString() : newColumn.Id,
-                name: newColumn.Name,
-                type: newColumn.Type,
-                notNull: newColumn.NotNull,
-                defaultValue: newColumn.DefaultValue,
-                state: newColumn.State,
-                maxLength: newColumn.MaxLength,
-                arrayElementType: newColumn.ArrayElementType,
-                defaultFunction: newColumn.DefaultFunction,
-                notNullConstraintName: newColumn.NotNullConstraintName,
-                comment: newColumn.Comment
-            )
-        );
-
-        tableSchema.Columns = tableColumns;
-    }
-
-    private static TableSchema ApplyElementState(Schema schema, SchemaElementStatePayload payload)
-    {
-        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
-            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
-
-        if (payload.ElementKind == SchemaElementKind.Index)
-            return ApplyIndexElementState(tableSchema, payload);
-
-        if (tableSchema.Columns is null)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
-
-        int columnIndex = tableSchema.Columns.FindIndex(column => string.Equals(column.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-        if (columnIndex < 0)
-            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{payload.ElementName}'");
-
-        TableColumnSchema current = tableSchema.Columns[columnIndex];
-        ValidateElementStateTransition(current.State, payload.State, payload.ElementName);
-
-        if (current.State == payload.State)
-            return tableSchema;
-
-        List<TableColumnSchema> tableColumns = [.. tableSchema.Columns];
-
-        if (payload.State == SchemaElementState.Absent)
-        {
-            tableColumns.RemoveAt(columnIndex);
-        }
-        else
-        {
-            tableColumns[columnIndex] = new(
-                current.Id,
-                current.Name,
-                current.Type,
-                current.NotNull,
-                current.DefaultValue,
-                payload.State,
-                maxLength: current.MaxLength,
-                arrayElementType: current.ArrayElementType,
-                defaultFunction: current.DefaultFunction,
-                notNullConstraintName: current.NotNullConstraintName
-            );
-        }
-
-        tableSchema.Version++;
-        tableSchema.Columns = tableColumns;
-        tableSchema.SchemaHistory ??= [];
-        tableSchema.SchemaHistory.Add(new()
-        {
-            Version = tableSchema.Version,
-            Columns = tableSchema.Columns
-        });
-
-        return tableSchema;
-    }
-
-    /// <summary>
-    /// Applies a <c>SetElementState</c> delta that targets an index. Unlike the column
-    /// variant, this does NOT bump <c>tableSchema.Version</c> or write schema history —
-    /// indexes are not part of the row encoding so their state changes are invisible to
-    /// the row decoder.
-    /// </summary>
-    private static TableSchema ApplyIndexElementState(TableSchema tableSchema, SchemaElementStatePayload payload)
-    {
-        if (tableSchema.Indexes is null || tableSchema.Indexes.Count == 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Table '{tableSchema.Name}' has no indexes — cannot apply state transition for '{payload.ElementName}'"
-            );
-
-        int indexIdx = tableSchema.Indexes.FindIndex(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
-        if (indexIdx < 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Unknown index '{payload.ElementName}' on table '{tableSchema.Name}'"
-            );
-
-        TableIndexSchema current = tableSchema.Indexes[indexIdx];
-        ValidateElementStateTransition(current.State, payload.State, payload.ElementName);
-
-        if (current.State == payload.State)
-            return tableSchema;
-
-        if (payload.State == SchemaElementState.Absent)
-        {
-            tableSchema.Indexes.RemoveAt(indexIdx);
-        }
-        else
-        {
-            tableSchema.Indexes[indexIdx] = new TableIndexSchema(
-                current.Id!,
-                current.Name,
-                current.ColumnIds,
-                current.Type,
-                payload.State,
-                current.StartOffset,
-                columnDirections: current.ColumnDirections,
-                includeColumnIds: current.IncludeColumnIds,
-                comment: current.Comment
-            );
-        }
-
-        // TableSchema.Version is intentionally NOT bumped: indexes are not part of the
-        // row encoding, so index state changes are invisible to the row decoder.
-        return tableSchema;
-    }
-
-    private static void ValidateElementStateTransition(
-        SchemaElementState current,
-        SchemaElementState next,
-        string elementName
-    )
-    {
-        if (current == next)
-            return;
-
-        bool valid = (current, next) switch
-        {
-            (SchemaElementState.Absent, SchemaElementState.DeleteOnly) => true,
-            (SchemaElementState.DeleteOnly, SchemaElementState.WriteOnly) => true,
-            (SchemaElementState.WriteOnly, SchemaElementState.Public) => true,
-            (SchemaElementState.Public, SchemaElementState.WriteOnly) => true,
-            (SchemaElementState.WriteOnly, SchemaElementState.DeleteOnly) => true,
-            (SchemaElementState.DeleteOnly, SchemaElementState.Absent) => true,
-            _ => false
-        };
-
-        if (!valid)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Invalid state transition for schema element '{elementName}': {current} -> {next}"
-            );
-    }
-
-    private static void DropColumn(TableSchema tableSchema, string columnName)
-    {
-        bool hasColumn = false;
-
-        List<TableColumnSchema> tableColumns = new(tableSchema.Columns!.Count);
-
-        foreach (TableColumnSchema column in tableSchema.Columns!)
-        {
-            if (columnName == column.Name)
-                hasColumn = true;
-            else
-                tableColumns.Add(column);
-        }
-
-        if (!hasColumn)
-            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{columnName}'");
-
-        tableSchema.Columns = tableColumns;
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 
     // -----------------------------------------------------------------------
     // Schema persistence
     // -----------------------------------------------------------------------
 
-    // ALL meta keys share a single Kahuna routing bucket: "{dbId}/meta" — the string before the
-    // last '/'. Kahuna partitions by that bucket (InversePrefixedStaticHash on the last '/'), and
-    // GetByBucket matches it exactly, so every meta key must keep "{dbId}/meta" as its last-'/'
-    // prefix. That is why table/history/coordinator use ':' (not '/') to separate their sub-fields:
-    // it keeps them in the one bucket, so a single scan/purge of "{dbId}/meta" reaches them all.
-    // (A '/' in the sub-fields would split them into per-table/per-version buckets scattered across
-    // partitions, which a single "{dbId}/meta" scan cannot reach — see DatabaseDropper.)
-    private static string MetaBucketPrefix(string dbId) => $"{dbId}/meta";
-    private static string SystemKey(string dbId) => $"{dbId}/meta/system";
-    private static string VersionKey(string dbId) => $"{dbId}/meta/version";
-    private static string TableKeyPrefix(string dbId) => $"{dbId}/meta/table:";
-    private static string TableKey(string dbId, string tableId) => $"{TableKeyPrefix(dbId)}{tableId}";
-    private static string HistoryKeyPrefix(string dbId, string tableId) => $"{dbId}/meta/history:{tableId}:";
-    private static string HistoryKey(string dbId, string tableId, int version) => $"{HistoryKeyPrefix(dbId, tableId)}{version}";
-    // Views get their own key family, and — like table/history/coordinator — separate their
-    // sub-field with ':' rather than '/' so every view key stays inside the one "{dbId}/meta"
-    // routing bucket that LoadMetaAsync scans and DatabaseDropper purges.
-    private static string ViewKeyPrefix(string dbId) => $"{dbId}/meta/view:";
-    private static string ViewKey(string dbId, string viewId) => $"{ViewKeyPrefix(dbId)}{viewId}";
-    private static string CoordinatorKeyPrefix(string dbId) => $"{dbId}/meta/coordinator:";
-    // Key embeds the immutable table id, not the mutable table name.
-    private static string CoordinatorKey(string dbId, string tableId, string elementName) => $"{CoordinatorKeyPrefix(dbId)}{tableId}~{elementName}";
+    // Persisting one catalog object is delegated to SchemaMetaStore, which owns the pairing of
+    // every object write with the schema-version bump and the "never under the schema lock"
+    // assertion. These entry points exist because callers across the engine hold a CatalogsManager,
+    // not the store.
 
-    /// <summary>
-    /// Returns the exclusive ordinal upper bound for every key beginning with <paramref name="prefix"/>.
-    /// Incrementing the last available UTF-16 code unit keeps a prefix scan inside its logical subrange
-    /// even when several key families share one Kahuna routing bucket.
-    /// </summary>
-    private static string? PrefixUpperBound(string prefix)
-    {
-        for (int i = prefix.Length - 1; i >= 0; i--)
-        {
-            if (prefix[i] < char.MaxValue)
-                return string.Concat(prefix.AsSpan(0, i), ((char)(prefix[i] + 1)).ToString());
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Returns the meta key that stores the grow-only set of all index ids ever allocated for one
-    /// <b>storage generation</b>. The catalog is written on every schema persist so that
-    /// DROP DATABASE can discover and purge overlay entries for indexes that were dropped
-    /// before the database itself was dropped.
-    ///
-    /// <para><paramref name="storageId"/> is the <c>EffectiveStorageId</c>, not the relation id. The
-    /// catalog names the key-space it describes, and a relation may own several over its life — one
-    /// per contents swap. Keying it by identity instead would make every generation of one relation
-    /// share a single entry, so retiring a generation could not record what that generation owned, and
-    /// the whole-database purge (which reads the key suffix as the bucket to sweep) would sweep an
-    /// empty prefix named after the identity while the real rows stayed behind.</para>
-    ///
-    /// <para>The two coincide for every relation that never swapped, which is why existing catalogs
-    /// keep working; where they differ, <see cref="WriteKeyspaceCatalogAsync"/> falls back to the
-    /// legacy identity-keyed entry and copies it forward.</para>
-    /// </summary>
-    private static string KeyspaceCatalogKey(string dbId, string storageId) => $"{dbId}/meta/keyspace:{storageId}";
-
-    /// <summary>
-    /// Persists the system schema metadata. Schema table metadata is stored per object
-    /// through <see cref="PersistSchemaTableAsync"/>.
-    /// </summary>
     public async Task PersistMetaAsync(DatabaseDescriptor database, KvTransaction tx)
-        => await PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
+        => await SchemaMetaStore.PersistMetaAsync(database, tx).ConfigureAwait(false);
 
     public async Task PersistSystemMetaAsync(DatabaseDescriptor database, KvTransaction tx)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
+        => await SchemaMetaStore.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
 
-        byte[] systemBytes = MetaJsonSerializer.Serialize(database.SystemSchema, MetaJsonContext.Default.SystemSchema);
-
-        await WriteMetaKey(kahuna, tx, SystemKey(database.Id), systemBytes).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Persists one view's meta blob plus the database schema-version counter, in the caller's
-    /// transaction so the two commit together.
-    ///
-    /// <para>The version write is not incidental: a view definition that landed without its version
-    /// bump would be invisible to the expansion cache, which keys on the schema version to decide
-    /// whether its parsed body is stale. Both keys must move as one.</para>
-    /// </summary>
     public async Task PersistSchemaViewAsync(DatabaseDescriptor database, ViewSchema viewSchema, KvTransaction tx)
-    {
-        // Same invariant as PersistSchemaTableAsync: a replicated KV write must never be issued while
-        // the schema lock is held, or the schema-log partition can deadlock behind it.
-        System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
-            $"PersistSchemaViewAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
-        );
+        => await SchemaMetaStore.PersistSchemaViewAsync(database, viewSchema, tx).ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(viewSchema.Id))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"View '{viewSchema.Name}' has no view id");
-
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
-        byte[] viewBytes = MetaJsonSerializer.Serialize(viewSchema, MetaJsonContext.Default.ViewSchema);
-
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
-        await WriteMetaKey(kahuna, tx, ViewKey(database.Id, viewSchema.Id), viewBytes).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Removes a dropped view's meta blob and advances the persisted schema version, in the caller's
-    /// transaction. A view owns no rows and no index keyspace, so unlike a table drop there is
-    /// nothing to detach or retain for recovery — deleting the definition removes the whole object.
-    /// </summary>
     public async Task DeleteSchemaViewAsync(DatabaseDescriptor database, string viewId, KvTransaction tx)
-    {
-        System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
-            $"DeleteSchemaViewAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
-        );
-
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
-
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
-        await DeleteMetaKey(kahuna, tx, ViewKey(database.Id, viewId)).ConfigureAwait(false);
-    }
+        => await SchemaMetaStore.DeleteSchemaViewAsync(database, viewId, tx).ConfigureAwait(false);
 
     public async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, KvTransaction tx)
-        => await PersistSchemaTableAsync(database, tableSchema, database.Schema.SchemaVersion, tx).ConfigureAwait(false);
+        => await SchemaMetaStore.PersistSchemaTableAsync(database, tableSchema, tx).ConfigureAwait(false);
 
     public async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, long schemaVersion, KvTransaction tx)
-    {
-        // Replicated KV writes must never be issued while the schema lock is held.
-        // A non-zero depth here means a caller violated the invariant (lock-order deadlock risk).
-        System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
-            $"PersistSchemaTableAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
-        );
+        => await SchemaMetaStore.PersistSchemaTableAsync(database, tableSchema, schemaVersion, tx).ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(tableSchema.Id))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Table '{tableSchema.Name}' has no table id");
+    public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
+        => await SchemaMetaStore.PersistDroppedTableAsync(database, tableId, tx).ConfigureAwait(false);
 
-        IKahuna kahuna = database.Kahuna.Kahuna;
+    public Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx)
+        => SchemaMetaStore.PersistDroppedTableAsync(database, tableId, schemaVersion, tx);
 
-        byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
-        byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(tableSchema), MetaJsonContext.Default.TableSchema);
+    public async Task PersistDroppedTableAsync(
+        DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx,
+        bool deferred, string formerName, HLCTimestamp droppedAt)
+        => await SchemaMetaStore.PersistDroppedTableAsync(
+            database, tableId, schemaVersion, tx, deferred, formerName, droppedAt).ConfigureAwait(false);
 
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
-        await WriteMetaKey(kahuna, tx, TableKey(database.Id, tableSchema.Id), tableBytes).ConfigureAwait(false);
+    /// <summary>
+    /// Loads <c>Schema.Tables</c>, <c>Schema.Views</c> and <c>SystemSchema</c> from KV into the
+    /// in-memory descriptor. See <see cref="SchemaLoader"/> for the ordering rules this obeys.
+    /// </summary>
+    public async Task LoadMetaAsync(DatabaseDescriptor database)
+        => await SchemaLoader.LoadMetaAsync(database, logger).ConfigureAwait(false);
 
-        if (tableSchema.SchemaHistory is not null)
-        {
-            TableSchemaHistory? history = tableSchema.SchemaHistory.FirstOrDefault(x => x.Version == tableSchema.Version);
-            if (history is not null)
-            {
-                // Schema history keys are append-only: once a table version is recorded,
-                // readers may safely cache it and load it under their own read timestamp.
-                byte[] historyBytes = MetaJsonSerializer.Serialize(history, MetaJsonContext.Default.TableSchemaHistory);
-                await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, tableSchema.Id, history.Version), historyBytes).ConfigureAwait(false);
-            }
-        }
+    internal static SchemaCheckpoint LoadSchemaCheckpoint(ReadOnlySpan<byte> buffer)
+        => SchemaLoader.LoadSchemaCheckpoint(buffer);
 
-        // Update the grow-only keyspace catalog to track all index ids ever used by this table.
-        await WriteKeyspaceCatalogAsync(kahuna, tx, database.Id, tableSchema).ConfigureAwait(false);
-    }
+    /// <summary>
+    /// Copies the source database's metadata namespace into the branch's namespace, as-of
+    /// <paramref name="forkT"/>. See <see cref="BranchMetaCopier"/> for the snapshot and locking
+    /// contract the caller must satisfy.
+    /// </summary>
+    public async Task CopyMetaForBranchAsync(DatabaseDescriptor source, string branchDbId, HLCTimestamp forkT)
+        => await BranchMetaCopier.CopyMetaForBranchAsync(source, branchDbId, forkT).ConfigureAwait(false);
+
+
+    /// <summary>
+    /// Re-persists the complete in-memory schema in a single transaction. Called after log replay
+    /// completes, to bring the on-disk checkpoint up to the committed head.
+    /// </summary>
+    public async Task PersistFullSchemaCheckpointAsync(DatabaseDescriptor database)
+        => await checkpoints.PersistFullSchemaCheckpointAsync(database).ConfigureAwait(false);
+
+    // -----------------------------------------------------------------------
+    // Delta application
+    // -----------------------------------------------------------------------
+    //
+    // The deltas themselves live under Catalogs/Apply/, which by construction cannot reach KV:
+    // apply runs inside the schema partition's commit pipeline, and a write from there re-enters
+    // the same partition and deadlocks it. These forwarders exist for the callers that hold a
+    // CatalogsManager rather than the appliers.
+
+    public static TableSchema? ApplySchemaDelta(Schema schema, SchemaChangeLogEntry entry)
+        => SchemaDeltaApplier.ApplySchemaDelta(schema, entry);
+
+    public static TableSchema? ApplySchemaDelta(Schema schema, DatabaseDescriptor database, SchemaChangeLogEntry entry)
+        => SchemaDeltaApplier.ApplySchemaDelta(schema, database, entry);
+
+    /// <summary>
+    /// Rebuilds the parsed condition tree of every CHECK constraint whose tree is not built yet.
+    /// Only the expression text is persisted, so this must run after a load and after an apply.
+    /// </summary>
+    internal static void ParseCheckConstraintAsts(TableSchema tableSchema)
+        => ConstraintDeltaApplier.ParseCheckConstraintAsts(tableSchema);
+
+    /// <summary>
+    /// Records, in memory only, that a committed delta replaced a relation's contents and left a
+    /// key-space nothing else names. Called from the apply pipeline, so it must never write KV.
+    /// </summary>
+    internal static void CaptureContentsRetirementIntent(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+        => ContentsRetirementStore.CaptureContentsRetirementIntent(database, entry);
+
+    /// <summary>
+    /// Reads every index key-space id a relation's storage generation ever owned. Called by the
+    /// proposer, never from apply — the result is frozen into the schema-log payload.
+    /// </summary>
+    internal async Task<string[]> ReadStorageIndexCatalogAsync(DatabaseDescriptor database, TableSchema tableSchema)
+        => await ContentsRetirementStore.ReadStorageIndexCatalogAsync(database, tableSchema).ConfigureAwait(false);
+
+    // -----------------------------------------------------------------------
+    // Per-object record stores
+    // -----------------------------------------------------------------------
+    //
+    // Three small key families, each owned by its own store: the orphan record of a deferred-dropped
+    // relation, the resumable schema-change coordinator job, and the in-flight materialized-view
+    // refresh job. These entry points exist because callers across the engine hold a CatalogsManager
+    // rather than the stores.
+
+    public async Task DeleteTableOrphanAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
+        => await OrphanTableStore.DeleteTableOrphanAsync(database, tableId, tx).ConfigureAwait(false);
+
+    public async Task<OrphanTableRecord?> TryGetTableOrphanAsync(DatabaseDescriptor database, string tableId)
+        => await OrphanTableStore.TryGetTableOrphanAsync(database, tableId).ConfigureAwait(false);
+
+    public async Task<List<OrphanTableRecord>> LoadTableOrphansAsync(DatabaseDescriptor database)
+        => await OrphanTableStore.LoadTableOrphansAsync(database).ConfigureAwait(false);
+
+    public async Task PersistCoordinatorJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
+        => await CoordinatorJobStore.PersistCoordinatorJobAsync(database, job).ConfigureAwait(false);
+
+    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
+        => await CoordinatorJobStore.DeleteCoordinatorJobAsync(database, tableId, elementName).ConfigureAwait(false);
+
+    public async Task DeleteCoordinatorJobsForTableAsync(
+        DatabaseDescriptor database,
+        string tableId,
+        KvTransaction tx)
+        => await CoordinatorJobStore.DeleteCoordinatorJobsForTableAsync(database, tableId, tx).ConfigureAwait(false);
+
+    public async Task<List<PersistedCoordinatorJob>> LoadCoordinatorJobsAsync(DatabaseDescriptor database)
+        => await CoordinatorJobStore.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
+
+    public async Task PersistRefreshJobAsync(DatabaseDescriptor database, MaterializedViewRefreshJob job)
+        => await MaterializedViewRefreshJobStore.PersistRefreshJobAsync(database, job).ConfigureAwait(false);
+
+    public async Task DeleteRefreshJobAsync(DatabaseDescriptor database, string viewTableId)
+        => await MaterializedViewRefreshJobStore.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+    public async Task<MaterializedViewRefreshJob?> TryGetRefreshJobAsync(DatabaseDescriptor database, string viewTableId)
+        => await MaterializedViewRefreshJobStore.TryGetRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+    public Task<List<MaterializedViewRefreshJob>> ListRefreshJobsAsync(DatabaseDescriptor database)
+        => MaterializedViewRefreshJobStore.ListRefreshJobsAsync(database);
+
+    /// <summary>
+    /// The listing by database id, for callers that do not have the database open — the background
+    /// sweep asks "is there anything to reclaim here" without opening every database on every tick.
+    /// </summary>
+    public static async Task<List<MaterializedViewRefreshJob>> ListRefreshJobsAsync(IKahuna kahuna, string dbId)
+        => await MaterializedViewRefreshJobStore.ListRefreshJobsAsync(kahuna, dbId).ConfigureAwait(false);
 
     /// <summary>
     /// Standalone-mode counterpart of <see cref="ReplicateSetCommentAsync"/>: mutates the in-memory
@@ -3663,7 +1385,7 @@ public sealed class CatalogsManager
 
     /// <summary>
     /// The single in-memory comment mutation, shared by the standalone write path and its revert so
-    /// the two can never drift. Mirrors <c>ApplySetComment</c>, which does the same work on the
+    /// the two can never drift. Mirrors <c>TableDeltaApplier.ApplySetComment</c>, which does the same work on the
     /// replicated path.
     /// </summary>
     private static void ApplyCommentToSchema(TableSchema tableSchema, CommentTarget target, string? elementName, string? comment)
@@ -3724,981 +1446,4 @@ public sealed class CatalogsManager
         }
     }
 
-    public async Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
-        => await PersistDroppedTableAsync(database, tableId, database.Schema.SchemaVersion, tx).ConfigureAwait(false);
-
-    public Task PersistDroppedTableAsync(DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx)
-        => PersistDroppedTableAsync(database, tableId, schemaVersion, tx, deferred: false, formerName: "", droppedAt: default);
-
-    /// <summary>
-    /// Persists the checkpoint side of a <c>DROP TABLE</c>: bumps the schema version and deletes the
-    /// per-table meta key. When <paramref name="deferred"/> is <c>true</c> it <b>also</b> writes the
-    /// table's orphan record in the same transaction — reading the table's current persisted schema
-    /// (still present at this point) to capture it — so the detach and the recovery record are one
-    /// atomic commit. Idempotent on replay: if the meta key is already gone the orphan was already
-    /// written and this is a no-op for that key.
-    /// </summary>
-    public async Task PersistDroppedTableAsync(
-        DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx,
-        bool deferred, string formerName, HLCTimestamp droppedAt)
-    {
-        // See PersistSchemaTableAsync above.
-        System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
-            $"PersistDroppedTableAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
-        );
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
-        await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
-
-        if (deferred)
-        {
-            // Capture the table's persisted schema before deleting it, and write the orphan record in the
-            // same transaction so a crash can never leave the table detached without a recovery record.
-            (KeyValueResponseType getType, ReadOnlyKeyValueEntry? tableEntry) = await kahuna.LocateAndTryGetValue(
-                HLCTimestamp.Zero, TableKey(database.Id, tableId), -1, HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-
-            if (getType == KeyValueResponseType.Get && tableEntry?.Value is { Length: > 0 })
-            {
-                TableSchema captured = MetaJsonSerializer.Deserialize(tableEntry.Value, MetaJsonContext.Default.TableSchema);
-                byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
-                {
-                    TableId = tableId,
-                    FormerName = formerName,
-                    DroppedAt = droppedAt,
-                    Schema = captured,
-                }, MetaJsonContext.Default.OrphanTableRecord);
-
-                await WriteMetaKey(kahuna, tx, OrphanKey(database.Id, tableId), orphanBytes).ConfigureAwait(false);
-            }
-            // else: meta key already gone (idempotent replay) — the orphan record was written on the
-            // original checkpoint; nothing more to do.
-        }
-        else
-        {
-            // Immediate (FORCE) drop destroys the keyspace for good. Remove any stale orphan record for
-            // this id so the destroyed table can never be relinked to an empty/partial keyspace.
-            await DeleteMetaKey(kahuna, tx, OrphanKey(database.Id, tableId)).ConfigureAwait(false);
-        }
-
-        await DeleteMetaKey(kahuna, tx, TableKey(database.Id, tableId)).ConfigureAwait(false);
-    }
-
-    // -----------------------------------------------------------------------
-    // Orphan table records (deferred drop / relink / GC reclamation)
-    // -----------------------------------------------------------------------
-
-    // ── Materialized-view refresh jobs (staging ownership + reclamation) ───────
-
-    private static string RefreshJobKeyPrefix(string dbId) => $"{dbId}/meta/mvrefresh:";
-    private static string RefreshJobKey(string dbId, string viewTableId) => $"{RefreshJobKeyPrefix(dbId)}{viewTableId}";
-
-    /// <summary>
-    /// Records that a refresh is building into a staging relation, so that relation has a durable owner
-    /// even if this process never runs again. Written before the staging relation is created: a record
-    /// with no relation is inert, whereas a relation with no record is an untracked leak.
-    /// </summary>
-    public async Task PersistRefreshJobAsync(DatabaseDescriptor database, MaterializedViewRefreshJob job)
-    {
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
-        try
-        {
-            byte[] bytes = MetaJsonSerializer.Serialize(job, MetaJsonContext.Default.MaterializedViewRefreshJob);
-            await WriteMetaKey(database.Kahuna.Kahuna, tx, RefreshJobKey(database.Id, job.ViewTableId), bytes).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>Removes a refresh job record: the attempt finished, or its staging storage was reclaimed.</summary>
-    public async Task DeleteRefreshJobAsync(DatabaseDescriptor database, string viewTableId)
-    {
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
-        try
-        {
-            await DeleteMetaKey(database.Kahuna.Kahuna, tx, RefreshJobKey(database.Id, viewTableId)).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>Reads the refresh job recorded for one materialized view, or null when none is in flight.</summary>
-    public async Task<MaterializedViewRefreshJob?> TryGetRefreshJobAsync(DatabaseDescriptor database, string viewTableId)
-    {
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, RefreshJobKey(database.Id, viewTableId), -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-
-        if (type != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 })
-            return null;
-
-        return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.MaterializedViewRefreshJob);
-    }
-
-    /// <summary>
-    /// Every refresh job recorded in this database. Used by the background reclaimer, which is what
-    /// covers the cases a later refresh cannot: a materialized view that was dropped, or that is simply
-    /// never refreshed again.
-    /// </summary>
-    public Task<List<MaterializedViewRefreshJob>> ListRefreshJobsAsync(DatabaseDescriptor database)
-        => ListRefreshJobsAsync(database.Kahuna.Kahuna, database.Id);
-
-    /// <summary>
-    /// The same listing, by database id, for callers that do not have the database open.
-    /// </summary>
-    /// <remarks>
-    /// Exists so the background sweep can ask "is there anything to reclaim here" without opening every
-    /// database on every tick — which is real work, and on a busy node is also avoidable contention.
-    /// </remarks>
-    public static async Task<List<MaterializedViewRefreshJob>> ListRefreshJobsAsync(IKahuna kahuna, string dbId)
-    {
-        string metaBucket = $"{dbId}/meta";
-        string prefix = RefreshJobKeyPrefix(dbId);
-        List<MaterializedViewRefreshJob> jobs = [];
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-        {
-            if (!key.StartsWith(prefix, StringComparison.Ordinal) || entry.Value is null)
-                continue;
-
-            jobs.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.MaterializedViewRefreshJob));
-        }
-
-        return jobs;
-    }
-
-    private static string OrphanKeyPrefix(string dbId) => $"{dbId}/meta/orphan:";
-    private static string OrphanKey(string dbId, string tableId) => $"{OrphanKeyPrefix(dbId)}{tableId}";
-
-    /// <summary>
-    /// Deletes a table orphan record within <paramref name="tx"/>. Called on relink (the table is being
-    /// reattached) and by the GC after the table's data has been purged.
-    /// </summary>
-    public async Task DeleteTableOrphanAsync(DatabaseDescriptor database, string tableId, KvTransaction tx)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        await DeleteMetaKey(kahuna, tx, OrphanKey(database.Id, tableId)).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Reads the orphan record for <paramref name="tableId"/>, or <c>null</c> if none exists. Lock-free
-    /// point read (zero-identity snapshot); used by relink and the GC to confirm the record before acting.
-    /// </summary>
-    public async Task<OrphanTableRecord?> TryGetTableOrphanAsync(DatabaseDescriptor database, string tableId)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, OrphanKey(database.Id, tableId), -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
-        ).ConfigureAwait(false);
-
-        if (type != KeyValueResponseType.Get || entry?.Value is null)
-            return null;
-
-        return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.OrphanTableRecord);
-    }
-
-    /// <summary>
-    /// Scans the database meta bucket and returns every orphaned-table record. Backing store for
-    /// <c>SHOW ORPHAN TABLES</c> and the GC reclamation sweep.
-    /// </summary>
-    public async Task<List<OrphanTableRecord>> LoadTableOrphansAsync(DatabaseDescriptor database)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        string metaBucket = $"{database.Id}/meta";
-        string orphanPrefix = OrphanKeyPrefix(database.Id);
-        List<OrphanTableRecord> orphans = [];
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-        {
-            if (!key.StartsWith(orphanPrefix, StringComparison.Ordinal) || entry.Value is null)
-                continue;
-
-            orphans.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.OrphanTableRecord));
-        }
-
-        return orphans;
-    }
-
-    /// <summary>
-    /// Re-persists the complete in-memory schema (all live tables + current version) in a
-    /// single KV transaction. Called after log replay completes (<c>OnRestoreFinished</c>)
-    /// to bring the on-disk checkpoint up to the committed head. Respects
-    /// <see cref="TestPersistCheckpointException"/> so checkpoint fault-injection tests are not
-    /// accidentally fired here.
-    /// </summary>
-    public async Task PersistFullSchemaCheckpointAsync(DatabaseDescriptor database)
-    {
-        if (TestPersistCheckpointException is { } fault)
-            throw fault;
-
-        // Must not be called while Schema lock is held (deadlock risk — see class doc).
-        System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
-            $"PersistFullSchemaCheckpointAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
-        );
-
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        long schemaVersion = database.Schema.SchemaVersion;
-
-        // Before the transaction opens, never inside it — see the method's remarks.
-        await PreloadContentsRetirementHistoriesAsync(database).ConfigureAwait(false);
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
-            await WriteMetaKey(kahuna, tx, VersionKey(database.Id), versionBytes).ConfigureAwait(false);
-
-            // Snapshot the table set: callers may invoke this without holding Schema.Semaphore
-            // (e.g. OnSchemaRestoreFinishedAsync, which must not hold the apply lock across these KV
-            // writes — see the deadlock note there), so a concurrent live apply could otherwise
-            // mutate Tables mid-iteration. A best-effort checkpoint over a point-in-time snapshot is
-            // fine; the committed schema log remains the source of truth.
-            foreach (TableSchema table in database.Schema.Tables.Values.ToArray())
-            {
-                if (string.IsNullOrWhiteSpace(table.Id))
-                    continue;
-
-                byte[] tableBytes = MetaJsonSerializer.Serialize(WithoutHistory(table), MetaJsonContext.Default.TableSchema);
-                await WriteMetaKey(kahuna, tx, TableKey(database.Id, table.Id), tableBytes).ConfigureAwait(false);
-
-                if (table.SchemaHistory is not null)
-                {
-                    TableSchemaHistory? current = table.SchemaHistory.FirstOrDefault(x => x.Version == table.Version);
-                    if (current is not null)
-                    {
-                        byte[] historyBytes = MetaJsonSerializer.Serialize(current, MetaJsonContext.Default.TableSchemaHistory);
-                        await WriteMetaKey(kahuna, tx, HistoryKey(database.Id, table.Id, current.Version), historyBytes).ConfigureAwait(false);
-                    }
-                }
-            }
-
-            // Reconciled here, in the transaction that also rewrites the table blobs, and before any
-            // of those blobs can overwrite a pre-swap table meta. A replay that recreated the live
-            // generation without recreating the retired one's record would leave that key-space
-            // unreachable: nothing in the schema names it any more.
-            IReadOnlyList<ContentsRetirementIntent> retirements =
-                await PersistContentsRetirementsAsync(database, tx).ConfigureAwait(false);
-
-            using CancellationTokenSource cts = new(CheckpointCommitTimeout);
-            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
-
-            database.CompleteContentsRetirements(retirements);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Coordinator job persistence
-    // -----------------------------------------------------------------------
-
-    public async Task PersistCoordinatorJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        byte[] bytes = MetaJsonSerializer.Serialize(job, MetaJsonContext.Default.PersistedCoordinatorJob);
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            await WriteMetaKey(kahuna, tx, CoordinatorKey(database.Id, job.TableId, job.ElementName), bytes).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            await DeleteMetaKey(kahuna, tx, CoordinatorKey(database.Id, tableId, elementName)).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Deletes all persisted coordinator jobs belonging to <paramref name="tableId"/> inside the
-    /// caller's DDL transaction. Reusing <paramref name="tx"/> is required because DROP TABLE already
-    /// owns metadata write intents in the same bucket; a nested transaction's snapshot scan would wait
-    /// for those intents while the outer transaction waits for the scan, creating a self-deadlock.
-    /// Keeping discovery and deletion in one transaction also makes the cleanup atomic with the drop.
-    /// </summary>
-    public async Task DeleteCoordinatorJobsForTableAsync(
-        DatabaseDescriptor database,
-        string tableId,
-        KvTransaction tx)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        string tableJobPrefix = $"{CoordinatorKeyPrefix(database.Id)}{tableId}~";
-        string? tableJobPrefixEnd = PrefixUpperBound(tableJobPrefix);
-
-        List<string> keysToDelete = [];
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
-            MetaBucketPrefix(database.Id),
-            tableJobPrefix, true,
-            tableJobPrefixEnd, false,
-            128,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            CancellationToken.None).ConfigureAwait(false))
-        {
-            if (key.StartsWith(tableJobPrefix, StringComparison.Ordinal) && entry.Value is not null)
-                keysToDelete.Add(key);
-        }
-
-        foreach (string key in keysToDelete)
-            await DeleteMetaKey(kahuna, tx, key).ConfigureAwait(false);
-    }
-
-    public async Task<List<PersistedCoordinatorJob>> LoadCoordinatorJobsAsync(DatabaseDescriptor database)
-    {
-        List<PersistedCoordinatorJob> jobs = [];
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        string keyPrefix = CoordinatorKeyPrefix(database.Id);
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                tx.TransactionId,
-                MetaBucketPrefix(database.Id),
-                null, true,
-                null, true,
-                128,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None).ConfigureAwait(false))
-            {
-                if (!key.StartsWith(keyPrefix, StringComparison.Ordinal) || entry.Value is null)
-                    continue;
-
-                PersistedCoordinatorJob job = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.PersistedCoordinatorJob);
-                jobs.Add(job);
-            }
-
-            return jobs;
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Loads <c>Schema.Tables</c> and <c>SystemSchema</c> from Kahuna KV into the
-    /// in-memory descriptor.
-    /// </summary>
-    public async Task LoadMetaAsync(DatabaseDescriptor database)
-    {
-        // Reloading metadata replaces TableSchema instances. Any open table
-        // descriptors that captured the old references must be rebuilt.
-        database.TableDescriptors.Clear();
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-
-        try
-        {
-            IKahuna kahuna = database.Kahuna.Kahuna;
-
-            (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, VersionKey(database.Id), -1,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
-
-            // A database with persisted schema has a version key. Absent ⟹ a fresh database with an
-            // empty schema (version 0, no tables) — there is no legacy single-blob fallback to read
-            // (backwards compatibility is intentionally not supported).
-            if (schemaType == KeyValueResponseType.Get && schemaEntry?.Value is not null)
-            {
-                database.Schema.SchemaVersion = MetaJsonSerializer.DeserializeCompat(schemaEntry.Value, MetaJsonContext.Default.Int64);
-                database.Schema.Tables = await LoadTablesAsync(database, tx).ConfigureAwait(false);
-
-                // Views load after tables so a view's recorded dependency ids can be checked against
-                // relations that are already in the map; a view is only ever a consumer of tables and
-                // of earlier views, never the reverse, so this one ordering is sufficient.
-                database.Schema.Views = await LoadViewsAsync(database, tx).ConfigureAwait(false);
-            }
-
-            // Both maps were replaced wholesale above, so the id index has to be built from them
-            // here: after this point readers resolve relation references through it and must never
-            // walk the maps themselves.
-            database.Schema.RebuildRelationNameIndex();
-
-            // Seed the Raft schema fence from the on-disk version so HeadSchemaVersion ≥
-            // SchemaVersion holds immediately after a load or reopen.  Without this, the fence
-            // starts at 0 each session and HeadSchemaVersion != SchemaVersion would incorrectly
-            // appear true for any database that has had prior DDL, breaking the branch stability
-            // gate and any other check that compares the two fields after a process restart.
-            database.ObserveSchemaEntryHead(database.Schema.SchemaVersion);
-
-            (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, SystemKey(database.Id), -1,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
-
-            if (systemType == KeyValueResponseType.Get && systemEntry?.Value is not null)
-            {
-                SystemSchema? system =
-                    MetaJsonSerializer.DeserializeCompat(systemEntry.Value, MetaJsonContext.Default.SystemSchema);
-                if (system is not null)
-                    database.SystemSchema = system;
-            }
-
-            // Populate TableSchema.Indexes in-memory for any table that still carries
-            // its indexes only in the legacy SystemSchema blob. The migration is in-memory
-            // here; the next index DDL write will persist the updated TableSchema to KV via
-            // PersistSchemaTableAsync (which includes Indexes via WithoutHistory).
-            MigrateIndexesFromSystemSchema(database);
-
-            Log.LogSchemaLoaded(logger, database.Schema.Tables.Count, database.SystemSchema.Indexes.Count);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-            database.TableDescriptors.Clear();
-        }
-    }
-
-    /// <summary>
-    /// For every table whose <see cref="TableSchema.Indexes"/> is still null
-    /// (i.e. stored only in the legacy <c>SystemSchema</c> blob), populate it in-memory from
-    /// <c>database.SystemSchema.Indexes</c>. The result is used immediately by
-    /// <c>TableOpener</c> so the table opens correctly; the next index DDL write will persist
-    /// the populated <c>Indexes</c> list to the table's KV entry via
-    /// <c>PersistSchemaTableAsync</c>.
-    /// </summary>
-    private static void MigrateIndexesFromSystemSchema(DatabaseDescriptor database)
-    {
-        if (database.SystemSchema.Indexes.Count == 0)
-            return;
-
-        foreach (TableSchema table in database.Schema.Tables.Values)
-        {
-            if (table.Indexes is not null && table.Indexes.Count > 0)
-                continue;
-
-            List<TableIndexSchema>? migrated = null;
-
-            foreach (DatabaseIndexObject sysIndex in database.SystemSchema.Indexes.Values)
-            {
-                if (sysIndex.TableId != table.Id)
-                    continue;
-
-                migrated ??= [];
-                migrated.Add(new TableIndexSchema(
-                    sysIndex.Id,
-                    sysIndex.Name,
-                    sysIndex.ColumnIds,
-                    sysIndex.Type,
-                    sysIndex.State,
-                    sysIndex.StartOffset
-                ));
-            }
-
-            if (migrated is not null)
-                table.Indexes = migrated;
-        }
-    }
-
-    /// <summary>
-    /// Loads every persisted <see cref="ViewSchema"/> for the database, keyed by name.
-    /// </summary>
-    /// <remarks>
-    /// Shares the single <c>{dbId}/meta</c> bucket scan pattern with <see cref="LoadTablesAsync"/>
-    /// and filters on the view key prefix, which is why view keys must use ':' rather than '/' as
-    /// their sub-field separator — a '/' would scatter them into per-view buckets this scan cannot
-    /// reach.
-    /// </remarks>
-    private static async Task<Dictionary<string, ViewSchema>> LoadViewsAsync(DatabaseDescriptor database, KvTransaction tx)
-    {
-        Dictionary<string, ViewSchema> views = new(StringComparer.OrdinalIgnoreCase);
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        string viewKeyPrefix = ViewKeyPrefix(database.Id);
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
-            MetaBucketPrefix(database.Id),
-            null, true,
-            null, true,
-            512,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            CancellationToken.None).ConfigureAwait(false))
-        {
-            if (!key.StartsWith(viewKeyPrefix, StringComparison.Ordinal) || entry.Value is null)
-                continue;
-
-            ViewSchema view = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.ViewSchema);
-
-            if (string.IsNullOrWhiteSpace(view.Name) || string.IsNullOrWhiteSpace(view.Id))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.SystemSpaceCorrupt,
-                    $"View meta key '{key}' decoded without a name or id");
-
-            views[view.Name!] = view;
-        }
-
-        return views;
-    }
-
-    private async Task<Dictionary<string, TableSchema>> LoadTablesAsync(DatabaseDescriptor database, KvTransaction tx)
-    {
-        Dictionary<string, TableSchema> tables = new(StringComparer.OrdinalIgnoreCase);
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        string tableKeyPrefix = TableKeyPrefix(database.Id);
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
-            MetaBucketPrefix(database.Id),
-            null, true,
-            null, true,
-            512,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            CancellationToken.None).ConfigureAwait(false))
-        {
-            if (!key.StartsWith(tableKeyPrefix, StringComparison.Ordinal) || entry.Value is null)
-                continue;
-
-            TableSchema table = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.TableSchema);
-            ValidateLoadedTable(table, key);
-            table.SchemaHistory = null;
-            ConfigureSchemaHistoryLoader(database, table);
-            ParseCheckConstraintAsts(table);
-            tables[table.Name!] = table;
-        }
-
-        return tables;
-    }
-
-    private static void ConfigureSchemaHistoryLoader(DatabaseDescriptor database, TableSchema table)
-    {
-        string tableId = table.Id ?? "";
-        table.SchemaHistoryLoader = (txId, version) =>
-            new ValueTask<TableSchemaHistory?>(LoadSchemaHistoryEntryAsync(database, tableId, txId, version));
-    }
-
-    private static async Task<TableSchemaHistory?> LoadSchemaHistoryEntryAsync(DatabaseDescriptor database, string tableId, HLCTimestamp txId, int version)
-    {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
-            await kahuna.LocateAndTryGetValue(
-                txId,
-                HistoryKey(database.Id, tableId, version),
-                -1,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None
-            ).ConfigureAwait(false);
-
-        if (type != KeyValueResponseType.Get || entry?.Value is null)
-            return null;
-
-        return MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.TableSchemaHistory);
-    }
-
-    internal static SchemaCheckpoint LoadSchemaCheckpoint(ReadOnlySpan<byte> buffer)
-    {
-        string json = MetaJsonSerializer.DecodeJsonTextCompat(buffer);
-
-        using JsonDocument document = JsonDocument.Parse(json);
-        JsonElement root = document.RootElement;
-
-        if (
-            root.ValueKind == JsonValueKind.Object &&
-            root.TryGetProperty(nameof(SchemaCheckpoint.FormatVersion), out JsonElement formatVersion) &&
-            formatVersion.ValueKind == JsonValueKind.Number &&
-            root.TryGetProperty(nameof(SchemaCheckpoint.Tables), out _)
-        )
-        {
-            SchemaCheckpoint checkpoint = JsonSerializer.Deserialize(json, MetaJsonContext.Default.SchemaCheckpoint) ?? new();
-            // JSON deserialization builds an ordinal-comparer dictionary; rebuild it with a
-            // case-insensitive comparer so loaded table names match SQL identifiers case-insensitively.
-            checkpoint.Tables = ToCaseInsensitiveTables(checkpoint.Tables);
-            return checkpoint;
-        }
-
-        Dictionary<string, TableSchema> tables = ToCaseInsensitiveTables(
-            JsonSerializer.Deserialize(json, MetaJsonContext.Default.DictionaryStringTableSchema));
-
-        return new()
-        {
-            FormatVersion = 1,
-            SchemaVersion = MaxTableVersion(tables),
-            Tables = tables
-        };
-    }
-
-    /// <summary>
-    /// Rebuilds a table dictionary with a case-insensitive comparer. JSON deserialization always
-    /// produces an ordinal-comparer dictionary, so any table set loaded from a KV checkpoint must
-    /// be re-keyed here to match the case-insensitive lookup semantics of <see cref="Schema.Tables"/>.
-    /// </summary>
-    private static Dictionary<string, TableSchema> ToCaseInsensitiveTables(Dictionary<string, TableSchema>? tables)
-    {
-        if (tables is null)
-            return new(StringComparer.OrdinalIgnoreCase);
-
-        return new(tables, StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static long MaxTableVersion(Dictionary<string, TableSchema> tables)
-    {
-        long maxVersion = 0;
-
-        foreach (TableSchema table in tables.Values)
-            maxVersion = Math.Max(maxVersion, table.Version);
-
-        return maxVersion;
-    }
-
-    private static void ValidateLoadedTable(TableSchema table, string sourceKey)
-    {
-        if (string.IsNullOrWhiteSpace(table.Id))
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Corrupt schema table metadata at '{sourceKey}': table id is required"
-            );
-
-        if (string.IsNullOrWhiteSpace(table.Name))
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Corrupt schema table metadata at '{sourceKey}': table name is required"
-            );
-    }
-
-    /// <summary>
-    /// The form of a table's schema that is written to its meta key: everything except the retained
-    /// column history, which lives in its own per-version keys.
-    /// </summary>
-    /// <remarks>
-    /// This projection is the durable record of the relation, so every field that must survive a
-    /// reopen has to be listed here — a field omitted is silently lost on the next restart while
-    /// looking perfectly correct in memory for the whole life of the process. That is why the
-    /// materialized-view fields are here: without them a materialized view would come back from disk
-    /// as an ordinary table, readable and writable and with no way left to refresh it.
-    /// </remarks>
-    private static TableSchema WithoutHistory(TableSchema tableSchema)
-    {
-        return new()
-        {
-            Id = tableSchema.Id,
-            Version = tableSchema.Version,
-            Name = tableSchema.Name,
-            Columns = tableSchema.Columns,
-            Indexes = tableSchema.Indexes,
-            CheckConstraints = tableSchema.CheckConstraints,
-            Settings = tableSchema.Settings,
-            Comment = tableSchema.Comment,
-            StorageId = tableSchema.StorageId,
-            ContentsGeneration = tableSchema.ContentsGeneration,
-            MetadataGeneration = tableSchema.MetadataGeneration,
-            Kind = tableSchema.Kind,
-            ViewDefinition = tableSchema.ViewDefinition,
-            IsPopulated = tableSchema.IsPopulated,
-            RefreshedAt = tableSchema.RefreshedAt,
-            SchemaHistory = null
-        };
-    }
-
-    private const int MetaKeyMaxRetries = 32;
-
-    /// <summary>
-    /// Copies all schema metadata keys from <paramref name="source"/> into the namespace identified
-    /// by <paramref name="branchDbId"/>, rewriting only the database-id segment of each key.
-    /// This produces an independent, consistent schema starting point for a branch database.
-    ///
-    /// Keys under the coordinator prefix (in-flight DDL state specific to the source) and the
-    /// keyspace prefix (Kommander routing metadata) are skipped; all other keys — version, system,
-    /// table, and history — are copied verbatim so the branch opens with the same schema as the
-    /// source had at the fork point.
-    ///
-    /// The caller is responsible for holding the source's <c>SchemaDdlSemaphore</c> across this
-    /// call to prevent a concurrent DDL on the same node from mutating the source schema between
-    /// the stability check and the copy. In cluster mode a remote DDL can still commit between
-    /// <paramref name="forkT"/> and the scan; reading at <paramref name="forkT"/> ensures the copy
-    /// is consistent with the row/index snapshot the branch will read at that timestamp.
-    ///
-    /// <para>The scan uses no live transaction (<c>HLCTimestamp.Zero</c> as the transaction id)
-    /// and <paramref name="forkT"/> as the MVCC read timestamp. This matches the snapshot-read
-    /// pattern used for ancestry reads in <see cref="KvTableStore"/> and guarantees the branch
-    /// schema is consistent with the ancestor rows it inherits.</para>
-    /// </summary>
-    public async Task CopyMetaForBranchAsync(DatabaseDescriptor source, string branchDbId, HLCTimestamp forkT)
-    {
-        IKahuna kahuna = source.Kahuna.Kahuna;
-        string sourceBucket = MetaBucketPrefix(source.Id);
-        string sourcePrefix = source.Id + "/meta/";
-        string branchPrefix = branchDbId + "/meta/";
-        string sourceCoordinatorPrefix = CoordinatorKeyPrefix(source.Id);
-        string sourceKeyspacePrefix = $"{source.Id}/meta/keyspace:";
-
-        List<(string destKey, byte[] value)> toCopy = [];
-
-        // Scan source metadata as-of forkT: any schema change committed after forkT is invisible,
-        // so the branch gets exactly the schema the row/index snapshot at forkT reflects.
-        // Uses HLCTimestamp.Zero as the transaction id (no live tx) and forkT as the read timestamp,
-        // matching the ancestor-read pattern in KvTableStore.ScanRowsRawAsync.
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero,
-            sourceBucket,
-            null, true,
-            null, true,
-            512,
-            forkT,
-            KeyValueDurability.Persistent,
-            CancellationToken.None).ConfigureAwait(false))
-        {
-            if (entry.Value is null)
-                continue;
-
-            if (key.StartsWith(sourceCoordinatorPrefix, StringComparison.Ordinal) ||
-                key.StartsWith(sourceKeyspacePrefix, StringComparison.Ordinal))
-                continue;
-
-            if (!key.StartsWith(sourcePrefix, StringComparison.Ordinal))
-                continue;
-
-            string destKey = branchPrefix + key[sourcePrefix.Length..];
-            toCopy.Add((destKey, entry.Value));
-        }
-
-        if (toCopy.Count == 0)
-            return;
-
-        KvTransaction writeTx = await source.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            foreach ((string destKey, byte[] value) in toCopy)
-                await WriteMetaKey(kahuna, writeTx, destKey, value).ConfigureAwait(false);
-
-            await source.Transactions.CommitAsync(writeTx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await source.Transactions.RollbackIfNotCompletedAsync(writeTx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Writes or updates the persisted keyspace catalog entry for <paramref name="tableSchema"/>.
-    /// The catalog records every index id ever allocated for this table — it grows monotonically
-    /// and never shrinks on DropIndex or DropTable, so DROP DATABASE can purge orphaned
-    /// overlay entries for indexes dropped before the database was dropped.
-    /// </summary>
-    private static async Task WriteKeyspaceCatalogAsync(
-        IKahuna kahuna, KvTransaction tx, string dbId, TableSchema tableSchema)
-    {
-        if (string.IsNullOrEmpty(tableSchema.Id))
-            return;
-
-        string storageId = tableSchema.EffectiveStorageId;
-        string catalogKey = KeyspaceCatalogKey(dbId, storageId);
-
-        // Load existing catalog to accumulate ids from previously dropped indexes.
-        // This read uses HLCTimestamp.Zero (non-transactional) because the caller holds
-        // Schema.Semaphore, which serializes all writes to this key on a single node. The
-        // read is not read-your-writes with tx; it sees the last committed value, which is
-        // correct here since the semaphore ensures no concurrent write races this read.
-        HashSet<string> allIndexIds = [];
-        (KeyValueResponseType readType, ReadOnlyKeyValueEntry? existingEntry) =
-            await kahuna.LocateAndTryGetValue(
-                HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, CancellationToken.None
-            ).ConfigureAwait(false);
-
-        if (readType == KeyValueResponseType.Get && existingEntry?.Value is { Length: > 0 } existingBytes)
-        {
-            string[]? existingIds = MetaJsonSerializer.Deserialize(existingBytes, MetaJsonContext.Default.StringArray);
-            foreach (string id in existingIds)
-                allIndexIds.Add(id);
-        }
-        else if (!string.Equals(storageId, tableSchema.Id, StringComparison.Ordinal))
-        {
-            // Compatibility: relations swapped before the catalog was keyed by storage generation
-            // have their only entry under the relation id. Read it once and let this write copy it
-            // forward to the storage-keyed entry.
-            (KeyValueResponseType legacyType, ReadOnlyKeyValueEntry? legacyEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    HLCTimestamp.Zero, KeyspaceCatalogKey(dbId, tableSchema.Id), -1, HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
-
-            if (legacyType == KeyValueResponseType.Get && legacyEntry?.Value is { Length: > 0 } legacyBytes)
-            {
-                foreach (string id in MetaJsonSerializer.Deserialize(legacyBytes, MetaJsonContext.Default.StringArray))
-                    allIndexIds.Add(id);
-            }
-        }
-
-        // Union with live indexes in the current schema.
-        if (tableSchema.Indexes is not null)
-            foreach (TableIndexSchema idx in tableSchema.Indexes)
-                if (!string.IsNullOrEmpty(idx.Id))
-                    allIndexIds.Add(idx.Id);
-
-        // Always write the catalog entry even when the index list is empty. The catalog is
-        // keyed by tableId, so its presence alone tells DROP DATABASE to purge the row bucket
-        // {dbId}:{tableId}:r for tables that were dropped before the database was dropped,
-        // regardless of whether the table had any indexes.
-        byte[] catalogBytes = MetaJsonSerializer.Serialize(allIndexIds.ToArray(), MetaJsonContext.Default.StringArray);
-        await WriteMetaKey(kahuna, tx, catalogKey, catalogBytes).ConfigureAwait(false);
-    }
-
-    private static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
-    {
-        KeyValueResponseType lockType;
-        int lockRetries = 0;
-
-        // Stable per-operation ids reused across the retry loop so a replayed call after a lost response
-        // folds once into the coordinator working set instead of applying twice. The write and its lock
-        // must fold, or the DDL transaction's commit-from-working-set would not persist this meta key.
-        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
-        TransactionOperationId setOperationId = TransactionOperationId.NewRandom();
-
-        do
-        {
-            if (lockRetries > 0)
-                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
-
-            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
-            ).ConfigureAwait(false);
-        }
-        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
-               && ++lockRetries < MetaKeyMaxRetries);
-
-        if (lockType != KeyValueResponseType.Locked)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to acquire meta lock on '{key}': {lockType}"
-            );
-
-        KeyValueResponseType setType;
-        int setRetries = 0;
-
-        do
-        {
-            if (setRetries > 0)
-                await Task.Delay(setRetries * 10).ConfigureAwait(false);
-
-            (setType, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                tx.TransactionId, key, value, null, -1,
-                KeyValueFlags.Set, 0,
-                KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: setOperationId
-            ).ConfigureAwait(false);
-        }
-        while (setType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
-               && ++setRetries < MetaKeyMaxRetries);
-
-        if (setType != KeyValueResponseType.Set)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to write meta key '{key}': {setType}"
-            );
-
-        tx.TrackModified(key, KeyValueDurability.Persistent);
-    }
-
-    private static async Task DeleteMetaKey(IKahuna kahuna, KvTransaction tx, string key)
-    {
-        KeyValueResponseType lockType;
-        int lockRetries = 0;
-
-        // Stable per-operation ids reused across the retry loop (see WriteMetaKey) so the delete and its
-        // lock fold once into the coordinator working set and the DDL commit persists the removal.
-        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
-        TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
-
-        do
-        {
-            if (lockRetries > 0)
-                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
-
-            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0, KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
-            ).ConfigureAwait(false);
-        }
-        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
-               && ++lockRetries < MetaKeyMaxRetries);
-
-        if (lockType != KeyValueResponseType.Locked)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to acquire meta lock on '{key}': {lockType}"
-            );
-
-        KeyValueResponseType deleteType;
-        int deleteRetries = 0;
-
-        do
-        {
-            if (deleteRetries > 0)
-                await Task.Delay(deleteRetries * 10).ConfigureAwait(false);
-
-            (deleteType, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
-                tx.TransactionId, key, KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: deleteOperationId
-            ).ConfigureAwait(false);
-        }
-        while (deleteType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
-               && ++deleteRetries < MetaKeyMaxRetries);
-
-        if (deleteType is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to delete meta key '{key}': {deleteType}"
-            );
-
-        tx.TrackModified(key, KeyValueDurability.Persistent);
-    }
 }

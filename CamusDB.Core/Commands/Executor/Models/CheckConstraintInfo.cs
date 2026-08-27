@@ -11,7 +11,7 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <summary>
 /// Carries one CHECK constraint through the ticket → CatalogsManager boundary. Populated by
 /// <c>SQLExecutorCreateTableCreator</c> after desugaring and rendering column-level and
-/// table-level CHECK expressions, and consumed by <c>CatalogsManager.CreateTableEntry</c>
+/// table-level CHECK expressions, and consumed by <c>SchemaChangeEntryFactory.CreateTableEntry</c>
 /// to build <c>TableSchema.CheckConstraints</c>.
 /// </summary>
 public sealed class CheckConstraintInfo

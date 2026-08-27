@@ -60,7 +60,7 @@ internal sealed class TableCreator
                 $"Database '{database.Name}' would exceed the maximum of {maxTables} tables per database");
 
         // Inline constraints (PRIMARY KEY / UNIQUE / INDEX) are folded into the single CreateTable
-        // delta (see CatalogsManager.BuildInlineIndexes), so creating a table is exactly one schema
+        // delta (see SchemaChangeEntryFactory.BuildInlineIndexes), so creating a table is exactly one schema
         // version and the table is born with its indexes at Public — no separate AddIndex round-trips.
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx, tableId).ConfigureAwait(false);
 
