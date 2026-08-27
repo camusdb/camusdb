@@ -60,7 +60,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         ILoggerFactory? loggerFactory = null,
         ILogger<ICamusDB>? logger = null,
         bool wireLeaderForwarder = false,
-        CamusDBOptions? options = null
+        CamusDBOptions? options = null,
+        Action<EmbeddedKahunaOptions>? configureNode = null
     )
     {
         // Every node in the cluster is built with the same configuration, fixed when the cluster
@@ -110,7 +111,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                     partitions: partitions,
                     raftCommunication: faultComm,
                     interNode: interNode,
-                    loggerFactory: loggerFactory
+                    loggerFactory: loggerFactory,
+                    configureNode: configureNode
                 );
             }
 
@@ -701,11 +703,12 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         int partitions,
         FaultInjectingCommunication raftCommunication,
         MemoryInterNodeCommmunication interNode,
-        ILoggerFactory loggerFactory
+        ILoggerFactory loggerFactory,
+        Action<EmbeddedKahunaOptions>? configureNode = null
     )
     {
-        return new(
-            new EmbeddedKahunaOptions
+        EmbeddedKahunaOptions nodeOptions =
+            new()
             {
                 NodeName = nodeName,
                 NodeId = nodeId,
@@ -727,7 +730,16 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 EndElectionTimeout = 6000,
                 StartElectionTimeoutIncrement = 200,
                 EndElectionTimeoutIncrement = 400
-            },
+            };
+
+        // Applied last, so a fixture can override anything above — including the election timings,
+        // which a fixture should only touch with the rationale above in mind. A node fixes its
+        // configuration when it is constructed, so this is the only point at which a node-level knob
+        // (the range auto-split policy, for instance) can be set at all.
+        configureNode?.Invoke(nodeOptions);
+
+        return new(
+            nodeOptions,
             interNode,
             raftCommunication,
             new StaticDiscovery(peers),

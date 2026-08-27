@@ -480,6 +480,26 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   leader_balancer_report_interval_ms: 5000  # per-node load-report publish cadence
 #   leader_balancer_report_ttl_ms: 20000 # reports older than this are ignored; must be > the report interval
 #   min_leader_stability_ms: 5000        # minimum leader tenure before the balancer may move leadership again
+#
+#   # Range auto-split. Both branches are OFF unless a threshold is set: a routing flag must not also
+#   # switch on a rebalancing policy. The count branch splits a range that holds many keys; the load
+#   # branch splits a partition that is saturated, which is the case the count branch cannot see.
+#   # Needs key_range_sharding: true, initial_partitions >= 2, cluster mode, AND a load-report source.
+#   # enable_leader_balancer above is what actually moves the child leader off the hot node — without
+#   # it a split costs an extra Raft group and relieves nothing. The node warns at startup for each
+#   # precondition it does not meet, and still starts. See docs/key-range-sharding.md.
+#   range_split_threshold: 0             # count branch: sampled keys before a range is split; 0 disables. Must be 0 or >= 2 x range_split_min_range_size
+#   range_split_min_range_size: 10       # smallest a child range may be
+#   range_split_load_threshold: 500      # load branch: sustained log ops/sec before a partition counts as hot; 0 disables
+#   range_split_load_min_queue_depth: 8  # WAL backlog required alongside the rate; AND-combined with it
+#   range_split_load_min_commit_wait_ms: 0  # optional third gate (commit-wait ms); 0 disables. Never fires on its own
+#   range_split_load_window_ms: 15000    # the three gates must all hold for this long before a split fires
+#   range_split_load_poll_interval_ms: 5000  # sampling cadence; must be < range_split_load_window_ms
+#   range_split_load_imbalance_max: 0.8  # refuse a split this lopsided (a single hot key); range (0.5, 1.0]
+#   range_split_settle_window_ms: 10000  # leave a fresh child alone for this long; must be >= min_leader_stability_ms
+#   range_split_indivisible_cooldown_ms: 300000  # stop re-sampling a range the imbalance guard refused
+#   range_merge_min_size: 10             # key count below which two neighbours merge back; 0 disables auto-merge
+#   enable_load_reports: false           # gossip load signals WITHOUT enabling the leader balancer
 
 # ── Diagnostics (opt-in) ──────────────────────────────────────────────────────
 # Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:

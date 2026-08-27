@@ -708,4 +708,178 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { DecommissionDrainTimeoutMs = 0 }.Validate());
         Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { MinLeaderStabilityMs = 0 }.Validate());
     }
+
+    [Test]
+    public void LoadSplitKnobs_MapToEmbeddedOptions()
+    {
+        KahunaOptionsConfig kahuna = new()
+        {
+            RangeSplitLoadThreshold = 250.5,
+            RangeSplitLoadMinQueueDepth = 16,
+            RangeSplitLoadMinCommitWaitMs = 12.5,
+            RangeSplitLoadWindowMs = 20_000,
+            RangeSplitLoadPollIntervalMs = 2_000,
+            RangeSplitLoadImbalanceMax = 0.9,
+            RangeSplitSettleWindowMs = 30_000,
+            RangeSplitIndivisibleCooldownMs = 60_000,
+            RangeMergeMinSize = 7,
+            EnableLoadReports = true,
+        };
+
+        Assert.DoesNotThrow(() => kahuna.Validate());
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/load-split", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.RangeSplitLoadThreshold, Is.EqualTo(250.5));
+        Assert.That(built.RangeSplitLoadMinQueueDepth, Is.EqualTo(16));
+        Assert.That(built.RangeSplitLoadMinCommitWaitMs, Is.EqualTo(12.5));
+        Assert.That(built.RangeSplitLoadWindow, Is.EqualTo(TimeSpan.FromMilliseconds(20_000)));
+        Assert.That(built.RangeSplitLoadPollInterval, Is.EqualTo(TimeSpan.FromMilliseconds(2_000)));
+        Assert.That(built.RangeSplitLoadImbalanceMax, Is.EqualTo(0.9));
+        Assert.That(built.RangeSplitSettleWindow, Is.EqualTo(TimeSpan.FromMilliseconds(30_000)));
+        Assert.That(built.RangeSplitIndivisibleCooldown, Is.EqualTo(TimeSpan.FromMilliseconds(60_000)));
+        Assert.That(built.RangeMergeMinSize, Is.EqualTo(7));
+        Assert.That(built.EnableLoadReports, Is.True);
+    }
+
+    [Test]
+    public void UnsetLoadSplitKnobs_KeepKahunaDefaults()
+    {
+        // Every knob except the threshold inherits Kahuna's own default, so an operator who sets one
+        // key does not silently re-tune the rest. The threshold itself is pinned to 0 in the CamusDB
+        // baseline, so a deployment that asks for nothing gets no heat-based splitting.
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/load-split-defaults", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(built.RangeSplitLoadThreshold, Is.EqualTo(0), "auto-split must never arrive unasked");
+        Assert.That(built.RangeSplitLoadMinQueueDepth, Is.EqualTo(8));
+        Assert.That(built.RangeSplitLoadMinCommitWaitMs, Is.EqualTo(0));
+        Assert.That(built.RangeSplitLoadWindow, Is.EqualTo(TimeSpan.FromSeconds(15)));
+        Assert.That(built.RangeSplitLoadPollInterval, Is.EqualTo(TimeSpan.FromSeconds(5)));
+        Assert.That(built.RangeSplitLoadImbalanceMax, Is.EqualTo(0.8));
+        Assert.That(built.RangeSplitSettleWindow, Is.EqualTo(TimeSpan.FromSeconds(10)));
+        Assert.That(built.RangeSplitIndivisibleCooldown, Is.EqualTo(TimeSpan.FromMinutes(5)));
+        Assert.That(built.RangeMergeMinSize, Is.EqualTo(10));
+        Assert.That(built.EnableLoadReports, Is.False);
+    }
+
+    [Test]
+    public void ClusterBaseline_PinsLoadSplitOff()
+    {
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.RangeSplitLoadThreshold, Is.EqualTo(0));
+        Assert.That(built.RangeSplitThreshold, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void NegativeLoadSplitKnobs_AreRejected()
+    {
+        CamusDBException threshold = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { RangeSplitLoadThreshold = -1 }.Validate())!;
+        Assert.That(threshold.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(threshold.Message, Does.Contain("range_split_load_threshold"));
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeSplitLoadMinQueueDepth = -1 }.Validate())!.Message,
+            Does.Contain("range_split_load_min_queue_depth"));
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeSplitLoadMinCommitWaitMs = -0.5 }.Validate())!.Message,
+            Does.Contain("range_split_load_min_commit_wait_ms"));
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeSplitLoadWindowMs = 0 }.Validate())!.Message,
+            Does.Contain("range_split_load_window_ms"));
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeSplitLoadPollIntervalMs = 0 }.Validate())!.Message,
+            Does.Contain("range_split_load_poll_interval_ms"));
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeSplitIndivisibleCooldownMs = -1 }.Validate())!.Message,
+            Does.Contain("range_split_indivisible_cooldown_ms"));
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeMergeMinSize = -1 }.Validate())!.Message,
+            Does.Contain("range_merge_min_size"));
+    }
+
+    [Test]
+    public void ImbalanceCeilingOutsideItsBand_IsRejected()
+    {
+        // At or below 0.5 no split can ever be accepted, because no split leaves less than half the
+        // writes on its heavier child. Above 1.0 no split is ever refused, so a single hot key would
+        // split its range again and again.
+        foreach (double outOfBand in new[] { 0.5, 0.25, 1.01 })
+        {
+            CamusDBException ex = Assert.Throws<CamusDBException>(
+                () => new KahunaOptionsConfig { RangeSplitLoadImbalanceMax = outOfBand }.Validate())!;
+            Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+            Assert.That(ex.Message, Does.Contain("range_split_load_imbalance_max"));
+        }
+
+        Assert.DoesNotThrow(() => new KahunaOptionsConfig { RangeSplitLoadImbalanceMax = 1.0 }.Validate());
+        Assert.DoesNotThrow(() => new KahunaOptionsConfig { RangeSplitLoadImbalanceMax = 0.51 }.Validate());
+    }
+
+    [Test]
+    public void PollIntervalAtOrAboveTheLoadWindow_IsRejected()
+    {
+        CamusDBException both = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig
+            {
+                RangeSplitLoadWindowMs = 10_000,
+                RangeSplitLoadPollIntervalMs = 10_000,
+            }.Validate())!;
+        Assert.That(both.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(both.Message, Does.Contain("range_split_load_poll_interval_ms"));
+        Assert.That(both.Message, Does.Contain("range_split_load_window_ms"));
+
+        // The cross-check compares the EFFECTIVE pair, so a window lowered below the default 5000 ms
+        // poll interval is caught with the interval key untouched.
+        CamusDBException oneSided = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { RangeSplitLoadWindowMs = 3_000 }.Validate())!;
+        Assert.That(oneSided.Message, Does.Contain("range_split_load_poll_interval_ms"));
+    }
+
+    [Test]
+    public void SettleWindowShorterThanLeaderStability_IsRejected()
+    {
+        // Kahuna raises an ArgumentException from the node constructor for this pair. Catching it
+        // here turns a startup crash into a named configuration error.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig
+            {
+                RangeSplitSettleWindowMs = 2_000,
+                MinLeaderStabilityMs = 5_000,
+            }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("range_split_settle_window_ms"));
+        Assert.That(ex.Message, Does.Contain("min_leader_stability_ms"));
+
+        // The default leader-stability window is 5000 ms, so a settle window below it must be caught
+        // with the stability key untouched.
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { RangeSplitSettleWindowMs = 1_000 }.Validate())!.Message,
+            Does.Contain("range_split_settle_window_ms"));
+
+        // Equal is acceptable: Kahuna's own bound is >=, not >.
+        Assert.DoesNotThrow(
+            () => new KahunaOptionsConfig { RangeSplitSettleWindowMs = 5_000, MinLeaderStabilityMs = 5_000 }.Validate());
+    }
+
+    [Test]
+    public void ZeroSettleWindow_IsRejected()
+    {
+        // Kahuna reads 0 as "no settle window". CamusDB does not accept it: a fresh child starts warm
+        // from its inherited histogram, so an unsuppressed re-evaluation turns one hot range into a
+        // split storm.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { RangeSplitSettleWindowMs = 0 }.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("range_split_settle_window_ms"));
+    }
 }

@@ -85,9 +85,14 @@ takes a final catch-up copy, and then flips routing in a single replicated step.
 **Rows on both sides of `K` are required.** A split key with nothing above or below it is refused —
 a range would otherwise end up empty and the division would buy nothing.
 
-**Automatic splitting is off unless you ask for it.** Kahuna ships a count-based threshold, and
-CamusDB deliberately pins it to `0` rather than inheriting it, so switching on a routing flag cannot
-also switch on a rebalancing policy as a side effect. To enable it:
+**Automatic splitting is off unless you ask for it.** Kahuna has two independent auto-split
+branches, and CamusDB pins both to `0` rather than inheriting Kahuna's defaults, so switching on a
+routing flag cannot also switch on a rebalancing policy as a side effect.
+
+Splitting a chosen range on demand consults neither threshold, so leaving both at `0` does not make
+the range admin surface unusable.
+
+### The count branch: a range holds many keys
 
 ```yml
 kahuna:
@@ -99,8 +104,85 @@ kahuna:
 that can never be satisfied and would sample and back off forever. The server refuses to start on a
 configuration that cannot be met.
 
-Splitting a chosen range on demand does not consult the threshold, so leaving it at `0` does not make
-the range admin surface unusable.
+### The load branch: a partition is saturated
+
+The count branch cannot see the case that hurts most — a small range that carries the whole write
+rate. The load branch splits on heat instead of size.
+
+```yml
+kahuna:
+  range_split_load_threshold: 500          # sustained log ops/sec before a partition counts as hot; 0 disables
+  range_split_load_min_queue_depth: 8      # WAL backlog required alongside the rate
+  range_split_load_min_commit_wait_ms: 0   # optional third gate; 0 disables it
+  range_split_load_window_ms: 15000        # the predicate must hold for this long
+  range_split_load_poll_interval_ms: 5000  # how often the predicate is sampled
+  range_split_load_imbalance_max: 0.8      # refuse a split this lopsided
+  range_split_settle_window_ms: 10000      # leave a fresh child alone for this long
+  range_split_indivisible_cooldown_ms: 300000
+  range_merge_min_size: 10                 # key count below which two neighbours merge again
+  enable_load_reports: true                # gossip load signals without the leader balancer
+```
+
+How a split is decided:
+
+1. **Three gates, AND-combined.** The partition's log rate must reach `range_split_load_threshold`,
+   its WAL queue depth must reach `range_split_load_min_queue_depth`, and — if you set it — its
+   commit wait must reach `range_split_load_min_commit_wait_ms`. The commit-wait gate can never fire
+   on its own.
+2. **A debounce window.** All three must hold continuously for `range_split_load_window_ms`, sampled
+   every `range_split_load_poll_interval_ms`. A poll interval at or above the window can never
+   observe a sustained window, so the server refuses to start on that pair.
+3. **A relief guard.** The split is skipped when no live peer is visible, because a child range with
+   nowhere to go adds a Raft group and relieves nothing.
+4. **A split key at the write centroid.** The boundary is the key that bisects *writes*, taken from
+   the write-frequency histogram — not the key that bisects the key count. When the histogram is
+   cold it falls back to the count median, or to the 75th percentile for an append-only pattern.
+5. **An indivisibility guard.** A split whose best achievable imbalance reaches
+   `range_split_load_imbalance_max` is refused. One hot key produces exactly that shape, and no
+   boundary can relieve it.
+6. **A settle window.** A fresh child inherits a filtered histogram, so it starts warm. It is left
+   alone for `range_split_settle_window_ms` before it is re-evaluated. That window must be at least
+   `min_leader_stability_ms`, or the child could be re-split before the balancer may move its
+   leader; the server refuses to start on that pair too.
+
+### What the load branch needs before it can work
+
+Load splitting is inert unless all of these hold. The node still starts in every case, and logs one
+warning per cause.
+
+| Precondition | Why |
+|---|---|
+| `key_range_sharding: true` | A hash-routed space has no range descriptor to split. |
+| `initial_partitions >= 2` | A child needs a partition to move to. |
+| cluster mode | A standalone node splits, but both children stay in the same process. |
+| a load-report source | `enable_leader_balancer`, `enable_placement_rebalancer`, a non-zero `replication_factor`, or `enable_load_reports`. Without gossip, a partition led on another node reports 0 ops/sec and is never seen as hot. |
+| `enable_leader_balancer: true` | Gossip alone makes the decision correct, not effective. Nothing else moves the child leader off the hot node. |
+
+The last two are the traps. Both present as "the feature does nothing" and neither is an error.
+
+### Reading what the splitter did
+
+`SHOW ENGINE STATS` reports five cumulative counters, one row per key space:
+
+| Counter | Meaning |
+|---|---|
+| `kahuna.range.splits` | splits committed, by either branch |
+| `kahuna.range.split.indivisible_refusals` | one key holds the load; no split can help |
+| `kahuna.range.split.no_relief_skips` | no peer was available to host the child |
+| `kahuna.range.split.settle_skips` | the range just split; it is being left to settle |
+| `kahuna.range.merge.warm_skips` | a merge candidate is still too warm to merge |
+
+An absent row means the counter has never fired. Together they separate "not hot yet" from "hot, and
+refused" — which `SHOW RANGES` and `/v1/cluster/placement` cannot, because those report the shape of
+the key space rather than the splitter's decisions.
+
+### Limits of an automatic split
+
+- **A `String`-keyed secondary index never splits.** It stays hash-routed, so a hot index of that
+  shape looks inert for a reason unrelated to these settings.
+- **Heat is measured per Raft partition, not per range.** One partition can host several ranges and
+  also carry hash-routed traffic, so a cold range on a hot partition is a split candidate too.
+- **These settings are read once, at startup.** `SET CLUSTER SETTING` cannot change them.
 
 ### What a split moves, and what it does not
 

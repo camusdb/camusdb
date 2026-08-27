@@ -486,17 +486,12 @@ ThreadPool.SetMinThreads(1024, 512);
 
 WebApplication app = builder.Build();
 
-// Warn early when key-range sharding is enabled but there is only one partition. Registration
-// still succeeds and the space is genuinely key-range routed, so this is not a no-op — but with a
-// single partition a range has nowhere to move to, so the table stays on one leader and the mode
-// distributes nothing. Operators reading "sharding enabled" in their config need to know that.
-if (camusOptions.KeyRangeShardingEnabled && config.InitialPartitions < 2)
-    app.Logger.LogWarning(
-        "key_range_sharding is enabled but initial_partitions={InitialPartitions} < 2; " +
-        "key spaces are key-range routed, but with one partition a range cannot move, so write " +
-        "coordination stays on a single leader. Set initial_partitions >= 2 in config.yml to " +
-        "distribute a table across partitions.",
-        config.InitialPartitions);
+// Warn early about every configuration that leaves key-range routing, or its automatic split
+// policy, inert. Each of these states starts the node successfully and then does nothing the
+// operator asked for, so nothing else would ever report them. See KeyRangeSplitStartupChecks for
+// the individual causes and why each one is invisible without this.
+foreach (string warning in KeyRangeSplitStartupChecks.Inspect(config, camusOptions))
+    app.Logger.LogWarning("{KeyRangeSplitWarning}", warning);
 
 if (config.IsClusterMode)
 {

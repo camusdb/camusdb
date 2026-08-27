@@ -104,6 +104,22 @@ Useful starting points:
 | `raft.elections_started_total` | leadership churn |
 | `kahuna.kv.write.batches` / `kahuna.kv.write.entries` | write aggregator effectiveness — entries ÷ batches is the average coalescing factor |
 
+### Range auto-split outcomes
+
+These five are cumulative process counters, each tagged with the `keyspace` it acted on. They are the
+only way to tell "the range is not hot yet" from "the range is hot, and the split was refused" — the
+placement views report the shape of the key space, not the splitter's decisions. A counter that has
+never fired has no row at all. See [key-range-sharding.md](key-range-sharding.md) for the policy that
+drives them.
+
+| metric | tells you |
+|---|---|
+| `kahuna.range.splits` | splits committed, by either the count branch or the load branch |
+| `kahuna.range.split.indivisible_refusals` | one key holds the load, so no boundary can relieve it; splitting is not the fix |
+| `kahuna.range.split.no_relief_skips` | no peer was available to host the child, so the split would have added a Raft group and relieved nothing |
+| `kahuna.range.split.settle_skips` | the range split recently and is being left to settle; rising against a low split count means the settle window is long relative to the load |
+| `kahuna.range.merge.warm_skips` | two neighbours are small enough to merge but still too warm; merging would re-trigger a split |
+
 ## Permissions
 
 `SHOW ENGINE STATS` requires a **superuser** when authentication is enabled. It is deliberately held to

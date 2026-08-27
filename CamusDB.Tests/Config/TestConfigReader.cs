@@ -66,6 +66,40 @@ public class TestConfigReader
 
     [Test]
     [NonParallelizable]
+    public void TestReadsLoadSplitKahunaKeys()
+    {
+        // Proves the allow-list spelling and the property spelling agree: an unlisted key is a
+        // configuration error, and a listed key that no property matches deserializes to null.
+        string yml = string.Join('\n',
+            "mode: cluster",
+            "kahuna:",
+            "  range_split_load_threshold: 250.5",
+            "  range_split_load_min_queue_depth: 16",
+            "  range_split_load_min_commit_wait_ms: 12.5",
+            "  range_split_load_window_ms: 20000",
+            "  range_split_load_poll_interval_ms: 2000",
+            "  range_split_load_imbalance_max: 0.9",
+            "  range_split_settle_window_ms: 30000",
+            "  range_split_indivisible_cooldown_ms: 60000",
+            "  range_merge_min_size: 7",
+            "  enable_load_reports: true");
+
+        ConfigDefinition config = new ConfigReader().Read(yml);
+
+        Assert.AreEqual(250.5, config.Kahuna.RangeSplitLoadThreshold);
+        Assert.AreEqual(16, config.Kahuna.RangeSplitLoadMinQueueDepth);
+        Assert.AreEqual(12.5, config.Kahuna.RangeSplitLoadMinCommitWaitMs);
+        Assert.AreEqual(20_000, config.Kahuna.RangeSplitLoadWindowMs);
+        Assert.AreEqual(2_000, config.Kahuna.RangeSplitLoadPollIntervalMs);
+        Assert.AreEqual(0.9, config.Kahuna.RangeSplitLoadImbalanceMax);
+        Assert.AreEqual(30_000, config.Kahuna.RangeSplitSettleWindowMs);
+        Assert.AreEqual(60_000, config.Kahuna.RangeSplitIndivisibleCooldownMs);
+        Assert.AreEqual(7, config.Kahuna.RangeMergeMinSize);
+        Assert.AreEqual(true, config.Kahuna.EnableLoadReports);
+    }
+
+    [Test]
+    [NonParallelizable]
     public void TestReadsJoinExisting()
     {
         string yml = string.Join('\n',

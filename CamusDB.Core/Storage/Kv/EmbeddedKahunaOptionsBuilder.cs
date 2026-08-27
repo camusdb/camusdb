@@ -52,6 +52,11 @@ public static class EmbeddedKahunaOptionsBuilder
             // side effect of a routing flag. Splitting a chosen range on demand is unaffected: a manual
             // split does not consult this threshold. Override with kahuna.range_split_threshold.
             RangeSplitThreshold = 0,
+            // The load branch stays off for the same reason, and is stated rather than inherited:
+            // it is the knob an operator reaches for, so a future change to Kahuna's default must
+            // not switch heat-based splitting on here. Override with
+            // kahuna.range_split_load_threshold.
+            RangeSplitLoadThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -89,6 +94,11 @@ public static class EmbeddedKahunaOptionsBuilder
             // side effect of a routing flag. Splitting a chosen range on demand is unaffected: a manual
             // split does not consult this threshold. Override with kahuna.range_split_threshold.
             RangeSplitThreshold = 0,
+            // The load branch stays off for the same reason, and is stated rather than inherited:
+            // it is the knob an operator reaches for, so a future change to Kahuna's default must
+            // not switch heat-based splitting on here. Override with
+            // kahuna.range_split_load_threshold.
+            RangeSplitLoadThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -127,6 +137,11 @@ public static class EmbeddedKahunaOptionsBuilder
             // side effect of a routing flag. Splitting a chosen range on demand is unaffected: a manual
             // split does not consult this threshold. Override with kahuna.range_split_threshold.
             RangeSplitThreshold = 0,
+            // The load branch stays off for the same reason, and is stated rather than inherited:
+            // it is the knob an operator reaches for, so a future change to Kahuna's default must
+            // not switch heat-based splitting on here. Override with
+            // kahuna.range_split_load_threshold.
+            RangeSplitLoadThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
@@ -282,6 +297,36 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.RangeSplitMinRangeSize is int rangeSplitMinRangeSize)
             baseline.RangeSplitMinRangeSize = rangeSplitMinRangeSize;
+
+        if (kahuna.RangeSplitLoadThreshold is double rangeSplitLoadThreshold)
+            baseline.RangeSplitLoadThreshold = rangeSplitLoadThreshold;
+
+        if (kahuna.RangeSplitLoadMinQueueDepth is int rangeSplitLoadQueueDepth)
+            baseline.RangeSplitLoadMinQueueDepth = rangeSplitLoadQueueDepth;
+
+        if (kahuna.RangeSplitLoadMinCommitWaitMs is double rangeSplitLoadCommitWait)
+            baseline.RangeSplitLoadMinCommitWaitMs = rangeSplitLoadCommitWait;
+
+        if (kahuna.RangeSplitLoadWindowMs is int rangeSplitLoadWindow)
+            baseline.RangeSplitLoadWindow = TimeSpan.FromMilliseconds(rangeSplitLoadWindow);
+
+        if (kahuna.RangeSplitLoadPollIntervalMs is int rangeSplitLoadPoll)
+            baseline.RangeSplitLoadPollInterval = TimeSpan.FromMilliseconds(rangeSplitLoadPoll);
+
+        if (kahuna.RangeSplitLoadImbalanceMax is double rangeSplitImbalanceMax)
+            baseline.RangeSplitLoadImbalanceMax = rangeSplitImbalanceMax;
+
+        if (kahuna.RangeSplitSettleWindowMs is int rangeSplitSettleWindow)
+            baseline.RangeSplitSettleWindow = TimeSpan.FromMilliseconds(rangeSplitSettleWindow);
+
+        if (kahuna.RangeSplitIndivisibleCooldownMs is int rangeSplitIndivisibleCooldown)
+            baseline.RangeSplitIndivisibleCooldown = TimeSpan.FromMilliseconds(rangeSplitIndivisibleCooldown);
+
+        if (kahuna.RangeMergeMinSize is int rangeMergeMinSize)
+            baseline.RangeMergeMinSize = rangeMergeMinSize;
+
+        if (kahuna.EnableLoadReports is bool enableLoadReports)
+            baseline.EnableLoadReports = enableLoadReports;
 
         if (kahuna.RestoreRoot is not null)
             baseline.RestoreRoot = kahuna.RestoreRoot;

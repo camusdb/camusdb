@@ -72,6 +72,16 @@ public sealed class KahunaOptionsConfig
         "backup_restore_throttle_bytes_per_sec",
         "range_split_threshold",
         "range_split_min_range_size",
+        "range_split_load_threshold",
+        "range_split_load_min_queue_depth",
+        "range_split_load_min_commit_wait_ms",
+        "range_split_load_window_ms",
+        "range_split_load_poll_interval_ms",
+        "range_split_load_imbalance_max",
+        "range_split_settle_window_ms",
+        "range_split_indivisible_cooldown_ms",
+        "range_merge_min_size",
+        "enable_load_reports",
         "replication_factor",
         "zone",
         "enable_placement_rebalancer",
@@ -351,6 +361,129 @@ public sealed class KahunaOptionsConfig
     /// default of 10.
     /// </summary>
     public int? RangeSplitMinRangeSize { get; set; }
+
+    // ── Range auto-split: the load branch ─────────────────────────────────────────────────────
+    // The count branch above splits a range because it holds many keys. This branch splits it
+    // because its Raft partition is saturated, which is the case the count branch cannot see: a
+    // small range that carries the whole write rate. The two branches are independent, and CamusDB
+    // pins both off in the baseline.
+
+    /// <summary>
+    /// Sustained log operations per second a Raft partition must reach before the load branch
+    /// considers splitting a key-range-routed space that it hosts. <c>0</c> disables load-based
+    /// auto-splitting, and Kahuna then never spawns the load-check actor. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitLoadThreshold"/>.
+    ///
+    /// <para><b>CamusDB pins this to 0 in every baseline</b>, for the reason
+    /// <see cref="RangeSplitThreshold"/> is pinned there: a deployment asks for a rebalancing
+    /// policy explicitly, or it does not get one.</para>
+    ///
+    /// <para>This rate gate is AND-combined with <see cref="RangeSplitLoadMinQueueDepth"/> and with
+    /// the optional <see cref="RangeSplitLoadMinCommitWaitMs"/> gate. The combined predicate must
+    /// hold continuously for <see cref="RangeSplitLoadWindowMs"/> before a split is proposed.</para>
+    ///
+    /// <para><b>Trap:</b> the load signals of a partition whose leader lives on another node reach
+    /// this node only while load-report gossip runs. Switch on <see cref="EnableLeaderBalancer"/>,
+    /// or <see cref="EnableLoadReports"/> for the gossip alone. With neither, every remote partition
+    /// reports 0 operations per second and this branch is silently dead for it.</para>
+    /// </summary>
+    public double? RangeSplitLoadThreshold { get; set; }
+
+    /// <summary>
+    /// Minimum WAL queue depth (pending writes) a partition must also show before the load branch
+    /// treats it as saturated. A high operation rate on its own describes a partition that keeps up;
+    /// a backlog is what says it does not. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitLoadMinQueueDepth"/>; unset keeps Kahuna's
+    /// default of 8.
+    /// </summary>
+    public int? RangeSplitLoadMinQueueDepth { get; set; }
+
+    /// <summary>
+    /// Optional third saturation gate: the commit-wait latency, in milliseconds, that the partition
+    /// must also reach. <c>0</c> (the Kahuna default) disables the gate. It can never fire on its
+    /// own, because all three gates are AND-combined. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitLoadMinCommitWaitMs"/>.
+    /// </summary>
+    public double? RangeSplitLoadMinCommitWaitMs { get; set; }
+
+    /// <summary>
+    /// How long, in milliseconds, the load predicate must hold continuously before a split fires —
+    /// the debounce that keeps a burst from splitting a range. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitLoadWindow"/>; unset keeps Kahuna's default
+    /// of 15000. Must exceed <see cref="RangeSplitLoadPollIntervalMs"/>.
+    /// </summary>
+    public int? RangeSplitLoadWindowMs { get; set; }
+
+    /// <summary>
+    /// How often, in milliseconds, the load branch samples the partition signals. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitLoadPollInterval"/>; unset keeps Kahuna's
+    /// default of 5000. A poll interval at or above <see cref="RangeSplitLoadWindowMs"/> can never
+    /// observe a sustained window, so <see cref="Validate"/> rejects that pair.
+    /// </summary>
+    public int? RangeSplitLoadPollIntervalMs { get; set; }
+
+    /// <summary>
+    /// Write-imbalance fraction at which the indivisibility guard refuses a split: a range whose
+    /// best achievable split still puts this fraction of the writes on one child is refused, because
+    /// the split would add a Raft partition and relieve nothing. A single hot key produces exactly
+    /// that shape. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitLoadImbalanceMax"/>;
+    /// unset keeps Kahuna's default of 0.8. Valid range is <c>(0.5, 1.0]</c> — at or below 0.5 no
+    /// split is ever accepted, and above 1.0 no split is ever refused.
+    /// </summary>
+    public double? RangeSplitLoadImbalanceMax { get; set; }
+
+    /// <summary>
+    /// How long, in milliseconds, a freshly created child range is left alone before the split
+    /// checker re-evaluates it. A child inherits a filtered write histogram, so it starts warm and
+    /// would otherwise re-split before its new leader settles. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitSettleWindow"/>; unset keeps Kahuna's
+    /// default of 10000.
+    ///
+    /// <para>Kahuna also requires this window to be at least <see cref="MinLeaderStabilityMs"/>,
+    /// otherwise a child could be re-split before the leader balancer is allowed to move its leader.
+    /// <see cref="Validate"/> checks the effective pair here, so the mismatch is a CamusDB config
+    /// error rather than an exception from the Kahuna node constructor.</para>
+    ///
+    /// <para>Kahuna reads <c>0</c> as "no settle window". CamusDB does not accept 0, because a
+    /// disabled settle window turns one hot range into a split storm.</para>
+    /// </summary>
+    public int? RangeSplitSettleWindowMs { get; set; }
+
+    /// <summary>
+    /// How long, in milliseconds, the count branch stops re-sampling a range after the
+    /// indivisibility guard refused to split it. The sample scans up to 4096 keys, so re-running it
+    /// every collection interval for a range that cannot be split is pure waste. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeSplitIndivisibleCooldown"/>; unset keeps Kahuna's
+    /// default of 300000.
+    /// </summary>
+    public int? RangeSplitIndivisibleCooldownMs { get; set; }
+
+    /// <summary>
+    /// Key count below which two adjacent ranges become eligible to merge back into one. <c>0</c>
+    /// disables auto-merge and stops the periodic merge checker. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeMergeMinSize"/>; unset keeps Kahuna's default
+    /// of 10.
+    ///
+    /// <para>Tune this together with the split thresholds. CamusDB inherited the default silently
+    /// while both split branches were off, which was harmless only because nothing split. A merge
+    /// size that is large relative to the split thresholds makes a range split and merge
+    /// repeatedly.</para>
+    /// </summary>
+    public int? RangeMergeMinSize { get; set; }
+
+    /// <summary>
+    /// Gossips per-partition load reports (operations per second, WAL queue depth, commit wait) even
+    /// when no other component consumes them. Reports already flow when
+    /// <see cref="EnableLeaderBalancer"/>, <see cref="EnablePlacementRebalancer"/>, or a non-zero
+    /// <see cref="ReplicationFactor"/> is set. This key exists so load splitting can read remote
+    /// partition signals without switching the leader balancer on as a side effect. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.EnableLoadReports"/>.
+    ///
+    /// <para>Gossip alone makes the split decision correct, not effective: nothing then moves the
+    /// child leader to another node, so the split costs consensus overhead and relieves nothing.
+    /// <see cref="EnableLeaderBalancer"/> is what delivers the relief.</para>
+    /// </summary>
+    public bool? EnableLoadReports { get; set; }
 
     /// <summary>
     /// Server-owned root that restore destinations must be contained within. Setting it enables remote
@@ -704,6 +837,69 @@ public sealed class KahunaOptionsConfig
                 $"'kahuna.range_split_min_range_size' ({RangeSplitMinRangeSize ?? DefaultRangeSplitMinRangeSize}), " +
                 "or no range can ever satisfy the split policy");
 
+        // ── The load branch ───────────────────────────────────────────────────────────────────
+        // Each rule below rejects a configuration that cannot fire, rather than let the node start
+        // and do nothing. Every one of these reads as "the feature is broken" to an operator.
+
+        if (RangeSplitLoadThreshold is < 0)
+            throw InvalidConfig(
+                $"'kahuna.range_split_load_threshold' must be >= 0 (0 disables load-based auto-split), got {RangeSplitLoadThreshold}");
+
+        if (RangeSplitLoadMinQueueDepth is < 0)
+            throw InvalidConfig($"'kahuna.range_split_load_min_queue_depth' must be >= 0, got {RangeSplitLoadMinQueueDepth}");
+
+        if (RangeSplitLoadMinCommitWaitMs is < 0)
+            throw InvalidConfig(
+                $"'kahuna.range_split_load_min_commit_wait_ms' must be >= 0 (0 disables the commit-wait gate), got {RangeSplitLoadMinCommitWaitMs}");
+
+        if (RangeSplitLoadWindowMs is <= 0)
+            throw InvalidConfig($"'kahuna.range_split_load_window_ms' must be > 0, got {RangeSplitLoadWindowMs}");
+
+        if (RangeSplitLoadPollIntervalMs is <= 0)
+            throw InvalidConfig($"'kahuna.range_split_load_poll_interval_ms' must be > 0, got {RangeSplitLoadPollIntervalMs}");
+
+        if (RangeSplitIndivisibleCooldownMs is < 0)
+            throw InvalidConfig($"'kahuna.range_split_indivisible_cooldown_ms' must be >= 0, got {RangeSplitIndivisibleCooldownMs}");
+
+        if (RangeMergeMinSize is < 0)
+            throw InvalidConfig($"'kahuna.range_merge_min_size' must be >= 0 (0 disables auto-merge), got {RangeMergeMinSize}");
+
+        // An imbalance ceiling at or below 0.5 refuses every split, because no split can put less
+        // than half the writes on its heavier child. Above 1.0 it refuses none, which turns the
+        // indivisibility guard off and lets a single hot key split its range forever.
+        if (RangeSplitLoadImbalanceMax is double imbalanceMax && (imbalanceMax <= 0.5 || imbalanceMax > 1.0))
+            throw InvalidConfig(
+                $"'kahuna.range_split_load_imbalance_max' must be > 0.5 and <= 1.0, got {imbalanceMax}");
+
+        // The predicate is sampled at the poll interval and must hold for the whole window. A poll
+        // that is slower than the window never produces two consecutive positive samples, so the
+        // window is never observed as sustained and no split ever fires. Compare the EFFECTIVE pair,
+        // so a window lowered below the 5000 ms default poll interval is caught with the interval
+        // key untouched.
+        int effectiveLoadWindow = RangeSplitLoadWindowMs ?? DefaultRangeSplitLoadWindowMs;
+        int effectiveLoadPoll = RangeSplitLoadPollIntervalMs ?? DefaultRangeSplitLoadPollIntervalMs;
+        if (effectiveLoadPoll >= effectiveLoadWindow)
+            throw InvalidConfig(
+                $"effective 'kahuna.range_split_load_poll_interval_ms' ({effectiveLoadPoll}) must be < " +
+                $"'kahuna.range_split_load_window_ms' ({effectiveLoadWindow}), or the load predicate can never " +
+                "be observed as sustained and no split can ever fire");
+
+        if (RangeSplitSettleWindowMs is <= 0)
+            throw InvalidConfig(
+                $"'kahuna.range_split_settle_window_ms' must be > 0, got {RangeSplitSettleWindowMs}");
+
+        // Kahuna refuses a settle window shorter than the leader-stability window: a child could
+        // otherwise be re-split before the balancer is permitted to move its leader. That check runs
+        // in the Kahuna node constructor and raises an ArgumentException, so catching the pair here
+        // turns a startup crash into a named configuration error.
+        int effectiveSettleWindow = RangeSplitSettleWindowMs ?? DefaultRangeSplitSettleWindowMs;
+        int effectiveLeaderStability = MinLeaderStabilityMs ?? DefaultMinLeaderStabilityMs;
+        if (effectiveLeaderStability > 0 && effectiveSettleWindow < effectiveLeaderStability)
+            throw InvalidConfig(
+                $"effective 'kahuna.range_split_settle_window_ms' ({effectiveSettleWindow}) must be >= " +
+                $"'kahuna.min_leader_stability_ms' ({effectiveLeaderStability}), or a fresh child range can be " +
+                "re-split before the leader balancer may move its leader");
+
         if (RestoreRoot is not null && string.IsNullOrWhiteSpace(RestoreRoot))
             throw InvalidConfig("'kahuna.restore_root' must not be blank when set (omit the key to disable confined remote restore)");
 
@@ -781,9 +977,16 @@ public sealed class KahunaOptionsConfig
     // Kahuna's own RangeSplitMinRangeSize default, used to cross-check a threshold supplied without it.
     private const int DefaultRangeSplitMinRangeSize = 10;
 
+    // Kahuna's load-branch defaults, used to cross-check a one-sided poll/window override and a
+    // settle window supplied without the leader-stability window it must cover.
+    private const int DefaultRangeSplitLoadWindowMs = 15_000;
+    private const int DefaultRangeSplitLoadPollIntervalMs = 5_000;
+    private const int DefaultRangeSplitSettleWindowMs = 10_000;
+
     // Kahuna's leader-balancer report defaults, used to cross-check a one-sided TTL/interval override.
     private const int DefaultLeaderBalancerReportIntervalMs = 5_000;
     private const int DefaultLeaderBalancerReportTtlMs = 20_000;
+    private const int DefaultMinLeaderStabilityMs = 5_000;
 
     private static void ValidateStorage(string? value, string field)
     {

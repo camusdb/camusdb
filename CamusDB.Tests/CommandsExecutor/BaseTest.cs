@@ -78,6 +78,20 @@ public abstract class BaseTest
     /// <summary>The per-test in-memory node, available after <see cref="SetUpTestEnvironment"/>.</summary>
     protected EmbeddedKahuna? TestNode => testNode;
 
+    /// <summary>
+    /// Last chance to change the per-test node's own options, after the shared test-node timings are
+    /// applied and before the node is built. A fixture overrides this for a knob that lives on the
+    /// Kahuna node rather than on <see cref="CamusDBOptions"/> — the range auto-split policy, for
+    /// example.
+    ///
+    /// <para>The node fixes its configuration when it is constructed, so a value assigned after
+    /// <see cref="SetUpTestEnvironment"/> has run changes nothing and the test still passes. This
+    /// hook is the only place a node-level setting takes effect.</para>
+    /// </summary>
+    protected virtual void ConfigureNodeOptions(EmbeddedKahunaOptions options)
+    {
+    }
+
     [SetUp]
     public async Task SetUpTestEnvironment()
     {
@@ -87,7 +101,7 @@ public abstract class BaseTest
 
         if (NeedsPerTestNode)
         {
-            testNode = new EmbeddedKahuna(new EmbeddedKahunaOptions
+            EmbeddedKahunaOptions nodeOptions = new EmbeddedKahunaOptions
             {
                 ReadIOThreads = 1,
                 WriteIOThreads = 1,
@@ -95,7 +109,11 @@ public abstract class BaseTest
                 Storage = "memory",
                 WalStorage = "memory",
                 InitialPartitions = NodeInitialPartitions
-            }.WithTestNodeDefaults());
+            }.WithTestNodeDefaults();
+
+            ConfigureNodeOptions(nodeOptions);
+
+            testNode = new EmbeddedKahuna(nodeOptions);
             await testNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
             await testNode.WaitForLeaderAsync("warmup", CancellationToken.None).ConfigureAwait(false);
             await testNode.FlushAsync().ConfigureAwait(false);
