@@ -11,7 +11,8 @@ SHOW ENGINE STATS LIKE 'raft.executor%';
 
 This is engine introspection, not table statistics — for the optimizer's view of your data see
 [`SHOW STATISTICS FOR <table>`](show-statistics.md), [`ANALYZE`](automatic-analyze.md) and
-[the query planner guide](query-planner.md).
+[the query planner guide](query-planner.md). It is also not placement: for where a table's data
+actually lives across partitions, see [`SHOW RANGES`](show-ranges.md).
 
 ## What it is for
 

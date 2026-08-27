@@ -279,6 +279,11 @@ internal sealed class StatementAuthorizer
         // Statistics report bounds drawn from real column values, so reading them is a read of the
         // table's data — the same bar as selecting from it, and deliberately not a superuser gate.
         NodeType.ShowStatistics => Privilege.Select,
+        // Range bounds are decoded from real column values too — a split point IS a value stored in
+        // the table — so whoever may read the rows may see where they divide, and nobody else. Same
+        // bar as SHOW STATISTICS, and deliberately not a superuser gate: this is the statement an
+        // operator reaches for to explain a slow query over a table they already read.
+        NodeType.ShowRanges => Privilege.Select,
         // Creating a view or materialized view creates a relation, so it needs the same privilege
         // creating a table does — and is checked at database scope for the same reason: the object
         // does not exist yet, so it cannot be a per-table grant target.

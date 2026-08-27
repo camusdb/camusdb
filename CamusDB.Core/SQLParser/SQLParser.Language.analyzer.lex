@@ -151,6 +151,8 @@ BytesLiteral    (X|x)\'{HexDig}*\'
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
 Placeholder     (@)([a-zA-Z0-9_]+)
+IndexNamePart   (~)?{Identifier}
+QualifiedIndex  {Identifier}@{IndexNamePart}
 TAt             @
 TAdd            \+
 TMult           \*
@@ -478,6 +480,21 @@ TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 {TMaterialized} { return (int)Token.TMATERIALIZED; }
 
 {TRefresh} { return (int)Token.TREFRESH; }
+
+/* An unquoted name@name pair, matched as ONE token so the '@' never reaches the parser.
+   Without this rule "users@users_pkey" lexes as TIDENTIFIER("users") followed by
+   TPLACEHOLDER("@users_pkey"), and PlaceholderCollector would then register "users_pkey"
+   as a required bind parameter the user never wrote. GPLEX resolves by longest match, so
+   this beats both {Identifier} and {Placeholder} here while leaving "= @p", "LIMIT @n"
+   and "VALUES(@a, @b)" untouched: the rule fires only with an identifier character
+   immediately before the '@'. The parser accepts the token in the SHOW ... FROM INDEX
+   productions only, and splits it on '@' there.
+
+   The index half admits a leading '~' so the primary index's internal name, "~pk", is
+   writable — "t@~pk" would otherwise be a syntax error, and the internal spelling is the
+   one SHOW INDEXES prints. It costs nothing elsewhere: '~' is not an identifier character
+   and {Placeholder} does not match it, so "t@~pk" is an input that has no meaning today. */
+{QualifiedIndex} { yylval.s = yytext; return (int)Token.TQUALIFIED_INDEX; }
 
 {Identifier} { yylval.s = yytext; return (int)Token.TIDENTIFIER; }
 

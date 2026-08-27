@@ -716,6 +716,11 @@ partition ships its result to the executing node, so the cost is *bytes shipped*
   range map is not read yet). `rowWidthBytes` comes from `RowWidthEstimator` (per-column type sizes).
   `NetWeight` (default `0.01`) is calibrated so one remote 100-byte row ≈ one local KV lookup.
 
+When a `NetworkFactor` looks wrong, [`SHOW RANGES`](show-ranges.md) is how you tell the two
+explanations apart: it reports each span of a relation's key space and whether this node believes it
+leads it, so you can see whether the data really is remote or whether this node's range map is simply
+behind a peer's.
+
 With sharding off or a single partition, `NetworkFactor` is 0 and the cost reduces to the single-node
 model — so enabling the network dimension never changes single-node plans. Once on, it rewards selective
 remote access and filter pushdown automatically, because both ship fewer bytes.

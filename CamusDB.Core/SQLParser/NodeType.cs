@@ -564,4 +564,33 @@ public enum NodeType
     /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
     /// </summary>
     TruncateTable,
+
+    /// <summary>
+    /// <c>SHOW RANGES FROM {TABLE|INDEX} target</c> and
+    /// <c>SHOW RANGE FROM {TABLE|INDEX} target FOR ROW (values)</c>.
+    /// <c>leftAst</c> = the relation name node; <c>rightAst</c> = the index name node, null for the
+    /// row space; <c>extendedOne</c> = the FOR ROW value list, null for the all-spans form.
+    ///
+    /// <para>Reports how one relation's key space is divided into spans, which Raft partition owns
+    /// each, and where this node believes their leaders are. The columns are placement, not data:
+    /// the point is to let an operator see whether a table has split and whether its ranges are
+    /// remote, which no other statement exposes — <c>SHOW ENGINE STATS</c> reports per-process
+    /// meters and <c>EXPLAIN</c> reports the cost that placement produced, not the placement.</para>
+    ///
+    /// <para>Everything it reports is <b>node-local and advisory</b>. The range map is this node's
+    /// applied view, so a lagging follower legitimately reports an older generation and a pre-split
+    /// shape; the routing mode is node-local unreplicated state, so the same key space can read
+    /// key-range here and hash on a node that never opened the relation; and the leader is a hint,
+    /// where unknown is reported as null rather than as "no leader". None of it is a correctness
+    /// gate, because execution always re-resolves through the Kahuna locator.</para>
+    ///
+    /// <para>The two FOR ROW forms differ in kind, not just in target. On an index the probe key is
+    /// computed from the values alone, so it answers for a key that does not exist. On a table it
+    /// cannot be: a row's KV key is built from the stored row id, not from the primary key, so the
+    /// statement must read the primary index to find the row id first.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    ShowRanges,
 }

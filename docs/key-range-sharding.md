@@ -232,6 +232,22 @@ apart. See [query-planner.md](query-planner.md) for what fragmentation is eligib
 
 ---
 
+## Seeing where the data actually went
+
+[`SHOW RANGES`](show-ranges.md) reports one row per span of a relation's key space — its bounds in
+column terms, the partition serving it, its routing generation, and whether this node believes it
+leads it. Use it to confirm a split actually happened (a silently refused split leaves the space as
+one range, which every query still reads correctly), and to find which range holds a hot key:
+
+```sql
+SHOW RANGES FROM TABLE readings;
+SHOW RANGES FROM INDEX readings@amount_idx;
+SHOW RANGE  FROM INDEX readings@amount_idx FOR ROW (5000);
+```
+
+Everything it reports is this node's applied view of the map. That is deliberate, and comparing two
+nodes is a reasonable way to spot one that is behind.
+
 ## Limits to know about
 
 - **The setting is not runtime-changeable.** Components capture it when they are built.
