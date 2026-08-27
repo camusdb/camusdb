@@ -1,0 +1,407 @@
+/*
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Design system for the operator dashboard.
+ *
+ * Every palette value, radius and component treatment here comes from the
+ * documentation site (camusdb.github.io), so the two read as one product. The
+ * site is a Docusaurus project; nothing of Docusaurus or Infima is imported —
+ * only the values are carried across, which is why this file has no build step
+ * and no dependency.
+ *
+ * The full light palette is declared on bare :root. Dark redefines only the
+ * tokens that change, twice: once for the operating-system preference and once
+ * for an explicit stamp, so a toggle wins in both directions. No color is ever
+ * declared only inside a dark block — a token that exists in one theme and not
+ * the other renders one theme's text on the other theme's ground.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+:root {
+  --primary:          #2d70f0;
+  --primary-light:    #3e87fa;
+  --primary-lightest: #97c7fb;
+  --heading:          #100f2f;
+  --bg:               #ffffff;
+  --surface:          #ffffff;
+  --surface-sunken:   #f6f8fc;
+  --border:           #dfe6f2;
+  --border-strong:    #c7d3e6;
+  --text:             #2c3550;
+  --muted:            #5d6b88;
+  --primary-wash:     rgba(45, 112, 240, 0.10);
+  --focus-ring:       rgba(45, 112, 240, 0.28);
+  --card-shadow:      0 12px 34px rgba(16, 15, 47, 0.06);
+
+  /* Semantic state, deliberately separate from the accent hue. State is never
+     carried by color alone — every dot is rendered beside its word. */
+  --ok:       #0f9d63;
+  --warn:     #a8720a;
+  --bad:      #c2453f;
+  --ok-dot:   #34d399;
+  --warn-dot: #fbbf24;
+  --bad-dot:  #f87171;
+
+  /* The node band is dark in both themes, so its colors never vary. */
+  --band-ink:     #f8fbff;
+  --band-sub:     #c8dfff;
+  --band-faint:   #a9c6e9;
+  --band-eyebrow: #68b8ff;
+  --band-rule:    rgba(111, 180, 255, 0.20);
+  --band-panel:   rgba(3, 13, 31, 0.78);
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell,
+          "Noto Sans", sans-serif;
+  --mono: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+  --shell: 1140px;
+  --nav-h: 3.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --primary:          #4e97f9;
+    --primary-light:    #78b4fb;
+    --primary-lightest: #c7e0ff;
+    --heading:          #f4f8ff;
+    --bg:               #100f2f;
+    --surface:          #151a53;
+    --surface-sunken:   #121540;
+    --border:           #2a3272;
+    --border-strong:    #3a4590;
+    --text:             #ccd7f5;
+    --muted:            #94a3ce;
+    --primary-wash:     rgba(78, 151, 249, 0.14);
+    --focus-ring:       rgba(120, 180, 251, 0.36);
+    --card-shadow:      0 12px 34px rgba(0, 0, 0, 0.30);
+    --ok:   #34d399;
+    --warn: #fbbf24;
+    --bad:  #f87171;
+  }
+}
+
+:root[data-theme="dark"] {
+  --primary:          #4e97f9;
+  --primary-light:    #78b4fb;
+  --primary-lightest: #c7e0ff;
+  --heading:          #f4f8ff;
+  --bg:               #100f2f;
+  --surface:          #151a53;
+  --surface-sunken:   #121540;
+  --border:           #2a3272;
+  --border-strong:    #3a4590;
+  --text:             #ccd7f5;
+  --muted:            #94a3ce;
+  --primary-wash:     rgba(78, 151, 249, 0.14);
+  --focus-ring:       rgba(120, 180, 251, 0.36);
+  --card-shadow:      0 12px 34px rgba(0, 0, 0, 0.30);
+  --ok:   #34d399;
+  --warn: #fbbf24;
+  --bad:  #f87171;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 1rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { color: var(--heading); margin: 0; text-wrap: balance; }
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+:where(a, button, input):focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.shell { width: 100%; max-width: var(--shell); margin: 0 auto; padding: 0 1.25rem; }
+
+/* Every value that refreshes is mono and tabular. A proportional digit changes
+   width as the value changes, so a two-second poll would shift each row it
+   sits in and make the page twitch. */
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+/* ── Navigation ────────────────────────────────────────────────────────── */
+.nav {
+  position: sticky; top: 0; z-index: 20;
+  height: var(--nav-h);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.nav .shell { height: 100%; display: flex; align-items: center; gap: 1.25rem; }
+.brand { display: flex; align-items: center; gap: .6rem; }
+.brand img { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; display: block; }
+.brand b { color: var(--heading); font-size: 1.05rem; letter-spacing: -0.01em; }
+.nav-links { display: flex; gap: 1.1rem; margin-left: .5rem; }
+.nav-links a { color: var(--muted); font-size: .92rem; font-weight: 600; }
+.nav-links a[aria-current] { color: var(--primary); }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: .6rem; }
+
+.btn-quiet {
+  font: inherit; font-size: .85rem; font-weight: 700;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: .38rem .7rem;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.btn-quiet:hover { color: var(--primary); border-color: var(--primary-light); }
+
+/* ── Node band ─────────────────────────────────────────────────────────── */
+/* The documentation site's hero treatment, reused for node identity. */
+.band {
+  position: relative;
+  overflow: hidden;
+  color: var(--band-ink);
+  border-bottom: 1px solid rgba(72, 164, 255, 0.22);
+  padding: 2.75rem 0 2.25rem;
+  background:
+    radial-gradient(circle at 78% 25%, rgba(38, 132, 255, 0.40), transparent 32%),
+    radial-gradient(circle at 18% 12%, rgba(0, 198, 255, 0.13), transparent 30%),
+    linear-gradient(135deg, #02050d 0%, #06142b 50%, #010713 100%);
+}
+.band::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  opacity: .2;
+  background-image:
+    linear-gradient(rgba(117, 183, 255, 0.16) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(117, 183, 255, 0.16) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: linear-gradient(to bottom, black, transparent 74%);
+          mask-image: linear-gradient(to bottom, black, transparent 74%);
+}
+.band .shell { position: relative; z-index: 1; }
+
+.eyebrow {
+  margin: 0 0 .7rem;
+  color: var(--primary);
+  font-size: .78rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+}
+/* The site defines the eyebrow twice: light blue on the dark hero, accent
+   everywhere else. Keep both, or a card kicker is unreadable on white. */
+.band .eyebrow { color: var(--band-eyebrow); }
+
+.band-head { display: flex; flex-wrap: wrap; align-items: center; gap: .9rem; }
+.band-head h1 {
+  color: #fff; margin: 0;
+  font-family: var(--mono);
+  font-size: clamp(1.5rem, 3.2vw, 2.2rem);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: .35rem;
+  padding: .25rem .6rem;
+  border-radius: 999px;
+  background: var(--primary-wash);
+  color: var(--primary);
+  font-size: .72rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+}
+.band .pill { background: rgba(31, 124, 255, 0.26); color: #bcdcff; }
+
+.state { display: inline-flex; align-items: center; gap: .45rem; font-size: .85rem; font-weight: 700; }
+.dot { flex: 0 0 auto; width: .48rem; height: .48rem; border-radius: 50%; }
+.dot-ok   { background: var(--ok-dot);   box-shadow: 0 0 12px rgba(52, 211, 153, 0.55); }
+.dot-warn { background: var(--warn-dot); box-shadow: 0 0 12px rgba(251, 191, 36, 0.55); }
+.dot-bad  { background: var(--bad-dot);  box-shadow: 0 0 12px rgba(248, 113, 113, 0.55); }
+
+/* Two states that are both normal. A database held in memory and one left on disk
+   are equally healthy — idle eviction reclaiming a database is the feature working,
+   not a fault — so neither gets the warning amber, and neither gets the healthy
+   green that would imply the other is worse. */
+.dot-info { background: var(--primary); }
+.dot-idle { background: transparent; border: 1.5px solid var(--border-strong); }
+.band .state { color: var(--band-sub); }
+
+.band-meta {
+  display: flex; flex-wrap: wrap; gap: .4rem 1.5rem;
+  margin-top: .9rem; color: var(--band-faint); font-size: .85rem;
+}
+.band-meta b { color: var(--band-sub); font-weight: 600; }
+
+/* Stat strip — the site's proof grid. */
+.strip {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 2rem 0 0;
+  border: 1px solid var(--band-rule);
+  border-radius: 14px;
+  background: var(--band-panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.20);
+  -webkit-backdrop-filter: blur(12px);
+          backdrop-filter: blur(12px);
+}
+.strip > div { padding: 1.15rem 1.25rem; }
+.strip > div + div { border-left: 1px solid rgba(111, 180, 255, 0.18); }
+.strip dt {
+  margin: 0 0 .25rem; color: var(--band-faint);
+  font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+}
+.strip dd {
+  margin: 0; color: #fff; font-size: 1.85rem; line-height: 1.1;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.strip small { display: block; margin-top: .3rem; color: var(--band-faint); font-size: .78rem; }
+
+/* ── Card grid ─────────────────────────────────────────────────────────── */
+main { padding: 2.25rem 0 3.5rem; }
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.col-2 { grid-column: span 2; }
+.col-3 { grid-column: span 3; }
+
+.card {
+  display: flex; flex-direction: column; min-width: 0;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--card-shadow);
+}
+.card > h2 { font-size: 1.34rem; line-height: 1.22; margin-bottom: 1rem; }
+.card-head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.card-head .when { margin-left: auto; color: var(--muted); font-size: .78rem; }
+.card-note { color: var(--muted); font-size: .8rem; margin: .9rem 0 0; }
+
+/* Panel with a header strip — the site's SQL snippet frame. */
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.panel-head {
+  display: flex; align-items: center; gap: .6rem;
+  min-height: 64px; padding: .9rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.panel-head strong { color: var(--heading); font-size: .9rem; }
+.panel-head .when { margin-left: auto; color: var(--muted); font-size: .78rem; }
+/* Wide content scrolls inside its own container so the page body never does. */
+.panel-body { overflow-x: auto; }
+
+/* ── Tables ────────────────────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+thead th {
+  text-align: left; padding: .6rem 1rem;
+  color: var(--muted); font-size: .72rem; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+tbody td { padding: .62rem 1rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: 0; }
+td.r, th.r { text-align: right; }
+.key { font-family: var(--mono); font-size: .84rem; color: var(--heading); }
+.dim { color: var(--muted); }
+
+/* A row that can be selected must look like it can. */
+tbody tr.selectable { cursor: pointer; }
+tbody tr.selectable:hover { background: var(--primary-wash); }
+tbody tr.selected { background: var(--primary-wash); }
+
+/* ── Metric rows ───────────────────────────────────────────────────────── */
+.metric {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 7.5rem;
+  align-items: center; gap: 1rem;
+  padding: .7rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.metric:last-child { border-bottom: 0; }
+.metric .name { color: var(--heading); font-weight: 600; font-size: .92rem; }
+.metric .name small {
+  display: block; color: var(--muted); font-weight: 400;
+  font-family: var(--mono); font-size: .74rem;
+}
+.metric .val {
+  text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 1.15rem; color: var(--heading);
+}
+.metric .val u { text-decoration: none; color: var(--muted); font-size: .74rem; }
+
+/* ── Degraded panel ────────────────────────────────────────────────────── */
+/* One appearance for every reason a panel has no data: a missing privilege, a
+   failed poll, a disabled collector. The rest of the page keeps working. */
+.notice-box {
+  display: flex; gap: .75rem; align-items: flex-start;
+  padding: 1rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-size: .88rem;
+}
+.notice-box strong { color: var(--heading); display: block; }
+
+.stale { color: var(--warn); font-size: .78rem; }
+
+/* ── Sign-in ───────────────────────────────────────────────────────────── */
+.signin-wrap { display: grid; place-items: center; min-height: calc(100vh - var(--nav-h)); padding: 2rem 1.25rem; }
+.signin-card { width: 100%; max-width: 26rem; }
+.signin-card label { display: block; margin-bottom: 1rem; font-size: .85rem; font-weight: 700; color: var(--heading); }
+.signin-card input {
+  display: block; width: 100%; margin-top: .35rem;
+  font: inherit; color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: .55rem .7rem;
+}
+.btn-primary {
+  width: 100%;
+  font: inherit; font-weight: 700;
+  color: #fff; background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  padding: .6rem .9rem;
+  cursor: pointer;
+  transition: background 160ms ease;
+}
+.btn-primary:hover { background: var(--primary-light); }
+.form-error { color: var(--bad); font-size: .85rem; margin: .9rem 0 0; }
+
+footer {
+  border-top: 1px solid var(--border);
+  padding: 1.5rem 0;
+  color: var(--muted);
+  font-size: .82rem;
+}
+footer .shell { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; }
+  .col-2, .col-3 { grid-column: span 1; }
+  .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .strip > div:nth-child(3) { border-left: 0; }
+  .strip > div:nth-child(n+3) { border-top: 1px solid rgba(111, 180, 255, 0.18); }
+  .nav-links { display: none; }
+}
+
+/* The page refreshes on a timer. Decorative movement would hide the one change
+   that matters, so only a state change transitions — and not even that here. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

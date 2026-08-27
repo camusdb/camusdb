@@ -230,6 +230,8 @@ public static class ConfigResolver
         DatabaseIdleEvictionMs = config.DatabaseIdleEvictionMs,
 
         EngineMetricsEnabled = config.EngineMetricsEnabled,
+        DashboardEnabled = config.DashboardEnabled,
+        DashboardRefreshSeconds = config.DashboardRefreshSeconds,
         QueryTracingEnabled = config.QueryTracingEnabled,
         LockTracingEnabled = config.LockTracingEnabled,
 

@@ -10,7 +10,7 @@ namespace CamusDB.Core.Catalogs.Models;
 
 /// <summary>
 /// The kind of change carried by a <see cref="SchemaChangeLogEntry"/>. The numeric values
-/// are persisted/serialized, so they must remain stable. <c>CatalogsManager.ApplySchemaDelta</c>
+/// are persisted/serialized, so they must remain stable. <c>SchemaDeltaApplier.ApplySchemaDelta</c>
 /// dispatches on this enum.
 /// </summary>
 public enum SchemaOp

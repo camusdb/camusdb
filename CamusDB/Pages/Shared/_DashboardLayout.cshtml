@@ -1,0 +1,68 @@
+@*
+    Layout for the operator dashboard and its sign-in page.
+
+    It is separate from _Layout on purpose. That layout still serves the
+    scaffolded Error and Privacy pages and keeps their Bootstrap and jQuery
+    references; this one loads neither. Bootstrap carries its own visual
+    identity — its navbar and card fight the documentation site's — and CSS grid
+    covers the whole layout, so the dashboard drops both dependencies rather
+    than fighting them.
+*@
+@{
+    bool authenticationEnabled = (ViewData["AuthenticationEnabled"] as bool?) ?? false;
+    bool showNav = (ViewData["ShowNav"] as bool?) ?? true;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] · CamusDB</title>
+    <link rel="icon" href="~/favicon.ico" />
+    <link rel="stylesheet" href="~/css/camus-dashboard.css" asp-append-version="true" />
+    <script>
+        // Stamp the theme before the first paint. Doing this from dashboard.js
+        // would be too late: the page would render in the wrong theme and then
+        // visibly swap. The try/catch matters because a private window can
+        // throw on storage access, and a page that cannot read a preference
+        // must still render.
+        (function () {
+            try {
+                var saved = localStorage.getItem('camus-theme');
+                if (saved === 'dark' || saved === 'light') {
+                    document.documentElement.setAttribute('data-theme', saved);
+                }
+            } catch (e) { /* fall through to the operating-system preference */ }
+        }());
+    </script>
+</head>
+<body>
+    @if (showNav)
+    {
+        <nav class="nav">
+            <div class="shell">
+                <span class="brand">
+                    <img src="~/img/camusdb-logo-mark.png" alt="" />
+                    <b>CamusDB</b>
+                </span>
+                <span class="nav-links">
+                    <a href="/" aria-current="page">Dashboard</a>
+                    <a href="https://camusdb.github.io/" rel="noopener">Docs</a>
+                </span>
+                <span class="nav-right">
+                    <button class="btn-quiet" id="theme-toggle" type="button" aria-live="polite">Dark theme</button>
+                    @if (authenticationEnabled)
+                    {
+                        <button class="btn-quiet" id="sign-out" type="button">Sign out</button>
+                    }
+                </span>
+            </div>
+        </nav>
+    }
+
+    @RenderBody()
+
+    <script src="~/js/dashboard.js" asp-append-version="true"></script>
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

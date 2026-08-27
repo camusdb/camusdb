@@ -93,6 +93,18 @@ internal sealed class EngineMetricsCollector : IDisposable
     /// <summary>Meter name published by Kahuna's metric holders.</summary>
     internal const string KahunaMeterName = "Kahuna";
 
+    /// <summary>
+    /// CamusDB's own meter (<see cref="ServerDiagnostics.MeterName"/>). It is observed here for the
+    /// same reason as the two above: the instruments are published whether or not an exporter is
+    /// configured, so without a listener the engine's request rate, execute/commit durations and
+    /// cache hit rates are readable only after someone wires up OpenTelemetry or Prometheus.
+    ///
+    /// <para><see cref="ServerDiagnostics.Enabled"/> gates <em>recording</em>, not publication. With
+    /// diagnostics off these instruments exist and never fire, so they aggregate to nothing and
+    /// simply do not appear. That is the correct report, not a fault.</para>
+    /// </summary>
+    internal const string CamusMeterName = ServerDiagnostics.MeterName;
+
     /// <summary>Tag-set size that fits the sort buffer without falling back to the heap.</summary>
     private const int MaxStackTags = 16;
 
@@ -121,7 +133,8 @@ internal sealed class EngineMetricsCollector : IDisposable
                 string meter = instrument.Meter.Name;
 
                 if (!string.Equals(meter, KommanderMeterName, StringComparison.Ordinal) &&
-                    !string.Equals(meter, KahunaMeterName, StringComparison.Ordinal))
+                    !string.Equals(meter, KahunaMeterName, StringComparison.Ordinal) &&
+                    !string.Equals(meter, CamusMeterName, StringComparison.Ordinal))
                     return;
 
                 listener.EnableMeasurementEvents(

@@ -443,4 +443,367 @@ internal static class SchemaChangeEntryFactory
         payload.State = initialState;
         return payload;
     }
+
+    // ── Element-level deltas ───────────────────────────────────────────────
+    //
+    // Each of these carries the same envelope: the database id, the current version, the next
+    // version, the operation, and a serialized payload. They are written out one by one rather than
+    // folded into a single generic builder, because the payload of each is the part that matters and
+    // a generic envelope hides it behind a type parameter. The caller holds Schema.Semaphore while
+    // it calls one of these, which is why reading Schema.SchemaVersion here is safe.
+
+    /// <summary>Adds a column already staged in <paramref name="initialState"/> rather than Public.</summary>
+    internal static SchemaChangeLogEntry AddColumnInStateEntry(
+        DatabaseDescriptor database, string tableName, ColumnInfo column, SchemaElementState initialState)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.AddColumn,
+            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+            {
+                TableName = tableName,
+                // Built through FromColumnInfo, never field by field: a hand-copied list silently
+                // drops whatever it forgets, and MaxLength / ArrayElementType / Comment were all
+                // lost here while the single-node path kept them. Only Id and State are ours.
+                Column = SchemaColumnPayloadWithState(column, initialState)
+            })
+        };
+    }
+
+    /// <summary>Moves one element along the Absent -> DeleteOnly -> WriteOnly -> Public ladder.</summary>
+    internal static SchemaChangeLogEntry ElementStateEntry(
+        DatabaseDescriptor database, string tableName, string elementName,
+        SchemaElementState targetState, SchemaElementKind elementKind)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetElementState,
+            Payload = Serializator.Serialize(new SchemaElementStatePayload
+            {
+                TableName = tableName,
+                ElementName = elementName,
+                State = targetState,
+                ElementKind = elementKind,
+            })
+        };
+    }
+
+    /// <summary>Adds an index already staged in <paramref name="initialState"/> rather than Public.</summary>
+    internal static SchemaChangeLogEntry AddIndexInStateEntry(
+        DatabaseDescriptor database, string tableName, IndexBuildInfo indexBuildInfo, SchemaElementState initialState)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.AddIndex,
+            Payload = Serializator.Serialize(new SchemaIndexPayload
+            {
+                TableName = tableName,
+                IndexName = indexBuildInfo.IndexName,
+                Index = new TableIndexSchema(
+                    id: indexBuildInfo.IndexId,
+                    name: indexBuildInfo.IndexName,
+                    columnIds: indexBuildInfo.ColumnIds,
+                    type: indexBuildInfo.IndexType,
+                    state: initialState,
+                    startOffset: null,
+                    columnDirections: indexBuildInfo.ColumnDirections,
+                    includeColumnIds: indexBuildInfo.IncludeColumnIds
+                )
+            })
+        };
+    }
+
+    /// <summary>
+    /// Drops an index by name. Distinct from <see cref="DropIndexEntry"/>, which takes an
+    /// <c>AlterIndexTicket</c> and a transaction; this one serves the staged coordinator path, which
+    /// has neither.
+    /// </summary>
+    internal static SchemaChangeLogEntry DropIndexByNameEntry(
+        DatabaseDescriptor database, string tableName, string indexName)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropIndex,
+            Payload = Serializator.Serialize(new SchemaIndexPayload
+            {
+                TableName = tableName,
+                IndexName = indexName
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry SetTableSettingsEntry(
+        DatabaseDescriptor database, string tableName,
+        IReadOnlyDictionary<string, string> settings, IReadOnlyCollection<string>? removedKeys)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetTableSettings,
+            Payload = Serializator.Serialize(new SchemaSetTableSettingsPayload
+            {
+                TableName = tableName,
+                Settings = new Dictionary<string, string>(settings, StringComparer.Ordinal),
+                RemovedKeys = removedKeys is null ? [] : [.. removedKeys]
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry SetCommentEntry(
+        DatabaseDescriptor database, string tableName, CommentTarget target,
+        string? elementName, string? comment)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetComment,
+            Payload = Serializator.Serialize(new SchemaSetCommentPayload
+            {
+                TableName = tableName,
+                Target = target,
+                ElementName = elementName,
+                Comment = comment
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry AddCheckConstraintEntry(
+        DatabaseDescriptor database, string tableName, string constraintName,
+        string expression, string[] referencedColumns)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.AddCheckConstraint,
+            Payload = Serializator.Serialize(new SchemaCheckConstraintPayload
+            {
+                TableName = tableName,
+                ConstraintName = constraintName,
+                Expression = expression,
+                ReferencedColumns = referencedColumns
+            })
+        };
+    }
+
+    /// <summary>
+    /// Drops a CHECK constraint. The payload carries an empty expression and no referenced columns:
+    /// a drop is identified by name alone, and repeating the expression would invite a reader to
+    /// match on it.
+    /// </summary>
+    internal static SchemaChangeLogEntry DropCheckConstraintEntry(
+        DatabaseDescriptor database, string tableName, string constraintName)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropCheckConstraint,
+            Payload = Serializator.Serialize(new SchemaCheckConstraintPayload
+            {
+                TableName = tableName,
+                ConstraintName = constraintName,
+                Expression = "",
+                ReferencedColumns = []
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry SetColumnNotNullEntry(
+        DatabaseDescriptor database, string tableName, string columnName,
+        bool notNull, string? constraintName)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetColumnNotNull,
+            Payload = Serializator.Serialize(new SchemaSetColumnNotNullPayload
+            {
+                TableName = tableName,
+                ColumnName = columnName,
+                NotNull = notNull,
+                ConstraintName = constraintName
+            })
+        };
+    }
+
+    // ── Relation-rename, view and truncate deltas ──────────────────────────
+
+    /// <summary>Renames one index. The timestamp comes from the caller's DDL transaction.</summary>
+    internal static SchemaChangeLogEntry RenameIndexEntry(
+        DatabaseDescriptor database, AlterIndexTicket ticket, string newName, KvTransaction tx)
+    {
+        return new()
+        {
+            Ts = tx.TransactionId,
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.RenameIndex,
+            Payload = Serializator.Serialize(new SchemaRenamePayload
+            {
+                TableName = ticket.TableName,
+                Kind = SchemaRenameKind.Index,
+                ElementName = ticket.IndexName,
+                NewName = newName
+            })
+        };
+    }
+
+    /// <summary>
+    /// Creates a view, or replaces an existing one. The two are the same delta shape under different
+    /// operations, so they share a builder and differ only in <paramref name="replace"/>.
+    /// </summary>
+    internal static SchemaChangeLogEntry CreateViewEntry(
+        DatabaseDescriptor database, string viewId, string viewName,
+        ViewDefinition definition, string? comment, bool replace)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = replace ? SchemaOp.ReplaceView : SchemaOp.CreateView,
+            Payload = Serializator.Serialize(new SchemaViewPayload
+            {
+                ViewId = viewId,
+                ViewName = viewName,
+                Definition = definition,
+                Comment = comment
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry DropViewEntry(DatabaseDescriptor database, string viewName)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropView,
+            Payload = Serializator.Serialize(new SchemaDropViewPayload { ViewName = viewName })
+        };
+    }
+
+    /// <summary>
+    /// Renames a view. <paramref name="dependentViews"/> carries the rewritten bodies of the views
+    /// that read this one, in the same delta: a rename that landed without them would leave those
+    /// bodies resolving a name that no longer exists.
+    /// </summary>
+    internal static SchemaChangeLogEntry RenameViewEntry(
+        DatabaseDescriptor database, string viewName, string newName,
+        Dictionary<string, ViewDefinition>? dependentViews)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.RenameView,
+            Payload = Serializator.Serialize(new SchemaRenamePayload
+            {
+                TableName = viewName,
+                Kind = SchemaRenameKind.View,
+                NewName = newName,
+                DependentViewDefinitions = dependentViews
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry SetViewDefinitionEntry(
+        DatabaseDescriptor database, string viewName, ViewDefinition definition)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetViewDefinition,
+            Payload = Serializator.Serialize(new SchemaSetViewDefinitionPayload
+            {
+                ViewName = viewName,
+                Definition = definition
+            })
+        };
+    }
+
+    /// <summary>
+    /// Publishes a refreshed materialized view. <paramref name="expectedMetadataGeneration"/> is the
+    /// compare-and-swap guard: a refresh that started against an older generation must not adopt its
+    /// contents over a newer one.
+    /// </summary>
+    internal static SchemaChangeLogEntry SetMaterializedViewStateEntry(
+        DatabaseDescriptor database, string tableId, bool isPopulated, HLCTimestamp? refreshedAt,
+        string? swapToTableId, HLCTimestamp publishHlc, long? expectedMetadataGeneration)
+    {
+        return new()
+        {
+            Ts = publishHlc,
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetMaterializedViewState,
+            Payload = Serializator.Serialize(new SchemaSetMatViewStatePayload
+            {
+                TableId = tableId,
+                IsPopulated = isPopulated,
+                RefreshedAt = refreshedAt,
+                SwapToTableId = swapToTableId,
+                ExpectedMetadataGeneration = expectedMetadataGeneration
+            })
+        };
+    }
+
+    /// <summary>
+    /// Swaps a relation's contents for an empty generation. The expected storage id and contents
+    /// generation are the compare-and-swap guard; the retired and new index id lists are resolved by
+    /// the proposer and frozen here, so every node retires exactly the same key-spaces without
+    /// reading anything.
+    /// </summary>
+    internal static SchemaChangeLogEntry TruncateTableEntry(
+        DatabaseDescriptor database, string tableId, string tableName,
+        string expectedStorageId, long expectedContentsGeneration, string newStorageId,
+        HLCTimestamp contentsValidFrom, string[] retiredIndexIds, string[] newIndexIds)
+    {
+        return new()
+        {
+            Ts = contentsValidFrom,
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.TruncateTable,
+            Payload = Serializator.Serialize(new SchemaTruncateTablePayload
+            {
+                TableId = tableId,
+                TableName = tableName,
+                ExpectedStorageId = expectedStorageId,
+                ExpectedContentsGeneration = expectedContentsGeneration,
+                NewStorageId = newStorageId,
+                ContentsValidFrom = contentsValidFrom,
+                RetiredIndexIds = retiredIndexIds,
+                NewIndexIds = newIndexIds,
+            })
+        };
+    }
 }

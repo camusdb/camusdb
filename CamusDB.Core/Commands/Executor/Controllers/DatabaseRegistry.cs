@@ -1375,9 +1375,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     /// <summary>
     /// Releases the drop-intent fence for <paramref name="dbId"/>: stops its background lease renewer and
-    /// removes the marker. Called after the fenced operation completes on every exit path.
-    /// Best-effort on the delete: if the delete fails the marker is left, but its bounded lease means it
-    /// frees automatically once the lease lapses rather than stranding forever (the pre-lease behavior).
+    /// frees the marker. Called after the fenced operation completes on every exit path.
+    /// The marker write retries transient replication statuses with a bounded budget, so an orderly
+    /// release normally frees the fence immediately. If the budget is exhausted the marker is left, and
+    /// its bounded lease frees it once the lease lapses rather than stranding forever (the pre-lease
+    /// behavior).
     /// </summary>
     public async Task ReleaseDropIntentAsync(string dbId)
     {

@@ -271,6 +271,16 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal int OpenDatabaseCount => databaseDescriptors.Descriptors.Count;
 
     /// <summary>
+    /// Whether this node currently holds an open descriptor for <paramref name="databaseId"/>.
+    ///
+    /// <para>The key is the database <b>id</b>, not its name: the descriptor cache is keyed by id so
+    /// a rename cannot orphan an entry. It is a plain lookup that opens nothing, which is the whole
+    /// point — a caller reporting on residency must not create the residency it reports.</para>
+    /// </summary>
+    internal bool IsDatabaseResident(string databaseId) =>
+        databaseDescriptors.Descriptors.ContainsKey(databaseId);
+
+    /// <summary>
     /// How many times background discovery has range-scanned a database's metadata bucket. The count a
     /// test needs to tell "the memo was used" from "the memo happened to produce the same answer" —
     /// the two are indistinguishable from the discovery result alone.

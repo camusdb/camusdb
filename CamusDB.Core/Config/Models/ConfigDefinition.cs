@@ -308,6 +308,19 @@ public class ConfigDefinition
     public bool EngineMetricsEnabled { get; set; } = true;
 
     /// <summary>
+    /// Serves the browser operator dashboard on the HTTP port. Maps to
+    /// <c>CamusDBOptions.DashboardEnabled</c> (yml <c>dashboard_enabled</c>). Default on.
+    /// </summary>
+    public bool DashboardEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Refresh interval, in seconds, of the dashboard's load panel. Maps to
+    /// <c>CamusDBOptions.DashboardRefreshSeconds</c> (yml <c>dashboard_refresh_seconds</c>).
+    /// Default 2.
+    /// </summary>
+    public int DashboardRefreshSeconds { get; set; } = 2;
+
+    /// <summary>
     /// Interval, in milliseconds, of the background orphan-reclamation sweep. <c>&lt;= 0</c> disables
     /// the loop. Maps to <c>CamusDBOptions.OrphanReclaimIntervalMs</c> (yml
     /// <c>orphan_reclaim_interval_ms</c>). Default 5 minutes.

@@ -14,7 +14,7 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <summary>
 /// In-memory schema of a single database: the monotonic version counter and the live table
 /// set. This is the local materialization of the replicated state machine — it is advanced
-/// by <c>CatalogsManager.ApplySchemaDelta</c> as committed <see cref="Catalogs.Models.SchemaChangeLogEntry"/>
+/// by <c>SchemaDeltaApplier.ApplySchemaDelta</c> as committed <see cref="Catalogs.Models.SchemaChangeLogEntry"/>
 /// deltas are applied. See the architecture documentation.
 /// </summary>
 public sealed class Schema : IDisposable

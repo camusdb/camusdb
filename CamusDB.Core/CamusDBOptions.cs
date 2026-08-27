@@ -304,6 +304,29 @@ public sealed record CamusDBOptions
     public bool EngineMetricsEnabled { get; init; } = true;
 
     /// <summary>
+    /// Serves the browser operator dashboard on the HTTP port. When false the host maps neither the
+    /// dashboard pages nor the <c>/v1/dashboard/</c> endpoints, and a browser at <c>/</c> gets a 404.
+    ///
+    /// <para>Restart-class because the host decides at startup whether to map those routes. A live
+    /// change would not add or remove an endpoint, so reporting it as runtime-mutable would be a lie
+    /// an operator only discovers in production.</para>
+    ///
+    /// <para>The dashboard is read-only, and every panel keeps the gate its underlying statement
+    /// already has. With <see cref="AuthenticationEnabled"/> off there is no principal to gate on, so
+    /// the dashboard then serves loopback connections only.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public bool DashboardEnabled { get; init; } = true;
+
+    /// <summary>
+    /// How often, in seconds, the dashboard's load panel refreshes in the browser. The value is read
+    /// per request and handed to the page, so a change reaches the next poll of an already-open tab
+    /// without a restart. The endpoint clamps it to a sane range before reporting it.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int DashboardRefreshSeconds { get; init; } = 2;
+
+    /// <summary>
     /// Interval, in milliseconds, of the background <c>OrphanReclaimer</c> sweep that physically
     /// reclaims orphaned databases/tables past <see cref="OrphanRetentionMs"/>. The sweep runs on a
     /// single elected node (registry-partition leader). A value <c>&lt;= 0</c> disables the loop

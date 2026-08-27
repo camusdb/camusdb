@@ -1,11 +1,143 @@
-﻿@page
+@page
 @model IndexModel
 @{
-    ViewData["Title"] = "Home page";
+    ViewData["Title"] = "Dashboard";
+    ViewData["AuthenticationEnabled"] = Model.AuthenticationEnabled;
+    Layout = "_DashboardLayout";
 }
+@*
+    Only the frames are rendered here. Every value arrives from a
+    /v1/dashboard/ endpoint after load.
 
-<div class="text-center">
-    <h1 class="display-4">Welcome</h1>
-    <p>Get started with <a href="https://github.com/camusdb/camusdb">CamusDB</a>.</p>
-</div>
+    Server-rendering a node value would make the page stale from its first
+    second, and would leave two code paths — one Razor, one JavaScript —
+    drawing the same number, which is exactly how the two come to disagree.
+*@
 
+<header class="band">
+    <div class="shell" id="band-body">
+        <p class="eyebrow">Node</p>
+        <div class="band-head" id="band-head">
+            <h1>Reading this node…</h1>
+        </div>
+        <div class="band-meta" id="band-meta"></div>
+        <dl class="strip" id="band-strip"></dl>
+    </div>
+</header>
+
+<main>
+    <div class="shell">
+        <div class="grid" id="dashboard">
+
+            <section class="card col-2">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Engine</p>
+                        <h2>This process, since start</h2>
+                    </div>
+                    <span class="when" id="metrics-node"></span>
+                </div>
+                <div id="metrics-body"></div>
+                <p class="card-note">
+                    Counters accumulate from process start, so a restart resets every rate. All of it
+                    describes this node only.
+                </p>
+            </section>
+
+            <section class="card">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Cluster</p>
+                        <h2>Roster</h2>
+                    </div>
+                </div>
+                <p class="card-note" id="cluster-version" style="margin: 0 0 .9rem;"></p>
+                <div class="panel">
+                    <div class="panel-body" id="cluster-body"></div>
+                </div>
+                <p class="card-note">
+                    Each node reports only the partitions it leads. Open the dashboard on every node
+                    for the whole cluster.
+                </p>
+            </section>
+
+            <section class="card col-2">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Data</p>
+                        <h2>Databases</h2>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-head">
+                        <span class="pill">Registry</span>
+                        <strong>Reading this list opens no database</strong>
+                    </div>
+                    <div class="panel-body" id="databases-body"></div>
+                </div>
+                <p class="card-note">
+                    Select a row to read its relations. That opens a descriptor, so it happens on a
+                    selection and never on the refresh timer.
+                </p>
+            </section>
+
+            <section class="card">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Relations</p>
+                        <h2 id="tables-heading">No database selected</h2>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="tables-body"></div>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Recovery</p>
+                        <h2>Backups</h2>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="backups-body"></div>
+                </div>
+            </section>
+
+            <section class="card col-2">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Configuration</p>
+                        <h2>Settings on this node</h2>
+                    </div>
+                    <span class="when">Superuser only</span>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="config-body"></div>
+                </div>
+            </section>
+
+            <section class="card col-3">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Cluster settings</p>
+                        <h2>Overlay</h2>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="overlay-body"></div>
+                </div>
+            </section>
+
+        </div>
+    </div>
+</main>
+
+<footer>
+    <div class="shell">
+        <span>CamusDB</span>
+        <span>Every number on this page is node-local.</span>
+        <span>For alerting and history, use the OpenTelemetry or Prometheus export.</span>
+    </div>
+</footer>

@@ -9,6 +9,7 @@ using System.Text.Json;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.App.Services;
 
 namespace CamusDB.App.Middleware;
 
@@ -80,6 +81,14 @@ public sealed class AuthenticationMiddleware
             return;
         }
 
+        // The dashboard's sign-in page and its credential-exchange endpoints must be reachable
+        // without a credential, for the same reason /login is: they are how a browser obtains one.
+        if (DashboardSession.IsAnonymousDashboardRoute(path))
+        {
+            await next(context).ConfigureAwait(false);
+            return;
+        }
+
         // Node-to-node forwarding: authenticate the peer by shared secret, not a user token.
         if (path.StartsWith("/internal/", StringComparison.OrdinalIgnoreCase))
         {
@@ -94,15 +103,25 @@ public sealed class AuthenticationMiddleware
         }
 
         // Every other route is a public user route: require a valid bearer token over a secure transport.
+        bool dashboardRoute = DashboardSession.IsDashboardRoute(path);
+
         Principal principal;
         try
         {
             EnsureSecureTransport(context, options);
-            string? bearer = ExtractBearer(context);
+            string? bearer = ExtractBearer(context) ?? (dashboardRoute ? ExtractSessionCookie(context) : null);
             principal = await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
         }
         catch (CamusDBException e)
         {
+            // A browser asking for a page cannot act on a JSON error body — send it to sign in
+            // instead. The page's polling endpoints keep the JSON answer their script branches on.
+            if (DashboardSession.IsDashboardPage(path))
+            {
+                context.Response.Redirect(DashboardSession.SignInPage);
+                return;
+            }
+
             await WriteErrorAsync(context, e.Code, e.Message).ConfigureAwait(false);
             return;
         }
@@ -121,6 +140,21 @@ public sealed class AuthenticationMiddleware
         context.Items["camus.principal"] = principal;
 
         await next(context).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads the browser session token from the dashboard cookie.
+    ///
+    /// <para><b>Only ever call this for a dashboard route.</b> Every other route authenticates by
+    /// the <c>Authorization</c> header alone, and that is what makes cross-site request forgery
+    /// impossible against them: a browser attaches a cookie by itself, but never a header. Accepting
+    /// this cookie on a write route would give that protection away. <see cref="DashboardSession"/>
+    /// holds the route list and the full reasoning.</para>
+    /// </summary>
+    private static string? ExtractSessionCookie(HttpContext context)
+    {
+        string? token = context.Request.Cookies[DashboardSession.CookieName];
+        return string.IsNullOrWhiteSpace(token) ? null : token;
     }
 
     private static string? ExtractBearer(HttpContext context)

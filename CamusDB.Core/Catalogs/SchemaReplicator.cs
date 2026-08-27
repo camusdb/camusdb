@@ -23,7 +23,7 @@ namespace CamusDB.Core.Catalogs;
 /// throw on gaps) and mutates the in-memory schema on every node. It does <b>not</b> persist
 /// the durable KV checkpoint: doing so from inside this commit-pipeline callback re-enters the
 /// same Raft partition and deadlocks. The proposer persists the checkpoint after the
-/// replication round-trip returns (<c>CatalogsManager.ReplicateAndWaitLocalApplyAsync</c>);
+/// replication round-trip returns (<c>SchemaChangePublisher.ReplicateAndWaitLocalApplyAsync</c>);
 /// the committed schema log is the source of truth and the checkpoint is a load-time
 /// optimization. Acks (per node, per database) are recorded only after a delta is actually
 /// applied — they drive the two-version invariant gate in <see cref="SchemaAckTracker"/>.
@@ -164,7 +164,7 @@ public sealed class SchemaReplicator
             // issuing the checkpoint's KV writes (which themselves replicate on the same
             // partition) from this context deadlocks the partition (ProposalTimeout). The
             // proposer persists the checkpoint after the replication round-trip returns —
-            // see CatalogsManager.ReplicateAndWaitLocalApplyAsync. The committed schema log
+            // see SchemaChangePublisher.ReplicateAndWaitLocalApplyAsync. The committed schema log
             // remains the source of truth; the KV checkpoint is a load-time optimization.
             // Before the mutation, never after: the retired generation's column layout, index list
             // and schema version only exist in the pre-swap schema. Persisting is forbidden from
@@ -312,7 +312,7 @@ public sealed class SchemaReplicator
         // checkpoint's 2PC in that case is pure cost AND races the node's very first live DDL on the
         // schema partition — the source of the CreateTable/INSERT 2PC conflicts and the deadlock
         // below. A node that genuinely created tables persists its checkpoint via the proposer path
-        // (CatalogsManager.ReplicateAndWaitLocalApplyAsync), never here. So skip when there is no
+        // (SchemaChangePublisher.ReplicateAndWaitLocalApplyAsync), never here. So skip when there is no
         // replayed schema; still clear the degraded flag (a no-op when it was never set).
         if (restoredVersion == 0)
         {

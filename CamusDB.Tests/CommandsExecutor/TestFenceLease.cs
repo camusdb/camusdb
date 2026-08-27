@@ -9,10 +9,16 @@
 using NUnit.Framework;
 
 using System;
+using System.Threading;
 using System.Threading.Tasks;
+
+using Kahuna;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Tests.Storage;
 
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -143,6 +149,73 @@ internal sealed class TestFenceLease : BaseTest
             await b.ReleaseDropIntentAsync(id);
             await a.DisposeAsync();
             await b.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// The write that frees the fence on release can see transient replication statuses under load.
+    /// The release must absorb them and land the free marker before it returns; a release that gave up
+    /// on the first transient status would leave the fence held for the full lease, which showed up as
+    /// a random failure of the immediate-reacquire tests under full-suite load.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task Release_AbsorbsTransientStatuses_FreesFenceWithoutLeaseLapse()
+    {
+        // Long lease, and a renew interval even longer: only a successful explicit release can free the
+        // fence during the test, and the renewer never fires to mask a faulted release write.
+        CamusDBOptions fence = Fence(leaseMs: 30_000, renewMs: 60_000);
+
+        string id = "f" + Guid.NewGuid().ToString("n");
+
+        TransientSetFaultKahuna faulty = new(TestNode!.Kahuna);
+        DatabaseRegistry a = await DatabaseRegistry.OpenForTestingAsync(TestNode!, faulty, fence);
+        DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, fence);
+        try
+        {
+            Assert.IsTrue(await a.AcquireDropIntentAsync(id), "sanity: fence acquired");
+            Assert.IsFalse(await b.AcquireDropIntentAsync(id), "held before release");
+
+            // Fault the next 3 drop-intent writes — well inside the release's bounded retry budget, so
+            // the count does not race the budget itself.
+            faulty.InjectSetFaults = 3;
+
+            await a.ReleaseDropIntentAsync(id);
+
+            Assert.Zero(faulty.InjectSetFaults, "sanity: the release consumed the injected transient statuses");
+            Assert.IsTrue(await b.AcquireDropIntentAsync(id),
+                "a release that saw transient statuses must still free the fence immediately");
+        }
+        finally
+        {
+            await b.ReleaseDropIntentAsync(id);
+            await a.DisposeAsync();
+            await b.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Returns <see cref="KeyValueResponseType.MustRetry"/> for the first
+    /// <see cref="InjectSetFaults"/> writes that touch a drop-intent key, then delegates to the real
+    /// node. Scoped to drop-intent keys so registry bookkeeping writes pass through untouched.
+    /// </summary>
+    private sealed class TransientSetFaultKahuna(IKahuna inner) : DelegatingKahuna(inner)
+    {
+        public int InjectSetFaults;
+
+        public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
+            HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision,
+            KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken,
+            long routedGeneration = 0, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            if (InjectSetFaults > 0 && key.Contains("drop-intent", StringComparison.Ordinal))
+            {
+                InjectSetFaults--;
+                return Task.FromResult((KeyValueResponseType.MustRetry, -1L, HLCTimestamp.Zero));
+            }
+
+            return base.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision,
+                flags, expiresMs, durability, cancellationToken, routedGeneration, coordinatorKey, operationId);
         }
     }
 

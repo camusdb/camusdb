@@ -1,0 +1,80 @@
+@page
+@model SignInModel
+@{
+    ViewData["Title"] = "Sign in";
+    ViewData["ShowNav"] = false;
+    Layout = "_DashboardLayout";
+}
+
+<div class="band signin-wrap">
+    <div class="shell signin-card">
+        <div class="card">
+            <p class="eyebrow">CamusDB</p>
+            <h2 style="margin-bottom: 1.25rem;">Sign in to the dashboard</h2>
+
+            <form id="signin-form" autocomplete="on">
+                <label>
+                    User
+                    <input type="text" id="user" name="user" autocomplete="username" required autofocus />
+                </label>
+                <label>
+                    Password
+                    <input type="password" id="password" name="password" autocomplete="current-password" required />
+                </label>
+                <button class="btn-primary" type="submit" id="submit">Sign in</button>
+                <p class="form-error" id="error" role="alert" hidden></p>
+            </form>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+    // The password is posted and then forgotten. It is never written back into
+    // the form, never put in the URL, and never stored.
+    (function () {
+        var form = document.getElementById('signin-form');
+        var error = document.getElementById('error');
+        var submit = document.getElementById('submit');
+
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            error.hidden = true;
+            submit.disabled = true;
+            submit.textContent = 'Signing in…';
+
+            fetch('/v1/dashboard/login', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user: document.getElementById('user').value,
+                    password: document.getElementById('password').value
+                })
+            })
+            .then(function (response) {
+                return response.json().catch(function () { return {}; })
+                    .then(function (body) { return { ok: response.ok, body: body }; });
+            })
+            .then(function (result) {
+                if (result.ok && result.body.status === 'ok') {
+                    window.location.href = result.body.redirect || '/';
+                    return;
+                }
+                show(result.body.message || 'Sign-in failed.');
+            })
+            .catch(function () {
+                show('The node could not be reached.');
+            });
+
+            function show(message) {
+                error.textContent = message;
+                error.hidden = false;
+                submit.disabled = false;
+                submit.textContent = 'Sign in';
+                document.getElementById('password').value = '';
+            }
+        });
+    }());
+</script>
+}

@@ -96,7 +96,31 @@ crash-safe online schema change.
 |---|---|---|
 | SQL / executor | `CommandExecutor` | Entry point for DDL & DML. Owns the DDL transaction, schema-version *pinning*, follower→leader *forwarding*, and the cluster add-column/add-index entry points that drive the coordinator. |
 | Online-schema driver | `SchemaChangeCoordinator` | Drives a column or index element through the staged `SetElementState` sequence one adjacent transition at a time, gating each step on the cluster ack, running backfill before `Public`, and persisting its job for leader-change resume. |
-| Catalog | `CatalogsManager` | Builds deltas, validates them, applies them (`ApplySchemaDelta`), persists per-object metadata, loads metadata on open. Exposes the `Replicate*` primitives the coordinator composes (`ReplicateAddColumnInStateAsync`, `ReplicateAddIndexInStateAsync`, `ReplicateElementStateAsync`, `ReplicateDropIndexAsync`). |
+| Catalog | `CatalogsManager` | The stable entry point. Delegates only — see the table below for what actually does the work. Still the type every caller holds, so the `Replicate*` primitives the coordinator composes (`ReplicateAddColumnInStateAsync`, `ReplicateAddIndexInStateAsync`, `ReplicateElementStateAsync`, `ReplicateDropIndexAsync`) are reached through it. |
+
+### Inside the catalog package
+
+`CatalogsManager` is a facade. The work is divided by responsibility:
+
+| Directory | Type | Owns |
+|---|---|---|
+| `Catalogs/` | `RelationCatalog` | create / alter / drop / rename / relink / truncate a relation |
+| `Catalogs/` | `ViewCatalog` | views and materialized-view state |
+| `Catalogs/` | `TableCommentWriter` | COMMENT ON, single-node path |
+| `Catalogs/Replication/` | `SchemaChangeEntryFactory` | builds every `SchemaChangeLogEntry`; nothing else constructs one |
+| `Catalogs/Replication/` | `SchemaChangePublisher` | the Raft round-trip, the apply wait, and both ack gates |
+| `Catalogs/Replication/` | `SchemaElementReplicator` | column, index, constraint, settings and comment deltas |
+| `Catalogs/Apply/` | `SchemaDeltaApplier` and six siblings | applies a committed delta to in-memory schema |
+| `Catalogs/Meta/` | `MetaKeys`, `MetaKeyWriter`, `SchemaMetaStore` | key construction and KV input/output |
+| `Catalogs/Meta/` | `SchemaLoader`, `SchemaHistoryStore` | the open path and lazy schema history |
+| `Catalogs/Meta/` | `SchemaCheckpointWriter` | the durable checkpoint after a commit |
+| `Catalogs/Meta/` | `OrphanTableStore`, `CoordinatorJobStore`, `MaterializedViewRefreshJobStore`, `ContentsRetirementStore`, `BranchMetaCopier` | the per-object record families |
+
+**No type under `Catalogs/Apply/` takes an `IKahuna` or a `KvTransaction`.** Apply runs inside the
+schema partition's commit pipeline on every node, and a KV write from there re-enters the same
+partition and deadlocks it. The separation used to be a comment; it is now something the compiler
+refuses to let you break.
+
 | Replication glue | `SchemaReplicator` | Bridges Kahuna's apply/restore callbacks to `CatalogsManager`. Applies committed deltas in-memory (never persists from the callback), records acks, evicts cached `TableDescriptor`s, and registers the coordinator-resume leader callback. |
 | KV / consensus | `EmbeddedKahuna` | Routes schema deltas to a Raft partition, replicates+commits them, fans them out to local subscribers, tracks per-node acks, sources live membership from Raft, and fires `OnLeaderChanged` for coordinator resume. |
 | Liveness | `SchemaAckTracker` | Per-database, per-node `{version, lastSeen}` map; powers the two-version invariant gate. The live set comes from Raft membership; an optional finite lease expires silent members. |

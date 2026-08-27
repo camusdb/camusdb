@@ -214,6 +214,13 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
     ///
     /// <para>Passing a token that is not the current acquisition does nothing, which makes a duplicate or
     /// late release harmless.</para>
+    ///
+    /// <para><b>The marker write retries transient statuses.</b> <c>MustRetry</c> and
+    /// <c>WaitingForReplication</c> are replication timing, not an outcome. A release that gave up on the
+    /// first transient status would leave the old value in place under its full lease, so the next
+    /// acquirer would wait out the whole lease — the observable symptom is a "released" fence that stays
+    /// held for tens of seconds. The retry budget matches <see cref="TryAcquireAsync"/>. Only after the
+    /// budget is exhausted does the release fall back to the lease lapse.</para>
     /// </summary>
     public async Task ReleaseAsync(string key, string token)
     {
@@ -229,21 +236,43 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
         try { await acquisition.Cts.CancelAsync().ConfigureAwait(false); } catch { }
         acquisition.Cts.Dispose();
 
-        try
+        int retries = 0;
+        while (true)
         {
-            await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, 
-                key, 
-                FreeMarker, 
-                acquisition.Value, 
-                -1,
-                KeyValueFlags.SetIfEqualToValue, 
-                ReleaseExpiryMs, 
-                KeyValueDurability.Persistent,
-                CancellationToken.None
-            ).ConfigureAwait(false);
+            try
+            {
+                (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero,
+                    key,
+                    FreeMarker,
+                    acquisition.Value,
+                    -1,
+                    KeyValueFlags.SetIfEqualToValue,
+                    ReleaseExpiryMs,
+                    KeyValueDurability.Persistent,
+                    CancellationToken.None
+                ).ConfigureAwait(false);
+
+                if (type == KeyValueResponseType.Set)
+                    return; // the free marker is in place; the next acquirer claims it immediately
+
+                if (type == KeyValueResponseType.NotSet)
+                    return; // the stored value is no longer this acquisition's — nothing of ours to free
+
+                if (type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
+                    return; // hard failure with an unknown key state — the lease lapses on its own
+            }
+            catch
+            {
+                // A transport failure has an unknown outcome. The compare-and-set is idempotent, so a
+                // retry is safe: a write that already landed makes the retry a NotSet no-op.
+            }
+
+            if (++retries >= MaxRetries)
+                return; // budget exhausted — the lease lapses on its own
+
+            await Task.Delay(retries * 10).ConfigureAwait(false);
         }
-        catch { /* the lease lapses on its own */ }
     }
 
     /// <summary>

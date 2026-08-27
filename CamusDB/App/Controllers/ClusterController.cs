@@ -347,7 +347,13 @@ public sealed class ClusterController : CommandsController
         }
     }
 
-    private static ClusterHealthResponse BuildHealth(IRaft raft)
+    /// <summary>
+    /// Builds the readiness answer for one node. Internal rather than private so the dashboard's
+    /// summary endpoint reports readiness from this one implementation: a second copy of the
+    /// "which roles serve" and "what counts as stalled" rules would drift from this one, and the
+    /// dashboard would then disagree with the probe an orchestrator trusts.
+    /// </summary>
+    internal static ClusterHealthResponse BuildHealth(IRaft raft)
     {
         bool initialized;
         string localRole;

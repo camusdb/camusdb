@@ -131,6 +131,8 @@ public class ConfigReader
         "orphan_reclaim_interval_ms",
         "database_idle_eviction_ms",
         "engine_metrics_enabled",
+        "dashboard_enabled",
+        "dashboard_refresh_seconds",
         "query_tracing_enabled",
         "lock_tracing_enabled",
         "fence_lease_ms",
