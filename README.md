@@ -3,13 +3,17 @@ CamusDB
 
 CamusDB is an open-source NewSQL distributed database written in C# on .NET. It pairs a familiar SQL interface with a Raft-replicated, transactional key-value storage layer, and makes a few deliberately opinionated choices: **serializable isolation and strong consistency are the default**, not an opt-in; databases can be **branched copy-on-write like code**; and **dropped objects are recoverable** instead of instantly destroyed. Development is driven by performance, Jepsen-style testing, chaos engineering, fault injection, and degraded-state testing.
 
-**While CamusDB is actively used in production, some of its features are considered alpha — use it with caution.** APIs and storage formats may change between versions.
+**While CamusDB is actively used in production, some of its features are considered alpha, use it with caution.** APIs and storage formats may change between versions.
 
 [![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
 
 [Documentation](https://camusdb.github.io/docs/intro)
 
-![camus-cli](https://media.giphy.com/media/vqs2XqX5mAxC4Ln0FO/giphy.gif)
+<img width="809" height="503" alt="cli" src="https://github.com/user-attachments/assets/77b73c6f-a985-4fca-8f75-10de0b0c4358" />
+
+<img width="808" height="507" alt="tui" src="https://github.com/user-attachments/assets/dcb65e29-cc3c-49fe-a2a8-07526400e99e" />
+
+<img width="939" height="705" alt="webconsole" src="https://github.com/user-attachments/assets/286690a1-bf7c-4c21-92a6-7c4ef3f86d4d" />
 
 Why CamusDB?
 ------------
