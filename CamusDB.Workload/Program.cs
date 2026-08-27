@@ -207,7 +207,8 @@ public static class Program
                 .VerifyOrInconclusiveAsync(
                     verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
                     writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
-                    bankMode: bank, baselineBalanceSum: baselineBalanceSum)
+                    bankMode: bank, baselineBalanceSum: baselineBalanceSum,
+                    retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)))
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)

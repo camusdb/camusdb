@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using CamusDB.Client;
 using CamusDB.Workload.Metrics;
 using CamusDB.Workload.Workload;
@@ -68,13 +69,15 @@ public static class Reconciliation
     /// <summary>Reads the current <c>SUM(version)</c> baseline; captured once before the run so
     /// reconciliation measures only this run's increments, not the accumulation of prior runs on the
     /// same seeded dataset.</summary>
-    public static Task<long> ReadVersionSumAsync(CamusConnection conn, CancellationToken ct)
-        => ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct);
+    public static Task<long> ReadVersionSumAsync(
+        CamusConnection conn, CancellationToken ct, TimeSpan? retryBudget = null)
+        => ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct, retryBudget);
 
     /// <summary>Reads the current <c>SUM(balance)</c> baseline; captured once before a bank-transfer run
     /// so the conservation invariant measures against the pre-run total.</summary>
-    public static Task<long> ReadBalanceSumAsync(CamusConnection conn, CancellationToken ct)
-        => ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct);
+    public static Task<long> ReadBalanceSumAsync(
+        CamusConnection conn, CancellationToken ct, TimeSpan? retryBudget = null)
+        => ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct, retryBudget);
 
     /// <summary>
     /// The inclusive band of acceptable <c>SUM(version)</c> deltas. An indeterminate transaction
@@ -113,10 +116,10 @@ public static class Reconciliation
         CamusConnection conn, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct,
-        bool bankMode = false, long baselineBalanceSum = 0)
+        bool bankMode = false, long baselineBalanceSum = 0, TimeSpan? retryBudget = null)
     {
-        long persistedSum = await ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct).ConfigureAwait(false);
-        long rowCount = await ScalarAsync(conn, $"SELECT COUNT(*) FROM {Dataset.TableName}", ct).ConfigureAwait(false);
+        long persistedSum = await ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct, retryBudget).ConfigureAwait(false);
+        long rowCount = await ScalarAsync(conn, $"SELECT COUNT(*) FROM {Dataset.TableName}", ct, retryBudget).ConfigureAwait(false);
 
         long persistedDelta = persistedSum - baselineVersionSum;
         (long expectedMin, long expectedMax) = VersionDeltaBand(committedRowWrites, indeterminateTxns, writesPerTransaction);
@@ -131,7 +134,7 @@ public static class Reconciliation
         // commits (an atomic transfer applies both legs or neither), so a changed sum is a genuine
         // atomicity break — never waived. In accounts mode balances change by design, so it is skipped.
         long balanceFinal = bankMode
-            ? await ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct).ConfigureAwait(false)
+            ? await ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct, retryBudget).ConfigureAwait(false)
             : 0;
         bool balanceConserved = !bankMode || balanceFinal == baselineBalanceSum;
 
@@ -164,12 +167,28 @@ public static class Reconciliation
     // (unhandled) instead of producing the consistency verdict the run exists to report.
     // A node recovering from a fault — a restart, or a full disk that was just freed and is now
     // compacting — can stay slow for tens of seconds. Reconciliation is post-measurement, so it can
-    // afford to be patient: ~30 attempts with up to 2 s of backoff is roughly a minute of tolerance
-    // before it gives up. Even then the caller keeps the measured artifacts (see VerifyOrInconclusive).
-    private const int MaxScalarAttempts = 30;
+    // afford to be patient. Even when it gives up the caller keeps the measured artifacts (see
+    // VerifyOrInconclusive).
+    //
+    // The bound is WALL-CLOCK, not an attempt count. An attempt cap is unpredictable here because
+    // each failed attempt costs whatever the client's request timeout is: with a ~11 s timeout,
+    // "30 attempts" is ~5.5 minutes, but with a shorter timeout the same cap gives up in seconds.
+    // Measured case that motivated this (bank soak, 2026-08-26): a node kept draining a read backlog
+    // after the measured window; reconciliation gave up 5.5 minutes after drain, and the very same
+    // aggregate succeeded 78 seconds later in 7 s. The run reported "cluster stayed unavailable"
+    // for a cluster that was merely still busy, and the SUM(balance) invariant went unverified.
+    public static readonly TimeSpan DefaultRetryBudget = TimeSpan.FromMinutes(10);
 
-    private static async Task<long> ScalarAsync(CamusConnection conn, string sql, CancellationToken ct)
+    // Safety net only: the wall-clock budget is the real bound. This stops a pathological
+    // fail-fast loop (an error that returns in microseconds) from spinning millions of times.
+    private const int MaxScalarAttempts = 10_000;
+
+    private static async Task<long> ScalarAsync(
+        CamusConnection conn, string sql, CancellationToken ct, TimeSpan? retryBudget = null)
     {
+        TimeSpan budget = retryBudget ?? DefaultRetryBudget;
+        long startedAt = Stopwatch.GetTimestamp();
+
         for (int attempt = 1; ; attempt++)
         {
             try
@@ -184,7 +203,8 @@ public static class Reconciliation
             {
                 Operations.OperationStatus status = Operations.ErrorClassifier.Classify(ex).Status;
                 bool retryable = status is Operations.OperationStatus.Conflict or Operations.OperationStatus.Transient;
-                if (!retryable || attempt >= MaxScalarAttempts || ct.IsCancellationRequested)
+                bool budgetSpent = Stopwatch.GetElapsedTime(startedAt) >= budget;
+                if (!retryable || budgetSpent || attempt >= MaxScalarAttempts || ct.IsCancellationRequested)
                     throw;
 
                 await Task.Delay(Math.Min(200 * attempt, 2000), ct).ConfigureAwait(false);
@@ -202,16 +222,26 @@ public static class Reconciliation
     public static async Task<ReconciliationResult> VerifyOrInconclusiveAsync(
         CamusConnection conn, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
-        long expectedRows, CancellationToken ct, bool bankMode, long baselineBalanceSum)
+        long expectedRows, CancellationToken ct, bool bankMode, long baselineBalanceSum,
+        TimeSpan? retryBudget = null)
     {
+        long startedAt = Stopwatch.GetTimestamp();
         try
         {
             return await VerifyAsync(conn, metrics, baselineVersionSum, committedRowWrites, indeterminateTxns,
-                writesPerTransaction, expectFaults, expectedRows, ct, bankMode, baselineBalanceSum).ConfigureAwait(false);
+                writesPerTransaction, expectFaults, expectedRows, ct, bankMode, baselineBalanceSum,
+                retryBudget).ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            return Inconclusive($"{ex.GetType().Name}: {ex.Message}", indeterminateTxns, metrics.Conflicts, baselineBalanceSum);
+            // Say how long it actually waited. "Unavailable" reads as a dead cluster; a run that gave
+            // up after N seconds of a still-draining cluster is a different diagnosis, and the reader
+            // cannot tell them apart without this number.
+            TimeSpan waited = Stopwatch.GetElapsedTime(startedAt);
+            return Inconclusive(
+                $"{ex.GetType().Name}: {ex.Message} (retried for {waited.TotalSeconds:F0}s of a " +
+                $"{(retryBudget ?? DefaultRetryBudget).TotalSeconds:F0}s budget)",
+                indeterminateTxns, metrics.Conflicts, baselineBalanceSum);
         }
     }
 
