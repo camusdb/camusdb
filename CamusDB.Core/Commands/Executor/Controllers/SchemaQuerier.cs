@@ -1193,4 +1193,58 @@ internal sealed class SchemaQuerier
     /// </summary>
     private static string RenderStringLiteral(string value) => SqlStringLiteral.Quote(value);
 
+    /// <summary>
+    /// Renders <c>SHOW RANGES</c> / <c>SHOW RANGE</c> from spans the caller already resolved.
+    ///
+    /// <para>The resolved result is passed in rather than read here, for the same reason
+    /// <see cref="ShowStatistics"/> takes its snapshot as a parameter: this class keeps its narrow
+    /// dependencies — it acquires no storage or Kahuna dependency — and the placement read stays
+    /// where it can be awaited before the first row is yielded, so a failure surfaces as a statement
+    /// error rather than mid-result.</para>
+    ///
+    /// <para>Rows come out in the span order the placement carries, which is the ascending ordinal
+    /// key order Kahuna's router binary-searches. The <c>span</c> ordinal is the position within the
+    /// full key space, so the single-span <c>FOR ROW</c> form reports which span of how many it
+    /// found rather than always reporting 1.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowRanges(Queries.ShowRangesResult ranges)
+    {
+        await Task.CompletedTask;
+
+        ColumnValue relation = new(ColumnType.String, ranges.Relation);
+        ColumnValue keySpace = new(ColumnType.String, ranges.KeySpace);
+        ColumnValue routing = new(ColumnType.String, ranges.IsKeyRange ? "key_range" : "hash");
+        ColumnValue probeKey = ranges.ProbeKey is null
+            ? ColumnValue.Null
+            : new ColumnValue(ColumnType.String, ranges.ProbeKey);
+
+        foreach (Queries.ShowRangesSpan span in ranges.Spans)
+        {
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "relation",        relation },
+                { "key_space",       keySpace },
+                { "routing",         routing },
+                { "span",            new ColumnValue(ColumnType.Integer64, span.Ordinal) },
+                { "start_key",       OptionalString(span.DecodedStartKey) },
+                { "end_key",         OptionalString(span.DecodedEndKey) },
+                { "raw_start_key",   OptionalString(span.Placement.StartKey) },
+                { "raw_end_key",     OptionalString(span.Placement.EndKey) },
+                { "partition_id",    new ColumnValue(ColumnType.Integer64, span.Placement.PartitionId) },
+                { "generation",      new ColumnValue(ColumnType.Integer64, span.Placement.Generation) },
+                // Null leader means unknown, never "leaderless": leadership here is a local belief.
+                { "leader",          OptionalString(span.Placement.LeaderEndpoint) },
+                { "leader_is_local", new ColumnValue(ColumnType.Bool, span.Placement.LeaderIsLocal) },
+                { "hosted_locally",  new ColumnValue(ColumnType.Bool, span.Placement.HostedLocally) },
+                // Empty means legacy full replication — every roster node hosts the partition — not
+                // "no replicas". Rendered as an empty string rather than NULL so the two stay
+                // distinguishable from a column that was never populated.
+                { "replicas",        new ColumnValue(ColumnType.String, string.Join(",", span.Placement.ReplicaEndpoints)) },
+                { "probe_key",       probeKey },
+            });
+        }
+    }
+
+    private static ColumnValue OptionalString(string? value) =>
+        value is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, value);
 }

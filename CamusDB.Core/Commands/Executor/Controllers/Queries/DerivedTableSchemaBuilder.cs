@@ -100,6 +100,49 @@ internal static class DerivedTableSchemaBuilder
         new("stale_mutations",   ColumnType.Integer64),
     ];
 
+    /// <summary>
+    /// One row per span of a relation's key space, in the ascending ordinal key order Kahuna's
+    /// router binary-searches — so what a reader sees is the order routing uses.
+    ///
+    /// <para><b>Most cells are nullable, and each null means something specific.</b> A null bound is
+    /// unbounded on that side, not an empty key. A null <c>leader</c> is <em>unknown</em>, not
+    /// "leaderless" — leadership here is a local belief, never a correctness gate. An <b>empty</b>
+    /// <c>replicas</c> string is legacy full replication, where every roster node hosts the
+    /// partition, not "no replicas". A null <c>probe_key</c> means the statement was the plural
+    /// all-spans form, which locates no single key.</para>
+    ///
+    /// <para><c>span</c> is a 1-based ordinal <em>within one result</em> and is explicitly not a
+    /// stable range identity: a split renumbers every span after it. <c>partition_id</c> is what
+    /// identifies the owner across two runs.</para>
+    ///
+    /// <para><c>start_key</c>/<c>end_key</c> are decoded for readability and may fall back to the
+    /// raw text when a bound does not fully decode, which is normal — a split point can land
+    /// mid-key. <c>raw_start_key</c>/<c>raw_end_key</c> are the encoded KV bounds verbatim and are
+    /// first-class columns for exactly that reason, not a debug detail.</para>
+    ///
+    /// <para><c>routing</c> describes what <em>this node</em> does. It is node-local unreplicated
+    /// state, so the same key space can read <c>key_range</c> here and <c>hash</c> on a node that
+    /// never opened the relation. That is not a fault to reconcile.</para>
+    /// </summary>
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowRangesSchema =
+    [
+        new("relation",        ColumnType.String),
+        new("key_space",       ColumnType.String),
+        new("routing",         ColumnType.String),
+        new("span",            ColumnType.Integer64),
+        new("start_key",       ColumnType.String),
+        new("end_key",         ColumnType.String),
+        new("raw_start_key",   ColumnType.String),
+        new("raw_end_key",     ColumnType.String),
+        new("partition_id",    ColumnType.Integer64),
+        new("generation",      ColumnType.Integer64),
+        new("leader",          ColumnType.String),
+        new("leader_is_local", ColumnType.Bool),
+        new("hosted_locally",  ColumnType.Bool),
+        new("replicas",        ColumnType.String),
+        new("probe_key",       ColumnType.String),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateTableSchema =
     [
         new("Table",        ColumnType.String),

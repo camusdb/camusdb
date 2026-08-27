@@ -49,6 +49,9 @@
    is matched as a plain identifier and validated in the parse action, so each stays usable as a
    table or column name. "owner" in particular is already a column name in the test corpus. */
 %token TVIEW TVIEWS TMATERIALIZED TREFRESH
+/* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
+   parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
+%token TQUALIFIED_INDEX
 
 %%
 
@@ -782,6 +785,39 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW VARIABLES [LIKE '<pattern>']");
             $$.n = new(NodeType.ShowVariables, $4.n, null, null, null, null, null, null, null);
+          }
+          /* RANGES, RANGE and ROW are matched as plain identifiers and validated in the action, so
+             all three stay usable as table and column names — "range" and "rows" in particular are
+             common enough that reserving them would be a real regression. The plural/singular word
+             and the presence of FOR ROW are paired here rather than accepted in any combination:
+             the four productions below are the only accepted shapes.
+
+             The FROM continuation keeps these distinct from SHOW VARIABLES (TSHOW TIDENTIFIER) and
+             from ENGINE STATS / CLUSTER SETTINGS (TSHOW TIDENTIFIER TIDENTIFIER) on one token of
+             lookahead. The two FROM TABLE productions differ only by the trailing FOR ROW clause,
+             which is a shift-versus-reduce decision one lookahead token settles — unlike two
+             productions of identical token shape, which would be a reduce/reduce conflict. */
+          | TSHOW TIDENTIFIER TFROM TTABLE any_identifier
+          {
+            RequireShowRangesWord($2.s, plural: true);
+            $$.n = new(NodeType.ShowRanges, $5.n, null, null, null, null, null, null, null);
+          }
+          | TSHOW TIDENTIFIER TFROM TINDEX TQUALIFIED_INDEX
+          {
+            RequireShowRangesWord($2.s, plural: true);
+            $$.n = QualifiedIndexRanges($5.s, null);
+          }
+          | TSHOW TIDENTIFIER TFROM TTABLE any_identifier TFOR TIDENTIFIER LPAREN in_value_list RPAREN
+          {
+            RequireShowRangesWord($2.s, plural: false);
+            RequireRowWord($7.s);
+            $$.n = new(NodeType.ShowRanges, $5.n, null, $9.n, null, null, null, null, null);
+          }
+          | TSHOW TIDENTIFIER TFROM TINDEX TQUALIFIED_INDEX TFOR TIDENTIFIER LPAREN in_value_list RPAREN
+          {
+            RequireShowRangesWord($2.s, plural: false);
+            RequireRowWord($7.s);
+            $$.n = QualifiedIndexRanges($5.s, $9.n);
           }
           ;
 

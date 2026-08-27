@@ -488,6 +488,67 @@ internal sealed class SelectStatementExecutor
                     return (database, schemaQuerier.ShowStatistics(table, statisticsView));
                 }
 
+            case NodeType.ShowRanges:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowRangesSchema;
+
+                    string rangesTarget = ast.leftAst!.yytext!;
+                    string? rangesIndex = ast.rightAst?.yytext;
+
+                    // A plain view has no key space of its own; its ranges are those of the tables
+                    // its body reads. Caught before the table open, which would otherwise reject a
+                    // read with "cannot be written to". Privilege first and through the view's own
+                    // check: nothing opens a view, so the chokepoint that guards every other
+                    // relation never runs for one, and naming a name as a view before checking the
+                    // grant would answer "does this object exist?" for a caller who may not read it.
+                    //
+                    // A materialized view is deliberately not caught here. It is a real relation
+                    // with a real store, so it is absent from Schema.Views and resolves below.
+                    if (database.Schema.Views.TryGetValue(rangesTarget, out ViewSchema? rangesView))
+                    {
+                        ViewAuthorization.Require(database, rangesTarget, rangesView, Privilege.Select);
+
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ViewDoesntExist,
+                            $"'{rangesTarget}' is a view and stores no rows, so it has no key space "
+                            + "of its own; ask for the ranges of the tables its definition reads");
+                    }
+
+                    TableDescriptor rangesTable =
+                        await context.TableOpener.Open(database, rangesTarget).ConfigureAwait(false);
+
+                    PinSchemaVersion(database, rangesTable, ticket.TxnState);
+
+                    // Read before returning the stream, so a failure to resolve the target or to
+                    // reach the range map surfaces as a statement error rather than mid-result.
+                    ShowRangesResult ranges;
+
+                    if (ast.extendedOne is null)
+                    {
+                        ranges = ShowRangesReader.Read(rangesTable, rangesIndex, database.Kahuna);
+                    }
+                    else
+                    {
+                        List<ColumnValue> forRowValues = [];
+                        CollectForRowValues(ast.extendedOne, ticket.Parameters, forRowValues);
+
+                        ObjectIdValue? probeRowId = null;
+
+                        // Only the table form needs a read: an index probe key is computed from the
+                        // values alone, while a row key is built from the stored row id.
+                        if (ShowRangesReader.TargetsRowSpace(rangesIndex))
+                            probeRowId = await ShowRangesReader
+                                .ResolveRowIdForTableProbeAsync(rangesTable, forRowValues, CancellationToken.None)
+                                .ConfigureAwait(false);
+
+                        ranges = ShowRangesReader.ReadForRow(
+                            rangesTable, rangesIndex, forRowValues, probeRowId, database.Kahuna);
+                    }
+
+                    return (database, schemaQuerier.ShowRanges(ranges));
+                }
+
             case NodeType.ShowCreateTable:
                 {
                     if (schemaOut is not null)
@@ -1217,6 +1278,40 @@ internal sealed class SelectStatementExecutor
     /// generation before the cut is entitled to finish against its snapshot, so failing its commit
     /// would turn a legal read into a spurious error.</para>
     /// </remarks>
+    /// <summary>
+    /// Flattens the left-leaning <c>ExprList</c> tree a <c>FOR ROW (…)</c> clause parses into, in
+    /// source order, evaluating each leaf against the statement's bind parameters.
+    ///
+    /// <para>The clause reuses the grammar's ordinary value list, so a leaf may be a literal or a
+    /// placeholder — which is what lets <c>FOR ROW (@id)</c> be prepared. A single value parses to
+    /// the leaf directly rather than to a one-element list, so the non-list case is not a special
+    /// case to guard but the base of the recursion.</para>
+    /// </summary>
+    private static void CollectForRowValues(
+        NodeAst? node,
+        Dictionary<string, ColumnValue>? parameters,
+        List<ColumnValue> values)
+    {
+        if (node is null)
+            return;
+
+        if (node.nodeType == NodeType.ExprList)
+        {
+            CollectForRowValues(node.leftAst, parameters, values);
+            CollectForRowValues(node.rightAst, parameters, values);
+            return;
+        }
+
+        values.Add(SqlExecutor.EvalExpr(node, EmptyRow, parameters));
+    }
+
+    /// <summary>
+    /// The row a <c>FOR ROW</c> value is evaluated against. There is no row: the clause admits
+    /// literals and placeholders only, and an identifier leaf resolves to nothing here so it fails
+    /// the value coercion with the same error any other unusable value gets.
+    /// </summary>
+    private static readonly Dictionary<string, ColumnValue> EmptyRow = new();
+
     internal static void PinSchemaVersion(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx)
     {
         RequireSnapshotWithinContentsGeneration(table, tx);

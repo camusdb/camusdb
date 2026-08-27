@@ -187,12 +187,48 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// </summary>
     public void InvalidatePlacement(string keySpace) => placementCache.TryRemove(keySpace, out _);
 
-    private TablePlacement BuildPlacement(string keySpace)
+    /// <summary>
+    /// Reads the placement of <paramref name="keySpace"/> without touching the planner's cache:
+    /// it neither serves a cached snapshot nor stores the one it builds, and it evicts nothing.
+    /// For introspection (<c>SHOW RANGES</c>), where reporting a layout up to
+    /// <see cref="PlacementCacheTtlMs"/> stale would be exactly the failure the reader is trying
+    /// to rule out, and where populating the cache would let inspection perturb planning.
+    ///
+    /// <para>Do not express this as <see cref="InvalidatePlacement"/> followed by
+    /// <see cref="GetPlacement"/>: that evicts the planner's entry as a side effect and still
+    /// leaves a fresh one behind. Both properties are the opposite of what is wanted here.</para>
+    ///
+    /// <para><paramref name="initialized"/> reports whether this node has applied the cluster's
+    /// meta partition. When it is false the returned placement is not a fact about the key space —
+    /// an empty descriptor list means "not known yet", not "no ranges" — and the caller must say so
+    /// rather than present the hash fallback as an answer. Standalone always reports true, because
+    /// a single node has nothing to wait for.</para>
+    ///
+    /// <para><b>Standalone is not short-circuited here, unlike in <see cref="GetPlacement"/>.</b>
+    /// A single node with key-range routing on really does divide its key spaces — the splitter is
+    /// not a cluster-only mechanism — so answering with <see cref="TablePlacement.Local"/>'s one
+    /// unbounded span would hide exactly what the reader asked about. The planner can afford that
+    /// shortcut because every span is local either way and its cost model reaches the same number;
+    /// an introspection statement cannot.</para>
+    ///
+    /// <para>Like <see cref="GetPlacement"/>, everything here is a node-local applied view and
+    /// advisory: leadership is a hint and the range map may lag a peer's.</para>
+    /// </summary>
+    public TablePlacement ReadPlacementUncached(string keySpace, out bool initialized)
+        => BuildPlacement(keySpace, out initialized);
+
+    private TablePlacement BuildPlacement(string keySpace) => BuildPlacement(keySpace, out _);
+
+    private TablePlacement BuildPlacement(string keySpace, out bool initialized)
     {
         string localEndpoint = Raft.GetLocalEndpoint();
 
         // Filtered form on purpose: the unfiltered call enumerates every registered key space.
         KahunaRangeMapResponse map = node.Kahuna.GetRangeMap(keySpace);
+
+        // A single node has no meta partition to catch up on, so there is nothing it could be
+        // waiting to learn — "not initialized" is a cluster condition only.
+        initialized = !isClusterMode || map.Initialized;
 
         KahunaKeySpaceRangesResponse? space = null;
         foreach (KahunaKeySpaceRangesResponse candidate in map.KeySpaces)
@@ -215,6 +251,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             spans = new(space!.Descriptors.Count);
             foreach (KahunaRangeDescriptorResponse descriptor in space.Descriptors)
                 spans.Add(BuildSpan(localEndpoint, descriptor.StartKey, descriptor.EndKey, descriptor.PartitionId, descriptor.Generation));
+
+            // Kahuna orders a key space's descriptors ascending by start key, unbounded first, and
+            // the router binary-searches them in that order. Nothing re-sorts them here, so a reader
+            // sees the order routing uses.
+
         }
         else
         {
@@ -231,6 +272,17 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     private PlacementSpan BuildSpan(string localEndpoint, string? startKey, string? endKey, int partitionId, long generation)
     {
+        // A single node leads and hosts every partition by definition, and has no replica set to
+        // report. Asking Raft would answer the same for hosting but may have no leader hint yet,
+        // which would render as "leader unknown" on a node that is provably the leader.
+        if (!isClusterMode)
+            return new PlacementSpan(
+                startKey, endKey, partitionId, generation,
+                LeaderEndpoint: localEndpoint,
+                ReplicaEndpoints: [],
+                LeaderIsLocal: true,
+                HostedLocally: true);
+
         bool hosted = Raft.HostsPartition(partitionId);
         string? leaderHint = Raft.GetPartitionLeaderHint(partitionId);
 

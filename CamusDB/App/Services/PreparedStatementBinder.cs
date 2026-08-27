@@ -65,7 +65,10 @@ public static class PreparedStatementBinder
         NodeType.ShowCreateMaterializedView or
         NodeType.ShowEngineStats or
         NodeType.ShowVariables or
-        NodeType.ShowClusterSettings;
+        NodeType.ShowClusterSettings or
+        // Preparable specifically so FOR ROW (@id) can be: the value list is an ordinary expression
+        // list, so its placeholders bind like any other statement's.
+        NodeType.ShowRanges;
 
     /// <summary>
     /// Parses <paramref name="sql"/>, checks it may be prepared, and builds the entry that both

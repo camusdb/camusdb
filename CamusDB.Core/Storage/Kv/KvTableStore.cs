@@ -1338,6 +1338,53 @@ public sealed class KvTableStore
     }
 
     /// <summary>
+    /// Point-reads a unique index entry <b>outside any transaction</b>: it acquires no lock, folds
+    /// nothing into a read set, and starts no session. Returns the row id, or null when the key is
+    /// absent.
+    ///
+    /// <para>For introspection only — today, resolving a primary key to its row id so
+    /// <c>SHOW RANGE … FOR ROW</c> can name the row's KV key. Never use it for DML or for anything
+    /// whose result a transaction may act on: it reads at the advisory read-committed context
+    /// (<see cref="HLCTimestamp.Zero"/>), so it does not see the caller's own uncommitted writes and
+    /// gives no isolation guarantee at all.</para>
+    ///
+    /// <para><b>The lock-free part is the point, not an optimization.</b> Going through
+    /// <see cref="LookupUnique"/> instead would take a shared point lock under serializable
+    /// read-write, and that observation would join the transaction's read set — so an inspection
+    /// statement could decide whether the surrounding transaction commits. A <c>SHOW</c> that can
+    /// abort its caller's transaction is a bug users would spend a long time not believing.</para>
+    ///
+    /// <para>Ancestry is still walked, so a branched database answers for rows it inherited rather
+    /// than reporting them missing.</para>
+    /// </summary>
+    internal async Task<ObjectIdValue?> LookupUniqueUntracked(
+        string indexId,
+        CompositeColumnValue key,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryBuildUniqueIndexKey(indexId, key, out string kvKey))
+            return null;
+
+        BranchKvValue idx = await ProbeRaw(HLCTimestamp.Zero, HLCTimestamp.Zero, kvKey, cancellationToken).ConfigureAwait(false);
+        if (idx.Kind == BranchKvKind.Tombstone)
+            return null;
+
+        if (idx.HasPayload)
+            return RowIdFromPayload(idx.Payload.Span);
+
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            BranchMetrics.RecordAncestorProbe();
+            string ancestorKvKey = ancestorStore.BuildUniqueIndexKey(indexId, key);
+            idx = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
+            if (idx.Kind == BranchKvKind.Tombstone) return null;
+            if (idx.HasPayload) return RowIdFromPayload(idx.Payload.Span);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Point-read a unique index entry for a covering (index-only) lookup, returning both the rowId
     /// and the stored/payload (INCLUDE) tuple bytes from the entry value. Mirrors
     /// <see cref="LookupUnique"/> exactly for locking, snapshot, and ancestry semantics; the only

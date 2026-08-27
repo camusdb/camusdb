@@ -2455,4 +2455,223 @@ public class TestSQLParser
     }
 
     #endregion
+
+    #region SHOW RANGES
+
+    private static NodeAst ParseShowRanges(string sql)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(sql);
+        Assert.AreEqual(NodeType.ShowRanges, ast.nodeType);
+        return ast;
+    }
+
+    [Test]
+    public void ShowRanges_FromTable_ParsesRelationOnly()
+    {
+        NodeAst ast = ParseShowRanges("SHOW RANGES FROM TABLE users");
+
+        Assert.AreEqual("users", ast.leftAst!.yytext);
+        Assert.IsNull(ast.rightAst, "A table target carries no index name");
+        Assert.IsNull(ast.extendedOne, "The plural form carries no FOR ROW list");
+    }
+
+    [Test]
+    public void ShowRanges_FromIndex_SplitsQualifiedNameOnTheAt()
+    {
+        NodeAst ast = ParseShowRanges("SHOW RANGES FROM INDEX users@by_email");
+
+        Assert.AreEqual("users", ast.leftAst!.yytext);
+        Assert.AreEqual("by_email", ast.rightAst!.yytext);
+        Assert.IsNull(ast.extendedOne);
+    }
+
+    [Test]
+    public void ShowRange_FromTable_ForRow_CarriesTheValueList()
+    {
+        NodeAst ast = ParseShowRanges("SHOW RANGE FROM TABLE users FOR ROW (1500)");
+
+        Assert.AreEqual("users", ast.leftAst!.yytext);
+        Assert.IsNull(ast.rightAst);
+        Assert.IsNotNull(ast.extendedOne);
+        Assert.AreEqual(NodeType.Integer, ast.extendedOne!.nodeType);
+        Assert.AreEqual("1500", ast.extendedOne.yytext);
+    }
+
+    [Test]
+    public void ShowRange_FromIndex_ForRow_CarriesBothNamesAndTheValues()
+    {
+        NodeAst ast = ParseShowRanges("SHOW RANGE FROM INDEX users@by_email FOR ROW (\'a@example.com\')");
+
+        Assert.AreEqual("users", ast.leftAst!.yytext);
+        Assert.AreEqual("by_email", ast.rightAst!.yytext);
+        Assert.AreEqual(NodeType.String, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void ShowRange_MultipleValues_BuildsAnExprList()
+    {
+        NodeAst ast = ParseShowRanges("SHOW RANGE FROM INDEX t@i FOR ROW (1, \'two\', 3)");
+
+        Assert.AreEqual(NodeType.ExprList, ast.extendedOne!.nodeType);
+    }
+
+    [Test]
+    public void ShowRanges_PrimaryKeyAliasSpelling_Parses()
+    {
+        // The lexer must match "users@users_pkey" as one token; the alias itself is resolved later.
+        NodeAst ast = ParseShowRanges("SHOW RANGES FROM INDEX users@users_pkey");
+
+        Assert.AreEqual("users", ast.leftAst!.yytext);
+        Assert.AreEqual("users_pkey", ast.rightAst!.yytext);
+    }
+
+    [Test]
+    public void ShowRanges_InternalPrimaryKeyName_Parses()
+    {
+        // "~pk" is the name SHOW INDEXES prints, so it must be writable here. '~' is not an
+        // identifier character, which is why the scanner rule admits it on the index half only.
+        NodeAst ast = ParseShowRanges("SHOW RANGES FROM INDEX users@~pk");
+
+        Assert.AreEqual("users", ast.leftAst!.yytext);
+        Assert.AreEqual("~pk", ast.rightAst!.yytext);
+    }
+
+    [Test]
+    public void ShowRanges_TildeIsNotAcceptedOnTheRelationHalf()
+    {
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SHOW RANGES FROM INDEX ~users@pk"));
+    }
+
+    [Test]
+    public void ShowRanges_QualifiedIndexCollectsNoPlaceholders()
+    {
+        // The whole point of the scanner rule: without it "@users_pkey" lexes as a placeholder and
+        // a prepared execution would demand a bind value for a parameter nobody wrote.
+        NodeAst ast = SQLParserProcessor.Parse("SHOW RANGES FROM INDEX users@users_pkey");
+
+        Assert.IsEmpty(PlaceholderCollector.Collect(ast));
+    }
+
+    [Test]
+    public void ShowRange_ForRowPlaceholder_IsCollected()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW RANGE FROM TABLE users FOR ROW (@id)");
+
+        CollectionAssert.AreEqual(new[] { "@id" }, PlaceholderCollector.Collect(ast));
+    }
+
+    [Test]
+    public void ShowRange_QualifiedIndexPlusForRowPlaceholder_CollectsOnlyTheRealParameter()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "SHOW RANGE FROM INDEX users@users_pkey FOR ROW (@id)");
+
+        CollectionAssert.AreEqual(new[] { "@id" }, PlaceholderCollector.Collect(ast));
+    }
+
+    [Test]
+    public void ShowRanges_PluralWithForRow_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SHOW RANGES FROM TABLE users FOR ROW (1)"))!;
+
+        StringAssert.Contains("SHOW RANGES FROM TABLE", ex.Message);
+    }
+
+    [Test]
+    public void ShowRange_SingularWithoutForRow_IsRejected()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SHOW RANGE FROM TABLE users"))!;
+
+        StringAssert.Contains("FOR ROW", ex.Message);
+    }
+
+    [Test]
+    public void ShowRanges_MisspelledLeadingWord_IsRejected()
+    {
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SHOW RANGERS FROM TABLE users"));
+    }
+
+    [Test]
+    public void ShowRanges_WrongWordInPlaceOfRow_IsRejected()
+    {
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SHOW RANGE FROM TABLE users FOR TUPLE (1)"));
+    }
+
+    [Test]
+    public void ShowRanges_EscapedIdentifiersInTheQualifiedName_DoNotParse()
+    {
+        // Documented gap rather than a silent misparse: the token is unquoted-only.
+        Assert.Throws<CamusDBException>(() =>
+            SQLParserProcessor.Parse("SHOW RANGES FROM INDEX `users`@`by_email`"));
+    }
+
+    #endregion
+
+    #region SHOW RANGES must not take words out of circulation
+
+    [Test]
+    public void RangeAndRow_StillUsableAsTableNames()
+    {
+        Assert.AreEqual("range", SelectFromTableName(SQLParserProcessor.Parse("SELECT * FROM range")));
+        Assert.AreEqual("ranges", SelectFromTableName(SQLParserProcessor.Parse("SELECT * FROM ranges")));
+        Assert.AreEqual("row", SelectFromTableName(SQLParserProcessor.Parse("SELECT * FROM row")));
+    }
+
+    [Test]
+    public void RangeAndRow_StillUsableAsColumnNames()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT range, ranges, row FROM t WHERE range = 1");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+    }
+
+    [Test]
+    public void RangeAndRow_StillUsableAsAliases()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SELECT a AS range, b AS row FROM t");
+        Assert.AreEqual(NodeType.Select, ast.nodeType);
+    }
+
+    [Test]
+    public void RangeAndRow_StillUsableAsColumnDeclarations()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (range int64, ranges string, row bool)");
+        Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
+    }
+
+    #endregion
+
+    #region The qualified-index token must not disturb placeholders
+
+    [Test]
+    public void Placeholders_StillBindAfterTheQualifiedIndexRule()
+    {
+        CollectionAssert.AreEqual(
+            new[] { "@p" },
+            PlaceholderCollector.Collect(SQLParserProcessor.Parse("SELECT * FROM t WHERE x = @p")));
+
+        CollectionAssert.AreEqual(
+            new[] { "@n" },
+            PlaceholderCollector.Collect(SQLParserProcessor.Parse("SELECT * FROM t LIMIT @n")));
+
+        CollectionAssert.AreEqual(
+            new[] { "@a", "@b" },
+            PlaceholderCollector.Collect(SQLParserProcessor.Parse("INSERT INTO t (a, b) VALUES (@a, @b)")));
+    }
+
+    [Test]
+    public void Placeholder_ImmediatelyAfterAnIdentifier_IsStillTwoTokensWhereItAlwaysWas()
+    {
+        // The new rule fires only on identifier@identifier. An operator or space before the '@'
+        // leaves the placeholder alone, which is every existing use.
+        CollectionAssert.AreEqual(
+            new[] { "@p" },
+            PlaceholderCollector.Collect(SQLParserProcessor.Parse("SELECT * FROM t WHERE name=@p")));
+    }
+
+    #endregion
 }
