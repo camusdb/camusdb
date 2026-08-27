@@ -723,6 +723,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             RangeSplitSettleWindowMs = 30_000,
             RangeSplitIndivisibleCooldownMs = 60_000,
             RangeMergeMinSize = 7,
+            RangeMoveSettleTimeoutMs = 4_000,
             EnableLoadReports = true,
         };
 
@@ -739,6 +740,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(built.RangeSplitSettleWindow, Is.EqualTo(TimeSpan.FromMilliseconds(30_000)));
         Assert.That(built.RangeSplitIndivisibleCooldown, Is.EqualTo(TimeSpan.FromMilliseconds(60_000)));
         Assert.That(built.RangeMergeMinSize, Is.EqualTo(7));
+        Assert.That(built.RangeMoveSettleTimeout, Is.EqualTo(TimeSpan.FromMilliseconds(4_000)));
         Assert.That(built.EnableLoadReports, Is.True);
     }
 
@@ -760,6 +762,8 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(built.RangeSplitSettleWindow, Is.EqualTo(TimeSpan.FromSeconds(10)));
         Assert.That(built.RangeSplitIndivisibleCooldown, Is.EqualTo(TimeSpan.FromMinutes(5)));
         Assert.That(built.RangeMergeMinSize, Is.EqualTo(10));
+        Assert.That(built.RangeMoveSettleTimeout, Is.EqualTo(TimeSpan.FromSeconds(10)),
+            "the drain wait must inherit Kahuna's own default; a shorter one refuses every attempt under load");
         Assert.That(built.EnableLoadReports, Is.False);
     }
 
@@ -772,6 +776,18 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
 
         Assert.That(built.RangeSplitLoadThreshold, Is.EqualTo(0));
         Assert.That(built.RangeSplitThreshold, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void NegativeMoveSettleTimeout_IsRejected()
+    {
+        // 0 is legitimate — it means "do not wait, refuse an attempt that meets an unsettled intent".
+        Assert.DoesNotThrow(() => new KahunaOptionsConfig { RangeMoveSettleTimeoutMs = 0 }.Validate());
+
+        Assert.That(
+            Assert.Throws<CamusDBException>(
+                () => new KahunaOptionsConfig { RangeMoveSettleTimeoutMs = -1 }.Validate())!.Message,
+            Does.Contain("range_move_settle_timeout_ms"));
     }
 
     [Test]

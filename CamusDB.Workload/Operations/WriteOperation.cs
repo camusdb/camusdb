@@ -17,7 +17,9 @@ namespace CamusDB.Workload.Operations;
 /// Optimistic): BEGIN, read each target row's balance+version, then UPDATE it with a bounded balance change and
 /// <c>version = version + 1</c>, and COMMIT — success is counted only after the commit returns. All
 /// target rows come from the worker's own <see cref="WorkerShard"/>, so two workers never touch the
-/// same row and the baseline is structurally conflict-free. The begin/read/update/commit spans are
+/// same row and the baseline is structurally conflict-free. A shard is a stride over the row index, so
+/// on a multi-table dataset one transaction can update rows in different tables — each row is written
+/// in the table <see cref="Dataset.TableOf"/> assigns it. The begin/read/update/commit spans are
 /// timed separately so the report can attribute where a write spends time (the prior investigation
 /// found commit — durable WAL — dominates). A conflict here is not retried into a better number; it is
 /// classified and surfaced so the run can be invalidated per the non-conflicting contract.
@@ -112,9 +114,11 @@ public sealed class WriteOperation : IWriteOperation
             {
                 (string id, _, _, _) = _dataset.RowFor(rowIndex);
 
+                string table = _dataset.TableOf(rowIndex);
+
                 long balance;
                 using (CamusCommand read = conn.CreateSelectCommand(
-                    "SELECT balance, version FROM " + Dataset.TableName + " WHERE id = @id"))
+                    $"SELECT balance, version FROM {table} WHERE id = @id"))
                 {
                     read.Transaction = tx;
                     read.Parameters.Add("@id", ColumnType.Id, id);
@@ -127,7 +131,7 @@ public sealed class WriteOperation : IWriteOperation
 
                 long newBalance = balance + BoundedDelta(rowIndex);
                 using (CamusCommand update = conn.CreateCamusCommand(
-                    "UPDATE " + Dataset.TableName + " SET balance = @b, version = version + 1 WHERE id = @id"))
+                    $"UPDATE {table} SET balance = @b, version = version + 1 WHERE id = @id"))
                 {
                     update.Transaction = tx;
                     update.Parameters.Add("@b", ColumnType.Integer64, newBalance);

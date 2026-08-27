@@ -82,6 +82,7 @@ public class TestConfigReader
             "  range_split_settle_window_ms: 30000",
             "  range_split_indivisible_cooldown_ms: 60000",
             "  range_merge_min_size: 7",
+            "  range_move_settle_timeout_ms: 4000",
             "  enable_load_reports: true");
 
         ConfigDefinition config = new ConfigReader().Read(yml);
@@ -95,6 +96,7 @@ public class TestConfigReader
         Assert.AreEqual(30_000, config.Kahuna.RangeSplitSettleWindowMs);
         Assert.AreEqual(60_000, config.Kahuna.RangeSplitIndivisibleCooldownMs);
         Assert.AreEqual(7, config.Kahuna.RangeMergeMinSize);
+        Assert.AreEqual(4_000, config.Kahuna.RangeMoveSettleTimeoutMs);
         Assert.AreEqual(true, config.Kahuna.EnableLoadReports);
     }
 

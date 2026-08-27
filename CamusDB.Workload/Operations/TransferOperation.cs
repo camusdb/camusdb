@@ -19,6 +19,12 @@ namespace CamusDB.Workload.Operations;
 /// workers contend for the same rows — real write/write conflict, which the operation absorbs with a
 /// bounded retry from a fresh BEGIN rather than surfacing (a lock conflict here is expected, not a bug).
 ///
+/// <para>On a multi-table dataset the operation can be asked to make every transfer <b>cross-table</b>:
+/// the second row is drawn from a different table than the first, so each transaction writes to two
+/// key spaces at once and commits across two partitions. That is the shape that keeps every partition
+/// loaded, and — under key-range routing — keeps every table's range hot enough to be a split
+/// candidate. The conservation invariant is unchanged; it just sums over all the tables.</para>
+///
 /// <para>The point is the invariant: because every transfer conserves total balance and a transaction
 /// is atomic, <c>SUM(balance)</c> must be unchanged after the run — even across faults and
 /// indeterminate commits, since an atomic transfer either applies both legs or neither. A changed sum
@@ -34,6 +40,7 @@ public sealed class TransferOperation : IWriteOperation
     private readonly ConnectionSet _connections;
     private readonly Dataset _dataset;
     private readonly long _rows;
+    private readonly bool _crossTable;
     private readonly int _maxRetries;
     private readonly Metrics.TransferLedger? _ledger;
     private long _committedRows;
@@ -47,11 +54,15 @@ public sealed class TransferOperation : IWriteOperation
         CamusLocking locking = CamusLocking.Optimistic,
         CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
         int maxRetries = 10,
-        Metrics.TransferLedger? ledger = null)
+        Metrics.TransferLedger? ledger = null,
+        bool crossTable = false)
     {
         _connections = connections;
         _dataset = dataset;
         _rows = Math.Max(2, rows);
+        // Asking for cross-table transfers on a single-table dataset would leave no second table to
+        // aim at, so the flag only takes effect when there is one.
+        _crossTable = crossTable && dataset.Tables > 1;
         _maxRetries = Math.Max(1, maxRetries);
         _ledger = ledger;
         _options = new CamusTransactionOptions
@@ -173,10 +184,11 @@ public sealed class TransferOperation : IWriteOperation
         CamusConnection conn, CamusTransaction tx, long rowIndex, long delta, Timing t, CancellationToken ct)
     {
         (string id, _, _, _) = _dataset.RowFor(rowIndex);
+        string table = _dataset.TableOf(rowIndex);
 
         long balance;
         using (CamusCommand read = conn.CreateSelectCommand(
-            "SELECT balance, version FROM " + Dataset.TableName + " WHERE id = @id"))
+            $"SELECT balance, version FROM {table} WHERE id = @id"))
         {
             read.Transaction = tx;
             read.Parameters.Add("@id", ColumnType.Id, id);
@@ -188,7 +200,7 @@ public sealed class TransferOperation : IWriteOperation
         t.ReadMs += t.Tick();
 
         using (CamusCommand update = conn.CreateCamusCommand(
-            "UPDATE " + Dataset.TableName + " SET balance = @b, version = version + 1 WHERE id = @id"))
+            $"UPDATE {table} SET balance = @b, version = version + 1 WHERE id = @id"))
         {
             update.Transaction = tx;
             update.Parameters.Add("@b", ColumnType.Integer64, balance + delta);
@@ -255,6 +267,20 @@ public sealed class TransferOperation : IWriteOperation
     {
         // Multiplicative hash spread across the keyspace; nudge off any self-collision.
         ulong mixed = unchecked((ulong)baseRowIndex * 0x9E3779B97F4A7C15UL + 0xD1B54A32D192ED03UL);
+
+        if (_crossTable)
+        {
+            // Land in a table other than the source's. The +1 makes the offset non-zero before the
+            // modulo, so the source table can never be selected, and the row inside the chosen table
+            // comes from the untouched high bits of the same hash.
+            int tables = _dataset.Tables;
+            int fromTable = _dataset.TableIndexOf(fromIndex);
+            int toTable = (int)((fromTable + 1 + (long)(mixed % (ulong)(tables - 1))) % tables);
+            long crossed = _dataset.RowIndexInTable(toTable, mixed >> 20);
+            // Distinct tables means distinct rows, so no self-collision is possible here.
+            return crossed;
+        }
+
         long to = (long)(mixed % (ulong)_rows);
         if (to == fromIndex)
             to = (to + 1) % _rows;

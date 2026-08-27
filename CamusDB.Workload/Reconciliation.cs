@@ -70,14 +70,30 @@ public static class Reconciliation
     /// reconciliation measures only this run's increments, not the accumulation of prior runs on the
     /// same seeded dataset.</summary>
     public static Task<long> ReadVersionSumAsync(
-        CamusConnection conn, CancellationToken ct, TimeSpan? retryBudget = null)
-        => ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct, retryBudget);
+        CamusConnection conn, Dataset dataset, CancellationToken ct, TimeSpan? retryBudget = null)
+        => AggregateOverTablesAsync(conn, dataset, "SUM(version)", ct, retryBudget);
 
-    /// <summary>Reads the current <c>SUM(balance)</c> baseline; captured once before a bank-transfer run
+    /// <summary>Reads the current <c>SUM(balance)</c> baseline; captured once before a transfer run
     /// so the conservation invariant measures against the pre-run total.</summary>
     public static Task<long> ReadBalanceSumAsync(
-        CamusConnection conn, CancellationToken ct, TimeSpan? retryBudget = null)
-        => ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct, retryBudget);
+        CamusConnection conn, Dataset dataset, CancellationToken ct, TimeSpan? retryBudget = null)
+        => AggregateOverTablesAsync(conn, dataset, "SUM(balance)", ct, retryBudget);
+
+    /// <summary>
+    /// Sums one aggregate over every table in the dataset. A multi-table dataset has no single table to
+    /// aggregate, and the invariants are whole-dataset invariants — a transfer between two tables
+    /// conserves the total, not either table's own sum — so each table is read and the results are
+    /// added. Each read carries the full retry budget, because the reason a post-fault aggregate is
+    /// slow (one node still draining) applies to every table equally.
+    /// </summary>
+    private static async Task<long> AggregateOverTablesAsync(
+        CamusConnection conn, Dataset dataset, string aggregate, CancellationToken ct, TimeSpan? retryBudget)
+    {
+        long total = 0;
+        foreach (string table in dataset.TableNames)
+            total += await ScalarAsync(conn, $"SELECT {aggregate} FROM {table}", ct, retryBudget).ConfigureAwait(false);
+        return total;
+    }
 
     /// <summary>
     /// The inclusive band of acceptable <c>SUM(version)</c> deltas. An indeterminate transaction
@@ -113,13 +129,13 @@ public static class Reconciliation
     /// kills nodes expects them. Without the flag the strict non-conflicting contract applies.
     /// </param>
     public static async Task<ReconciliationResult> VerifyAsync(
-        CamusConnection conn, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
+        CamusConnection conn, Dataset dataset, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct,
         bool bankMode = false, long baselineBalanceSum = 0, TimeSpan? retryBudget = null)
     {
-        long persistedSum = await ScalarAsync(conn, $"SELECT SUM(version) FROM {Dataset.TableName}", ct, retryBudget).ConfigureAwait(false);
-        long rowCount = await ScalarAsync(conn, $"SELECT COUNT(*) FROM {Dataset.TableName}", ct, retryBudget).ConfigureAwait(false);
+        long persistedSum = await AggregateOverTablesAsync(conn, dataset, "SUM(version)", ct, retryBudget).ConfigureAwait(false);
+        long rowCount = await AggregateOverTablesAsync(conn, dataset, "COUNT(*)", ct, retryBudget).ConfigureAwait(false);
 
         long persistedDelta = persistedSum - baselineVersionSum;
         (long expectedMin, long expectedMax) = VersionDeltaBand(committedRowWrites, indeterminateTxns, writesPerTransaction);
@@ -129,12 +145,13 @@ public static class Reconciliation
                           && metrics.Started == metrics.Completed + metrics.Failed;
         bool noConflicts = metrics.Conflicts == 0;
 
-        // Bank-transfer atomicity invariant: every transfer conserves total balance and commits
-        // atomically, so SUM(balance) must be unchanged. This holds across faults and indeterminate
+        // Transfer atomicity invariant: every transfer conserves total balance and commits
+        // atomically, so SUM(balance) over the whole dataset must be unchanged — including a transfer
+        // whose two legs land in different tables. This holds across faults and indeterminate
         // commits (an atomic transfer applies both legs or neither), so a changed sum is a genuine
         // atomicity break — never waived. In accounts mode balances change by design, so it is skipped.
         long balanceFinal = bankMode
-            ? await ScalarAsync(conn, $"SELECT SUM(balance) FROM {Dataset.TableName}", ct, retryBudget).ConfigureAwait(false)
+            ? await AggregateOverTablesAsync(conn, dataset, "SUM(balance)", ct, retryBudget).ConfigureAwait(false)
             : 0;
         bool balanceConserved = !bankMode || balanceFinal == baselineBalanceSum;
 
@@ -220,7 +237,7 @@ public static class Reconciliation
     /// as "could not verify", not lost as "crashed".
     /// </summary>
     public static async Task<ReconciliationResult> VerifyOrInconclusiveAsync(
-        CamusConnection conn, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
+        CamusConnection conn, Dataset dataset, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct, bool bankMode, long baselineBalanceSum,
         TimeSpan? retryBudget = null)
@@ -228,7 +245,7 @@ public static class Reconciliation
         long startedAt = Stopwatch.GetTimestamp();
         try
         {
-            return await VerifyAsync(conn, metrics, baselineVersionSum, committedRowWrites, indeterminateTxns,
+            return await VerifyAsync(conn, dataset, metrics, baselineVersionSum, committedRowWrites, indeterminateTxns,
                 writesPerTransaction, expectFaults, expectedRows, ct, bankMode, baselineBalanceSum,
                 retryBudget).ConfigureAwait(false);
         }

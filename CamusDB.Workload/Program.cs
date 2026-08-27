@@ -58,15 +58,38 @@ public static class Program
 
     private static async Task<int> RunInitAsync(InitOptions o, CancellationToken ct)
     {
-        Dataset dataset = new(o.Seed, o.Rows, o.PayloadBytes);
+        if (DatasetShapeError(o) is string shapeError)
+        {
+            Console.Error.WriteLine(shapeError);
+            return 2;
+        }
+
+        Dataset dataset = new(o.Seed, o.Rows, o.PayloadBytes, o.Tables);
         await using CamusConnection conn = await OpenSingleAsync(o, ct).ConfigureAwait(false);
 
         Console.WriteLine($"Ensuring schema for database '{o.Database}' (fingerprint {dataset.Fingerprint()})...");
         await dataset.EnsureSchemaAsync(conn, ct).ConfigureAwait(false);
-        Console.WriteLine($"Seeding {o.Rows} rows (batch {o.Batch})...");
+        Console.WriteLine($"Seeding {o.Rows} rows over {dataset.Tables} table(s) (batch {o.Batch})...");
         await dataset.SeedAsync(conn, o.Batch, ct).ConfigureAwait(false);
         Console.WriteLine("Init complete.");
         return 0;
+    }
+
+    /// <summary>
+    /// The message for a dataset shape that cannot be seeded, or null when the shape is sound. A table
+    /// per row is the hard ceiling: a table with no rows is created, never read, and never splits, so
+    /// the run would quietly test less than it claims. Checked by both verbs because <c>init</c> writes
+    /// the schema the later <c>run</c> depends on.
+    /// </summary>
+    private static string? DatasetShapeError(CommonOptions o)
+    {
+        if (o.Tables < 1)
+            return $"--tables must be >= 1 (got {o.Tables}).";
+        if (o.Rows < 1)
+            return $"--rows must be >= 1 (got {o.Rows}).";
+        if (o.Tables > o.Rows)
+            return $"--tables ({o.Tables}) cannot exceed --rows ({o.Rows}); every table must hold at least one row.";
+        return null;
     }
 
     private static async Task<int> RunWorkloadAsync(RunOptions o, CancellationToken ct)
@@ -86,19 +109,34 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return 2;
         }
-        if (o.Workload is not ("accounts" or "bank"))
+        if (o.Workload is not ("accounts" or "bank" or "fanout"))
         {
-            Console.Error.WriteLine($"--workload must be accounts or bank (got '{o.Workload}').");
+            Console.Error.WriteLine($"--workload must be accounts, bank or fanout (got '{o.Workload}').");
             return 2;
         }
-        bool bank = o.Workload == "bank";
+        if (DatasetShapeError(o) is string shapeError)
+        {
+            Console.Error.WriteLine(shapeError);
+            return 2;
+        }
+        if (o.Workload == "fanout" && o.Tables < 2)
+        {
+            Console.Error.WriteLine(
+                $"--workload fanout moves each transfer between two different tables, so it needs --tables >= 2 (got {o.Tables}).");
+            return 2;
+        }
+
+        // Both transfer shapes conserve SUM(balance) and both retry a conflicted transfer, so they take
+        // the same reconciliation treatment; only the choice of the second row differs.
+        bool transfers = o.Workload is "bank" or "fanout";
+        bool crossTable = o.Workload == "fanout";
         if (Directory.Exists(o.Output))
         {
             Console.Error.WriteLine($"Output directory already exists: {o.Output}. Refusing to overwrite.");
             return 2;
         }
 
-        Dataset dataset = new(o.Seed, o.Rows, o.PayloadBytes);
+        Dataset dataset = new(o.Seed, o.Rows, o.PayloadBytes, o.Tables);
 
         // Setup (never measured). Capture the SUM(version) baseline here so reconciliation measures only
         // this run's increments, even when the dataset was already written by a previous run.
@@ -117,24 +155,27 @@ public static class Program
                 return 2;
             }
 
-            baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, ct).ConfigureAwait(false);
-            if (bank)
-                baselineBalanceSum = await Reconciliation.ReadBalanceSumAsync(setup, ct).ConfigureAwait(false);
+            baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, dataset, ct).ConfigureAwait(false);
+            if (transfers)
+                baselineBalanceSum = await Reconciliation.ReadBalanceSumAsync(setup, dataset, ct).ConfigureAwait(false);
         }
 
         ConnectionSettings settings = new(locking, isolation, o.NoAutoPrepare, o.RequestTimeout);
         await using ConnectionSet connections =
             await ConnectionSet.OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, settings, ct).ConfigureAwait(false);
 
-        // The bank transfer contends across the whole keyspace and conserves SUM(balance); the accounts
+        // The transfer shapes contend across the whole keyspace and conserve SUM(balance); the accounts
         // write stays shard-disjoint and conflict-free. Both report as writes, so scheduling and metrics
-        // are identical either way.
+        // are identical either way. Fanout differs from bank only in where the second leg lands: always
+        // in another table, so every transaction spans two key spaces and the load reaches every
+        // partition instead of the one that owns a single table.
         // The transfer ledger journals every terminal transfer attempt so a conservation deficit can be
-        // attributed to exact rows and moments; see TransferLedger. Only the bank workload keeps one.
-        Metrics.TransferLedger? transferLedger = bank ? new Metrics.TransferLedger() : null;
+        // attributed to exact rows and moments; see TransferLedger. Only a transfer workload keeps one.
+        Metrics.TransferLedger? transferLedger = transfers ? new Metrics.TransferLedger() : null;
 
-        IWriteOperation writeOperation = bank
-            ? new TransferOperation(connections, dataset, o.Rows, locking, isolation, ledger: transferLedger)
+        IWriteOperation writeOperation = transfers
+            ? new TransferOperation(
+                connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable)
             : new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation);
         OperationDispatcher dispatcher = new(
             new ReadOperation(connections, dataset),
@@ -144,8 +185,9 @@ public static class Program
         TimeSpan measure = DurationParser.Parse(o.Duration);
         TimeSpan drain = DurationParser.Parse(o.Drain);
 
-        Console.WriteLine($"Running {o.Mode}-loop workload: {o.ReadPercent}/{o.WritePercent} read/write, " +
-                          $"{o.Workers} workers over {o.Connections} connections, warmup {warmup}, measure {measure}.");
+        Console.WriteLine($"Running {o.Mode}-loop {o.Workload} workload: {o.ReadPercent}/{o.WritePercent} read/write, " +
+                          $"{o.Workers} workers over {o.Connections} connections, {o.Rows} rows over " +
+                          $"{dataset.Tables} table(s), warmup {warmup}, measure {measure}.");
 
         RunMetrics metrics;
         IReadOnlyList<IntervalRow> intervals;
@@ -205,9 +247,9 @@ public static class Program
             await using CamusConnection verify = await OpenSingleAsync(o, ct).ConfigureAwait(false);
             reconciliation = await Reconciliation
                 .VerifyOrInconclusiveAsync(
-                    verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
+                    verify, dataset, metrics, baselineVersionSum, writeOperation.CommittedRows,
                     writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
-                    bankMode: bank, baselineBalanceSum: baselineBalanceSum,
+                    bankMode: transfers, baselineBalanceSum: baselineBalanceSum,
                     retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)))
                 .ConfigureAwait(false);
         }
@@ -310,6 +352,8 @@ public static class Program
         Seed: o.Seed,
         Rows: o.Rows,
         PayloadBytes: o.PayloadBytes,
+        Tables: dataset.Tables,
+        WorkloadKind: o.Workload,
         Workers: o.Workers,
         Connections: o.Connections,
         TargetOps: o.TargetOps,

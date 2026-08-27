@@ -26,8 +26,11 @@ public abstract class CommonOptions
     [Option("seed", Default = 1847UL, HelpText = "Deterministic seed for ids, payloads, and operation selection.")]
     public ulong Seed { get; set; }
 
-    [Option("rows", Default = 100_000L, HelpText = "Number of seeded rows in workload_accounts.")]
+    [Option("rows", Default = 100_000L, HelpText = "Number of seeded rows across all workload tables.")]
     public long Rows { get; set; }
+
+    [Option("tables", Default = 1, HelpText = "Number of workload tables the rows are spread over. 1 (default) uses workload_accounts; more use workload_accounts_00.. and put the dataset on every partition. Must be the same for init and run, and must not exceed --rows.")]
+    public int Tables { get; set; }
 
     [Option("payload-bytes", Default = 256, HelpText = "Size of the deterministic payload string per row.")]
     public int PayloadBytes { get; set; }
@@ -111,7 +114,7 @@ public sealed class RunOptions : CommonOptions
     [Option("reconcile-timeout", Default = 600, HelpText = "Seconds reconciliation keeps retrying its aggregate reads while the cluster is still settling, before reporting 'could not verify'. Post-measurement only; it never extends the measured window.")]
     public int ReconcileTimeout { get; set; }
 
-    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free) or bank (contended transfers with a conserved SUM(balance) invariant).")]
+    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), or fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2).")]
     public string Workload { get; set; } = "accounts";
 }
 

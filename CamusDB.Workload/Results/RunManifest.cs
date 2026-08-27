@@ -13,7 +13,9 @@ namespace CamusDB.Workload.Results;
 /// is operator-supplied because the client cannot observe it; the fingerprint and seed tie the run to
 /// the exact seeded data. Locking/isolation/auto-prepare/timeout and <c>ExpectFaults</c> are recorded
 /// because runs under different concurrency-control or fault-tolerance settings are not comparable —
-/// in particular, an <c>ExpectFaults</c> run had validity waivers active.
+/// in particular, an <c>ExpectFaults</c> run had validity waivers active. The table count and the
+/// workload kind are recorded for the same reason and because the run artifacts need them to be read:
+/// the transfer ledger names rows by index, and only the table count says which table an index is in.
 /// </summary>
 public sealed record RunManifest(
     string ToolVersion,
@@ -25,6 +27,8 @@ public sealed record RunManifest(
     ulong Seed,
     long Rows,
     int PayloadBytes,
+    int Tables,
+    string WorkloadKind,
     int Workers,
     int Connections,
     int TargetOps,

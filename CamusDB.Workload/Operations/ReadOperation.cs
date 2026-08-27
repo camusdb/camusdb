@@ -16,21 +16,25 @@ namespace CamusDB.Workload.Operations;
 /// read connection defaults to <c>ReadOnly</c> mode), fully consumes the single-row result, and
 /// validates that the returned id and row shape match what was requested before the operation is
 /// counted complete — a read that silently returned the wrong row or no row is a correctness failure,
-/// not a fast success. The SQL text is constant and the id is bound as a parameter so the server's
-/// parse/plan caches see one statement, not one per row.
+/// not a fast success. There is one constant SQL text per table and the id is bound as a parameter, so
+/// the server's parse/plan caches see one statement per table, not one per row.
 /// </summary>
 public sealed class ReadOperation
 {
-    private const string Sql =
-        "SELECT id, balance, version, payload FROM " + Dataset.TableName + " WHERE id = @id";
-
     private readonly ConnectionSet _connections;
     private readonly Dataset _dataset;
+
+    /// <summary>One prepared-shape SELECT per dataset table, indexed the same way as
+    /// <see cref="Dataset.TableNames"/>, so the read path never builds SQL per operation.</summary>
+    private readonly string[] _sqlByTable;
 
     public ReadOperation(ConnectionSet connections, Dataset dataset)
     {
         _connections = connections;
         _dataset = dataset;
+        _sqlByTable = new string[dataset.TableNames.Count];
+        for (int i = 0; i < _sqlByTable.Length; i++)
+            _sqlByTable[i] = $"SELECT id, balance, version, payload FROM {dataset.TableNames[i]} WHERE id = @id";
     }
 
     public async Task<OperationResult> ExecuteAsync(long rowIndex, CancellationToken ct)
@@ -40,7 +44,7 @@ public sealed class ReadOperation
 
         try
         {
-            using CamusCommand cmd = conn.CreateSelectCommand(Sql);
+            using CamusCommand cmd = conn.CreateSelectCommand(_sqlByTable[_dataset.TableIndexOf(rowIndex)]);
             cmd.Parameters.Add("@id", ColumnType.Id, id);
 
             using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);

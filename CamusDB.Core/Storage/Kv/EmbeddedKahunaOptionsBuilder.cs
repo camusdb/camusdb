@@ -322,6 +322,9 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.RangeSplitIndivisibleCooldownMs is int rangeSplitIndivisibleCooldown)
             baseline.RangeSplitIndivisibleCooldown = TimeSpan.FromMilliseconds(rangeSplitIndivisibleCooldown);
 
+        if (kahuna.RangeMoveSettleTimeoutMs is int rangeMoveSettleTimeout)
+            baseline.RangeMoveSettleTimeout = TimeSpan.FromMilliseconds(rangeMoveSettleTimeout);
+
         if (kahuna.RangeMergeMinSize is int rangeMergeMinSize)
             baseline.RangeMergeMinSize = rangeMergeMinSize;
 

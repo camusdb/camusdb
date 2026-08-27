@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using System.Threading;
 using CamusDB.Client;
 
@@ -57,13 +58,46 @@ public sealed class ConnectionSet : IAsyncDisposable
         for (int i = 0; i < connections; i++)
         {
             reads[i] = new CamusConnection(new CamusConnectionStringBuilder(readCs));
-            await reads[i].OpenAsync(ct).ConfigureAwait(false);
+            await OpenWithRetryAsync(reads[i], ct).ConfigureAwait(false);
             writes[i] = new CamusConnection(new CamusConnectionStringBuilder(writeCs));
-            await writes[i].OpenAsync(ct).ConfigureAwait(false);
+            await OpenWithRetryAsync(writes[i], ct).ConfigureAwait(false);
         }
 
         return new ConnectionSet(reads, writes);
     }
+
+    /// <summary>
+    /// Opens one connection, riding out a transport transient rather than failing the run.
+    ///
+    /// <para>This is setup, not measurement: it happens before the measured window and its cost is
+    /// wall clock only. A run opens dozens of connections in a row immediately after seeding, which
+    /// is when the cluster is least likely to answer promptly — a single unlucky open would otherwise
+    /// end the run with a bare cancellation, after the seed had already succeeded.</para>
+    /// </summary>
+    private static async Task OpenWithRetryAsync(CamusConnection connection, CancellationToken ct)
+    {
+        long startedAt = Stopwatch.GetTimestamp();
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await connection.OpenAsync(ct).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex)
+            {
+                bool retryable = Operations.ErrorClassifier.Classify(ex).Status
+                    is Operations.OperationStatus.Transient or Operations.OperationStatus.Conflict;
+                if (!retryable || Stopwatch.GetElapsedTime(startedAt) >= OpenBudget || ct.IsCancellationRequested)
+                    throw;
+
+                await Task.Delay(Math.Min(250 * attempt, 2000), ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>How long one connection open keeps retrying a transport transient before giving up.</summary>
+    private static readonly TimeSpan OpenBudget = TimeSpan.FromMinutes(2);
 
     /// <summary>Opens a single connection for setup/reconciliation work (schema, seeding, verification).
     /// Only the settings' common suffix applies — setup transactions keep the client defaults.</summary>
@@ -72,7 +106,7 @@ public sealed class ConnectionSet : IAsyncDisposable
     {
         string cs = $"Endpoint={endpoint};Database={database};Protocol={protocol}{settings.CommonSuffix()}";
         CamusConnection conn = new(new CamusConnectionStringBuilder(cs));
-        await conn.OpenAsync(ct).ConfigureAwait(false);
+        await OpenWithRetryAsync(conn, ct).ConfigureAwait(false);
         return conn;
     }
 

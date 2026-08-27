@@ -55,7 +55,7 @@ public sealed class RealServerSmokeTests
         {
             await dataset.EnsureSchemaAsync(setup, ct);
             await dataset.SeedAsync(setup, batchSize: 250, ct);
-            baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, ct);
+            baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, dataset, ct);
         }
 
         // Short mixed run.
@@ -77,7 +77,7 @@ public sealed class RealServerSmokeTests
         // Reopen and reconcile persisted effect.
         await using CamusConnection verify = await ConnectionSet.OpenSingleAsync(endpoint, database, protocol, ConnectionSettings.Default, ct);
         ReconciliationResult reconciliation = await Reconciliation.VerifyAsync(
-            verify, metrics, baselineVersionSum, writeOperation.CommittedRows,
+            verify, dataset, metrics, baselineVersionSum, writeOperation.CommittedRows,
             writeOperation.IndeterminateTxns, writesPerTx, expectFaults: false, rows, ct);
 
         Assert.That(reconciliation.Passed, Is.True,

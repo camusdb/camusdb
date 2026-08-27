@@ -80,6 +80,7 @@ public sealed class KahunaOptionsConfig
         "range_split_load_imbalance_max",
         "range_split_settle_window_ms",
         "range_split_indivisible_cooldown_ms",
+        "range_move_settle_timeout_ms",
         "range_merge_min_size",
         "enable_load_reports",
         "replication_factor",
@@ -457,6 +458,25 @@ public sealed class KahunaOptionsConfig
     /// default of 300000.
     /// </summary>
     public int? RangeSplitIndivisibleCooldownMs { get; set; }
+
+    /// <summary>
+    /// Upper bound, in milliseconds, on how long a range split or merge holds its quiesce while it
+    /// drains the moving range's unsettled durable intents before the cutover. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeMoveSettleTimeout"/>; unset keeps Kahuna's
+    /// default of 10000.
+    ///
+    /// <para>This is the knob that decides what one split attempt costs the workload. The quiesce
+    /// blocks new prepares in the moving half, so writes there are refused — retryably — for as long
+    /// as the drain runs. A longer wait lets more attempts succeed and blocks writes for longer each
+    /// time; a shorter one makes each attempt cheap and more likely to be refused. Under sustained
+    /// writes a range always carries just-prepared intents, so with the wait disabled every attempt
+    /// is refused and the range never divides.</para>
+    ///
+    /// <para>Kahuna reads 0 or negative as "no wait" (one settle pass, then refuse) and clamps
+    /// anything above 15000 to 15000, so the copy and cutover still fit inside the 30-second quiesce
+    /// window. CamusDB passes the value through and only refuses a negative one.</para>
+    /// </summary>
+    public int? RangeMoveSettleTimeoutMs { get; set; }
 
     /// <summary>
     /// Key count below which two adjacent ranges become eligible to merge back into one. <c>0</c>
@@ -883,6 +903,10 @@ public sealed class KahunaOptionsConfig
                 $"effective 'kahuna.range_split_load_poll_interval_ms' ({effectiveLoadPoll}) must be < " +
                 $"'kahuna.range_split_load_window_ms' ({effectiveLoadWindow}), or the load predicate can never " +
                 "be observed as sustained and no split can ever fire");
+
+        if (RangeMoveSettleTimeoutMs is < 0)
+            throw InvalidConfig(
+                $"'kahuna.range_move_settle_timeout_ms' must be >= 0 (0 disables the drain wait), got {RangeMoveSettleTimeoutMs}");
 
         if (RangeSplitSettleWindowMs is <= 0)
             throw InvalidConfig(

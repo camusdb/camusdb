@@ -498,6 +498,11 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   range_split_load_imbalance_max: 0.8  # refuse a split this lopsided (a single hot key); range (0.5, 1.0]
 #   range_split_settle_window_ms: 10000  # leave a fresh child alone for this long; must be >= min_leader_stability_ms
 #   range_split_indivisible_cooldown_ms: 300000  # stop re-sampling a range the imbalance guard refused
+#   range_move_settle_timeout_ms: 10000  # how long one split/merge attempt holds its quiesce draining
+#                                        # the moving range's intents. This is what an attempt costs the
+#                                        # workload: writes to the moving half are refused (retryably)
+#                                        # for up to this long. 0 = no wait, and under sustained writes
+#                                        # that means every attempt is refused. Clamped to 15000
 #   range_merge_min_size: 10             # key count below which two neighbours merge back; 0 disables auto-merge
 #   enable_load_reports: false           # gossip load signals WITHOUT enabling the leader balancer
 
