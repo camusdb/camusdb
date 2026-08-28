@@ -114,7 +114,7 @@ public sealed class TransferOperation : IWriteOperation
         }
 
         // Exhausted the retry budget still conflicting — surface it like the baseline write would.
-        _ledger?.Record(lowIndex, highIndex, lowDelta, _maxRetries, "conflict-final", lastConflict.ErrorCode);
+        _ledger?.Record(lowIndex, highIndex, lowDelta, _maxRetries, Metrics.TransferOutcome.ConflictFinal, lastConflict.ErrorCode);
         RecordAttempts(_maxRetries);
         return lastConflict;
     }
@@ -152,7 +152,7 @@ public sealed class TransferOperation : IWriteOperation
             commitMs = t.Tick();
 
             System.Threading.Interlocked.Add(ref _committedRows, 2);
-            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, "committed", null);
+            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Committed, null);
             return (true, new OperationResult(OperationKind.Write, OperationStatus.Ok, null, beginMs, t.ReadMs, t.UpdateMs, commitMs));
         }
         catch (Exception ex)
@@ -164,7 +164,7 @@ public sealed class TransferOperation : IWriteOperation
                 // The atomic commit may already have applied both legs or neither; either keeps the sum
                 // conserved. Leave it for the server's reaper and carry the ambiguity into reconciliation.
                 System.Threading.Interlocked.Increment(ref _indeterminateTxns);
-                _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, "indeterminate", code);
+                _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Indeterminate, code);
                 return (true, OperationResult.Failure(OperationKind.Write, status, code));
             }
 
@@ -173,7 +173,8 @@ public sealed class TransferOperation : IWriteOperation
 
             // A conflict is retried by the caller; any other definite abort is surfaced now.
             _ledger?.Record(lowIndex, highIndex, lowDelta, attempt,
-                status == OperationStatus.Conflict ? "conflict-retry" : "error", code);
+                status == OperationStatus.Conflict ? Metrics.TransferOutcome.ConflictRetry : Metrics.TransferOutcome.Error,
+                code);
             return status == OperationStatus.Conflict
                 ? (false, OperationResult.Failure(OperationKind.Write, status, code))
                 : (true, OperationResult.Failure(OperationKind.Write, status, code));

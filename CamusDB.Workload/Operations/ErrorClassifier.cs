@@ -25,20 +25,50 @@ public static class ErrorClassifier
 
     /// <summary>
     /// Classifies a write-path failure with knowledge of whether the commit request had already been
-    /// submitted. A <see cref="CamusException"/> is a server verdict — the server answered, so the
-    /// transaction definitely aborted (conflict/domain error) even when the answer arrived during the
-    /// commit round trip. Any other failure after commit submission (cancellation, transport drop,
-    /// timeout, unexpected client fault) means no verdict was received: the commit may have durably
-    /// applied before the failure, so the outcome is <see cref="OperationStatus.Indeterminate"/> rather
-    /// than a definite abort. Failures before commit submission keep their ordinary classification —
-    /// no commit was requested, so nothing can have landed.
+    /// submitted. A <see cref="CamusException"/> that carries a server error code is a server verdict —
+    /// the server answered, so the transaction definitely aborted (conflict/domain error) even when the
+    /// answer arrived during the commit round trip. Any other failure after commit submission
+    /// (cancellation, transport drop, timeout, unexpected client fault) means no verdict was received:
+    /// the commit may have durably applied before the failure, so the outcome is
+    /// <see cref="OperationStatus.Indeterminate"/> rather than a definite abort. Failures before commit
+    /// submission keep their ordinary classification — no commit was requested, so nothing can have
+    /// landed.
+    ///
+    /// <para>The gRPC client does not always turn a transport failure into a plain transport exception:
+    /// a deadline that expires, or a node that goes away, during the commit round trip can surface as a
+    /// <see cref="CamusException"/> whose <see cref="CamusException.Code"/> is empty. That is not a
+    /// verdict — nothing answered — so it must widen the ambiguity, not close it. Reading it as a
+    /// definite abort tells the per-row attribution that the transfer applied nothing, and a commit that
+    /// did land then looks exactly like a leaked write; the check would report the harness's own
+    /// misreading as an engine defect.</para>
     /// </summary>
     public static (OperationStatus Status, string Code) Classify(Exception ex, bool commitSubmitted)
     {
         (OperationStatus status, string code) = Classify(ex);
-        if (commitSubmitted && ex is not CamusException)
+        if (!commitSubmitted)
+            return (status, code);
+        if (ex is not CamusException camus || CarriesNoVerdict(camus))
             return (OperationStatus.Indeterminate, code);
         return (status, code);
+    }
+
+    /// <summary>
+    /// True when a <see cref="CamusException"/> reports a transport failure rather than a server
+    /// decision: no error code came back, and the message names a gRPC transport condition. Both halves
+    /// are required — an empty code alone also happens on real server errors whose code the wire dropped,
+    /// and those did carry a verdict.
+    /// </summary>
+    private static bool CarriesNoVerdict(CamusException camus)
+    {
+        if (!string.IsNullOrEmpty(camus.Code))
+            return false;
+
+        string message = camus.Message;
+        return message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("deadline", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Cancelled", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Canceled", StringComparison.OrdinalIgnoreCase);
     }
 
     public static (OperationStatus Status, string Code) Classify(Exception ex)

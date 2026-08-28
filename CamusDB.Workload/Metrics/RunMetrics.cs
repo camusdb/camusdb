@@ -55,6 +55,16 @@ public sealed class RunMetrics
     /// </summary>
     public DateTime MeasureStartUtc { get; set; } = DateTime.MinValue;
 
+    /// <summary>
+    /// Operations still running when the scheduler's drain budget expired. Non-zero only in open-loop
+    /// mode, which dispatches without waiting. It matters to correctness checking, not to throughput:
+    /// a transfer still in flight can commit <em>after</em> the verification scan has read its rows, so
+    /// any post-run comparison against the client's journal would see a write the journal does not yet
+    /// carry. A run that ends with work outstanding cannot have its per-row attribution trusted, and
+    /// says so instead of reporting a violation it manufactured itself.
+    /// </summary>
+    public long UnfinishedAtDrain { get; set; }
+
     private readonly int _writesPerTransaction;
 
     public RunMetrics(int writesPerTransaction)

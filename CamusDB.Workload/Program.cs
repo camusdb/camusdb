@@ -138,6 +138,23 @@ public static class Program
 
         Dataset dataset = new(o.Seed, o.Rows, o.PayloadBytes, o.Tables);
 
+        // The per-row check exists because SUM(balance) conservation cannot see an atomicity break whose
+        // leaked writes cancel each other out. It needs a starting balance and version for every row, so
+        // it is built before setup and given its baseline from a scan there. Only the transfer shapes
+        // keep a journal to compare against, so only they can run it.
+        Metrics.RowAttribution? attribution = null;
+        RowAttributionResult? attributionSkip = null;
+        if (transfers && o.NoRowAttribution)
+        {
+            attributionSkip = RowAttributionResult.Disabled("turned off by --no-row-attribution.");
+        }
+        else if (transfers)
+        {
+            attribution = Metrics.RowAttribution.TryCreate(dataset, o.Seed, out string? why);
+            if (attribution is null)
+                attributionSkip = RowAttributionResult.Unavailable(why!);
+        }
+
         // Setup (never measured). Capture the SUM(version) baseline here so reconciliation measures only
         // this run's increments, even when the dataset was already written by a previous run.
         long baselineVersionSum;
@@ -155,9 +172,39 @@ public static class Program
                 return 2;
             }
 
-            baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, dataset, ct).ConfigureAwait(false);
-            if (transfers)
-                baselineBalanceSum = await Reconciliation.ReadBalanceSumAsync(setup, dataset, ct).ConfigureAwait(false);
+            // One baseline scan serves both purposes when the per-row check is on: it yields the same two
+            // aggregate totals the bands need, so the run pays for a scan instead of a scan plus two
+            // aggregate queries. A scan that fails costs the sharper check, never the run — the aggregate
+            // baselines are read the old way and the verdict says which check went missing.
+            RowScanTotals? baseline = null;
+            if (attribution is not null)
+            {
+                try
+                {
+                    baseline = await attribution.CaptureBaselineAsync(setup, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    Console.Error.WriteLine(
+                        $"Per-row baseline scan failed ({ex.GetType().Name}: {ex.Message}); " +
+                        "continuing with the aggregate invariants only.");
+                    attribution = null;
+                    attributionSkip = RowAttributionResult.Unavailable(
+                        $"the per-row baseline scan did not complete: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            if (baseline is not null)
+            {
+                baselineVersionSum = baseline.VersionSum;
+                baselineBalanceSum = baseline.BalanceSum;
+            }
+            else
+            {
+                baselineVersionSum = await Reconciliation.ReadVersionSumAsync(setup, dataset, ct).ConfigureAwait(false);
+                if (transfers)
+                    baselineBalanceSum = await Reconciliation.ReadBalanceSumAsync(setup, dataset, ct).ConfigureAwait(false);
+            }
         }
 
         ConnectionSettings settings = new(locking, isolation, o.NoAutoPrepare, o.RequestTimeout);
@@ -171,7 +218,7 @@ public static class Program
         // partition instead of the one that owns a single table.
         // The transfer ledger journals every terminal transfer attempt so a conservation deficit can be
         // attributed to exact rows and moments; see TransferLedger. Only a transfer workload keeps one.
-        Metrics.TransferLedger? transferLedger = transfers ? new Metrics.TransferLedger() : null;
+        Metrics.TransferLedger? transferLedger = transfers ? new Metrics.TransferLedger(attribution) : null;
 
         IWriteOperation writeOperation = transfers
             ? new TransferOperation(
@@ -250,14 +297,19 @@ public static class Program
                     verify, dataset, metrics, baselineVersionSum, writeOperation.CommittedRows,
                     writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
                     bankMode: transfers, baselineBalanceSum: baselineBalanceSum,
-                    retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)))
+                    retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)),
+                    rowAttribution: attribution, rowAttributionSkip: attributionSkip)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             reconciliation = Reconciliation.Inconclusive(
-                $"{ex.GetType().Name}: {ex.Message}", writeOperation.IndeterminateTxns, metrics.Conflicts, baselineBalanceSum);
+                $"{ex.GetType().Name}: {ex.Message}", writeOperation.IndeterminateTxns, metrics.Conflicts,
+                baselineBalanceSum, rowAttributionExpected: attribution is not null);
         }
+
+        if (reconciliation.RowAttribution is RowAttributionResult rowResult)
+            await Metrics.RowAttribution.WriteViolationsAsync(o.Output, rowResult, ct).ConfigureAwait(false);
 
         await File.WriteAllTextAsync(
             Path.Combine(o.Output, "reconciliation.json"),
@@ -388,6 +440,7 @@ public static class Program
         Console.WriteLine($"  Max attempts used   : {s.MaxAttemptsUsed}");
         Console.WriteLine($"  Indeterminate       : {s.Indeterminate}");
         Console.WriteLine($"  Reconciliation      : {(r.Passed ? "PASS" : "FAIL")}");
+        Console.WriteLine($"  Row attribution     : {DescribeRowAttribution(r.RowAttribution)}");
         foreach (string f in r.Failures)
             Console.WriteLine($"    ✗ {f}");
         Console.WriteLine($"  Run validity        : {(s.Valid ? "VALID" : "INVALID")}" +
@@ -397,4 +450,22 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine($"  Artifacts written to: {output}");
     }
+
+    /// <summary>
+    /// One line for the per-row verdict. It always prints for a transfer run, including when the check
+    /// did not run: a reader who sees only "Reconciliation: PASS" cannot tell whether the strongest
+    /// check ran, and that is precisely how a leak that cancels in the totals has passed before.
+    /// </summary>
+    private static string DescribeRowAttribution(RowAttributionResult? r) => r switch
+    {
+        null => "n/a (only the transfer workloads keep a per-row journal)",
+        { Status: RowAttributionStatus.Disabled } =>
+            $"OFF — {r.Reason} SUM(balance) alone cannot see leaked writes that cancel out.",
+        { Status: RowAttributionStatus.Unavailable } => $"NOT VERIFIED — {r.Reason}",
+        { TotalViolations: 0 } =>
+            $"PASS ({r.RowsScanned} row(s) scanned, {r.RowsInAmbiguityBand} inside the indeterminate band)",
+        _ =>
+            $"FAIL ({r.TotalViolations} violating row(s) of {r.RowsScanned} scanned; " +
+            $"{r.RowsInAmbiguityBand} inside the indeterminate band)",
+    };
 }

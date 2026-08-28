@@ -19,6 +19,10 @@ namespace CamusDB.Workload;
 /// the persisted <c>SUM(version)</c> delta that must fall inside. With zero indeterminate transactions
 /// the band collapses to the historical exact equality. <see cref="ConflictsWaived"/> records that
 /// conflicts were tolerated because the run declared <c>--expect-faults</c>.
+///
+/// <para><c>RowAttribution</c> carries the per-row verdict for a transfer run, which is the only part of
+/// this result that can see an atomicity break whose stray writes cancel in the totals. It is null for a
+/// workload that has no journal to compare against.</para>
 /// </summary>
 public sealed record ReconciliationResult(
     long ExpectedMin,
@@ -35,7 +39,8 @@ public sealed record ReconciliationResult(
     bool BalanceConserved = true,
     long BalanceBaseline = 0,
     long BalanceFinal = 0,
-    bool VersionCheckWaived = false)
+    bool VersionCheckWaived = false,
+    RowAttributionResult? RowAttribution = null)
 {
     // BalanceConserved is the bank-transfer atomicity invariant: SUM(balance) must be unchanged after a
     // transfer run. It is never waived — unlike conflicts, an atomicity break is a correctness failure a
@@ -47,8 +52,16 @@ public sealed record ReconciliationResult(
     // the transfer twice — which inflates the version count while still conserving balance. The version
     // band assumes at-most-once application (true only for the non-retrying accounts writes), so in bank
     // mode SUM(balance) conservation is the consistency guard and the version delta is informational.
+    //
+    // RowAttribution is the per-row check that the aggregates cannot perform. SUM(balance) proves only
+    // that the net of every stray write is zero, so an even number of leaked legs that cancel — one row
+    // credited, another debited, neither acknowledged to the client — passes it untouched. SUM(version)
+    // has the same blind spot for a row that gained an increment and another that lost one. The per-row
+    // comparison has no such cancellation, and it is never waived: like BalanceConserved, it reports an
+    // atomicity break, which is the failure a chaos run exists to catch rather than tolerate.
     public bool Passed => (VersionsMatch || VersionCheckWaived)
-        && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived) && BalanceConserved;
+        && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived) && BalanceConserved
+        && (RowAttribution is null || RowAttribution.Passed);
 }
 
 /// <summary>
@@ -63,6 +76,14 @@ public sealed record ReconciliationResult(
 /// [committed, committed + indeterminate × writes-per-transaction]. It also confirms the seeded row
 /// count survived and that the operation accounting (offered = started + drops,
 /// started = completed + failed) has no lost operations.
+///
+/// <para>Every check above is an <em>aggregate</em>, and an aggregate can only see the net of what went
+/// wrong. A transfer run that leaked an even number of legs which cancel — one row credited, another
+/// debited, neither commit acknowledged — leaves both <c>SUM(balance)</c> and <c>SUM(version)</c>
+/// exactly where they should be, and such a run has been reported as PASS. For the transfer workloads
+/// reconciliation therefore also runs <see cref="Metrics.RowAttribution"/>, which compares every row
+/// against the effect the transfer journal predicts for it. Cancellation is impossible per row, so it
+/// catches what the totals cannot; it is the strongest signal this check produces.</para>
 /// </summary>
 public static class Reconciliation
 {
@@ -128,11 +149,23 @@ public static class Reconciliation
     /// When set, observed conflicts are reported but do not fail reconciliation — a chaos run that
     /// kills nodes expects them. Without the flag the strict non-conflicting contract applies.
     /// </param>
+    /// <param name="rowAttribution">
+    /// The per-row check, or null when the run has none (the accounts workload, or an operator opt-out
+    /// that the caller reports through <paramref name="rowAttributionSkip"/>). When present it is the
+    /// strongest signal reconciliation produces, and it runs last so that a cluster too slow to answer
+    /// downgrades it to "could not verify" without discarding the aggregate verdict.
+    /// </param>
+    /// <param name="rowAttributionSkip">
+    /// A pre-decided outcome for the per-row check when it could not even be built — the dataset was too
+    /// large, or the baseline scan failed. Carried through so the verdict says which check was missing
+    /// instead of quietly reporting one fewer check.
+    /// </param>
     public static async Task<ReconciliationResult> VerifyAsync(
         CamusConnection conn, Dataset dataset, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct,
-        bool bankMode = false, long baselineBalanceSum = 0, TimeSpan? retryBudget = null)
+        bool bankMode = false, long baselineBalanceSum = 0, TimeSpan? retryBudget = null,
+        Metrics.RowAttribution? rowAttribution = null, RowAttributionResult? rowAttributionSkip = null)
     {
         long persistedSum = await AggregateOverTablesAsync(conn, dataset, "SUM(version)", ct, retryBudget).ConfigureAwait(false);
         long rowCount = await AggregateOverTablesAsync(conn, dataset, "COUNT(*)", ct, retryBudget).ConfigureAwait(false);
@@ -155,6 +188,9 @@ public static class Reconciliation
             : 0;
         bool balanceConserved = !bankMode || balanceFinal == baselineBalanceSum;
 
+        RowAttributionResult? rowResult = await RunRowAttributionAsync(
+            conn, metrics, rowAttribution, rowAttributionSkip, ct, retryBudget).ConfigureAwait(false);
+
         List<string> failures = new();
         if (!versionsMatch && !bankMode)
             failures.Add($"persisted SUM(version) delta={persistedDelta} outside [{expectedMin}, {expectedMax}] " +
@@ -170,11 +206,85 @@ public static class Reconciliation
         if (!balanceConserved)
             failures.Add($"SUM(balance) changed from {baselineBalanceSum} to {balanceFinal} " +
                          $"(delta {balanceFinal - baselineBalanceSum}) — a bank transfer broke atomicity.");
+        failures.AddRange(DescribeRowAttribution(rowResult));
 
         return new ReconciliationResult(
             expectedMin, expectedMax, persistedDelta, indeterminateTxns,
             versionsMatch, rowCount, rowCountMatches, accounting, noConflicts, expectFaults && !noConflicts, failures,
-            balanceConserved, baselineBalanceSum, balanceFinal, VersionCheckWaived: bankMode);
+            balanceConserved, baselineBalanceSum, balanceFinal, VersionCheckWaived: bankMode,
+            RowAttribution: rowResult);
+    }
+
+    /// <summary>
+    /// Produces the per-row verdict, or the reason there is none. Three things can stop it: the caller
+    /// never built one, the run ended with work still in flight, or the verification scan could not
+    /// complete. None of them throws — each becomes an <see cref="RowAttributionStatus.Unavailable"/>
+    /// result, which does not pass but also does not discard the aggregate verdict alongside it.
+    /// </summary>
+    private static async Task<RowAttributionResult?> RunRowAttributionAsync(
+        CamusConnection conn, RunMetrics metrics, Metrics.RowAttribution? attribution,
+        RowAttributionResult? skip, CancellationToken ct, TimeSpan? retryBudget)
+    {
+        if (attribution is null)
+            return skip;
+
+        // An operation still running can commit after the scan below has already read its rows, which
+        // would show up as a row carrying a write the journal does not have — a violation the harness
+        // manufactured itself. Refuse to judge rather than report it.
+        if (metrics.UnfinishedAtDrain > 0)
+        {
+            return RowAttributionResult.Unavailable(
+                $"{metrics.UnfinishedAtDrain} operation(s) were still in flight when the drain budget " +
+                "expired, so their writes could land after the verification scan.");
+        }
+
+        try
+        {
+            return await attribution.VerifyAsync(conn, ct, retryBudget).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            return RowAttributionResult.Unavailable(
+                $"the per-row verification scan did not complete: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Turns a per-row verdict into reconciliation failure lines. Each violation class gets its own
+    /// line because they mean different things: a balance that disagrees is value moved without a
+    /// committed transfer, while a version above the journalled count is a write the client never
+    /// committed — the sharper signal, since it fires even when the stray writes leave the total right.
+    /// </summary>
+    private static IEnumerable<string> DescribeRowAttribution(RowAttributionResult? r)
+    {
+        if (r is null || r.Passed)
+            yield break;
+
+        if (r.Status != RowAttributionStatus.Verified)
+        {
+            yield return $"per-row attribution could not verify atomicity: {r.Reason}";
+            yield break;
+        }
+
+        string sample = r.Violations.Count == 0
+            ? ""
+            : " First: " + string.Join("; ", r.Violations.Take(3).Select(v => $"row {v.RowIndex} in {v.Table}: {v.Detail}"));
+
+        if (r.BalanceViolations > 0)
+            yield return $"{r.BalanceViolations} row(s) hold a balance the transfer journal does not " +
+                         $"account for, outside their indeterminate ambiguity band." + sample;
+        if (r.UncountedWriteRows > 0)
+            yield return $"{r.UncountedWriteRows} row(s) carry more version increments than the client " +
+                         "ever committed against them — a write leaked past an aborted transaction.";
+        if (r.LostWriteRows > 0)
+            yield return $"{r.LostWriteRows} row(s) carry fewer version increments than the client " +
+                         "committed against them — a committed write was lost.";
+        if (r.RowsMissing > 0)
+            yield return $"{r.RowsMissing} seeded row(s) were absent from the final scan.";
+        if (r.RowsDuplicated > 0)
+            yield return $"{r.RowsDuplicated} row id(s) were returned more than once by the final scan.";
+        if (r.RowsForeign > 0)
+            yield return $"{r.RowsForeign} row(s) in the workload tables do not belong to this seed's dataset.";
     }
 
     // Reconciliation runs right after the measured window, when a cluster that just lost and recovered a
@@ -240,14 +350,15 @@ public static class Reconciliation
         CamusConnection conn, Dataset dataset, RunMetrics metrics, long baselineVersionSum, long committedRowWrites,
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct, bool bankMode, long baselineBalanceSum,
-        TimeSpan? retryBudget = null)
+        TimeSpan? retryBudget = null,
+        Metrics.RowAttribution? rowAttribution = null, RowAttributionResult? rowAttributionSkip = null)
     {
         long startedAt = Stopwatch.GetTimestamp();
         try
         {
             return await VerifyAsync(conn, dataset, metrics, baselineVersionSum, committedRowWrites, indeterminateTxns,
                 writesPerTransaction, expectFaults, expectedRows, ct, bankMode, baselineBalanceSum,
-                retryBudget).ConfigureAwait(false);
+                retryBudget, rowAttribution, rowAttributionSkip).ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -258,17 +369,22 @@ public static class Reconciliation
             return Inconclusive(
                 $"{ex.GetType().Name}: {ex.Message} (retried for {waited.TotalSeconds:F0}s of a " +
                 $"{(retryBudget ?? DefaultRetryBudget).TotalSeconds:F0}s budget)",
-                indeterminateTxns, metrics.Conflicts, baselineBalanceSum);
+                indeterminateTxns, metrics.Conflicts, baselineBalanceSum, rowAttribution is not null);
         }
     }
 
     /// <summary>Builds a not-passed "could not verify" result carrying the reason, for when the
     /// verification cannot run at all (the reconciliation connection could not even be opened).</summary>
-    public static ReconciliationResult Inconclusive(string reason, long indeterminateTxns, long conflicts, long baselineBalanceSum)
+    public static ReconciliationResult Inconclusive(
+        string reason, long indeterminateTxns, long conflicts, long baselineBalanceSum,
+        bool rowAttributionExpected = false)
         => new(
             0, 0, 0, indeterminateTxns,
             VersionsMatch: false, RowCount: -1, RowCountMatches: false, AccountingBalances: false,
             NoConflicts: conflicts == 0, ConflictsWaived: false,
             Failures: [$"reconciliation could not complete (the cluster stayed unavailable after the fault): {reason}"],
-            BalanceConserved: false, BalanceBaseline: baselineBalanceSum, BalanceFinal: 0, VersionCheckWaived: false);
+            BalanceConserved: false, BalanceBaseline: baselineBalanceSum, BalanceFinal: 0, VersionCheckWaived: false,
+            RowAttribution: rowAttributionExpected
+                ? RowAttributionResult.Unavailable("reconciliation could not reach the cluster: " + reason)
+                : null);
 }

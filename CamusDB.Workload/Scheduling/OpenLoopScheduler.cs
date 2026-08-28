@@ -68,6 +68,11 @@ public sealed class OpenLoopScheduler
         while (Volatile.Read(ref _liveInFlight) > 0 && Stopwatch.GetTimestamp() < drainDeadline)
             await Task.Delay(20, CancellationToken.None).ConfigureAwait(false);
 
+        // Whatever is still running when the budget expires can still commit, including after the
+        // post-run verification scan reads its rows. Record it so reconciliation can tell a run whose
+        // durable state was settled from one whose was not.
+        metrics.UnfinishedAtDrain = Volatile.Read(ref _liveInFlight);
+
         try { await recorderStart.ConfigureAwait(false); } catch (OperationCanceledException) { }
         await recorder.StopAsync().ConfigureAwait(false);
 

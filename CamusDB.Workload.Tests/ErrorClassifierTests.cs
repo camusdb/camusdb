@@ -15,7 +15,9 @@ namespace CamusDB.Workload.Tests;
 /// The commit-phase boundary of error classification: a failure before the commit request is a
 /// definite abort (nothing was asked to persist), while a verdict-less failure of the commit round
 /// trip itself is <see cref="OperationStatus.Indeterminate"/> — the write may have landed. A
-/// <see cref="CamusException"/> is a server verdict and therefore definite even during commit.
+/// <see cref="CamusException"/> that carries a server error code is a server verdict and therefore
+/// definite even during commit; one that carries no code and a transport message never reached a
+/// verdict and must stay ambiguous.
 /// </summary>
 [TestFixture]
 public sealed class ErrorClassifierTests
@@ -66,6 +68,41 @@ public sealed class ErrorClassifierTests
     {
         var domain = new CamusException("CADB0100", "table not found");
         (OperationStatus status, _) = ErrorClassifier.Classify(domain, commitSubmitted: true);
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
+    }
+
+    /// <summary>
+    /// The gRPC client wraps a transport failure in a <see cref="CamusException"/> with an empty code
+    /// (the gRPC status never becomes a CamusDB error code). Nothing answered, so the commit may have
+    /// landed. Reading it as a definite abort tells the per-row attribution the transfer applied
+    /// nothing, and a commit that did land then looks exactly like a leaked write — the harness would
+    /// report its own misreading as an engine defect.
+    /// </summary>
+    [TestCase("Status(StatusCode=\"DeadlineExceeded\", Detail=\"\")")]
+    [TestCase("Status(StatusCode=\"Unavailable\", Detail=\"failed to connect\")")]
+    [TestCase("Status(StatusCode=\"Cancelled\", Detail=\"\")")]
+    public void CodelessTransportFailureDuringCommitIsIndeterminate(string message)
+    {
+        (OperationStatus status, _) = ErrorClassifier.Classify(new CamusException("", message), commitSubmitted: true);
+        Assert.That(status, Is.EqualTo(OperationStatus.Indeterminate));
+    }
+
+    [Test]
+    public void CodelessTransportFailureBeforeCommitKeepsItsOrdinaryClassification()
+    {
+        (OperationStatus status, _) = ErrorClassifier.Classify(
+            new CamusException("", "Status(StatusCode=\"Unavailable\")"), commitSubmitted: false);
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError),
+            "no commit was requested, so nothing can have landed");
+    }
+
+    [Test]
+    public void CodelessServerErrorDuringCommitIsStillADefiniteAbort()
+    {
+        // The wire drops the code on genuine server errors too, so an empty code alone is not enough:
+        // a message that names no transport condition still describes a verdict the server reached.
+        (OperationStatus status, _) = ErrorClassifier.Classify(
+            new CamusException("", "Duplicate entry for key 'workload_accounts_pk'"), commitSubmitted: true);
         Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
     }
 

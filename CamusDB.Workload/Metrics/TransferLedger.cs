@@ -20,6 +20,11 @@ namespace CamusDB.Workload.Metrics;
 /// observed balance still disagrees identifies the victim transfer (and its wall-clock moment, joinable with
 /// node logs) precisely.
 ///
+/// <para>The same <see cref="Record"/> call also feeds <see cref="Attribution"/>, which performs that join
+/// in-process at the end of the run instead of leaving it to an offline script. Routing both through one
+/// call is deliberate: the journal a reader inspects and the expectation the run is failed against are then
+/// derived from the same event, and cannot drift apart.</para>
+///
 /// <para>Recording is lock-free (a concurrent queue of pre-formatted lines) so the hot path pays one string
 /// format and one enqueue per terminal attempt; the file is written once, after the run.</para>
 /// </summary>
@@ -27,15 +32,21 @@ public sealed class TransferLedger
 {
     private readonly ConcurrentQueue<string> lines = new();
 
-    /// <summary>Records one terminal transfer attempt. <paramref name="outcome"/> is one of
-    /// <c>committed</c>, <c>indeterminate</c>, <c>conflict-retry</c> (the caller retries from BEGIN),
-    /// <c>conflict-final</c> (retry budget exhausted), or <c>error</c>. The deltas are signed and always sum
-    /// to zero across the two rows; only the low row's delta is recorded, the high row's is its negation.</summary>
-    public void Record(long lowIndex, long highIndex, long lowDelta, int attempt, string outcome, string? code)
+    public TransferLedger(RowAttribution? attribution = null) => Attribution = attribution;
+
+    /// <summary>The per-row expectation built from the same attempts this journal records, or null when
+    /// per-row attribution is off for this run.</summary>
+    public RowAttribution? Attribution { get; }
+
+    /// <summary>Records one terminal transfer attempt. The deltas are signed and always sum to zero across
+    /// the two rows; only the low row's delta is recorded, the high row's is its negation.</summary>
+    public void Record(long lowIndex, long highIndex, long lowDelta, int attempt, TransferOutcome outcome, string? code)
     {
         long wallMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         lines.Enqueue(string.Create(CultureInfo.InvariantCulture,
-            $"{wallMs},{lowIndex},{highIndex},{lowDelta},{attempt},{outcome},{code ?? ""}"));
+            $"{wallMs},{lowIndex},{highIndex},{lowDelta},{attempt},{outcome.ToLedgerToken()},{code ?? ""}"));
+
+        Attribution?.Record(lowIndex, highIndex, lowDelta, outcome);
     }
 
     /// <summary>Writes the journal plus the seeded per-row baseline into <paramref name="outputDir"/> as

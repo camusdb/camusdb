@@ -114,6 +114,9 @@ public sealed class RunOptions : CommonOptions
     [Option("reconcile-timeout", Default = 600, HelpText = "Seconds reconciliation keeps retrying its aggregate reads while the cluster is still settling, before reporting 'could not verify'. Post-measurement only; it never extends the measured window.")]
     public int ReconcileTimeout { get; set; }
 
+    [Option("no-row-attribution", Default = false, HelpText = "Transfer workloads: skip the per-row balance/version check and judge atomicity on SUM(balance) alone. The aggregate cannot see leaked writes that cancel out, so a run started with this flag can report PASS while atomicity is broken. It costs one full scan before the run and one after; use it only when that scan is genuinely unaffordable.")]
+    public bool NoRowAttribution { get; set; }
+
     [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), or fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2).")]
     public string Workload { get; set; } = "accounts";
 }

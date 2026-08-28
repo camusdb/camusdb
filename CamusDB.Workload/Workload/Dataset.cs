@@ -290,9 +290,15 @@ public sealed class Dataset
             long transientSince = 0;
             while (true)
             {
-                CamusTransaction tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
+                // BEGIN belongs inside the try. It is a round trip like any other, and during a burst
+                // of unanswered inter-node requests it is usually the first call to time out — so
+                // leaving it outside meant a failed BEGIN bypassed every retry below and killed the
+                // whole seed, no matter how patient those retries were.
+                CamusTransaction? tx = null;
                 try
                 {
+                    tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
+
                     for (long i = start; i < end; i++)
                     {
                         (string id, long owner, long balance, string payload) = RowFor(i);
@@ -311,9 +317,13 @@ public sealed class Dataset
                 }
                 catch (Exception ex)
                 {
-                    // Best-effort rollback: an already-aborted transaction may itself refuse the rollback.
-                    try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
-                    catch { /* the batch is retried from a new transaction regardless */ }
+                    // Best-effort rollback: an already-aborted transaction may itself refuse the
+                    // rollback, and a BEGIN that never returned leaves nothing to roll back at all.
+                    if (tx is not null)
+                    {
+                        try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
+                        catch { /* the batch is retried from a new transaction regardless */ }
+                    }
 
                     // A duplicate on a seed id means this batch is already committed. Seed ids are
                     // deterministic, only this seeder writes them, and each batch commits in one
@@ -396,10 +406,15 @@ public sealed class Dataset
     /// How long a seeding batch keeps retrying a transport transient before giving up. Wall clock,
     /// not attempts: each failed attempt costs an unpredictable amount of time (whatever the client
     /// request timeout is), so only a clock can express "ride out a burst of unanswered inter-node
-    /// requests". Two minutes comfortably outlasts the bursts measured during seeding, which ran
-    /// about seventy seconds.
+    /// requests". Sized from observation, not guesswork: bursts of about seventy seconds and of four
+    /// minutes have both been recorded, the latter exhausting a two-minute budget and failing an
+    /// otherwise healthy run. Five minutes covers what has been seen, with margin.
+    ///
+    /// <para>This is compensation, not a cure. The bursts are a property of the store under bulk
+    /// writes; raising this number does not stop them, it only keeps setup alive while they last. If
+    /// one ever outlasts this budget, investigate the burst rather than raising the number again.</para>
     /// </summary>
-    private static readonly TimeSpan SeedTransientBudget = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan SeedTransientBudget = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// Patient retry budget for table-not-found (DDL propagation lag) during seeding: 120 tries at a

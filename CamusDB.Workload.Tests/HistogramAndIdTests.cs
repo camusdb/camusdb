@@ -61,6 +61,33 @@ public sealed class HistogramAndIdTests
         }
     }
 
+    /// <summary>
+    /// The per-row check joins a scan back to its bookkeeping by decoding the row index out of the id,
+    /// so the decode must be the exact inverse of the encode and must refuse anything this seed did not
+    /// produce — a wrong index would silently attribute one row's writes to another.
+    /// </summary>
+    [Test]
+    public void RowIndexRoundTripsThroughTheId()
+    {
+        const ulong seed = 1847;
+        foreach (long index in new long[] { 0, 1, 42, 99_999, 5_000_000, long.MaxValue })
+        {
+            Assert.That(RowIdFactory.TryRowIndex(seed, RowIdFactory.ForRow(seed, index), out long decoded), Is.True);
+            Assert.That(decoded, Is.EqualTo(index));
+        }
+    }
+
+    [Test]
+    public void AnIdFromAnotherSeedOrAMalformedIdIsRejected()
+    {
+        const ulong seed = 1847;
+        Assert.That(RowIdFactory.TryRowIndex(seed, RowIdFactory.ForRow(seed + 1, 7), out _), Is.False,
+            "a different seed occupies disjoint id space and its rows are not ours to attribute");
+        Assert.That(RowIdFactory.TryRowIndex(seed, null, out _), Is.False);
+        Assert.That(RowIdFactory.TryRowIndex(seed, "abc", out _), Is.False, "wrong length");
+        Assert.That(RowIdFactory.TryRowIndex(seed, new string('z', 24), out _), Is.False, "not hex");
+    }
+
     [Test]
     public void DatasetRowsAndFingerprintAreDeterministic()
     {

@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Workload.Metrics;
 using NUnit.Framework;
 
 namespace CamusDB.Workload.Tests;
@@ -58,6 +59,42 @@ public sealed class ReconciliationBandTests
         (long min, long max) = Reconciliation.VersionDeltaBand(50, 7, 1);
         Assert.That((min, max), Is.EqualTo((50L, 57L)));
     }
+
+    /// <summary>
+    /// The reason the per-row check exists: every aggregate can be green while atomicity is broken. A
+    /// result whose aggregates all agree must still fail when the per-row comparison found a violation,
+    /// otherwise the sharper check would be computed and then ignored.
+    /// </summary>
+    [Test]
+    public void AFailingPerRowCheckFailsAnOtherwiseGreenReconciliation()
+    {
+        Assert.That(GreenAggregates(null).Passed, Is.True, "the aggregates alone are all satisfied");
+
+        RowAttributionResult leaked = new(
+            RowAttributionStatus.Verified, null, RowsScanned: 100_000, RowsInAmbiguityBand: 800,
+            BalanceViolations: 8, UncountedWriteRows: 8, LostWriteRows: 0,
+            RowsMissing: 0, RowsDuplicated: 0, RowsForeign: 0, Violations: []);
+
+        Assert.That(GreenAggregates(leaked).Passed, Is.False);
+    }
+
+    [Test]
+    public void AnUnverifiablePerRowCheckDoesNotPassButAnOptedOutOneDoes()
+    {
+        Assert.That(GreenAggregates(RowAttributionResult.Unavailable("scan timed out")).Passed, Is.False,
+            "'could not verify' must never read as 'verified clean'");
+        Assert.That(GreenAggregates(RowAttributionResult.Disabled("--no-row-attribution")).Passed, Is.True,
+            "an explicit opt-out is the operator's call, not a hidden failure");
+    }
+
+    /// <summary>A reconciliation result whose every aggregate check is satisfied, carrying the supplied
+    /// per-row verdict.</summary>
+    private static ReconciliationResult GreenAggregates(RowAttributionResult? rows) => new(
+        ExpectedMin: 1_000, ExpectedMax: 1_000, Observed: 1_000, IndeterminateTxns: 0,
+        VersionsMatch: true, RowCount: 100_000, RowCountMatches: true, AccountingBalances: true,
+        NoConflicts: true, ConflictsWaived: false, Failures: [],
+        BalanceConserved: true, BalanceBaseline: 42, BalanceFinal: 42, VersionCheckWaived: true,
+        RowAttribution: rows);
 
     [Test]
     public void NonPositiveWritesPerTransactionIsClampedLikeTheWritePath()
