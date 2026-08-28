@@ -181,7 +181,7 @@ internal sealed class TestVectorBindParameters : BaseTest
         string db = await SeedAsync();
 
         JsonResult prepared = await Statements(new { databaseName = db, sql = NearestSql }).PrepareSQLStatement();
-        string statementId = ((PrepareStatementResponse)prepared.Value!).StatementId;
+        string statementId = ((PrepareStatementResponse)prepared.Value!).StatementId!;
 
         // One prepared statement, three different payloads. If a value were captured at prepare
         // time every execution would answer with the first vector's neighbour.

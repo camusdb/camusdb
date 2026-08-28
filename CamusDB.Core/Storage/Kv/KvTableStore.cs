@@ -1500,9 +1500,24 @@ public sealed class KvTableStore
         //     [enc(prefix), enc(prefix)] contains no key of the form enc(prefix)+enc(rest)).
         // Widening here is always safe: the decoded-key ComparePrefix filter below is authoritative
         // and trims whatever the raw bound over-reads.
-        bool toIsPrefixBound = to is not null && to.Values.Length < keyTypes.Length;
+        bool fromIsPrefixBound = from is not null && from.Values.Length < keyTypes.Length;
+        bool toIsPrefixBound   = to   is not null && to.Values.Length   < keyTypes.Length;
 
-        string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
+        // Start bound: an exclusive lower bound ('>') must also clear every stored key that extends
+        // the encoded bound (the rowId suffix on a non-unique index, the remaining columns under a
+        // prefix bound). A bare exclusive start still admits those keys — they sort after the bound —
+        // and the decoded ComparePrefix filter below then discards them, so the over-read is invisible
+        // in the results. It is NOT harmless to the raw window: those keys belong to the adjacent
+        // ('<= V') predicate's range, and a foreign transaction holding an exclusive range lock there
+        // has planted write intents on them. A scan page that includes such a key cannot settle until
+        // that transaction finishes, so two deliberately disjoint predicates ('<= V' and '> V')
+        // serialize against each other for the whole intent lease. Appending IndexKeySentinel pushes
+        // the start past every extension of the bound value — the exact rule
+        // <see cref="AcquireBoundedIndexRangeLockAsync"/> applies to the lock's own start bound — so
+        // the raw scan window is as disjoint as the lock that protects it.
+        string? startKey = fromEncoded is not null
+            ? ((unique && !fromIsPrefixBound) || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + IndexKeySentinel)
+            : null;
         string? endKey   = toEncoded   is not null
             ? (unique && !toIsPrefixBound ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;
@@ -1606,11 +1621,11 @@ public sealed class KvTableStore
             int levelCount = 1 + ancestorStores.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound).GetAsyncEnumerator(cancellationToken);
+            iters[0] = ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound).GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < ancestorStores.Length; ai++)
             {
                 (KvTableStore ancestorStore, HLCTimestamp forkTimestamp) = ancestorStores[ai];
-                iters[ai + 1] = ancestorStore.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, "", toIsPrefixBound).GetAsyncEnumerator(cancellationToken);
+                iters[ai + 1] = ancestorStore.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, "", toIsPrefixBound, fromIsPrefixBound).GetAsyncEnumerator(cancellationToken);
             }
 
             if (ancestorStores.Length > 0)
@@ -3385,14 +3400,18 @@ public sealed class KvTableStore
         bool unique,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
         string coordinatorKey = "",
-        bool toIsPrefixBound = false)
+        bool toIsPrefixBound = false,
+        bool fromIsPrefixBound = false)
     {
         string bucketPrefix = BuildIndexBucketPrefix(indexId);
         string keyPrefix = bucketPrefix + "/";
         int prefixLen = keyPrefix.Length;
 
-        // See ScanIndex for why a prefix bound needs the sentinel even on a unique index.
-        string? startKey = fromEncoded is not null ? keyPrefix + fromEncoded : null;
+        // See ScanIndex for why a prefix bound needs the sentinel even on a unique index, and why an
+        // exclusive lower bound must clear the bound value's stored-key extensions with the sentinel.
+        string? startKey = fromEncoded is not null
+            ? ((unique && !fromIsPrefixBound) || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + IndexKeySentinel)
+            : null;
         string? endKey   = toEncoded   is not null
             ? (unique && !toIsPrefixBound ? keyPrefix + toEncoded : keyPrefix + toEncoded + IndexKeySentinel)
             : null;

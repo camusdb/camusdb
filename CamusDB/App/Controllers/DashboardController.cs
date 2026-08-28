@@ -102,6 +102,21 @@ public sealed class DashboardController : CommandsController
     /// </summary>
     private const int MaxMetricRows = 400;
 
+    /// <summary>
+    /// Ceiling on slow-query entries the panel draws. The ring itself can be configured far larger,
+    /// and a card is not where an operator reads two thousand statements — that is what
+    /// <c>SHOW SLOW QUERIES</c> is for. What the cap drops is reported in <c>omitted</c>.
+    /// </summary>
+    private const int MaxSlowQueryRows = 50;
+
+    /// <summary>
+    /// Characters of statement text the panel returns per entry. The log has already truncated to
+    /// its own configured length, but that length is an operator's choice and can be several
+    /// kilobytes — which is a fine size for a SQL client and a payload the page would have to
+    /// re-truncate anyway, on every poll, for every entry.
+    /// </summary>
+    private const int MaxSlowQuerySqlLength = 300;
+
     /// <summary>Bounds on the served refresh interval, so a typo cannot produce a hot loop.</summary>
     private const int MinRefreshSeconds = 1;
     private const int MaxRefreshSeconds = 300;
@@ -151,20 +166,11 @@ public sealed class DashboardController : CommandsController
 
             ClusterHealthResponse health = ClusterController.BuildHealth(kahuna.Raft);
 
-            string endpoint;
-            try
-            {
-                endpoint = kahuna.Raft.GetLocalEndpoint();
-            }
-            catch (Exception)
-            {
-                // A node early in boot has no endpoint yet. The band shows the rest regardless.
-                endpoint = "";
-            }
-
             return new JsonResult(new DashboardSummaryResponse
             {
-                LocalEndpoint = endpoint,
+                // Empty on a node early in boot, which has no endpoint yet. The band shows the rest
+                // regardless rather than failing the whole panel over a name.
+                LocalEndpoint = ResolveLocalEndpoint(),
                 LocalRole = health.LocalRole,
                 Initialized = health.Initialized,
                 Ready = health.Ready,
@@ -255,6 +261,90 @@ public sealed class DashboardController : CommandsController
                     Min: Number(row, "min"),
                     Max: Number(row, "max"),
                     Last: Number(row, "last")));
+            }
+
+            response.Omitted = omitted;
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            return Failure(e);
+        }
+        catch (Exception e)
+        {
+            return Unexpected(e);
+        }
+    }
+
+    /// <summary>
+    /// The newest entries in this node's slow query log.
+    ///
+    /// <para>It runs <c>SHOW SLOW QUERIES</c> through the executor rather than reading the log
+    /// directly, so the statement's superuser gate applies unchanged. Reading the ring here would
+    /// mean a second copy of that rule, and a second copy is what eventually disagrees with the
+    /// first — on a surface whose rows carry other users' SQL text.</para>
+    ///
+    /// <para>The statement already returns entries newest first, so no ordering is imposed here.</para>
+    /// </summary>
+    [HttpGet]
+    [Route("/v1/dashboard/slow-queries")]
+    public async Task<IActionResult> GetSlowQueries()
+    {
+        IActionResult? refusal = RefuseIfUnavailable();
+        if (refusal is not null)
+            return refusal;
+
+        try
+        {
+            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+
+            DashboardSlowQueriesResponse response = new()
+            {
+                LogEnabled = options.SlowQueryLogEnabled,
+                ThresholdMs = options.SlowQueryLogThresholdMs,
+                Capacity = options.SlowQueryLogMaxEntries,
+                Node = ResolveLocalEndpoint(),
+            };
+
+            // Off is a state, not a failure — the statement itself answers with no rows and no
+            // error. Returning early also keeps a disabled node from paying for a parse per poll.
+            if (!options.SlowQueryLogEnabled)
+                return new JsonResult(response);
+
+            int omitted = 0;
+
+            await foreach (QueryResultRow row in RunServerStatementAsync("SHOW SLOW QUERIES", principal).ConfigureAwait(false))
+            {
+                long sequence = Integer(row, "seq");
+
+                // The statement returns newest first, so the first row carries the highest sequence.
+                if (sequence > response.NewestSequence)
+                    response.NewestSequence = sequence;
+
+                if (response.Rows.Count >= MaxSlowQueryRows)
+                {
+                    omitted++;
+                    continue;
+                }
+
+                string sql = Text(row, "sql");
+                bool truncated = Flag(row, "truncated") || sql.Length > MaxSlowQuerySqlLength;
+
+                response.Rows.Add(new DashboardSlowQueryRow(
+                    Seq: sequence,
+                    StartedAt: Text(row, "started_at"),
+                    DurationMs: Number(row, "duration_ms") ?? 0,
+                    Database: Text(row, "database"),
+                    User: NullableText(row, "user"),
+                    Kind: Text(row, "kind"),
+                    RowsReturned: Integer(row, "rows_returned"),
+                    RowsRead: Integer(row, "rows_read"),
+                    FullScan: Flag(row, "full_scan"),
+                    Spilled: Flag(row, "spilled"),
+                    Outcome: Text(row, "outcome"),
+                    ErrorCode: NullableText(row, "error_code"),
+                    Truncated: truncated,
+                    Sql: sql.Length > MaxSlowQuerySqlLength ? sql[..MaxSlowQuerySqlLength] : sql));
             }
 
             response.Omitted = omitted;
@@ -578,6 +668,35 @@ public sealed class DashboardController : CommandsController
 
     private static string Text(QueryResultRow row, string column) =>
         row.Row.TryGetValue(column, out ColumnValue? value) ? value.StrValue ?? "" : "";
+
+    /// <summary>
+    /// Reads a text cell that is meaningfully nullable. <c>user</c> is null when the node is not
+    /// authenticating and <c>error_code</c> is null unless the statement failed; flattening either to
+    /// an empty string would make "no identity to report" indistinguishable from an empty name.
+    /// </summary>
+    private static string? NullableText(QueryResultRow row, string column) =>
+        row.Row.TryGetValue(column, out ColumnValue? value) && value.Type != ColumnType.Null
+            ? value.StrValue
+            : null;
+
+    private static bool Flag(QueryResultRow row, string column) =>
+        row.Row.TryGetValue(column, out ColumnValue? value) && value.Type != ColumnType.Null && value.BoolValue;
+
+    /// <summary>
+    /// This node's endpoint, or an empty string early in boot before one exists. A panel that names
+    /// the node its rows came from is what stops an operator reading one node's log as the cluster's.
+    /// </summary>
+    private string ResolveLocalEndpoint()
+    {
+        try
+        {
+            return kahuna.Raft.GetLocalEndpoint();
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+    }
 
     private static long Integer(QueryResultRow row, string column) =>
         row.Row.TryGetValue(column, out ColumnValue? value) ? value.LongValue : 0;

@@ -321,6 +321,15 @@ tbody tr.selectable { cursor: pointer; }
 tbody tr.selectable:hover { background: var(--primary-wash); }
 tbody tr.selected { background: var(--primary-wash); }
 
+/* ── Slow query panel ──────────────────────────────────────────────────── */
+
+/* A statement can carry both flags at once, and without this they touch. */
+td .pill + .pill { margin-left: .35rem; }
+
+/* The statement is by far the widest column and the least useful when it pushes
+   the numbers off the card. Clipped to one line; the full text is the title. */
+td.sql { max-width: 26rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── Metric rows ───────────────────────────────────────────────────────── */
 .metric {
   display: grid;

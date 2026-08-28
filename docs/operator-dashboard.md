@@ -22,6 +22,7 @@ card keeps working.
 | Databases | The registry, with each database's id, branch parent, and whether this node currently holds it in memory | 30 s |
 | Relations | The tables and views of one database | on selection |
 | Backups | The most recent backups with kind and size | 60 s |
+| Slow queries | The newest statements over the slow-query threshold, with duration, rows read against rows returned, and the full-scan and spill flags | 15 s |
 | Configuration | Every setting this node resolved, with its value, whether a change needs a restart, and whether the fleet must agree | once |
 | Overlay | The live cluster-settings entries | once |
 
@@ -55,14 +56,33 @@ of a cross-site request: a browser attaches a cookie by itself, but never a head
 is served to loopback connections only. A browser on another machine gets 403 and a message naming
 the setting to turn on. To reach the dashboard from another machine, enable authentication.
 
+### Reading the Slow queries card
+
+The card is empty on a node that has had nothing slow **and** on a node that is not recording at all,
+so it says which. With [the slow query log](slow-query-log.md) switched off it shows one line telling
+you to turn it on, rather than an empty table you would read as a healthy node.
+
+Two flags carry most of the value. **Full scan** means the plan read a whole relation instead of
+seeking an index. **Spilled** means a sort, grouping, distinct or join outgrew its memory budget and
+wrote to disk. Together with rows read against rows returned they usually answer "why was this slow"
+without a second run.
+
+Statement text is clipped to fit the cell; the full text is the tooltip, and all of it is in
+`SHOW SLOW QUERIES`. The card also says when older entries have been overwritten, so a short list is
+never mistaken for a complete history.
+
+Polling this card does not disturb what it shows: `SHOW SLOW QUERIES` is never itself recorded.
+
 ## What a non-superuser sees
 
-Two cards need a superuser, because the statements behind them do: **Engine** runs
-`SHOW ENGINE STATS`, and **Configuration** runs `SHOW VARIABLES` and `SHOW CLUSTER SETTINGS`. Those
-outputs describe the node's whole security posture, limits and workload volume, which no per-database
-grant scopes down.
+Three cards need a superuser, because the statements behind them do: **Engine** runs
+`SHOW ENGINE STATS`, **Configuration** runs `SHOW VARIABLES` and `SHOW CLUSTER SETTINGS`, and
+**Slow queries** runs `SHOW SLOW QUERIES`. Those outputs describe the node's whole security posture,
+limits and workload volume, which no per-database grant scopes down — and the slow-query rows carry
+the literal SQL text of statements other users ran, which can hold values from tables the reader has
+no grant on.
 
-Any other authenticated user sees a complete page with those two cards replaced by one line of
+Any other authenticated user sees a complete page with those three cards replaced by one line of
 explanation. The database list is filtered to the databases that user may already reach.
 
 ## Settings
@@ -99,6 +119,10 @@ every rate again from nothing.
 
 **The Engine card is empty when `engine_metrics_enabled` is false.** The card says so rather than
 showing an empty table. Turning it back on needs a restart.
+
+**The Slow queries card is empty when `slow_query_log_enabled` is false**, and it says so for the
+same reason. Turning it on needs a restart. The log lives in memory, holds a bounded sample, and does
+not survive a restart — see [the slow query log](slow-query-log.md) for sizing it.
 
 **CamusDB's own instruments record only when diagnostics are on.** With `diagnostics.enabled` false
 the engine's request, execute, commit and cache instruments exist but never record, so they do not

@@ -339,6 +339,37 @@ internal sealed class TestSlowQueryLogStatements : BaseTest
     // Reading the log
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Reading the log must not change it.
+    ///
+    /// <para>Without this the statement records itself, so every read evicts an entry — and anything
+    /// that polls the log, which the operator dashboard does every few seconds, erases the history it
+    /// exists to display. On a small ring it erases it completely, which is how this was found.</para>
+    /// </summary>
+    [Test]
+    public async Task ReadingTheLogDoesNotRecordTheRead()
+    {
+        (string dbname, _, CommandExecutor executor) = await SetupRobots(
+            Logging(Options) with { SlowQueryLogMaxEntries = 4 }, rows: 2);
+
+        await QueryAsync(executor, dbname, "SELECT name FROM robots");
+
+        // Poll the log far more often than the ring can hold. A self-recording read would push the
+        // SELECT out well before this loop ends.
+        for (int i = 0; i < 20; i++)
+            await ShowSlowQueriesAsync(executor, dbname);
+
+        List<QueryResultRow> entries = await ShowSlowQueriesAsync(executor, dbname);
+
+        Assert.IsNotNull(
+            FirstWithSql(entries, "SELECT name FROM robots"),
+            "polling the log must not evict the statements it reports");
+
+        Assert.IsEmpty(
+            entries.Where(row => Text(row, "kind") == "show_slow_queries"),
+            "the statement that reads the log must not appear in it");
+    }
+
     [Test]
     public async Task RowsAreNewestFirst()
     {

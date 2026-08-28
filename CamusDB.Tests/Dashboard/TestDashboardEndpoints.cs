@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 
@@ -19,6 +20,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.App.Controllers;
 using CamusDB.App.Models;
 using CamusDB.App.Services;
+using CamusDB.Core.Transactions;
 using CamusDB.Tests.CommandsExecutor;
 
 namespace CamusDB.Tests.Dashboard;
@@ -68,6 +70,158 @@ public class TestDashboardEndpoints : BaseTest
     {
         JsonResult json = (JsonResult)result;
         return (T)json.Value!;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Slow queries
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A node with the log off must say so, rather than answering with an empty list. The two look
+    /// identical to a reader, and "no slow statements" is the opposite conclusion from "not
+    /// recording".
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SlowQueriesReportsTheLogAsDisabledRatherThanEmpty()
+    {
+        (string _, DatabaseDescriptor _, CommandExecutor executor) = await CreateDatabase();
+
+        DashboardController controller = CreateController(executor, Options);
+        DashboardSlowQueriesResponse body =
+            Payload<DashboardSlowQueriesResponse>(await controller.GetSlowQueries());
+
+        Assert.AreEqual("ok", body.Status);
+        Assert.IsFalse(body.LogEnabled);
+        Assert.IsEmpty(body.Rows);
+        Assert.AreEqual(0, body.NewestSequence);
+    }
+
+    /// <summary>
+    /// With the log on, the panel reports the statements this node ran, newest first, and carries
+    /// the execution facts that explain each duration — which is the panel's whole reason to exist.
+    ///
+    /// <para>The engine is built with the log enabled through <c>CreateDatabase(options)</c>. Setting
+    /// the flag on an engine that already exists would be a no-op that still passes.</para>
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SlowQueriesReportsRecordedStatementsNewestFirst()
+    {
+        CamusDBOptions logging = Options with { SlowQueryLogEnabled = true, SlowQueryLogThresholdMs = 0 };
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(logging);
+
+        KvTransaction ddl = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: ddl, database: dbname,
+            sql: "CREATE TABLE dash_slow (id OID PRIMARY KEY, name STRING NOT NULL)", parameters: null));
+        await database.Transactions.CommitAsync(ddl);
+
+        await DrainAsync(executor, dbname, "SELECT * FROM dash_slow WHERE name = 'absent'");
+
+        DashboardController controller = CreateController(executor, logging);
+        DashboardSlowQueriesResponse body =
+            Payload<DashboardSlowQueriesResponse>(await controller.GetSlowQueries());
+
+        Assert.IsTrue(body.LogEnabled);
+        Assert.AreEqual(0, body.ThresholdMs);
+        Assert.AreEqual(logging.SlowQueryLogMaxEntries, body.Capacity);
+        Assert.IsNotEmpty(body.Rows);
+
+        DashboardSlowQueryRow? scan = body.Rows.Find(entry => entry.Sql.Contains("dash_slow"));
+        Assert.IsNotNull(scan, "the SELECT should have been recorded");
+        Assert.AreEqual("select", scan!.Kind);
+        Assert.AreEqual(dbname, scan.Database);
+        Assert.AreEqual("completed", scan.Outcome);
+        Assert.IsNull(scan.ErrorCode);
+
+        // Newest first, and the reported newest sequence is the highest one present.
+        long[] sequences = body.Rows.ConvertAll(entry => entry.Seq).ToArray();
+        for (int i = 1; i < sequences.Length; i++)
+            Assert.Less(sequences[i], sequences[i - 1], "entries must come back newest first");
+
+        Assert.AreEqual(sequences[0], body.NewestSequence);
+    }
+
+    /// <summary>
+    /// The panel clips statement text. The log's own limit is an operator's choice and can be
+    /// kilobytes, which is a payload the page would re-truncate on every poll for every entry.
+    /// A clipped entry must say it was clipped.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SlowQueriesClipsLongStatementTextAndFlagsIt()
+    {
+        CamusDBOptions logging = Options with
+        {
+            SlowQueryLogEnabled = true,
+            SlowQueryLogThresholdMs = 0,
+            SlowQueryLogMaxSqlLength = 8192,
+        };
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(logging);
+
+        KvTransaction ddl = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: ddl, database: dbname,
+            sql: "CREATE TABLE dash_long (id OID PRIMARY KEY, name STRING NOT NULL)", parameters: null));
+        await database.Transactions.CommitAsync(ddl);
+
+        // A predicate long enough to pass the log's own limit and still exceed the panel's.
+        string wide = string.Join(" OR ", Enumerable.Range(0, 60).Select(i => $"name = 'padding value {i}'"));
+        await DrainAsync(executor, dbname, $"SELECT * FROM dash_long WHERE {wide}");
+
+        DashboardController controller = CreateController(executor, logging);
+        DashboardSlowQueriesResponse body =
+            Payload<DashboardSlowQueriesResponse>(await controller.GetSlowQueries());
+
+        DashboardSlowQueryRow? entry = body.Rows.Find(row => row.Sql.Contains("dash_long"));
+        Assert.IsNotNull(entry);
+        Assert.LessOrEqual(entry!.Sql.Length, 300);
+        Assert.IsTrue(entry.Truncated, "a clipped statement must say it was clipped");
+    }
+
+    /// <summary>
+    /// The panel is unreachable without a superuser session.
+    ///
+    /// <para>The gate is not implemented in the controller — the panel runs <c>SHOW SLOW QUERIES</c>
+    /// through the executor and inherits that statement's bar. This test drives the endpoint anyway,
+    /// because "the statement is gated" and "the panel is gated" are two claims, and the second is
+    /// the one an operator relies on. The rows carry other users' SQL text, so a panel that quietly
+    /// stopped inheriting the gate would be a disclosure, not a cosmetic slip.</para>
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SlowQueriesRefusesANonSuperuser()
+    {
+        CamusDBOptions guarded = Options with
+        {
+            SlowQueryLogEnabled = true,
+            SlowQueryLogThresholdMs = 0,
+            AuthenticationEnabled = true,
+        };
+
+        (string _, DatabaseDescriptor _, CommandExecutor executor) = await CreateDatabase(guarded);
+
+        DashboardController controller = CreateController(executor, guarded);
+        controller.HttpContext.Items["camus.principal"] =
+            new Principal("dash_reader", isSuperuser: false, grants: []);
+
+        JsonResult refusal = (JsonResult)await controller.GetSlowQueries();
+        DashboardFailureResponse body = (DashboardFailureResponse)refusal.Value!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, body.Code);
+        Assert.AreEqual(StatusCodes.Status403Forbidden, refusal.StatusCode);
+    }
+
+    /// <summary>Runs a statement and drains its cursor, which is what ends the recorded duration.</summary>
+    private static async Task DrainAsync(CommandExecutor executor, string dbname, string sql)
+    {
+        (_, System.Collections.Generic.IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(KvTransaction.CreateReadOnly(), dbname, sql, null));
+
+        await foreach (QueryResultRow _ in cursor) { }
     }
 
     [Test]

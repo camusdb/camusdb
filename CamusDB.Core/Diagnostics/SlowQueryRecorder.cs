@@ -165,6 +165,20 @@ public sealed class SlowQueryRecording
     }
 
     /// <summary>
+    /// Abandons this recording: the statement is timed but never stored.
+    ///
+    /// <para>It exists for the statement that reads the log. <c>SHOW SLOW QUERIES</c> recording
+    /// itself would mean every read evicts an entry, so anything polling the log — the operator
+    /// dashboard does, every few seconds — would erase the history it exists to display. Reading a
+    /// diagnostic must not change it.</para>
+    ///
+    /// <para>Implemented by claiming the finish flag, so the cursor wrapper's later
+    /// <see cref="Finish"/> and <see cref="FinishFailed"/> both become the no-ops they already are on
+    /// a second call.</para>
+    /// </summary>
+    public void Discard() => Interlocked.Exchange(ref finished, 1);
+
+    /// <summary>
     /// Ends a statement that raised, taking the error code from the exception when it is one of the
     /// engine's own.
     /// </summary>

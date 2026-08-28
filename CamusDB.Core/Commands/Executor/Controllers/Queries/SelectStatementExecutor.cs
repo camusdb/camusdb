@@ -226,6 +226,12 @@ internal sealed class SelectStatementExecutor
 
         recording?.Describe(ast.nodeType);
 
+        // Reading the log must not change it. Recording this statement would make every read evict
+        // an entry, so a dashboard polling the log every few seconds would erase the history it
+        // exists to display — and on a small ring it erases it completely.
+        if (ast.nodeType == NodeType.ShowSlowQueries)
+            recording?.Discard();
+
         statementAuthorizer.SetAuthorizationScope(ticket, ast);
         ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
         await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);

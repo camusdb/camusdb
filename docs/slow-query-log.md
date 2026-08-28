@@ -122,6 +122,32 @@ what it returned but spilled, so it is a memory problem, not an index problem �
 `spill_threshold_rows` or bound the sort with a `LIMIT`. See
 [Spill to disk](spill-to-disk.md) and [the query planner guide](query-planner.md).
 
+## On the dashboard
+
+The [operator dashboard](operator-dashboard.md) carries a **Slow queries** panel showing the newest
+entries with the same columns, refreshed every 15 seconds. It runs `SHOW SLOW QUERIES` through the
+engine, so it inherits the superuser bar below rather than applying a second copy of it, and a
+non-superuser session sees the panel refuse instead of the rows.
+
+The panel clips statement text to 300 characters — the log's own limit is yours to set and can be
+kilobytes, which is a fine size for a SQL client and a poor one for a table cell. The full text is
+the cell's tooltip; the whole statement is in `SHOW SLOW QUERIES`.
+
+It draws at most 50 entries and says how many more are held. It also says when the ring has wrapped,
+by comparing the newest `seq` against the capacity.
+
+### Reading the log does not change it
+
+`SHOW SLOW QUERIES` is never recorded, however slow it is and whatever the threshold is set to.
+
+Without that rule the statement records itself, so every read evicts an entry — and anything polling
+the log, the dashboard panel included, erases the history it exists to show. On a small ring it
+erases it completely within a minute.
+
+Other introspection statements are not exempt. With the threshold at `0` an open dashboard fills the
+log with its own `SHOW ENGINE STATS` polls, because at that setting everything is recorded. That is
+one more reason `0` belongs on an idle node while reproducing something, and not on a busy one.
+
 ## Privileges
 
 `SHOW SLOW QUERIES` requires a **superuser**, a higher bar than `SHOW DATABASES` and the same bar as
@@ -142,8 +168,8 @@ Know these before you build anything on the log.
    own, and answering from the leader would hide exactly that.
 3. **It is a bounded sample, not every slow statement.** Once the ring is full the oldest entry goes.
    Use `seq` to tell whether you are looking at a complete picture.
-4. **It is not an audit log.** Statements below the threshold are never recorded, and the text is
-   truncated.
+4. **It is not an audit log.** Statements below the threshold are never recorded, the text is
+   truncated, and `SHOW SLOW QUERIES` itself never appears.
 
 ## Related
 
@@ -151,4 +177,5 @@ Know these before you build anything on the log.
 - [`SHOW VARIABLES`](show-variables.md) — what this node's configuration actually resolved to.
 - [`EXPLAIN` and `EXPLAIN ANALYZE`](explain.md) — per-operator detail for one statement.
 - [Spill to disk](spill-to-disk.md) — what `spilled` means and how to tune it.
+- [Operator dashboard](operator-dashboard.md) — the browser panel over the same log.
 - [Configuration](configuration.md) — the full settings reference.
