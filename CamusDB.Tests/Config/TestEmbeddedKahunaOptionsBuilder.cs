@@ -791,6 +791,34 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void ScanPageRetryBudget_MapsValidatesAndKeepsTheDefault()
+    {
+        // Mapping: a configured budget reaches the embedded options.
+        KahunaOptionsConfig kahuna = new() { ScanPageRetryBudgetMs = 4_000 };
+        Assert.DoesNotThrow(() => kahuna.Validate());
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/scan-budget", kahuna, CamusDBOptions.Default);
+        Assert.That(built.ScanPageRetryBudgetMs, Is.EqualTo(4_000));
+
+        // Unset keeps Kahuna's default, which must sit below the shipped 10 s client command deadline —
+        // a budget at or above the deadline raises the named scan error into a call the client has
+        // already cancelled, so the diagnosis never reaches a caller.
+        EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/scan-budget-default", new KahunaOptionsConfig(), CamusDBOptions.Default);
+        Assert.That(defaults.ScanPageRetryBudgetMs, Is.EqualTo(5_000));
+        Assert.That(defaults.ScanPageRetryBudgetMs, Is.LessThan(10_000),
+            "the budget must fire below the default client command deadline or it is unobservable");
+
+        // A non-positive budget would restore the unbounded silent retry loop the setting rules out.
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { ScanPageRetryBudgetMs = 0 }.Validate())!.Message,
+            Does.Contain("scan_page_retry_budget_ms"));
+        Assert.That(
+            Assert.Throws<CamusDBException>(() => new KahunaOptionsConfig { ScanPageRetryBudgetMs = -1 }.Validate())!.Message,
+            Does.Contain("scan_page_retry_budget_ms"));
+    }
+
+    [Test]
     public void NegativeLoadSplitKnobs_AreRejected()
     {
         CamusDBException threshold = Assert.Throws<CamusDBException>(

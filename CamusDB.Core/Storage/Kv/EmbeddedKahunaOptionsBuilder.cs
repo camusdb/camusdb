@@ -335,6 +335,12 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.TransactionOutcomeRetentionMax is int outcomeRetentionMax)
             baseline.TransactionOutcomeRetentionMax = outcomeRetentionMax;
 
+        // Per-page scan retry budget. Kahuna's default already sits below the shipped client command
+        // deadline (5 s vs 10 s) so the named failure is observable; a deployment that raises its client
+        // deadline may raise this with it, keeping the budget strictly below the deadline.
+        if (kahuna.ScanPageRetryBudgetMs is int scanPageRetryBudget)
+            baseline.ScanPageRetryBudgetMs = scanPageRetryBudget;
+
         if (kahuna.RangeMergeMinSize is int rangeMergeMinSize)
             baseline.RangeMergeMinSize = rangeMergeMinSize;
 

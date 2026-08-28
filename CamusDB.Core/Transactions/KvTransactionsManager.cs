@@ -230,9 +230,35 @@ public sealed class KvTransactionsManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Mints the tracking identity (<see cref="KvTransaction.ClientId"/>) for a transaction this
+    /// manager registers. Every tracked identity must come from THIS node's clock: the HTTP/gRPC
+    /// transaction coordinator keys its tracking map by <c>(ClientId.L, ClientId.C)</c> — the wire
+    /// handle carries no node component — so identities minted by two different clocks can collide
+    /// on that pair. A Kahuna session id is minted by whichever node leads the session's
+    /// coordinator partition, i.e. by another node's clock for most sessions in a cluster; using it
+    /// as the tracking identity let a session id equal a locally-minted id from the same
+    /// millisecond, silently binding two live transactions to one tracking key. A statement or
+    /// finalize for one transaction then resolved the other: a write could stage into a colliding
+    /// autocommit read (which committed it as a one-legged transaction), and a commit could land on
+    /// a colliding empty transaction and report success while its own staged writes were never
+    /// committed. One local monotonic clock never produces the same (physical, counter) pair
+    /// twice, which makes the key collision-free. Falls back to the session id only when no local
+    /// mint was provided (single-clock test fixtures, where the ambiguity cannot arise).
+    /// </summary>
+    private Kommander.Time.HLCTimestamp MintTrackingId(Kommander.Time.HLCTimestamp sessionId)
+        => mintLocalT?.Invoke(null) ?? sessionId;
+
     private void Track(KvTransaction tx)
     {
-        activeTransactions[tx.ClientId] = tx;
+        // A collision here means two live transactions share a tracking identity — the exact
+        // corruption the local-mint rule above exists to prevent. Refuse loudly instead of
+        // overwriting: an overwritten entry silently routes one transaction's statements and
+        // finalize to the other.
+        if (!activeTransactions.TryAdd(tx.ClientId, tx))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Transaction tracking identity {tx.ClientId} is already registered to a live transaction");
     }
 
     private void Untrack(KvTransaction tx)
@@ -336,9 +362,10 @@ public sealed class KvTransactionsManager : IDisposable
             return txDeferred;
         }
 
-        // Eager start (the default): starts the Kahuna session immediately and sets
-        // TransactionId = ClientId = the Kahuna handle. Used for every internally-begun and autocommit
-        // transaction, and whenever deferral was not requested.
+        // Eager start (the default): starts the Kahuna session immediately. Used for every
+        // internally-begun and autocommit transaction, and whenever deferral was not requested. The
+        // tracking identity is minted locally, never taken from the session handle — see
+        // MintTrackingId for why a remote-minted session id must not key the tracking maps.
         TransactionHandle handle = await StartKahunaTransactionAsync(
             uniqueId, 
             "start Kahuna transaction", 
@@ -350,14 +377,15 @@ public sealed class KvTransactionsManager : IDisposable
         ).ConfigureAwait(false);
 
         KvTransaction tx = new(
-            handle.TransactionId, 
-            uniqueId, 
-            isReadOnly: false, 
-            level, 
+            handle.TransactionId,
+            uniqueId,
+            isReadOnly: false,
+            level,
             mode,
-            mutationLimit: mutationLimit, 
-            locking: lockingMode, 
+            mutationLimit: mutationLimit,
+            locking: lockingMode,
             readValidation: readValidationMode,
+            clientId: MintTrackingId(handle.TransactionId),
             priority: priorityMode
         )
         {
@@ -415,6 +443,7 @@ public sealed class KvTransactionsManager : IDisposable
             isolationLevel:  CamusIsolationLevel.Serializable,
             transactionMode: CamusTransactionMode.ReadOnly,
             readTimestamp:   t,
+            clientId:        MintTrackingId(t),
             priority:        priority
         );
         
@@ -581,13 +610,14 @@ public sealed class KvTransactionsManager : IDisposable
         ).ConfigureAwait(false);
 
         KvTransaction tx = new(
-            handle.TransactionId, 
-            uniqueId, 
+            handle.TransactionId,
+            uniqueId,
             isReadOnly: true,
-            transactionMode: CamusTransactionMode.ReadOnly, 
+            transactionMode: CamusTransactionMode.ReadOnly,
+            clientId: MintTrackingId(handle.TransactionId),
             priority: priorityMode
         );
-        
+
         Track(tx);
         
         return tx;

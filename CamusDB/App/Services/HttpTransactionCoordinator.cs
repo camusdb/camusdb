@@ -130,7 +130,7 @@ public sealed class HttpTransactionCoordinator
         if (sessionOwned)
             tx.MarkSessionOwned();
 
-        Register(database.Transactions, tx);
+        await RegisterAsync(database.Transactions, tx).ConfigureAwait(false);
         return tx;
     }
 
@@ -162,7 +162,7 @@ public sealed class HttpTransactionCoordinator
         // Zero-snapshot fast-path transactions carry no identity and need no tracking or cleanup;
         // a promoted (real-id) transaction is registered so commit/rollback can find and release it.
         if (tx.TransactionId != Kommander.Time.HLCTimestamp.Zero)
-            Register(database.Transactions, tx);
+            await RegisterAsync(database.Transactions, tx).ConfigureAwait(false);
 
         return tx;
     }
@@ -411,8 +411,26 @@ public sealed class HttpTransactionCoordinator
         }
     }
 
-    private void Register(KvTransactionsManager manager, KvTransaction tx) =>
-        active[Key(tx)] = new ActiveTransaction(manager, tx);
+    /// <summary>
+    /// Registers a transaction under its wire key. The key is the identity's (physical, counter)
+    /// pair — the wire handle has no node component — so it is collision-free only because every
+    /// tracked identity is minted by this node's clock (see <c>KvTransactionsManager.MintTrackingId</c>).
+    /// A collision therefore means two live transactions would share one key, silently routing one
+    /// transaction's statements and finalize to the other; refuse loudly instead of overwriting,
+    /// and roll the newcomer back so it cannot leak a live session.
+    /// </summary>
+    private async Task RegisterAsync(KvTransactionsManager manager, KvTransaction tx)
+    {
+        if (active.TryAdd(Key(tx), new ActiveTransaction(manager, tx)))
+            return;
+
+        try { await manager.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false); }
+        catch { /* best effort — the session lease is the backstop */ }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Transaction tracking key {Key(tx)} is already registered to a live transaction");
+    }
 
     private void Unregister(KvTransaction tx) =>
         active.TryRemove(Key(tx), out _);

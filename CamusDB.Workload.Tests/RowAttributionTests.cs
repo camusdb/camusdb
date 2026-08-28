@@ -425,4 +425,124 @@ public sealed class RowAttributionTests
         Assert.That(RowAttributionResult.Disabled("opted out").Passed, Is.True);
         Assert.That(RowAttributionResult.Unavailable("scan failed").Passed, Is.False);
     }
+
+    /// <summary>
+    /// The case the leg-pairing check exists for, and the one the other two checks cannot reach. Two
+    /// indeterminate transfers each apply only their low leg, with opposite deltas. Every row stays
+    /// inside its own band, because a row touched by an indeterminate transfer is allowed to have
+    /// applied it; and the two drifts cancel, so SUM(balance) is untouched. Only the pairing sees it.
+    /// </summary>
+    [Test]
+    public async Task HalfAppliedTransfersThatCancelAreCaughtOnlyByLegPairing()
+    {
+        Dataset dataset = NewDataset();
+        RowAttribution attribution = NewAttribution(dataset);
+        FakeStore store = new(dataset);
+        await attribution.CaptureBaselineAsync(store.Source, CancellationToken.None);
+        long baselineBalance = store.BalanceSum();
+
+        // Transfer A: low leg applied (-1), high leg never applied.
+        attribution.Record(1, 41, -1, TransferOutcome.Indeterminate);
+        store.ApplyLeg(1, -1);
+
+        // Transfer B: low leg applied (+1), high leg never applied. Cancels A in the total.
+        attribution.Record(2, 42, +1, TransferOutcome.Indeterminate);
+        store.ApplyLeg(2, +1);
+
+        RowAttributionResult result = await VerifyOnlyAsync(attribution, store);
+
+        Assert.That(store.BalanceSum(), Is.EqualTo(baselineBalance),
+            "the two half-applied transfers must cancel, or this test is not exercising the blind spot");
+        Assert.That(result.BalanceViolations, Is.Zero, "each leg is inside its own ambiguity band");
+        Assert.That(result.UncountedWriteRows, Is.Zero);
+        Assert.That(result.LostWriteRows, Is.Zero);
+
+        Assert.That(result.HalfAppliedTransfers, Is.EqualTo(2));
+        Assert.That(result.Passed, Is.False);
+        Assert.That(result.AllViolations.Select(v => v.Kind), Has.All.EqualTo("half-applied"));
+        Assert.That(result.AllViolations.Select(v => v.RowIndex), Is.EquivalentTo(new long[] { 1, 2 }));
+    }
+
+    /// <summary>An indeterminate transfer that applied both legs is not a violation — that is one of the
+    /// two outcomes the client's ambiguity admits.</summary>
+    [Test]
+    public async Task AnIndeterminateTransferThatAppliedBothLegsPasses()
+    {
+        Dataset dataset = NewDataset();
+        RowAttribution attribution = NewAttribution(dataset);
+        FakeStore store = new(dataset);
+        await attribution.CaptureBaselineAsync(store.Source, CancellationToken.None);
+
+        attribution.Record(3, 43, -1, TransferOutcome.Indeterminate);
+        store.ApplyLeg(3, -1);
+        store.ApplyLeg(43, +1);
+
+        RowAttributionResult result = await VerifyOnlyAsync(attribution, store);
+
+        Assert.That(result.HalfAppliedTransfers, Is.Zero);
+        Assert.That(result.TotalViolations, Is.Zero, string.Join("; ", result.Violations.Select(v => v.Detail)));
+    }
+
+    /// <summary>And one that applied neither leg is equally admissible.</summary>
+    [Test]
+    public async Task AnIndeterminateTransferThatAppliedNeitherLegPasses()
+    {
+        Dataset dataset = NewDataset();
+        RowAttribution attribution = NewAttribution(dataset);
+        FakeStore store = new(dataset);
+        await attribution.CaptureBaselineAsync(store.Source, CancellationToken.None);
+
+        attribution.Record(4, 44, +1, TransferOutcome.Indeterminate);
+
+        RowAttributionResult result = await VerifyOnlyAsync(attribution, store);
+
+        Assert.That(result.HalfAppliedTransfers, Is.Zero);
+        Assert.That(result.TotalViolations, Is.Zero);
+    }
+
+    /// <summary>
+    /// The check reports only what it can prove. With two indeterminate transfers against the same row
+    /// and exactly one of them applied, the version cannot say which, so neither transfer is accused.
+    /// A guess here would put a fabricated atomicity break in a run report.
+    /// </summary>
+    [Test]
+    public async Task AnUndecidableRowIsNotAccused()
+    {
+        Dataset dataset = NewDataset();
+        RowAttribution attribution = NewAttribution(dataset);
+        FakeStore store = new(dataset);
+        await attribution.CaptureBaselineAsync(store.Source, CancellationToken.None);
+
+        // Row 5 carries two indeterminate transfers; one of them applied to both of its legs.
+        attribution.Record(5, 45, -1, TransferOutcome.Indeterminate);
+        attribution.Record(5, 46, -1, TransferOutcome.Indeterminate);
+        store.ApplyLeg(5, -1);
+        store.ApplyLeg(45, +1);
+
+        RowAttributionResult result = await VerifyOnlyAsync(attribution, store);
+
+        Assert.That(result.HalfAppliedTransfers, Is.Zero,
+            "row 5 applied one of its two indeterminate transfers, and the version cannot say which");
+        Assert.That(result.TotalViolations, Is.Zero);
+    }
+
+    /// <summary>A committed transfer missing one leg is a lost write, not a half-applied indeterminate
+    /// one: the pairing pass must not claim it, because the row's own version check already does.</summary>
+    [Test]
+    public async Task AHalfAppliedCommittedTransferIsReportedByVersionNotByPairing()
+    {
+        Dataset dataset = NewDataset();
+        RowAttribution attribution = NewAttribution(dataset);
+        FakeStore store = new(dataset);
+        await attribution.CaptureBaselineAsync(store.Source, CancellationToken.None);
+
+        attribution.Record(6, 47, -1, TransferOutcome.Committed);
+        store.ApplyLeg(6, -1);
+
+        RowAttributionResult result = await VerifyOnlyAsync(attribution, store);
+
+        Assert.That(result.HalfAppliedTransfers, Is.Zero);
+        Assert.That(result.LostWriteRows, Is.EqualTo(1));
+        Assert.That(result.Passed, Is.False);
+    }
 }

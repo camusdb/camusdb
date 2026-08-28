@@ -13,11 +13,12 @@ namespace CamusDB.Workload.Tests;
 
 /// <summary>
 /// The commit-phase boundary of error classification: a failure before the commit request is a
-/// definite abort (nothing was asked to persist), while a verdict-less failure of the commit round
-/// trip itself is <see cref="OperationStatus.Indeterminate"/> — the write may have landed. A
-/// <see cref="CamusException"/> that carries a server error code is a server verdict and therefore
-/// definite even during commit; one that carries no code and a transport message never reached a
-/// verdict and must stay ambiguous.
+/// definite abort (nothing was asked to persist), while a failure of the commit round trip that
+/// carries no verdict is <see cref="OperationStatus.Indeterminate"/> — the write may have landed.
+/// Verdict-less shapes are: a <see cref="CamusException"/> with no code and a transport-condition
+/// message (nothing answered), and the explicit outcome-unavailable server codes CADB0501 /
+/// CADB0509 (the server answered that it does not know the outcome). Any other coded
+/// <see cref="CamusException"/> is a server verdict and stays definite even during commit.
 /// </summary>
 [TestFixture]
 public sealed class ErrorClassifierTests
@@ -111,5 +112,33 @@ public sealed class ErrorClassifierTests
     {
         (OperationStatus status, _) = ErrorClassifier.Classify(new InvalidOperationException("row missing"), commitSubmitted: false);
         Assert.That(status, Is.EqualTo(OperationStatus.InternalError));
+    }
+
+    /// <summary>
+    /// CADB0501 (the coordinator session is gone and the durable outcome could not be read back) and
+    /// CADB0509 (commit outcome not yet known) both report that the outcome is UNAVAILABLE, not that the
+    /// transaction failed. A commit reported under either can have committed durably — store forensics of a
+    /// soak run found every one of its "leaked" rows was a transfer the client had recorded under CADB0501
+    /// that Kahuna had in fact committed. So on a submitted commit these must widen the ambiguity, exactly
+    /// like a codeless transport fault, rather than count as a definite non-commit.
+    /// </summary>
+    [TestCase("CADB0501")]
+    [TestCase("CADB0509")]
+    public void OutcomeUnavailableCodeDuringCommitIsIndeterminate(string code)
+    {
+        var ex = new CamusException(code, "the coordinator session is gone and the outcome is unavailable");
+        (OperationStatus status, string returnedCode) = ErrorClassifier.Classify(ex, commitSubmitted: true);
+        Assert.That(status, Is.EqualTo(OperationStatus.Indeterminate));
+        Assert.That(returnedCode, Is.EqualTo(code), "the underlying code survives for errors.json aggregation");
+    }
+
+    [Test]
+    public void OutcomeUnavailableCodeBeforeCommitKeepsItsOrdinaryClassification()
+    {
+        // No commit was requested, so the "outcome unavailable" widening does not apply: nothing could have
+        // landed, and the ordinary (definite) classification stands.
+        (OperationStatus status, _) = ErrorClassifier.Classify(
+            new CamusException("CADB0501", "a commit or rollback is in progress"), commitSubmitted: false);
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
     }
 }

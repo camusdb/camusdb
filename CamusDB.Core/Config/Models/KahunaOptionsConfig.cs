@@ -83,6 +83,7 @@ public sealed class KahunaOptionsConfig
         "range_move_settle_timeout_ms",
         "transaction_outcome_retention_ttl_ms",
         "transaction_outcome_retention_max",
+        "scan_page_retry_budget_ms",
         "range_merge_min_size",
         "enable_load_reports",
         "replication_factor",
@@ -515,6 +516,17 @@ public sealed class KahunaOptionsConfig
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.TransactionOutcomeRetentionMax"/>.
     /// </summary>
     public int? TransactionOutcomeRetentionMax { get; set; }
+
+    /// <summary>
+    /// Milliseconds one Kahuna range-scan page may keep answering transient before the scan fails
+    /// loudly with the range and cursor named, instead of retrying in silence. Must stay
+    /// <b>below</b> the smallest client command deadline in front of the scan (the shipped client
+    /// default is 10 s) — a budget above that deadline raises the named error into a call the
+    /// client has already cancelled, so the diagnosis is never observable. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.ScanPageRetryBudgetMs"/>; unset keeps Kahuna's
+    /// default of 5,000 ms.
+    /// </summary>
+    public int? ScanPageRetryBudgetMs { get; set; }
 
     /// <summary>
     /// Key count below which two adjacent ranges become eligible to merge back into one. <c>0</c>
@@ -954,6 +966,12 @@ public sealed class KahunaOptionsConfig
         if (TransactionOutcomeRetentionMax is < 0)
             throw InvalidConfig(
                 $"'kahuna.transaction_outcome_retention_max' must be >= 0, got {TransactionOutcomeRetentionMax}");
+
+        // Must be positive: a non-positive budget would restore the unbounded silent scan retry loop this
+        // setting exists to rule out.
+        if (ScanPageRetryBudgetMs is <= 0)
+            throw InvalidConfig(
+                $"'kahuna.scan_page_retry_budget_ms' must be > 0, got {ScanPageRetryBudgetMs}");
 
         if (RangeSplitSettleWindowMs is <= 0)
             throw InvalidConfig(

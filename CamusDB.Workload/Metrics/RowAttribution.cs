@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -53,6 +54,7 @@ public sealed record RowAttributionResult(
     long RowsMissing,
     long RowsDuplicated,
     long RowsForeign,
+    long HalfAppliedTransfers,
     IReadOnlyList<RowViolation> Violations)
 {
     /// <summary>
@@ -63,9 +65,18 @@ public sealed record RowAttributionResult(
     [JsonIgnore]
     public IReadOnlyList<RowViolation> AllViolations { get; init; } = [];
 
-    /// <summary>Total rows that contradict the journal, by any of the checks.</summary>
+    /// <summary>
+    /// True when the leg-pairing check could not see every unknown-outcome transfer, because the run
+    /// produced more than the retained cap. Violations it did find are still real; absence of them is
+    /// no longer proof of absence, so a caller must not read a zero count as clean.
+    /// </summary>
+    [JsonIgnore]
+    public bool HalfAppliedCheckTruncated { get; init; }
+
+    /// <summary>Total contradictions with the journal, by any of the checks.</summary>
     public long TotalViolations =>
-        BalanceViolations + UncountedWriteRows + LostWriteRows + RowsMissing + RowsDuplicated + RowsForeign;
+        BalanceViolations + UncountedWriteRows + LostWriteRows + RowsMissing + RowsDuplicated + RowsForeign
+        + HalfAppliedTransfers;
 
     /// <summary>
     /// A disabled check passes (the operator opted out knowingly); an unavailable one does not, because
@@ -79,10 +90,10 @@ public sealed record RowAttributionResult(
     };
 
     public static RowAttributionResult Disabled(string reason) =>
-        new(RowAttributionStatus.Disabled, reason, 0, 0, 0, 0, 0, 0, 0, 0, []);
+        new(RowAttributionStatus.Disabled, reason, 0, 0, 0, 0, 0, 0, 0, 0, 0, []);
 
     public static RowAttributionResult Unavailable(string reason) =>
-        new(RowAttributionStatus.Unavailable, reason, 0, 0, 0, 0, 0, 0, 0, 0, []);
+        new(RowAttributionStatus.Unavailable, reason, 0, 0, 0, 0, 0, 0, 0, 0, 0, []);
 }
 
 /// <summary>Row count and column totals produced by one full scan of the dataset.</summary>
@@ -149,6 +160,14 @@ public sealed class RowAttribution
     /// <summary>Violations copied into <c>reconciliation.json</c>, which is meant to stay readable.</summary>
     private const int MaxSampledViolations = 50;
 
+    /// <summary>
+    /// Unknown-outcome transfers whose legs are retained for the pairing check. At 8 bytes a pair this
+    /// caps the cost at about 8 MB, far above what any healthy run produces — a run that exceeds it has
+    /// a pathological indeterminate rate, and the check reports itself truncated rather than silently
+    /// scanning a subset.
+    /// </summary>
+    private const int MaxRetainedPairs = 1_000_000;
+
     private readonly Dataset _dataset;
     private readonly ulong _seed;
     private readonly int _rows;
@@ -161,6 +180,20 @@ public sealed class RowAttribution
     private readonly long[] _ambiguousNegative;
     private readonly int[] _ambiguousTouches;
     private readonly int[] _observed;
+
+    // The two rows of every unknown-outcome transfer, kept as pairs rather than folded into the
+    // per-row totals above. A transfer moves value between its two rows, so it is zero-sum: whether it
+    // applied or not, it leaves SUM(balance) unchanged and leaves each row inside its own band. Only
+    // the pairing shows an attempt that applied to one row and not the other, which is the atomicity
+    // break the other checks are structurally unable to see.
+    private readonly ConcurrentQueue<(int Low, int High)> _ambiguousPairs = new();
+    private int _ambiguousPairsSeen;
+
+    // Per-row count of unknown-outcome transfers that demonstrably applied, derived from the scanned
+    // version, and whether that count can be trusted for this row. A row whose version fell outside its
+    // band is already reported by its own check and tells the pairing pass nothing reliable.
+    private readonly int[] _ambiguousApplied;
+    private readonly bool[] _ambiguousAppliedKnown;
 
     private bool _baselineCaptured;
 
@@ -177,6 +210,8 @@ public sealed class RowAttribution
         _ambiguousNegative = new long[rows];
         _ambiguousTouches = new int[rows];
         _observed = new int[rows];
+        _ambiguousApplied = new int[rows];
+        _ambiguousAppliedKnown = new bool[rows];
     }
 
     /// <summary>
@@ -223,6 +258,7 @@ public sealed class RowAttribution
             case TransferOutcome.Indeterminate:
                 ApplyAmbiguous(lowIndex, lowDelta);
                 ApplyAmbiguous(highIndex, -lowDelta);
+                RetainPair(lowIndex, highIndex);
                 break;
 
             // A conflict or a definite server abort applied nothing, so it moves no row's expected
@@ -252,6 +288,20 @@ public sealed class RowAttribution
         Interlocked.Increment(ref _ambiguousTouches[index]);
     }
 
+    /// <summary>
+    /// Keeps one unknown-outcome transfer's two rows for the pairing pass, up to the retention cap.
+    /// Past the cap the pair is dropped and the check reports itself truncated, because a pairing pass
+    /// over an arbitrary subset would turn "found nothing" into a claim it cannot support.
+    /// </summary>
+    private void RetainPair(long lowIndex, long highIndex)
+    {
+        if (!InRange(lowIndex) || !InRange(highIndex))
+            return;
+        if (Interlocked.Increment(ref _ambiguousPairsSeen) > MaxRetainedPairs)
+            return;
+        _ambiguousPairs.Enqueue(((int)lowIndex, (int)highIndex));
+    }
+
     private bool InRange(long index) => index >= 0 && index < _rows;
 
     /// <summary>
@@ -278,6 +328,8 @@ public sealed class RowAttribution
             reset: () =>
             {
                 Array.Clear(_observed);
+                Array.Clear(_ambiguousApplied);
+                Array.Clear(_ambiguousAppliedKnown);
                 Array.Clear(_baselineBalance);
                 Array.Clear(_baselineVersion);
                 balanceSum = 0;
@@ -410,6 +462,15 @@ public sealed class RowAttribution
                         $"version {version} below {expectedVersion} (baseline {_baselineVersion[index]} + " +
                         $"{_committedWrites[index]} journalled write(s)); a committed write was lost."));
                 }
+
+                // Inside its band, the version says exactly how many of this row's unknown-outcome
+                // transfers applied. Outside it, the row already has its own violation and the count
+                // would be meaningless, so the pairing pass is told not to trust it.
+                if (version >= expectedVersion && version <= maxVersion)
+                {
+                    _ambiguousApplied[index] = (int)(version - expectedVersion);
+                    _ambiguousAppliedKnown[index] = true;
+                }
             }).ConfigureAwait(false);
 
         long missing = 0;
@@ -423,13 +484,63 @@ public sealed class RowAttribution
                 "the seeded row was not returned by the final scan."));
         }
 
+        long halfApplied = CheckLegPairing(violations);
+
         return new RowAttributionResult(
             RowAttributionStatus.Verified, null, scanned, ambiguous,
-            balanceBad, versionHigh, versionLow, missing, duplicated, foreign,
+            balanceBad, versionHigh, versionLow, missing, duplicated, foreign, halfApplied,
             violations.Take(MaxSampledViolations).ToArray())
         {
             AllViolations = violations,
+            HalfAppliedCheckTruncated = _ambiguousPairsSeen > MaxRetainedPairs,
         };
+    }
+
+    /// <summary>
+    /// Reports every unknown-outcome transfer proven to have applied to one of its rows and not the
+    /// other. Returns how many were found.
+    ///
+    /// <para>Only provable cases are counted. For a transfer's row, the scanned version says how many
+    /// of that row's unknown-outcome transfers applied: a count equal to the row's total proves this
+    /// transfer applied there, and a count of zero proves it did not. When one row proves "applied" and
+    /// the other proves "not applied", the transfer moved value into one row without moving it out of
+    /// the other — a broken transfer, whatever the totals say. A row whose count is neither extreme
+    /// leaves this transfer's fate genuinely open and is passed over, so the check never guesses.</para>
+    ///
+    /// <para>Neither of the other checks can see this. Both legs stay inside their own bands, because a
+    /// row touched by an unknown-outcome transfer is allowed to have applied it or not; and
+    /// <c>SUM(balance)</c> only shows the net, so two half-applied transfers of opposite sign cancel
+    /// and the total reads as conserved.</para>
+    /// </summary>
+    private long CheckLegPairing(List<RowViolation> violations)
+    {
+        long halfApplied = 0;
+
+        foreach ((int low, int high) in _ambiguousPairs)
+        {
+            if (!_ambiguousAppliedKnown[low] || !_ambiguousAppliedKnown[high])
+                continue;
+
+            bool provenApplied =
+                _ambiguousApplied[low] == _ambiguousTouches[low] ||
+                _ambiguousApplied[high] == _ambiguousTouches[high];
+            bool provenNotApplied =
+                _ambiguousApplied[low] == 0 || _ambiguousApplied[high] == 0;
+
+            if (!provenApplied || !provenNotApplied)
+                continue;
+
+            halfApplied++;
+            int applied = _ambiguousApplied[low] == 0 ? high : low;
+            int skipped = applied == low ? high : low;
+            Add(violations, new RowViolation(
+                applied, RowIdFactory.ForRow(_seed, applied), _dataset.TableOf(applied), "half-applied",
+                $"a transfer between rows {low} and {high} applied to row {applied} but not to row " +
+                $"{skipped}, so value moved without its counterpart; the client was never told the " +
+                "transfer committed."));
+        }
+
+        return halfApplied;
     }
 
     private static void Add(List<RowViolation> violations, RowViolation violation)

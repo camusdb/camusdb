@@ -52,14 +52,30 @@ public static class ErrorClassifier
         return (status, code);
     }
 
+    // Server codes that, on a submitted commit, report that the outcome is UNAVAILABLE rather than a
+    // decision. CADB0501 (TransactionAlreadyCompleted) is raised when the coordinator session is gone and
+    // the durable outcome could not be read back; CADB0509 (TransactionFinalizeUnresolved) is the
+    // commit-outcome-not-yet-known signal by construction. A transaction reported under either can have
+    // committed durably — treating it as a definite non-commit tells the per-row attribution the transfer
+    // applied nothing, and a commit that did land then reads as a leaked write. Both must widen the
+    // ambiguity, not close it.
+    private const string TransactionAlreadyCompleted = "CADB0501";
+    private const string FinalizeUnresolved = "CADB0509";
+
     /// <summary>
-    /// True when a <see cref="CamusException"/> reports a transport failure rather than a server
-    /// decision: no error code came back, and the message names a gRPC transport condition. Both halves
-    /// are required — an empty code alone also happens on real server errors whose code the wire dropped,
-    /// and those did carry a verdict.
+    /// True when a <see cref="CamusException"/> reports that the commit outcome is unavailable rather than a
+    /// server decision. Two shapes qualify: a transport failure that came back with no error code and a
+    /// message naming a gRPC transport condition (deadline / unavailable / cancelled); and an explicit
+    /// "outcome unavailable / unresolved" server code (CADB0501 / CADB0509), whose own contract is that the
+    /// commit may already have committed. A plain empty code alone is not enough for the transport case —
+    /// real server errors whose code the wire dropped did carry a verdict — which is why the codeless branch
+    /// also requires the transport-condition message.
     /// </summary>
     private static bool CarriesNoVerdict(CamusException camus)
     {
+        if (camus.Code is TransactionAlreadyCompleted or FinalizeUnresolved)
+            return true;
+
         if (!string.IsNullOrEmpty(camus.Code))
             return false;
 

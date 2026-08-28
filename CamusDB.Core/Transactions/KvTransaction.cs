@@ -77,9 +77,13 @@ public sealed class KvTransaction
     /// on this value so the client can locate an explicit transaction by the ID returned in
     /// <c>/start-transaction</c>, regardless of whether the session has started yet.
     ///
-    /// <para>For eagerly-started transactions (promoted read-only, Serializable+RO),
-    /// <c>ClientId</c> equals <see cref="TransactionId"/> (both set to the Kahuna handle at
-    /// construction). For zero-snapshot read-only transactions, both are
+    /// <para>Deliberately distinct from <see cref="TransactionId"/>: the wire handle carries only
+    /// the identity's (physical, counter) pair, without its node component, and the tracking maps
+    /// key on that pair. A Kahuna session id is minted by the session's coordinator partition
+    /// leader — another node's clock for most sessions in a cluster — so using it as the tracking
+    /// identity let two live transactions collide on the same pair. Every tracked identity is
+    /// therefore minted by the local clock (see <c>KvTransactionsManager.MintTrackingId</c>),
+    /// which never repeats a pair. For zero-snapshot read-only transactions both identities are
     /// <see cref="HLCTimestamp.Zero"/> and the transaction is not tracked.</para>
     /// </summary>
     public HLCTimestamp ClientId { get; }
@@ -368,10 +372,11 @@ public sealed class KvTransaction
         TransactionPriority priority = TransactionPriority.Normal)
     {
         TransactionId = transactionId;
-        // ClientId is the stable tracking identity for HttpTransactionCoordinator. For eager-start
-        // transactions (transactionId != Zero) it equals the Kahuna session id so existing
-        // callers need no change. For deferred-start transactions it is separately minted by the
-        // caller (BeginAsync) so it is non-zero before the Kahuna session exists.
+        // ClientId is the stable tracking identity for HttpTransactionCoordinator; the manager
+        // mints it from the local clock for every tracked transaction (see MintTrackingId — a
+        // session id minted by another node's clock can collide with local identities on the wire
+        // handle's node-less (physical, counter) pair). The transactionId fallback serves only
+        // direct constructions that never pass a clientId and are not tracked across requests.
         ClientId = clientId.IsNull() ? transactionId : clientId;
         UniqueId = uniqueId;
         IsReadOnly = isReadOnly;

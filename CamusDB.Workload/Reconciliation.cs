@@ -257,7 +257,17 @@ public static class Reconciliation
     /// </summary>
     private static IEnumerable<string> DescribeRowAttribution(RowAttributionResult? r)
     {
-        if (r is null || r.Passed)
+        if (r is null)
+            yield break;
+
+        // Reported before the pass gate on purpose. A truncated pairing check that found nothing has
+        // not established that nothing is there, and that caveat matters most precisely when the rest
+        // of the verdict is clean.
+        if (r.HalfAppliedCheckTruncated)
+            yield return "the leg-pairing check saw only part of this run's indeterminate transfers " +
+                         "(retention cap reached), so it cannot report the absence of half-applied ones.";
+
+        if (r.Passed)
             yield break;
 
         if (r.Status != RowAttributionStatus.Verified)
@@ -273,6 +283,11 @@ public static class Reconciliation
         if (r.BalanceViolations > 0)
             yield return $"{r.BalanceViolations} row(s) hold a balance the transfer journal does not " +
                          $"account for, outside their indeterminate ambiguity band." + sample;
+        if (r.HalfAppliedTransfers > 0)
+            yield return $"{r.HalfAppliedTransfers} transfer(s) applied to one of their two rows and not " +
+                         "the other — value moved without its counterpart. Neither the per-row bands nor " +
+                         "SUM(balance) can see this on their own: each leg stays inside its own band, and " +
+                         "half-applied transfers of opposite sign cancel in the total." + sample;
         if (r.UncountedWriteRows > 0)
             yield return $"{r.UncountedWriteRows} row(s) carry more version increments than the client " +
                          "ever committed against them — a write leaked past an aborted transaction.";

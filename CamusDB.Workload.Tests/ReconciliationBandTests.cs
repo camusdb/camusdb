@@ -73,7 +73,7 @@ public sealed class ReconciliationBandTests
         RowAttributionResult leaked = new(
             RowAttributionStatus.Verified, null, RowsScanned: 100_000, RowsInAmbiguityBand: 800,
             BalanceViolations: 8, UncountedWriteRows: 8, LostWriteRows: 0,
-            RowsMissing: 0, RowsDuplicated: 0, RowsForeign: 0, Violations: []);
+            RowsMissing: 0, RowsDuplicated: 0, RowsForeign: 0, HalfAppliedTransfers: 0, Violations: []);
 
         Assert.That(GreenAggregates(leaked).Passed, Is.False);
     }
