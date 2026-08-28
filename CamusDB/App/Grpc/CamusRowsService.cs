@@ -179,7 +179,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 try
                 {
                     txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
-                    QueryTicket ticket = BuildQueryTicket(txnState, request, filters, orderBy);
+                    QueryTicket ticket = BuildQueryTicket(txnState, request, filters, orderBy, ct);
                     await StreamQueryRowsAsync(ticket, schema, responseStream, ct).ConfigureAwait(false);
                     return;
                 }
@@ -193,13 +193,16 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
 
             // Autocommit: promoted read-only transaction.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
+            // Begin, commit and rollback deliberately ignore the call's token: a cancelled
+            // lifecycle call abandons the transaction's locks until their lease expires. The read
+            // between them is the only part worth stopping when the caller disconnects.
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: ct).ConfigureAwait(false);
+                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
             try
             {
-                QueryTicket ticket = BuildQueryTicket(tx, request, filters, orderBy);
+                QueryTicket ticket = BuildQueryTicket(tx, request, filters, orderBy, ct);
                 await StreamQueryRowsAsync(ticket, schema, responseStream, ct).ConfigureAwait(false);
-                HLCTimestamp commitToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                HLCTimestamp commitToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 if (!commitToken.IsNull())
                 {
                     context.ResponseTrailers.Add("camus-causal-token-n", commitToken.N.ToString());
@@ -209,7 +212,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
         });
@@ -267,12 +270,15 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             // CommitAsync handle both zero-snapshot and promoted txns, avoiding the tracked-only
             // restriction of CommitTrackedAsync.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
+            // The read observes the caller's token through the stream write; begin, commit and
+            // rollback do not, because a cancelled lifecycle call abandons this transaction's
+            // locks until their lease expires.
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: ct).ConfigureAwait(false);
+                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
             try
             {
                 await RunQueryById(tx).ConfigureAwait(false);
-                HLCTimestamp commitToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                HLCTimestamp commitToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 if (!commitToken.IsNull())
                 {
                     context.ResponseTrailers.Add("camus-causal-token-n", commitToken.N.ToString());
@@ -282,7 +288,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
         });
@@ -744,7 +750,8 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         KvTransaction txnState,
         RowQueryRequest request,
         List<EngineQueryFilter>? filters,
-        List<QueryOrderBy>? orderBy)
+        List<QueryOrderBy>? orderBy,
+        CancellationToken cancellationToken)
         => new(
             txnState: txnState,
             databaseName: request.Database,
@@ -756,7 +763,8 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             orderBy: orderBy,
             limit: null,
             offset: null,
-            parameters: null
+            parameters: null,
+            cancellationToken: cancellationToken
         );
 
     private static void ApplyCausalToken(NonQueryReply reply, HLCTimestamp token)

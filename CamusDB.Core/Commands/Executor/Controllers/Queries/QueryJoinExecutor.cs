@@ -196,7 +196,7 @@ internal sealed class QueryJoinExecutor
 
             case SortNode { Input: not null } sortNode when sortNode.OrderBy is { Count: > 0 }:
             {
-                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy, QueryExecutionContext.For(plan.Database));
+                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy, QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken));
                 
                 await foreach (QueryResultRow row in sorted.ConfigureAwait(false))
                     yield return row;
@@ -387,7 +387,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey).ConfigureAwait(false);
+        ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
         if (rowId is null)
             yield break;
@@ -426,7 +426,7 @@ internal sealed class QueryJoinExecutor
             keyTypes,
             lookupKey,
             to: null,
-            unique: false).ConfigureAwait(false))
+            unique: false, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
         {
             int cmp = key.Values[0].CompareTo(lookupValue);
 
@@ -471,7 +471,7 @@ internal sealed class QueryJoinExecutor
         QueryPlan plan,
         RightDecodeState? decodeState = null)
     {
-        ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
         if (dataOpt is null || dataOpt.Value.Length == 0)
             return null;
@@ -582,7 +582,7 @@ internal sealed class QueryJoinExecutor
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-            plan.Ticket.TxnState).ConfigureAwait(false))
+            plan.Ticket.TxnState, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -641,11 +641,11 @@ internal sealed class QueryJoinExecutor
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
-            from: null, to: null, unique: unique).ConfigureAwait(false))
+            from: null, to: null, unique: unique, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
             if (dataOpt is null || dataOpt.Value.Length == 0)
                 continue;
@@ -708,11 +708,11 @@ internal sealed class QueryJoinExecutor
             to: rangeNode.ToBound,
             fromInclusive: rangeNode.FromInclusive,
             toInclusive: rangeNode.ToInclusive,
-            unique: unique).ConfigureAwait(false))
+            unique: unique, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
         {
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
             if (dataOpt is null || dataOpt.Value.Length == 0)
                 continue;
@@ -774,14 +774,14 @@ internal sealed class QueryJoinExecutor
             if (isUnique)
             {
                 ObjectIdValue? rowId = await table.Store.LookupUnique(
-                    plan.Ticket.TxnState, inListNode.Index.KvId, lookupKey).ConfigureAwait(false);
+                    plan.Ticket.TxnState, inListNode.Index.KvId, lookupKey, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
                 deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-                ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value).ConfigureAwait(false);
+                ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value, plan.Ticket.CancellationToken).ConfigureAwait(false);
                 if (data is null || data.Value.Length == 0)
                     continue;
 
@@ -815,14 +815,14 @@ internal sealed class QueryJoinExecutor
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null).ConfigureAwait(false))
+                    maxRows: null, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
                 {
                     if (!seen.Add(rowId))
                         continue;
 
                     deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId).ConfigureAwait(false);
+                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
                     if (data is null || data.Value.Length == 0)
                         continue;
 
@@ -1116,7 +1116,10 @@ internal sealed class QueryJoinExecutor
         // The session must exist before workers read tx.TransactionId concurrently.
         await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
 
-        using CancellationTokenSource cts = new();
+        // Linked to the request: every probe worker reads and writes through this token, so the
+        // link stops the local scans and the remote fragments together on a client disconnect.
+        using CancellationTokenSource cts =
+            CancellationTokenSource.CreateLinkedTokenSource(plan.Ticket.CancellationToken);
 
         var channels = new Channel<BroadcastProbeItem>[spans.Count];
         var workers = new Task[spans.Count];
@@ -1162,7 +1165,7 @@ internal sealed class QueryJoinExecutor
         {
             for (int i = 0; i < spans.Count; i++)
             {
-                await foreach (BroadcastProbeItem item in channels[i].Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
+                await foreach (BroadcastProbeItem item in channels[i].Reader.ReadAllAsync(plan.Ticket.CancellationToken).ConfigureAwait(false))
                 {
                     qualifiedProbeLayout ??= QueryRowMerger.BuildQualifiedLayout(item.Row.Layout, broadcast.ProbeAlias);
                     IReadOnlyDictionary<string, ColumnValue> qualifiedProbe = QueryRowMerger.QualifyRowAsQueryRow(item.Row, qualifiedProbeLayout);
@@ -1479,7 +1482,8 @@ internal sealed class QueryJoinExecutor
             orderBy: null,
             limit: null,
             offset: null,
-            parameters: null);
+            parameters: null,
+            cancellationToken: cancellationToken);
 
         RowEncoder.RowDecodeState decodeState = new();
         RowLayout? qualifiedLayout = null;
@@ -1610,7 +1614,7 @@ internal sealed class QueryJoinExecutor
         // With spill enabled, cap at SpillEffectiveThreshold so the Grace path is triggered
         // at the configured spill boundary instead of the (much larger) legacy NLJ cap.
         // With spill disabled, honour the legacy HashJoinMaxBuildRows cap.
-        QueryExecutionContext context = QueryExecutionContext.For(plan.Database);
+        QueryExecutionContext context = QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken);
 
         int buildCap = context.Options.SpillEnabled
             ? context.Options.SpillEffectiveThreshold
@@ -2254,7 +2258,7 @@ internal sealed class QueryJoinExecutor
             probeKeyColumns = joinNode.BuildKeyColumns;
         }
 
-        SpillScope scope = SpillFileManager.CreateScope(QueryExecutionContext.For(plan.Database).SpillDirectory);
+        SpillScope scope = SpillFileManager.CreateScope(QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken).SpillDirectory);
 
         try
         {

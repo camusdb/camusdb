@@ -143,9 +143,14 @@ public sealed class ExecuteSQLController : CommandsController
         // can subtract it from its own observed latency to isolate network/connection overhead.
         Stopwatch stopwatch = Stopwatch.StartNew();
 
+        // The client's disconnect signal. It reaches the query through the ticket, and nothing
+        // else: the transaction lifecycle below deliberately keeps its own token, because a
+        // cancelled commit or rollback abandons locks that only a lease expiry can reclaim.
+        CancellationToken requestAborted = HttpContext.RequestAborted;
+
         try
         {
-            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
+            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, requestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
@@ -172,7 +177,8 @@ public sealed class ExecuteSQLController : CommandsController
                     database: resolved.Database,
                     sql: sql,
                     parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        cancellationToken: requestAborted
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                 List<QueryResultRow> rows = [];
@@ -195,7 +201,8 @@ public sealed class ExecuteSQLController : CommandsController
                         database: resolved.Database,
                         sql: sql,
                         parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        cancellationToken: requestAborted
                     );
                     List<QueryResultRow> rows = [];
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
@@ -233,7 +240,10 @@ public sealed class ExecuteSQLController : CommandsController
                         database: resolved.Database,
                         sql: sql,
                         parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        // The query observes the client's disconnect; the surrounding begin/commit/
+                        // rollback keep `ct`, which the serializable retry owns.
+                        cancellationToken: requestAborted
                     );
                     // Fully buffer the decoded, transaction-independent rows, THEN commit — so a
                     // serializable retry can restart cleanly (no bytes are written until the
@@ -363,7 +373,8 @@ public sealed class ExecuteSQLController : CommandsController
                     database: resolved.Database,
                     sql: sql,
                     parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        cancellationToken: ct
                 );
                 (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
             }
@@ -378,7 +389,8 @@ public sealed class ExecuteSQLController : CommandsController
                         database: resolved.Database,
                         sql: sql,
                         parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        cancellationToken: ct
                     );
                     (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                 }
@@ -392,8 +404,13 @@ public sealed class ExecuteSQLController : CommandsController
             // serializable retry, because rows may already be on the wire before commit.
             else
             {
+                // Begin, commit and rollback deliberately ignore the client's disconnect. A
+                // promoted read-only transaction mints a Kahuna identity and can hold a shared
+                // range lock; a begin cancelled after that identity exists leaks a transaction no
+                // rollback ever reaches, and a cancelled commit or rollback abandons the locks
+                // until their lease expires. Only the read below is worth stopping early.
                 KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    resolved.Database, promote: true, request.CausalToken, cancellationToken: ct).ConfigureAwait(false);
+                    resolved.Database, promote: true, request.CausalToken, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -401,15 +418,16 @@ public sealed class ExecuteSQLController : CommandsController
                         database: resolved.Database,
                         sql: sql,
                         parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        cancellationToken: ct
                     );
                     (DatabaseDescriptor? db, int count) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                     total = count;
-                    causalToken = await transactions.CommitAsync(db!, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(db!, tx, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }

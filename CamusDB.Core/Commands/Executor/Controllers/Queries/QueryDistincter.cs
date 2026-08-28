@@ -37,7 +37,7 @@ internal sealed class QueryDistincter
         if (!context.Options.SpillEnabled)
             return DistinctRows(dataCursor);
 
-        return DistinctWithSpill(dataCursor, context);
+        return DistinctWithSpill(dataCursor, context, context.CancellationToken);
     }
 
     /// <summary>

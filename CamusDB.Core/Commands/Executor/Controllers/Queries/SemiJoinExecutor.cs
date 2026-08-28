@@ -125,14 +125,14 @@ internal sealed class SemiJoinExecutor
 
         if (index.Type == IndexType.Unique)
         {
-            ObjectIdValue? rowId = await inner.Store.LookupUnique(outerTicket.TxnState, index.KvId, key).ConfigureAwait(false);
+            ObjectIdValue? rowId = await inner.Store.LookupUnique(outerTicket.TxnState, index.KvId, key, outerTicket.CancellationToken).ConfigureAwait(false);
             if (rowId is null)
                 return false;
 
             if (node.InnerFilter is null)
                 return true;
 
-            ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId.Value).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId.Value, outerTicket.CancellationToken).ConfigureAwait(false);
             if (data is null || data.Value.Length == 0)
                 return false;
 
@@ -155,9 +155,9 @@ internal sealed class SemiJoinExecutor
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
             false, true, false,
-            maxRows: null))
+            maxRows: null, cancellationToken: outerTicket.CancellationToken))
         {
-            ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId, outerTicket.CancellationToken).ConfigureAwait(false);
             if (data is null || data.Value.Length == 0)
                 continue;
 
@@ -187,7 +187,7 @@ internal sealed class SemiJoinExecutor
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: null))
+            outerTicket.TxnState, maxRows: null, cancellationToken: outerTicket.CancellationToken))
         {
             if (data.Length == 0)
                 continue;
@@ -227,7 +227,7 @@ internal sealed class SemiJoinExecutor
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: null))
+            outerTicket.TxnState, maxRows: null, cancellationToken: outerTicket.CancellationToken))
         {
             if (data.Length == 0)
                 continue;
@@ -259,7 +259,7 @@ internal sealed class SemiJoinExecutor
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
 
         await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: 1))
+            outerTicket.TxnState, maxRows: 1, cancellationToken: outerTicket.CancellationToken))
         {
             if (data.Length > 0)
                 return true;

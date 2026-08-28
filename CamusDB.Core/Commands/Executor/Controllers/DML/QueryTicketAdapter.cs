@@ -93,7 +93,11 @@ internal static class QueryTicketAdapter
             preparedInSets: preparedInSets,
             exclusivePredicateLocks: exclusivePredicateLocks,
             cacheHint: suppressCacheHint ? null : query.CacheHint,
-            requiredColumnsMemo: requiredColumnsMemo);
+            requiredColumnsMemo: requiredColumnsMemo,
+            // The single place the transport's request token crosses from the SQL ticket into the
+            // query ticket. Every SELECT reaches its plan through here, so one copy covers the
+            // whole SQL path.
+            cancellationToken: ticket.CancellationToken);
     }
 
     private static IReadOnlyDictionary<NodeAst, PreparedInSet>? BuildPreparedInSets(PredicateAnalysis analysis)

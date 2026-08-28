@@ -60,7 +60,8 @@ internal sealed class DerivedTableExecutor
             txnState: outerTicket.TxnState,
             database: outerTicket.DatabaseName,
             sql: "",
-            parameters: outerTicket.Parameters);
+            parameters: outerTicket.Parameters,
+            cancellationToken: outerTicket.CancellationToken);
 
         QueryTicket innerTicket = QueryTicketAdapter.ToQueryTicket(innerBound, executeTicket);
 
@@ -68,7 +69,7 @@ internal sealed class DerivedTableExecutor
             ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
             : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
 
-        SpillableRowList rows = new(QueryExecutionContext.For(database));
+        SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket.CancellationToken));
 
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
         {

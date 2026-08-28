@@ -88,7 +88,8 @@ internal sealed class SubqueryRewriter
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid EXISTS subquery expression");
 
                 bool exists = await existsExecutor.ExecuteUncorrelatedAsync(
-                    database, expr.leftAst, ticket.TxnState, ticket.Parameters).ConfigureAwait(false);
+                    database, expr.leftAst, ticket.TxnState, ticket.Parameters,
+                    ticket.CancellationToken).ConfigureAwait(false);
 
                 return exists ? NodeAst.True : NodeAst.False;
             }
@@ -240,7 +241,8 @@ internal sealed class SubqueryRewriter
             database,
             expr.rightAst,
             ticket.TxnState,
-            ticket.Parameters).ConfigureAwait(false);
+            ticket.Parameters,
+            ticket.CancellationToken).ConfigureAwait(false);
 
         return negated
             ? await SubqueryValueListAst.BuildNotInMembershipAsync(lhs, materialization).ConfigureAwait(false)

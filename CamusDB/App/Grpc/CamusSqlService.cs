@@ -138,7 +138,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     database: request.Database,
                     sql: sql,
                     parameters: ToColumnValueMap(request.Parameters),
-                    principal: principal
+                    principal: principal,
+                    cancellationToken: ct
                 );
                 await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
                 return;
@@ -217,7 +218,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 database: request.Database,
                 sql: sql,
                 parameters: ToColumnValueMap(request.Parameters),
-                principal: principal
+                principal: principal,
+                cancellationToken: ct
             );
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
@@ -251,8 +253,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         async Task<HLCTimestamp> Attempt(CancellationToken innerCt)
         {
+            // Begin, commit and rollback deliberately ignore the caller's token. A promoted
+            // read-only transaction mints a Kahuna identity and can hold a shared range lock; a
+            // begin cancelled after that identity exists leaks a transaction no rollback ever
+            // reaches, and a cancelled commit or rollback abandons the locks until their lease
+            // expires. Only the read is worth stopping early.
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
+                request.Database, promote: true, causalToken, priority: reqPriority, cancellationToken: CancellationToken.None).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
@@ -260,15 +267,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     database: request.Database,
                     sql: sql,
                     parameters: ToColumnValueMap(request.Parameters),
-                    principal: principal
+                    principal: principal,
+                    cancellationToken: innerCt
                 );
                 DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, innerCt, cacheMeta).ConfigureAwait(false);
-                commitToken = await transactions.CommitAsync(db, tx, innerCt).ConfigureAwait(false);
+                commitToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 return commitToken;
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
         }
@@ -788,7 +796,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: resolved.Database, sql: sql,
-                parameters: resolved.Parameters, principal: principal);
+                parameters: resolved.Parameters, principal: principal,
+                cancellationToken: ct);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
@@ -797,7 +806,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: sql,
-                parameters: resolved.Parameters, principal: principal);
+                parameters: resolved.Parameters, principal: principal,
+                cancellationToken: ct);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else
@@ -805,19 +815,23 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Autocommit: begin a promoted read-only txn, stream, commit. Not server-retried — a
             // retryable conflict propagates and is reported as BatchError for the client to replay.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
+            // Begin, commit and rollback deliberately ignore the stream's token, for the reason
+            // given on the unary autocommit path: a cancelled lifecycle call abandons locks that
+            // only a lease expiry reclaims. The read alone observes a cancel.
             KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: ct).ConfigureAwait(false);
+                resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: resolved.Database, sql: sql,
-                    parameters: resolved.Parameters, principal: principal);
+                    parameters: resolved.Parameters, principal: principal,
+                    cancellationToken: ct);
                 DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
-                commitToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                commitToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
         }
