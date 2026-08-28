@@ -339,8 +339,10 @@ public sealed class TestSerializableReadOnlyExplicit : SharedNodeBaseTest
         // ── Request 2: resume the snapshot transaction by (L, C) ─────────────
         // Simulates: the client sends the txnId it received in Request 1 and the
         // server calls GetState to recover the exact same KvTransaction object.
-        long txnIdL = tx.TransactionId.L;
-        uint txnIdC = tx.TransactionId.C;
+        // The wire id is ClientId — the locally minted tracking identity the start
+        // response carries — not the Kahuna session id.
+        long txnIdL = tx.ClientId.L;
+        uint txnIdC = tx.ClientId.C;
 
         KvTransaction resumed = coordinator.GetState(txnIdL, txnIdC);
 

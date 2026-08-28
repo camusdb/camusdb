@@ -61,7 +61,8 @@ public sealed class TestAbandonedTransactionReaper : SharedNodeBaseTest
         Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
 
         // It must be gone from the in-flight map, so a later statement can no longer resolve it.
-        Assert.Throws<CamusDBException>(() => coord.GetState(tx.TransactionId.L, tx.TransactionId.C));
+        // The map keys on ClientId (the wire identity), not on the Kahuna session id.
+        Assert.Throws<CamusDBException>(() => coord.GetState(tx.ClientId.L, tx.ClientId.C));
     }
 
     [Test]
@@ -77,7 +78,7 @@ public sealed class TestAbandonedTransactionReaper : SharedNodeBaseTest
         Assert.That(reaped, Is.EqualTo(0));
         Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.Active));
         // Still resolvable — GetState both proves it survived and refreshes its idle timer.
-        Assert.That(coord.GetState(tx.TransactionId.L, tx.TransactionId.C), Is.SameAs(tx));
+        Assert.That(coord.GetState(tx.ClientId.L, tx.ClientId.C), Is.SameAs(tx));
 
         // Clean up so the shared node is not left with a live heartbeat.
         await coord.RollbackAsync(tx, CancellationToken.None);
@@ -92,7 +93,7 @@ public sealed class TestAbandonedTransactionReaper : SharedNodeBaseTest
 
         // Let a little time pass, then simulate a statement touching the transaction.
         await Task.Delay(60, CancellationToken.None);
-        coord.GetState(tx.TransactionId.L, tx.TransactionId.C);
+        coord.GetState(tx.ClientId.L, tx.ClientId.C);
 
         // Idle threshold above the elapsed-since-touch time: the touch must keep it alive.
         int reaped = await coord.ReapIdleAsync(TimeSpan.FromSeconds(30), CancellationToken.None);

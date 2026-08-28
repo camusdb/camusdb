@@ -94,7 +94,7 @@ public sealed class TestHttpCommitIdempotencyGuard : SharedNodeBaseTest
         }
 
         // The transaction is gone from the in-flight map after finalization.
-        Assert.Throws<CamusDBException>(() => coord.GetState(tx.TransactionId.L, tx.TransactionId.C));
+        Assert.Throws<CamusDBException>(() => coord.GetState(tx.ClientId.L, tx.ClientId.C));
     }
 
     [Test]
@@ -138,7 +138,7 @@ public sealed class TestHttpCommitIdempotencyGuard : SharedNodeBaseTest
         Assert.That(
             tx.Status,
             Is.EqualTo(KvTransactionStatus.Committed).Or.EqualTo(KvTransactionStatus.RolledBack));
-        Assert.Throws<CamusDBException>(() => coord.GetState(tx.TransactionId.L, tx.TransactionId.C));
+        Assert.Throws<CamusDBException>(() => coord.GetState(tx.ClientId.L, tx.ClientId.C));
     }
 
     [Test]
@@ -170,6 +170,6 @@ public sealed class TestHttpCommitIdempotencyGuard : SharedNodeBaseTest
         Assert.That(
             tx.Status,
             Is.EqualTo(KvTransactionStatus.Committed).Or.EqualTo(KvTransactionStatus.RolledBack));
-        Assert.Throws<CamusDBException>(() => coord.GetState(tx.TransactionId.L, tx.TransactionId.C));
+        Assert.Throws<CamusDBException>(() => coord.GetState(tx.ClientId.L, tx.ClientId.C));
     }
 }
