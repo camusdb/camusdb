@@ -325,6 +325,16 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.RangeMoveSettleTimeoutMs is int rangeMoveSettleTimeout)
             baseline.RangeMoveSettleTimeout = TimeSpan.FromMilliseconds(rangeMoveSettleTimeout);
 
+        // The retained terminal record is what decides, after the fact, whether a durable write that
+        // outlived its transaction was a commit or a leaked leg. Both bounds must be raised together:
+        // age pruning and the size cap evict independently, so a long TTL under the default cap still
+        // loses the record on any run that commits more transactions than the cap holds.
+        if (kahuna.TransactionOutcomeRetentionTtlMs is int outcomeRetentionTtl)
+            baseline.TransactionOutcomeRetentionTtl = TimeSpan.FromMilliseconds(outcomeRetentionTtl);
+
+        if (kahuna.TransactionOutcomeRetentionMax is int outcomeRetentionMax)
+            baseline.TransactionOutcomeRetentionMax = outcomeRetentionMax;
+
         if (kahuna.RangeMergeMinSize is int rangeMergeMinSize)
             baseline.RangeMergeMinSize = rangeMergeMinSize;
 

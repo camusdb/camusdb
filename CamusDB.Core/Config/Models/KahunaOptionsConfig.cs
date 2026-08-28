@@ -81,6 +81,8 @@ public sealed class KahunaOptionsConfig
         "range_split_settle_window_ms",
         "range_split_indivisible_cooldown_ms",
         "range_move_settle_timeout_ms",
+        "transaction_outcome_retention_ttl_ms",
+        "transaction_outcome_retention_max",
         "range_merge_min_size",
         "enable_load_reports",
         "replication_factor",
@@ -477,6 +479,42 @@ public sealed class KahunaOptionsConfig
     /// window. CamusDB passes the value through and only refuses a negative one.</para>
     /// </summary>
     public int? RangeMoveSettleTimeoutMs { get; set; }
+
+    /// <summary>
+    /// Age after which Kahuna reclaims a terminal transaction record. The record names the transaction's
+    /// committed-or-aborted decision, so it is the only evidence that says whether a durable write which
+    /// outlived its transaction was a genuine commit or a leg that leaked past an abort.
+    ///
+    /// <para>The default of five minutes is sized for the idempotency window it exists to serve, and it is
+    /// shorter than a soak's measured window. A leak found after such a run is therefore undecidable: its
+    /// record is already gone. Raising this for an investigation keeps the evidence, at the cost of a
+    /// retained-record store that grows with the commit rate.</para>
+    ///
+    /// <para>Kahuna reads the same value as the horizon past which an <i>absent</i> record stops meaning
+    /// "never initialized" and starts meaning "possibly a reclaimed commit", so raising it also widens the
+    /// age range over which recovery presumes abort rather than holding the intent. That is the designed
+    /// relationship — both read one property — but it does change recovery behaviour, so a run configured
+    /// this way is not behaviourally identical to one left at the default.</para>
+    ///
+    /// <para>Raise <see cref="TransactionOutcomeRetentionMax"/> alongside it: the size cap evicts records
+    /// independently of age, and the default holds far fewer than a busy run produces.</para>
+    ///
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.TransactionOutcomeRetentionTtl"/> (in milliseconds).
+    /// </summary>
+    public int? TransactionOutcomeRetentionTtlMs { get; set; }
+
+    /// <summary>
+    /// Maximum number of terminal transaction records retained per node, independent of their age. This is
+    /// the bound that makes a long <see cref="TransactionOutcomeRetentionTtlMs"/> effective or useless: with
+    /// the cap left at its default, a run committing more transactions than the cap evicts the oldest
+    /// records regardless of how long the age window says to keep them.
+    ///
+    /// <para>Sizing it for an investigation means covering the whole run's committed transactions with
+    /// margin. The cost is memory proportional to the count.</para>
+    ///
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.TransactionOutcomeRetentionMax"/>.
+    /// </summary>
+    public int? TransactionOutcomeRetentionMax { get; set; }
 
     /// <summary>
     /// Key count below which two adjacent ranges become eligible to merge back into one. <c>0</c>
@@ -907,6 +945,15 @@ public sealed class KahunaOptionsConfig
         if (RangeMoveSettleTimeoutMs is < 0)
             throw InvalidConfig(
                 $"'kahuna.range_move_settle_timeout_ms' must be >= 0 (0 disables the drain wait), got {RangeMoveSettleTimeoutMs}");
+
+        if (TransactionOutcomeRetentionTtlMs is < 0)
+            throw InvalidConfig(
+                "'kahuna.transaction_outcome_retention_ttl_ms' must be >= 0 (0 disables age pruning, leaving " +
+                $"the size cap as the only bound), got {TransactionOutcomeRetentionTtlMs}");
+
+        if (TransactionOutcomeRetentionMax is < 0)
+            throw InvalidConfig(
+                $"'kahuna.transaction_outcome_retention_max' must be >= 0, got {TransactionOutcomeRetentionMax}");
 
         if (RangeSplitSettleWindowMs is <= 0)
             throw InvalidConfig(
