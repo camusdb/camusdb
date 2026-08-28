@@ -296,6 +296,18 @@ public sealed class ExecuteSQLController : CommandsController
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
+        catch (Kahuna.KahunaServerException e)
+        {
+            // Same translation as the gRPC query path (StreamQueryAsync): a read Kahuna cannot
+            // currently serve — a scan page whose retry budget expired on an unresolved intent — is
+            // safe to retry because a read is idempotent, and its message names the failed range.
+            // The generic catch below would bury both under an internal error the caller cannot
+            // distinguish from corruption. This method only reads, so the translation is safe here;
+            // write and finalize surfaces keep the conservative mapping.
+            LogCommandFailure(new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, e.Message));
+
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", CamusDBErrorCodes.TransactionMustRetry, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.TransactionMustRetry) };
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);

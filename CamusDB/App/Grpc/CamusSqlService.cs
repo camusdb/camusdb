@@ -191,15 +191,31 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         CancellationToken ct,
         CacheMetadataHolder? cacheMeta = null)
     {
-        QuerySchemaHolder schemaHolder = new();
-        (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) =
-            await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
+        try
+        {
+            QuerySchemaHolder schemaHolder = new();
+            (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) =
+                await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
 
-        await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
-        await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
-            await sink.WriteRowAsync(row.Row, schemaHolder.Schema, ct).ConfigureAwait(false);
+            await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
+            await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
+                await sink.WriteRowAsync(row.Row, schemaHolder.Schema, ct).ConfigureAwait(false);
 
-        return db;
+            return db;
+        }
+        catch (Kahuna.KahunaServerException ex)
+        {
+            // A Kahuna read that cannot currently be served — a scan page whose retry budget expired
+            // on an unresolved write intent, an unroutable range — is safe to retry, because a read
+            // is idempotent, and its message names the range and cursor that failed. The generic
+            // internal-error catch at the RPC boundary would discard both: the caller could not
+            // tell this recoverable condition from corruption, and a reconciliation-style caller
+            // then abandons its retry budget instead of retrying a read that would soon succeed.
+            // Only this read path gets the retryable translation: a write or finalize op may have
+            // applied before its failure, so a blanket retryable mapping could invite a
+            // double-applying replay.
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, ex.Message);
+        }
     }
 
     private async Task RunExplicitTxnQuery(
