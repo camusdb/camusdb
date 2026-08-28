@@ -111,7 +111,8 @@ internal sealed class ExistsSubqueryPreparer
                     database,
                     expr.leftAst,
                     ticket.TxnState,
-                    ticket.Parameters).ConfigureAwait(false);
+                    ticket.Parameters,
+                    ticket.CancellationToken).ConfigureAwait(false);
 
                 return ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromBool(exists));
             }

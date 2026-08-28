@@ -91,12 +91,18 @@ internal sealed class QueryScanner
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
         QueryDependencyCollector? deps = plan.DepCollector;
 
+        // The client's disconnect signal, carried on the ticket rather than on this iterator's
+        // enumerator, because the intermediate stages between here and the transport do not all
+        // forward an enumerator token.
+        CancellationToken cancellationToken = plan.Ticket.CancellationToken;
+
         // Acquire a phantom-protection range lock on the row key space before the scan.
         // Shared for SELECT; Exclusive for UPDATE/DELETE (blocks concurrent readers from
         // seeing the range while the mutation is in flight). Same-tx re-acquisition is
-        // idempotent. Read-only transactions skip this.
+        // idempotent. Read-only transactions skip this. The wait is interruptible: a lock held by a
+        // long-running writer, and the storage read below, are where a cancelled query blocks.
         await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
-            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+            exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // Full table scan: the entire row-bucket range is a dependency (catches phantom inserts).
         deps?.RecordRange(table.Store.RowKeySpace);
@@ -140,6 +146,10 @@ internal sealed class QueryScanner
                 // thread: expression evaluation and the dependency collector are not thread-safe.
                 await foreach ((ObjectIdValue rowId, QueryRow queryRow) in ScanAndDecodeInParallel(plan, parallelism).ConfigureAwait(false))
                 {
+                    // A KV read served from an already-fetched batch never observes the token, so
+                    // the loop checks for itself. Without this the scan stops per batch, not per row.
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     rowsScanned++;
                     if (scanStats is not null)
                     {
@@ -164,8 +174,10 @@ internal sealed class QueryScanner
             // an optimistic transaction folds this scan's rows so its commit validates them, exactly
             // as a point read would — isolation must not depend on which plan answered the predicate.
             await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit))
+                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cancellationToken))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (data.Length == 0)
                     continue;
 
@@ -243,7 +255,11 @@ internal sealed class QueryScanner
         IReadOnlySet<string>? requiredColumns = plan.ScanRequiredColumns;
         bool slotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null;
 
-        using CancellationTokenSource cts = new();
+        // Linked, not standalone: the finally below cancels this source to stop straggler decode
+        // tasks on an early break, and the link adds the client's disconnect as a second reason to
+        // stop. Both reach the producer's scan through the one token.
+        using CancellationTokenSource cts =
+            CancellationTokenSource.CreateLinkedTokenSource(plan.Ticket.CancellationToken);
 
         // Deliberately not disposed with `using`: a straggler decode task releases its slot in
         // a finally that can run after this iterator has exited on an early break.
@@ -261,7 +277,7 @@ internal sealed class QueryScanner
         try
         {
             await foreach (Task<(ObjectIdValue rowId, QueryRow row)[]> chunkTask in
-                chunks.Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
+                chunks.Reader.ReadAllAsync(plan.Ticket.CancellationToken).ConfigureAwait(false))
             {
                 (ObjectIdValue rowId, QueryRow row)[] decoded = await chunkTask.ConfigureAwait(false);
 
@@ -405,9 +421,10 @@ internal sealed class QueryScanner
         TableDescriptor table = plan.Table;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
         QueryDependencyCollector? deps = plan.DepCollector;
+        CancellationToken cancellationToken = plan.Ticket.CancellationToken;
 
         await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
-            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+            exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         deps?.RecordRange(table.Store.RowKeySpace);
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
@@ -423,6 +440,10 @@ internal sealed class QueryScanner
         {
             await foreach ((ObjectIdValue rowId, QueryRow queryRow, bool preFiltered) in GatherSpansAsync(plan, gather).ConfigureAwait(false))
             {
+                // Rows arrive from worker channels, so a cancel that stops the workers still
+                // leaves buffered rows here. Check per row, not per channel read.
+                cancellationToken.ThrowIfCancellationRequested();
+
                 rowsScanned++;
                 if (scanStats is not null)
                 {
@@ -486,7 +507,10 @@ internal sealed class QueryScanner
         // for eager, read-only, and already-started transactions.
         await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
 
-        using CancellationTokenSource cts = new();
+        // Linked to the request: every worker already reads and writes through this token, so one
+        // link stops the local scans, the remote fragments and the channel writes together.
+        using CancellationTokenSource cts =
+            CancellationTokenSource.CreateLinkedTokenSource(plan.Ticket.CancellationToken);
 
         var channels = new Channel<(ObjectIdValue rowId, QueryRow row, bool preFiltered)>[spans.Count];
         var workers = new Task[spans.Count];
@@ -538,7 +562,7 @@ internal sealed class QueryScanner
             for (int i = 0; i < spans.Count; i++)
             {
                 await foreach ((ObjectIdValue rowId, QueryRow row, bool preFiltered) item in
-                    channels[i].Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
+                    channels[i].Reader.ReadAllAsync(plan.Ticket.CancellationToken).ConfigureAwait(false))
                 {
                     yield return item;
                     emitted++;
@@ -779,10 +803,12 @@ internal sealed class QueryScanner
         bool unique = index.Type == IndexType.Unique;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
         QueryDependencyCollector? deps = plan.DepCollector;
+        CancellationToken cancellationToken = ticket.CancellationToken;
 
         // Phantom-protection range lock on the index key space (mirrors ScanUsingTableIndex).
+        // Interruptible for the same reason: a contended lock is a place a cancelled query blocks.
         await table.Store.AcquireIndexRangeLockAsync(ticket.TxnState, index.KvId,
-            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+            exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // Full index scan: record the index bucket range and the schema version.
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
@@ -816,8 +842,11 @@ internal sealed class QueryScanner
                 unique,
                 fromInclusive: true,
                 toInclusive: true,
-                maxRows: plan.ScanRowLimit))
+                maxRows: plan.ScanRowLimit,
+                cancellationToken: cancellationToken))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 rowsScanned++;
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
@@ -853,9 +882,11 @@ internal sealed class QueryScanner
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page).ConfigureAwait(false);
+                ticket.TxnState, page, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 ObjectIdValue batchRowId = page[i];
                 ReadOnlyMemory<byte>? data = batchResult[i];
                 if (data is null || data.Value.Length == 0)
@@ -883,8 +914,11 @@ internal sealed class QueryScanner
             unique,
             fromInclusive: true,
             toInclusive: true,
-            maxRows: plan.ScanRowLimit))
+            maxRows: plan.ScanRowLimit,
+            cancellationToken: cancellationToken))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             rowsScanned++;
             if (scanStats is not null)
                 scanStats.KvScanEntries++;

@@ -572,14 +572,14 @@ internal sealed class QueryExecutor
             case SortNode sortNode:
                 Trace(QueryPlanStepType.SortBy);
                 cursor = querySorter.SortResultset(
-                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database), sortNode.BoundedLimit);
+                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken), sortNode.BoundedLimit);
                 break;
 
             case AggregateNode aggregateNode:
                 Trace(QueryPlanStepType.Aggregate);
                 cursor = aggregateNode.IsStreamingGroupBy
-                    ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database))
-                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database));
+                    ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken))
+                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken));
                 break;
 
             case HavingFilterNode:
@@ -591,7 +591,7 @@ internal sealed class QueryExecutor
                 Trace(QueryPlanStepType.Distinct);
                 cursor = distinctNode.IsStreaming
                     ? queryDistincter.StreamingDistinctRows(RequireInput(input))
-                    : queryDistincter.DistinctResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database));
+                    : queryDistincter.DistinctResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken));
                 break;
 
             case ProjectNode:
@@ -673,7 +673,8 @@ internal sealed class QueryExecutor
             orderBy: null,
             limit: null,
             offset: null,
-            parameters: null);
+            parameters: null,
+            cancellationToken: cancellationToken);
 
         RowEncoder.RowDecodeState decodeState = new()
         {
@@ -755,12 +756,13 @@ internal sealed class QueryExecutor
             limit: null,
             offset: null,
             parameters: null,
-            groupBy: groupBy?.ToList());
+            groupBy: groupBy?.ToList(),
+            cancellationToken: cancellationToken);
 
         IAsyncEnumerable<QueryResultRow> partialRows = queryAggregator.AggregateResultset(
             ticket,
             ScanSpanRows(database, table, filter, fromRowId, untilRowId, schemaVersion, requiredColumns, snapshotTx, ticket, cancellationToken),
-            QueryExecutionContext.For(database));
+            QueryExecutionContext.For(database, ticket.CancellationToken));
 
         await foreach (QueryResultRow row in partialRows.ConfigureAwait(false))
             yield return new QueryFragmentRow(null, null, EncodeCells(row.Row));
@@ -854,7 +856,8 @@ internal sealed class QueryExecutor
         NodeAst? filter = plan.ExecutionFilter;
 
         await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
-            exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+            exclusive: plan.Ticket.ExclusivePredicateLocks,
+            cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false);
 
         await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
 
@@ -868,7 +871,10 @@ internal sealed class QueryExecutor
         var partialTasks = new Task<List<Dictionary<string, ColumnValue>>>[spans.Count];
         List<(ObjectIdValue? from, ObjectIdValue? until, int index)> localSpans = [];
 
-        using CancellationTokenSource cts = new();
+        // Linked to the request: the workers below already read through this token, so the link
+        // stops every span's scan when the client disconnects.
+        using CancellationTokenSource cts =
+            CancellationTokenSource.CreateLinkedTokenSource(plan.Ticket.CancellationToken);
 
         for (int i = 0; i < spans.Count; i++)
         {
@@ -916,10 +922,11 @@ internal sealed class QueryExecutor
                 limit: null,
                 offset: null,
                 parameters: null,
-                groupBy: partialPlan.MergeGroupBy);
+                groupBy: partialPlan.MergeGroupBy,
+                cancellationToken: plan.Ticket.CancellationToken);
 
             await foreach (QueryResultRow merged in queryAggregator.AggregateResultset(
-                mergeTicket, partialRows.ToAsyncEnumerable(), QueryExecutionContext.For(database)).ConfigureAwait(false))
+                mergeTicket, partialRows.ToAsyncEnumerable(), QueryExecutionContext.For(database, plan.Ticket.CancellationToken)).ConfigureAwait(false))
             {
                 yield return partialPlan.AvgFinalizers.Count == 0 ? merged : FinalizeAverages(merged, partialPlan);
             }
@@ -1167,7 +1174,9 @@ internal sealed class QueryExecutor
             yield break;
         }
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
+        CancellationToken cancellationToken = ticket.CancellationToken;
+
+        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
 
         if (scanStats is not null)
             scanStats.KvPointLookups++;
@@ -1175,7 +1184,7 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
-        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken).ConfigureAwait(false);
         if (data is null || data.Value.Length == 0)
             yield break;
 
@@ -1238,6 +1247,7 @@ internal sealed class QueryExecutor
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
         QueryDependencyCollector? deps = plan.DepCollector;
+        CancellationToken cancellationToken = ticket.CancellationToken;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
@@ -1248,6 +1258,7 @@ internal sealed class QueryExecutor
             ticket.TxnState, index.KvId,
             fromBound, fromInclusive, toBound, toInclusive,
             unique, exclusive: plan.Ticket.ExclusivePredicateLocks,
+            cancellationToken: cancellationToken,
             keyColumnCount: index.Columns.Length).ConfigureAwait(false);
 
         if (plan.IndexOnly)
@@ -1265,8 +1276,11 @@ internal sealed class QueryExecutor
                 unique,
                 fromInclusive,
                 toInclusive,
-                maxRows: plan.ScanRowLimit))
+                maxRows: plan.ScanRowLimit,
+                cancellationToken: cancellationToken))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
 
@@ -1298,9 +1312,11 @@ internal sealed class QueryExecutor
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page).ConfigureAwait(false);
+                ticket.TxnState, page, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 ObjectIdValue batchRowId = page[i];
                 ReadOnlyMemory<byte>? data = batchResult[i];
                 if (data is null || data.Value.Length == 0)
@@ -1325,8 +1341,11 @@ internal sealed class QueryExecutor
             unique,
             fromInclusive,
             toInclusive,
-            maxRows: plan.ScanRowLimit))
+            maxRows: plan.ScanRowLimit,
+            cancellationToken: cancellationToken))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
 
@@ -1364,6 +1383,7 @@ internal sealed class QueryExecutor
         bool isUnique = index.Type == IndexType.Unique;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         QueryDependencyCollector? deps = plan.DepCollector;
+        CancellationToken cancellationToken = ticket.CancellationToken;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
@@ -1396,16 +1416,21 @@ internal sealed class QueryExecutor
             await table.Store.AcquireBoundedIndexRangeLockAsync(
                 ticket.TxnState, index.KvId,
                 minVal, true, maxVal, true,
-                unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks).ConfigureAwait(false);
+                unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
+        // One seek per IN value: the check belongs here as well as in the inner loops, so a list
+        // of many values whose seeks each return nothing still stops on a cancel.
         foreach (ColumnValue value in inListNode.Values)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             CompositeColumnValue lookupKey = new(new[] { value });
 
             if (isUnique)
             {
-                ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey).ConfigureAwait(false);
+                ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
 
                 if (scanStats is not null)
                     scanStats.KvPointLookups++;
@@ -1413,7 +1438,7 @@ internal sealed class QueryExecutor
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
-                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
+                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken).ConfigureAwait(false);
                 if (data is null || data.Value.Length == 0)
                     continue;
 
@@ -1446,15 +1471,17 @@ internal sealed class QueryExecutor
                     ticket.TxnState, index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null).ConfigureAwait(false))
+                    maxRows: null, cancellationToken: cancellationToken).ConfigureAwait(false))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     if (scanStats is not null)
                         scanStats.KvScanEntries++;
 
                     if (!seen.Add(rowId))
                         continue;
 
-                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId).ConfigureAwait(false);
+                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId, cancellationToken).ConfigureAwait(false);
                     if (data is null || data.Value.Length == 0)
                         continue;
 

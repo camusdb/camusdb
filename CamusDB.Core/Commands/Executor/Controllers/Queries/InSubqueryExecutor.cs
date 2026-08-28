@@ -41,9 +41,10 @@ internal sealed class InSubqueryExecutor
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken = default)
     {
-        QueryExecutionContext context = QueryExecutionContext.For(database);
+        QueryExecutionContext context = QueryExecutionContext.For(database, cancellationToken);
 
         SpillableValueList valueList = new(context);
         bool containsNull = false;

@@ -61,6 +61,10 @@ internal sealed class QuerySorter
         long? boundedLimit = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        // Executed as part of a plan the token arrives on the context; driven directly it arrives
+        // on the enumerator. See QueryExecutionContext.Effective for which one wins.
+        cancellationToken = context.Effective(cancellationToken);
+
         if (ticket.OrderBy is null || ticket.OrderBy.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid internal sort context");
 
@@ -360,6 +364,8 @@ internal sealed class QuerySorter
         QueryExecutionContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        cancellationToken = context.Effective(cancellationToken);
+
         IComparer<QueryResultRow> comparer = new QueryResultRowOrderComparer(orderBy);
 
         if (!context.Options.SpillEnabled)

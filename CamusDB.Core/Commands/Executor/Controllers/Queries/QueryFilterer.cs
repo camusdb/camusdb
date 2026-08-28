@@ -260,7 +260,8 @@ internal sealed class QueryFilterer
                     prepared,
                     row,
                     ticket.TxnState,
-                    ticket.Parameters).ConfigureAwait(false);
+                    ticket.Parameters,
+                    ticket.CancellationToken).ConfigureAwait(false);
 
                 return ColumnValue.FromBool(exists);
             }

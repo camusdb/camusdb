@@ -30,7 +30,15 @@ public sealed class QueryExecutionContext
     /// <summary>Configuration of the engine running this query.</summary>
     public CamusDBOptions Options { get; }
 
-    /// <summary>Cancellation for the whole query; operators propagate it into their own awaits.</summary>
+    /// <summary>
+    /// Cancellation for the whole query; operators propagate it into their own awaits.
+    ///
+    /// <para>An operator can be reached two ways, so it can see a token twice. Executed as part of
+    /// a plan it gets this one, taken from the query ticket, and the scan below it obeys the same
+    /// token. Driven directly — by a test, or by a caller that composes operators by hand — it gets
+    /// one through its <c>[EnumeratorCancellation]</c> parameter instead, and this one is
+    /// <see cref="CancellationToken.None"/>. <see cref="Effective"/> settles which applies.</para>
+    /// </summary>
     public CancellationToken CancellationToken { get; }
 
     /// <summary>
@@ -67,4 +75,19 @@ public sealed class QueryExecutionContext
     /// <summary>Same context, re-scoped to a different cancellation token.</summary>
     public QueryExecutionContext WithCancellation(CancellationToken cancellationToken)
         => new(Options, cancellationToken, SpillDirectory);
+
+    /// <summary>
+    /// The token an operator should obey, given the one its enumerator was started with.
+    ///
+    /// <para>The enumerator token wins whenever it can actually be cancelled, so a caller that
+    /// drives one operator keeps full control of it. Otherwise this context's token applies, which
+    /// is the plan case: the intermediate stages between an operator and the transport do not all
+    /// forward an enumerator token, so the context is the only path the request's token has.</para>
+    ///
+    /// <para>Both being cancellable at once does not happen on any current path, so no linked
+    /// source is built — a link would allocate on every operator of every query to cover a case
+    /// that cannot arise. If one ever does, this is the single place to change.</para>
+    /// </summary>
+    public CancellationToken Effective(CancellationToken enumeratorToken)
+        => enumeratorToken.CanBeCanceled ? enumeratorToken : CancellationToken;
 }

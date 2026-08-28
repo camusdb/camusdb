@@ -28,7 +28,8 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken = default)
     {
         if (queryExecutor is null)
         {
@@ -50,7 +51,8 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         PreparedExistsSubquery prepared,
         IReadOnlyDictionary<string, ColumnValue> outerRow,
         KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken = default)
     {
         if (prepared.InnerBound.Sources.Count != 1)
         {
@@ -84,7 +86,8 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
                 txnState,
                 parameters,
                 combinedResolver,
-                txId).ConfigureAwait(false);
+                txId,
+                cancellationToken).ConfigureAwait(false);
 
             if (seeked)
                 return exists;
@@ -97,8 +100,11 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         // UPDATE/DELETE that contains this subquery cannot mark it as write-driving), and takes no
         // range lock, so a Serializable transaction is not fenced against inner-table phantoms on
         // this path — unlike the seek path above, which locks the range it reads.
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in innerTable.Store.ScanRows(txnState).ConfigureAwait(false))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in innerTable.Store.ScanRows(
+            txnState, cancellationToken: cancellationToken).ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (data.Length == 0)
                 continue;
 
@@ -155,7 +161,8 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver combinedResolver,
-        HLCTimestamp txId)
+        HLCTimestamp txId,
+        CancellationToken cancellationToken)
     {
         // The bound expressions may reference outer columns by bare or qualified name, exactly as
         // the inner predicate does. Merging an empty inner row yields the outer half of that view.
@@ -206,6 +213,7 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
             seekKey, true, seekKey, true,
             seekPlan.Unique,
             exclusive: false,
+            cancellationToken: cancellationToken,
             keyColumnCount: seekPlan.Index.Columns.Length).ConfigureAwait(false);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in innerTable.Store.ScanIndex(
@@ -214,9 +222,12 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
             seekPlan.KeyTypes,
             seekKey,
             seekKey,
-            seekPlan.Unique).ConfigureAwait(false))
+            seekPlan.Unique,
+            cancellationToken: cancellationToken).ConfigureAwait(false))
         {
-            ReadOnlyMemory<byte>? data = await innerTable.Store.GetRow(txnState, rowId).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            ReadOnlyMemory<byte>? data = await innerTable.Store.GetRow(txnState, rowId, cancellationToken).ConfigureAwait(false);
 
             if (data is null || data.Value.Length == 0)
                 continue;

@@ -112,6 +112,24 @@ public sealed class QueryTicket
     /// </summary>
     internal Queries.SingleTableRequiredColumnsMemo? RequiredColumnsMemo { get; }
 
+    /// <summary>
+    /// The transport's request token, carried here rather than as a parameter on every operator
+    /// because <see cref="Controllers.Queries.QueryPlan.Ticket"/> is reachable from every scan and
+    /// every query operator, while the leaf scanners are async iterators whose enumerator token
+    /// would otherwise have to be threaded through each intermediate stage by hand.
+    ///
+    /// <para><b>This token bounds reads only.</b> It stops a scan, an index read and a predicate
+    /// lock wait. It must never be handed to a commit, a rollback, or a lock release: a cancelled
+    /// rollback abandons the transaction's locks until their lease expires. A write phase ignores
+    /// it — once the first mutation lands, the statement runs to its commit or its rollback.</para>
+    ///
+    /// <para>Safe to hold on a ticket because a ticket is built per statement. The plan cache
+    /// stores a <c>PlanCacheEntry</c> — the optimization decision alone — and never a
+    /// <see cref="Controllers.Queries.QueryPlan"/>, so no cached object can retain a token from a
+    /// request that has already ended.</para>
+    /// </summary>
+    public CancellationToken CancellationToken { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -136,7 +154,8 @@ public sealed class QueryTicket
         bool exclusivePredicateLocks = false,
         IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = null,
         CacheHintOptions? cacheHint = null,
-        Queries.SingleTableRequiredColumnsMemo? requiredColumnsMemo = null)
+        Queries.SingleTableRequiredColumnsMemo? requiredColumnsMemo = null,
+        CancellationToken cancellationToken = default)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -162,5 +181,6 @@ public sealed class QueryTicket
         PreparedInSets = preparedInSets;
         CacheHint = cacheHint;
         RequiredColumnsMemo = requiredColumnsMemo;
+        CancellationToken = cancellationToken;
     }
 }

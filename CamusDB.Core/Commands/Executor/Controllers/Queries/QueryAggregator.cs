@@ -34,7 +34,7 @@ internal sealed class QueryAggregator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "This resultset shouldn't be aggregated");
 
         if (ticket.GroupBy is { Count: > 0 })
-            return AggregateGrouped(ticket, dataCursor, _stats, context);
+            return AggregateGrouped(ticket, dataCursor, _stats, context, context.CancellationToken);
 
         if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket) || HasCompoundProjection(ticket.Projection))
             return AggregateGlobalWorkspace(ticket, dataCursor);
@@ -113,7 +113,7 @@ internal sealed class QueryAggregator
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
                 "Streaming GROUP BY requires GROUP BY expressions");
         List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
-        return StreamingAggregateRows(groupBy, projections, ticket, dataCursor, context);
+        return StreamingAggregateRows(groupBy, projections, ticket, dataCursor, context, context.CancellationToken);
     }
 
     private static async IAsyncEnumerable<QueryResultRow> StreamingAggregateRows(

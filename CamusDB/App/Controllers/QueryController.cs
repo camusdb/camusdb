@@ -30,9 +30,14 @@ public sealed class QueryController : CommandsController
     [Route("/query")]
     public async Task<JsonResult> Query()
     {
+        // The client's disconnect signal. It reaches the scan through the ticket only: the
+        // transaction lifecycle below keeps its own token, because a cancelled commit or rollback
+        // abandons locks that only a lease expiry reclaims.
+        CancellationToken requestAborted = HttpContext.RequestAborted;
+
         try
         {
-            QueryRequest? request = await JsonSerializer.DeserializeAsync<QueryRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
+            QueryRequest? request = await JsonSerializer.DeserializeAsync<QueryRequest>(Request.Body, jsonOptions, requestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Query request is not valid");
 
@@ -54,7 +59,8 @@ public sealed class QueryController : CommandsController
                         orderBy: request.OrderBy,
                         limit: null,
                         offset: null,
-                        parameters: null
+                        parameters: null,
+                        cancellationToken: requestAborted
                     );
                     List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
@@ -92,7 +98,8 @@ public sealed class QueryController : CommandsController
                         orderBy: request.OrderBy,
                         limit: null,
                         offset: null,
-                        parameters: null
+                        parameters: null,
+                        cancellationToken: requestAborted
                     );
                     List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
                     (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
