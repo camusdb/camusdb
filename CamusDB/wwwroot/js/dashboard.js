@@ -321,6 +321,14 @@
     });
     panels.push(backupsPanel);
 
+    var slowQueriesPanel = new Panel({
+      url: '/v1/dashboard/slow-queries',
+      intervalMs: 15000,
+      element: document.getElementById('slow-queries-body'),
+      render: renderSlowQueries,
+    });
+    panels.push(slowQueriesPanel);
+
     // Configuration does not change under a running node, so it loads once.
     var configPanel = new Panel({
       url: '/v1/dashboard/config',
@@ -554,6 +562,111 @@
         row.appendChild(element('td', 'r num', bytes(backup.sizeBytes)));
         return row;
       });
+  }
+
+  /**
+   * The newest slow statements on this node.
+   *
+   * Three things this panel must say out loud, because a reader who assumes
+   * otherwise draws the opposite conclusion from an empty table:
+   *
+   *  - the log can be switched off, and off looks exactly like "nothing slow";
+   *  - the entries are one node's, not the cluster's;
+   *  - the ring wraps, so an empty-looking history may simply have scrolled
+   *    past. `seq` above the capacity is what reveals that.
+   */
+  function renderSlowQueries(body) {
+    var container = document.getElementById('slow-queries-body');
+    var label = document.getElementById('slow-queries-node');
+
+    label.textContent = body.node ? 'Node ' + body.node : 'This node';
+
+    if (!body.logEnabled) {
+      container.innerHTML = '';
+      container.appendChild(box(
+        'The slow query log is switched off',
+        ' Set slow_query_log_enabled to true and restart the node to collect statements.'));
+      return;
+    }
+
+    fillTable(
+      container,
+      [
+        { label: 'When' },
+        { label: 'Took', align: 'right' },
+        { label: 'Kind' },
+        { label: 'Database' },
+        { label: 'User' },
+        { label: 'Rows out', align: 'right' },
+        { label: 'Rows read', align: 'right' },
+        { label: 'Why' },
+        { label: 'Outcome' },
+        { label: 'Statement' },
+      ],
+      body.rows || [],
+      function (entry) {
+        var row = element('tr');
+
+        row.appendChild(element('td', 'dim', clockOf(entry.startedAt)));
+        row.appendChild(element('td', 'r num', millis(entry.durationMs)));
+        row.appendChild(element('td', 'dim', entry.kind));
+        row.appendChild(element('td', 'key', entry.database || '—'));
+        row.appendChild(element('td', 'dim', entry.user || '—'));
+        row.appendChild(element('td', 'r num', number(entry.rowsReturned)));
+        row.appendChild(element('td', 'r num', number(entry.rowsRead)));
+
+        // The two flags are the panel's whole reason for existing: they turn
+        // "this was slow" into "this was slow because".
+        var why = element('td');
+        if (entry.fullScan) why.appendChild(element('span', 'pill', 'Full scan'));
+        if (entry.spilled) why.appendChild(element('span', 'pill', 'Spilled'));
+        if (!entry.fullScan && !entry.spilled) why.appendChild(document.createTextNode('—'));
+        row.appendChild(why);
+
+        var outcome = element('td');
+        if (entry.outcome === 'failed') {
+          outcome.appendChild(stateSpan('bad', entry.errorCode || 'failed'));
+        } else if (entry.outcome === 'abandoned') {
+          outcome.appendChild(stateSpan('warn', 'abandoned'));
+        } else {
+          outcome.appendChild(stateSpan('ok', 'completed'));
+        }
+        row.appendChild(outcome);
+
+        // The text is set through textContent by `element`, never innerHTML: it
+        // is whatever a client sent, and this page renders it back to an
+        // operator.
+        var statement = element('td', 'key sql', entry.sql + (entry.truncated ? ' …' : ''));
+        statement.title = entry.sql;
+        row.appendChild(statement);
+
+        return row;
+      });
+
+    if (body.newestSequence > body.capacity) {
+      container.appendChild(box(
+        'Older entries have been overwritten',
+        ' ' + number(body.newestSequence) + ' statements have been recorded and the log holds ' +
+        number(body.capacity) + '. Raise slow_query_log_max_entries or the threshold to keep more.'));
+    }
+
+    if (body.omitted > 0) {
+      container.appendChild(box(
+        'Some entries are not shown',
+        ' ' + number(body.omitted) + ' more are held. Run SHOW SLOW QUERIES for the rest.'));
+    }
+  }
+
+  /** Wall-clock time of day from the entry's ISO-8601 UTC stamp, in the reader's zone. */
+  function clockOf(isoUtc) {
+    var when = new Date(isoUtc);
+    return isNaN(when.getTime()) ? isoUtc : when.toLocaleTimeString();
+  }
+
+  /** A duration a reader can compare at a glance: sub-second stays in ms, above that becomes seconds. */
+  function millis(value) {
+    if (value === null || value === undefined) return '—';
+    return value >= 1000 ? number(value / 1000, 2) + ' s' : number(value, 0) + ' ms';
   }
 
   function renderConfig(body) {

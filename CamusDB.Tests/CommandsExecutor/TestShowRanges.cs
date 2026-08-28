@@ -516,7 +516,7 @@ internal sealed class TestShowRanges : BaseTest
 
         CollectionAssert.AreEqual(expectedNames, schema!.Select(c => c.Name).ToArray());
 
-        Assert.AreEqual(ColumnType.String, schema[0].Type);
+        Assert.AreEqual(ColumnType.String, schema![0].Type);
         Assert.AreEqual(ColumnType.Integer64, schema[3].Type);
         Assert.AreEqual(ColumnType.Integer64, schema[8].Type);
         Assert.AreEqual(ColumnType.Bool, schema[11].Type);

@@ -233,6 +233,77 @@ public sealed class DashboardConfigResponse
     public List<DashboardClusterSettingRow> ClusterSettings { get; set; } = new();
 }
 
+/// <summary>
+/// One recorded slow statement, as the panel draws it.
+///
+/// <para>The execution facts travel with the duration on purpose. A panel that showed only "4.2 s"
+/// would send the reader to a SQL console to ask why, and by then the conditions that made the
+/// statement slow are gone — which is the whole reason the log records them at the time.</para>
+/// </summary>
+public sealed record DashboardSlowQueryRow(
+    long Seq,
+    string StartedAt,
+    double DurationMs,
+    string Database,
+    string? User,
+    string Kind,
+    long RowsReturned,
+    long RowsRead,
+    bool FullScan,
+    bool Spilled,
+    string Outcome,
+    string? ErrorCode,
+    bool Truncated,
+    string Sql);
+
+/// <summary>
+/// The newest entries in this node's slow query log.
+///
+/// <para><b>Node-local, like every other panel.</b> The log holds what this process served and is
+/// never gathered from peers, so a three-node cluster needs the dashboard opened on all three. The
+/// page says so, because an operator who assumes otherwise reads a quiet panel as a quiet
+/// cluster.</para>
+///
+/// <para><b>Superuser only.</b> The rows carry the literal SQL text of statements other users ran,
+/// which can hold predicate values from tables the caller has no grant on. The bar is not enforced
+/// here: the panel runs <c>SHOW SLOW QUERIES</c> through the executor, so the statement's own gate
+/// applies and cannot drift from a second copy.</para>
+/// </summary>
+public sealed class DashboardSlowQueriesResponse
+{
+    public string Status { get; set; } = "ok";
+
+    /// <summary>
+    /// False when <c>slow_query_log_enabled</c> is off. The row list is then empty. Reported as a
+    /// state rather than an error, because an empty list on its own cannot be told apart from a node
+    /// that has simply had nothing slow — and reading "nothing slow" off a disabled log is exactly
+    /// the wrong conclusion.
+    /// </summary>
+    public bool LogEnabled { get; set; }
+
+    /// <summary>The node these entries belong to. They are never cluster-wide.</summary>
+    public string Node { get; set; } = "";
+
+    /// <summary>Duration at or above which a statement is recorded, so the panel can say what it is showing.</summary>
+    public int ThresholdMs { get; set; }
+
+    /// <summary>Entries the ring holds before it overwrites the oldest.</summary>
+    public int Capacity { get; set; }
+
+    /// <summary>
+    /// Sequence number of the newest entry, or 0 when the log is empty. With
+    /// <see cref="Capacity"/> it tells the reader whether entries were overwritten: a newest
+    /// sequence above the capacity means the ring has wrapped and the panel is a sample, not the
+    /// whole history.
+    /// </summary>
+    public long NewestSequence { get; set; }
+
+    /// <summary>Entries dropped by the panel's row cap, so a truncated panel never reads as a complete one.</summary>
+    public int Omitted { get; set; }
+
+    public List<DashboardSlowQueryRow> Rows { get; set; } = new();
+}
+
 /// <summary>Answer to a dashboard sign-in attempt. It never echoes the password back.</summary>
 public sealed class DashboardLoginResponse
 {

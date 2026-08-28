@@ -105,6 +105,24 @@
                 </div>
             </section>
 
+            <section class="card col-3">
+                <div class="card-head">
+                    <div>
+                        <p class="eyebrow">Slow queries</p>
+                        <h2>Statements over the threshold</h2>
+                    </div>
+                    <span class="when" id="slow-queries-node">Superuser only</span>
+                </div>
+                <div class="panel">
+                    <div class="panel-body" id="slow-queries-body"></div>
+                </div>
+                <p class="card-note">
+                    This node only, held in memory, and lost on restart. The list is a bounded sample:
+                    once the ring is full the oldest entry is overwritten. Run
+                    <code>SHOW SLOW QUERIES</code> for the full text and the rest of the entries.
+                </p>
+            </section>
+
             <section class="card col-2">
                 <div class="card-head">
                     <div>
