@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 27/08/2026 9:35:28 AM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 27/08/2026 9:34:39 AM>
+// DateTime: 28/08/2026 8:52:40 AM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 28/08/2026 8:51:36 AM>
 
 // options: no-lines gplex
 
@@ -2685,10 +2685,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
             else if (string.Equals(ValueStack[ValueStack.Depth-2].s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(ValueStack[ValueStack.Depth-1].s, "settings", System.StringComparison.OrdinalIgnoreCase))
                 CurrentSemanticValue.n = new(NodeType.ShowClusterSettings, null, null, null, null, null, null, null, null);
+            else if (string.Equals(ValueStack[ValueStack.Depth-2].s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ValueStack[ValueStack.Depth-1].s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                CurrentSemanticValue.n = new(NodeType.ShowSlowQueries, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'] or SHOW CLUSTER SETTINGS [LIKE '<pattern>']");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
           }
         break;
       case 250: // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER, TLIKE, string
@@ -2699,10 +2702,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
             else if (string.Equals(ValueStack[ValueStack.Depth-4].s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(ValueStack[ValueStack.Depth-3].s, "settings", System.StringComparison.OrdinalIgnoreCase))
                 CurrentSemanticValue.n = new(NodeType.ShowClusterSettings, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
+            else if (string.Equals(ValueStack[ValueStack.Depth-4].s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(ValueStack[ValueStack.Depth-3].s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                CurrentSemanticValue.n = new(NodeType.ShowSlowQueries, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'] or SHOW CLUSTER SETTINGS [LIKE '<pattern>']");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
           }
         break;
       case 251: // show_stmt -> TSHOW, TIDENTIFIER

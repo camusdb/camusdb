@@ -444,7 +444,11 @@ internal sealed class QuerySorter
                 buffer.Add(row);
                 if (buffer.Count >= threshold)
                 {
-                    scope ??= SpillFileManager.CreateScope(context.SpillDirectory);
+                    if (scope is null)
+                    {
+                        context.Probe?.NoteSpill();
+                        scope = SpillFileManager.CreateScope(context.SpillDirectory);
+                    }
                     buffer.Sort(comparer);
                     runs.Add(await SpillSortedBufferAsync(scope, buffer, context, ct).ConfigureAwait(false));
                     buffer.Clear();

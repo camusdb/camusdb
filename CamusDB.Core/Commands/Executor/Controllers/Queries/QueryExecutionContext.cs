@@ -48,16 +48,28 @@ public sealed class QueryExecutionContext
     /// </summary>
     public string SpillDirectory { get; }
 
+    /// <summary>
+    /// Per-statement diagnostic accumulator for the slow query log, or null when the log is off.
+    ///
+    /// <para>It belongs here by the same test as the rest of this type: the whole pipeline needs it,
+    /// because any blocking operator may be the one that spills. An operator reports the spill
+    /// through this reference instead of returning the fact upwards through stages that would
+    /// otherwise have no reason to know about it.</para>
+    /// </summary>
+    public Diagnostics.StatementProbe? Probe { get; }
+
     public QueryExecutionContext(
         CamusDBOptions options,
         CancellationToken cancellationToken = default,
-        string? spillDirectory = null)
+        string? spillDirectory = null,
+        Diagnostics.StatementProbe? probe = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         Options = options;
         CancellationToken = cancellationToken;
         SpillDirectory = spillDirectory ?? options.DataDirectory;
+        Probe = probe;
     }
 
     /// <summary>
@@ -72,9 +84,25 @@ public sealed class QueryExecutionContext
         return new QueryExecutionContext(database.Options, cancellationToken);
     }
 
+    /// <summary>
+    /// Context for a query against <paramref name="database"/> executing <paramref name="ticket"/>,
+    /// taking both the request's cancellation token and its diagnostic probe from the ticket.
+    ///
+    /// <para>Prefer this over the token-only overload anywhere a ticket is in hand. The two values
+    /// are per statement and always travel together, and passing only the token is how an operator
+    /// silently stops reporting the spill it just performed.</para>
+    /// </summary>
+    public static QueryExecutionContext For(DatabaseDescriptor database, Models.Tickets.QueryTicket ticket)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+        ArgumentNullException.ThrowIfNull(ticket);
+
+        return new QueryExecutionContext(database.Options, ticket.CancellationToken, spillDirectory: null, ticket.Probe);
+    }
+
     /// <summary>Same context, re-scoped to a different cancellation token.</summary>
     public QueryExecutionContext WithCancellation(CancellationToken cancellationToken)
-        => new(Options, cancellationToken, SpillDirectory);
+        => new(Options, cancellationToken, SpillDirectory, Probe);
 
     /// <summary>
     /// The token an operator should obey, given the one its enumerator was started with.

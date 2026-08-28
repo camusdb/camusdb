@@ -572,14 +572,14 @@ internal sealed class QueryExecutor
             case SortNode sortNode:
                 Trace(QueryPlanStepType.SortBy);
                 cursor = querySorter.SortResultset(
-                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken), sortNode.BoundedLimit);
+                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket), sortNode.BoundedLimit);
                 break;
 
             case AggregateNode aggregateNode:
                 Trace(QueryPlanStepType.Aggregate);
                 cursor = aggregateNode.IsStreamingGroupBy
-                    ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken))
-                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken));
+                    ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket))
+                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket));
                 break;
 
             case HavingFilterNode:
@@ -591,7 +591,7 @@ internal sealed class QueryExecutor
                 Trace(QueryPlanStepType.Distinct);
                 cursor = distinctNode.IsStreaming
                     ? queryDistincter.StreamingDistinctRows(RequireInput(input))
-                    : queryDistincter.DistinctResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken));
+                    : queryDistincter.DistinctResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket));
                 break;
 
             case ProjectNode:
@@ -762,7 +762,7 @@ internal sealed class QueryExecutor
         IAsyncEnumerable<QueryResultRow> partialRows = queryAggregator.AggregateResultset(
             ticket,
             ScanSpanRows(database, table, filter, fromRowId, untilRowId, schemaVersion, requiredColumns, snapshotTx, ticket, cancellationToken),
-            QueryExecutionContext.For(database, ticket.CancellationToken));
+            QueryExecutionContext.For(database, ticket));
 
         await foreach (QueryResultRow row in partialRows.ConfigureAwait(false))
             yield return new QueryFragmentRow(null, null, EncodeCells(row.Row));
@@ -926,7 +926,7 @@ internal sealed class QueryExecutor
                 cancellationToken: plan.Ticket.CancellationToken);
 
             await foreach (QueryResultRow merged in queryAggregator.AggregateResultset(
-                mergeTicket, partialRows.ToAsyncEnumerable(), QueryExecutionContext.For(database, plan.Ticket.CancellationToken)).ConfigureAwait(false))
+                mergeTicket, partialRows.ToAsyncEnumerable(), QueryExecutionContext.For(database, plan.Ticket)).ConfigureAwait(false))
             {
                 yield return partialPlan.AvgFinalizers.Count == 0 ? merged : FinalizeAverages(merged, partialPlan);
             }
@@ -1148,6 +1148,7 @@ internal sealed class QueryExecutor
         QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
@@ -1188,6 +1189,7 @@ internal sealed class QueryExecutor
         if (data is null || data.Value.Length == 0)
             yield break;
 
+        probe?.AddRowRead();
         if (scanStats is not null)
             scanStats.RowsRead++;
 
@@ -1246,6 +1248,7 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
 
@@ -1322,6 +1325,7 @@ internal sealed class QueryExecutor
                 if (data is null || data.Value.Length == 0)
                     continue;
                 deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
+                probe?.AddRowRead();
                 if (scanStats is not null) scanStats.RowsRead++;
                 QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,
@@ -1390,6 +1394,7 @@ internal sealed class QueryExecutor
 
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
 
         // Layout-backed decode with a per-scan plan cache shared by every seek in the IN list
         // (same policy as QueryScanner's scans): rows at the same stored schema version share one
@@ -1444,6 +1449,7 @@ internal sealed class QueryExecutor
 
                 deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
+                probe?.AddRowRead();
                 if (scanStats is not null)
                     scanStats.RowsRead++;
 
@@ -1487,6 +1493,7 @@ internal sealed class QueryExecutor
 
                     deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
+                    probe?.AddRowRead();
                     if (scanStats is not null)
                         scanStats.RowsRead++;
 

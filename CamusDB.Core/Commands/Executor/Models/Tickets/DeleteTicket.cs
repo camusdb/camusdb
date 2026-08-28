@@ -27,6 +27,13 @@ public readonly struct DeleteTicket
 
     public NodeAst? Limit { get; }
 
+    /// <summary>
+    /// Per-statement diagnostic accumulator for the slow query log, or null when the log is off.
+    /// Taken from the SQL ticket this one was created from, and handed to the locate scan's
+    /// <see cref="QueryTicket"/> so a mutation reports the same scan facts a SELECT does.
+    /// </summary>
+    public Diagnostics.StatementProbe? Probe { get; }
+
     public DeleteTicket(
         KvTransaction txnState,
         string databaseName,
@@ -34,7 +41,8 @@ public readonly struct DeleteTicket
         NodeAst? where,
         List<QueryFilter>? filters,
         Dictionary<string, ColumnValue>? parameters = null,
-        NodeAst? limit = null
+        NodeAst? limit = null,
+        Diagnostics.StatementProbe? probe = null
     )
     {
         TxnState = txnState;
@@ -44,5 +52,6 @@ public readonly struct DeleteTicket
         Filters = filters;
         Parameters = parameters;
         Limit = limit;
+        Probe = probe;
     }
 }

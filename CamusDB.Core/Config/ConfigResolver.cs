@@ -230,6 +230,10 @@ public static class ConfigResolver
         DatabaseIdleEvictionMs = config.DatabaseIdleEvictionMs,
 
         EngineMetricsEnabled = config.EngineMetricsEnabled,
+        SlowQueryLogEnabled = config.SlowQueryLogEnabled,
+        SlowQueryLogThresholdMs = config.SlowQueryLogThresholdMs,
+        SlowQueryLogMaxEntries = config.SlowQueryLogMaxEntries,
+        SlowQueryLogMaxSqlLength = config.SlowQueryLogMaxSqlLength,
         DashboardEnabled = config.DashboardEnabled,
         DashboardRefreshSeconds = config.DashboardRefreshSeconds,
         QueryTracingEnabled = config.QueryTracingEnabled,

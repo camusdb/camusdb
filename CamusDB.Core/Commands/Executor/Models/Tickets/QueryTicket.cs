@@ -130,6 +130,19 @@ public sealed class QueryTicket
     /// </summary>
     public CancellationToken CancellationToken { get; }
 
+    /// <summary>
+    /// Per-statement diagnostic accumulator for the slow query log, or null when the log is off.
+    ///
+    /// <para>It rides here for the reason the cancellation token does: <c>QueryPlan.Ticket</c> is
+    /// reachable from every scan and every query operator, so the alternative is threading a
+    /// parameter through each intermediate stage by hand.</para>
+    ///
+    /// <para>One probe spans the whole statement, so a ticket built for a subquery or for the locate
+    /// scan of an UPDATE carries the same instance as the statement that owns it. Its counters are
+    /// interlocked for that reason.</para>
+    /// </summary>
+    internal Diagnostics.StatementProbe? Probe { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -155,7 +168,8 @@ public sealed class QueryTicket
         IReadOnlyDictionary<NodeAst, PreparedInSet>? preparedInSets = null,
         CacheHintOptions? cacheHint = null,
         Queries.SingleTableRequiredColumnsMemo? requiredColumnsMemo = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Diagnostics.StatementProbe? probe = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -182,5 +196,6 @@ public sealed class QueryTicket
         CacheHint = cacheHint;
         RequiredColumnsMemo = requiredColumnsMemo;
         CancellationToken = cancellationToken;
+        Probe = probe;
     }
 }

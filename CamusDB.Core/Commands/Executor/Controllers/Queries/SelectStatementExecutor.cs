@@ -91,6 +91,9 @@ internal sealed class SelectStatementExecutor
 
     internal readonly EngineMetricsCollector? engineMetrics;
 
+    /// <summary>Times statements into the slow query log, or null when the log is not built.</summary>
+    internal readonly SlowQueryRecorder? slowQueries;
+
     /// <summary>
     /// How many times a statement re-attempts a table open that failed the schema catch-up fence.
     /// The fence fires before any write or schema pin, so the in-flight transaction is unmodified
@@ -117,7 +120,8 @@ internal sealed class SelectStatementExecutor
         Auth.UserAdminService userAdmin,
         Maintenance.BackgroundSchedulerHost? backgroundSchedulers,
         ClusterSettingsService? clusterSettings,
-        EngineMetricsCollector? engineMetrics
+        EngineMetricsCollector? engineMetrics,
+        SlowQueryRecorder? slowQueries = null
     )
     {
         this.context = context;
@@ -139,6 +143,7 @@ internal sealed class SelectStatementExecutor
         this.backgroundSchedulers = backgroundSchedulers;
         this.clusterSettings = clusterSettings;
         this.engineMetrics = engineMetrics;
+        this.slowQueries = slowQueries;
     }
 
     /// <summary>
@@ -171,16 +176,55 @@ internal sealed class SelectStatementExecutor
     }
 
     /// <summary>
-    /// Execute a SQL statement that returns rows
+    /// Executes a SQL statement that returns rows, and times it for the slow query log.
+    ///
+    /// <para><b>The returned cursor is lazy, and that is why the timing is where it is.</b> When
+    /// this method returns, the statement has been parsed, authorized and planned, and no row has
+    /// been read. The clock therefore stops inside the wrapped cursor, when the caller stops reading
+    /// it — see <see cref="SlowQueryRecording.Wrap"/>. A duration measured at return would report
+    /// every query in the engine as fast.</para>
+    ///
+    /// <para>With the log off, <paramref name="ticket"/> is passed through untouched and nothing is
+    /// allocated: no probe, no clock, no wrapper around the cursor.</para>
     /// </summary>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
-    /// <exception cref="Exception"></exception>
     public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
+    {
+        SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+
+        if (recording is null)
+            return await ExecuteSQLQueryInternal(ticket, metaOut, schemaOut, recording: null).ConfigureAwait(false);
+
+        try
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
+                await ExecuteSQLQueryInternal(ticket.WithProbe(recording.Probe), metaOut, schemaOut, recording)
+                    .ConfigureAwait(false);
+
+            return (database, recording.Wrap(cursor, ticket.CancellationToken));
+        }
+        catch (Exception exception)
+        {
+            // A statement that fails before it produces a cursor never reaches the wrapper, so it is
+            // recorded here instead. A slow failure — a lock wait that timed out, a schema catch-up
+            // that never caught up — is exactly what an operator wants the log to show.
+            recording.FinishFailed(exception);
+            throw;
+        }
+    }
+
+    /// <param name="recording">
+    /// The statement's slow-query timing, or null when the log is off. Used only to name the
+    /// statement's kind once the parse has identified it; the clock and the counters live on the
+    /// recording and on the probe already attached to <paramref name="ticket"/>.
+    /// </param>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryInternal(
+        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, SlowQueryRecording? recording)
     {
         context.Validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+
+        recording?.Describe(ast.nodeType);
 
         statementAuthorizer.SetAuthorizationScope(ticket, ast);
         ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
@@ -208,6 +252,17 @@ internal sealed class SelectStatementExecutor
                 UnquoteLikePattern(ast.leftAst?.yytext),
                 LocalNodeLabel(),
                 BuildEngineCounterRows()));
+        }
+
+        // SHOW SLOW QUERIES reports the statements this process recorded as slow. Node-local for the
+        // same reason as the metrics above — the log is this process's own memory — and it opens no
+        // database and no transaction.
+        if (ast.nodeType == NodeType.ShowSlowQueries)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowSlowQueriesSchema;
+
+            return (null!, schemaQuerier.ShowSlowQueries(slowQueries?.Log, UnquoteLikePattern(ast.leftAst?.yytext)));
         }
 
         // SHOW VARIABLES reports the configuration this engine was constructed with. Node-local for the
@@ -679,7 +734,19 @@ internal sealed class SelectStatementExecutor
         HLCTimestamp snapshotT = AsOfSystemTimeResolver.Resolve(ast.extendedSeven, ticket.Parameters, now);
 
         KvTransaction snapshotTx = KvTransaction.CreateSnapshotReadOnly(snapshotT);
-        return new ExecuteSQLTicket(snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters);
+        // Only the transaction is replaced. Every other per-statement value is carried forward,
+        // because a rebuild that drops one loses it for the rest of the statement with nothing to
+        // say so.
+        //
+        // The caller identity is carried for that reason rather than because a reader needs it here:
+        // the per-table and per-view gates below read the ambient AuthorizationScope, which was set
+        // from this ticket before the rebind, so today nothing downstream of this line consults the
+        // ticket's own principal. Dropping it would therefore be invisible until someone added a
+        // check that does read it — and a null principal reads as "authentication disabled", which
+        // fails open. Carrying it costs nothing and removes that trap.
+        return new ExecuteSQLTicket(
+            snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters, ticket.Principal,
+            ticket.CancellationToken, ticket.Probe);
     }
 
     /// <summary>

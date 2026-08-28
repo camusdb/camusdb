@@ -39,6 +39,6 @@ internal sealed class DeleteFluxState
         Table = table;
         Ticket = ticket;
         QueryExecutor = queryExecutor;
-        RowsToDelete = new SpillableRowList(QueryExecutionContext.For(database));
+        RowsToDelete = new SpillableRowList(new QueryExecutionContext(database.Options, probe: ticket.Probe));
     }
 }

@@ -69,12 +69,20 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `query_result_cache_singleflight_wait_ms` | — | `250` |
 | `query_result_cache_strict_validation_max_keys` | — | `10000` |
 | `query_result_cache_sweep_interval_ms` | — | `10000` |
+| `slow_query_log_enabled` | — | `false` |
+| `slow_query_log_threshold_ms` | — | `1000` |
+| `slow_query_log_max_entries` | — | `200` |
+| `slow_query_log_max_sql_length` | — | `4096` |
 | `kahuna.*` | — | mode-specific baseline |
 
 Parser-cache, lock/isolation, spill, and query-result-cache knobs are YAML-only (operational tuning,
 not per-node startup flags). The result cache is **on by default** (opt-in per query via a
 `{cache=…}` hint); set `query_result_cache_enabled: false` to turn it off entirely. See
 [query-result-cache.md](query-result-cache.md) for what each knob does and operator guidance.
+
+The slow-query-log knobs are YAML-only too. The log is **off by default**; see
+[slow-query-log.md](slow-query-log.md) for sizing guidance and for which of the four take effect
+without a restart.
 
 ## Kahuna engine section
 

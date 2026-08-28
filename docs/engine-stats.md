@@ -143,3 +143,9 @@ script polling a fleet does not have to special-case which nodes have it enabled
 
 This setting is independent of the `diagnostics:` section, which configures OpenTelemetry/Prometheus
 export. Either can be on without the other, and both can read the same meters.
+
+## Related
+
+`SHOW ENGINE STATS` describes the node. For the individual statements that were slow on it, with the
+full-scan and spill facts that explain each duration, see the
+[slow query log](slow-query-log.md).

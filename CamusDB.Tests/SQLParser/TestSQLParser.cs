@@ -1545,6 +1545,54 @@ public class TestSQLParser
         Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW ENGINE STATS LIKE 'x' EXTRA"));
     }
 
+    [Test]
+    public void TestParseShowSlowQueries()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW SLOW QUERIES");
+
+        Assert.AreEqual(NodeType.ShowSlowQueries, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+    }
+
+    [Test]
+    public void TestParseShowSlowQueriesLowercase()
+    {
+        Assert.AreEqual(NodeType.ShowSlowQueries, SQLParserProcessor.Parse("show slow queries").nodeType);
+    }
+
+    [Test]
+    public void TestParseShowSlowQueriesLike()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW SLOW QUERIES LIKE '%robots%'");
+
+        Assert.AreEqual(NodeType.ShowSlowQueries, ast.nodeType);
+        Assert.IsNotNull(ast.leftAst);
+        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
+        Assert.AreEqual("'%robots%'", ast.leftAst.yytext);
+    }
+
+    /// <summary>
+    /// "slow" and "queries" are matched as plain identifiers rather than reserved words, so both must
+    /// stay usable as table and column names. Reserving them would break existing schemas, which is
+    /// the whole reason the statement shares the two-identifier SHOW production.
+    /// </summary>
+    [Test]
+    public void TestSlowAndQueriesRemainUsableAsIdentifiers()
+    {
+        Assert.AreEqual(NodeType.Select, SQLParserProcessor.Parse("SELECT slow, queries FROM metrics").nodeType);
+        Assert.AreEqual(NodeType.Select, SQLParserProcessor.Parse("SELECT * FROM queries WHERE slow = 1").nodeType);
+        Assert.AreEqual(NodeType.CreateTable, SQLParserProcessor.Parse(
+            "CREATE TABLE queries (id OID PRIMARY KEY, slow INT64 NOT NULL)").nodeType);
+    }
+
+    [Test]
+    public void TestParseShowSlowQueriesRejectsOtherWords()
+    {
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW SLOW FOO"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW FOO QUERIES"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW SLOW QUERIES LIKE 'x' EXTRA"));
+    }
+
     /// <summary>
     /// ENGINE and STATS are matched as identifiers rather than reserved as keywords, precisely so DDL
     /// that already uses those words keeps parsing. Reserving them would have been a silent breaking

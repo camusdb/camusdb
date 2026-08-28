@@ -111,7 +111,12 @@ internal static class SessionScalarFunctions
             ? ColumnValue.Null
             : ColumnValue.FromBool(ticket.Principal.IsSuperuser);
 
-        return new ExecuteSQLTicket(ticket.TxnState, ticket.DatabaseName, ticket.Sql, parameters, ticket.Principal);
+        // Every per-statement value the incoming ticket carried is carried forward: this rebuild
+        // exists to add session parameters, and a value dropped here is silently lost for the rest
+        // of the statement — the request's cancellation token and its diagnostic probe included.
+        return new ExecuteSQLTicket(
+            ticket.TxnState, ticket.DatabaseName, ticket.Sql, parameters, ticket.Principal,
+            ticket.CancellationToken, ticket.Probe);
     }
 
     private static ScalarFunctionDescriptor Describe(string name, string parameterKey, ColumnType returnType)

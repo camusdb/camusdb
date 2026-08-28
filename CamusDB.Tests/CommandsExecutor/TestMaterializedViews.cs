@@ -1480,4 +1480,80 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.MaterializedViewNotPopulated, error!.Code,
             "an unpopulated materialized view must not come back from disk looking populated");
     }
+
+    /// <summary>
+    /// A refresh does not destroy the contents it replaces. It retires that key-space behind an orphan
+    /// record, and the record keeps the rows readable for the retention window. A relink publishes the
+    /// pre-refresh snapshot as its own relation, while the live materialized view goes on serving the
+    /// rows the refresh wrote.
+    ///
+    /// <para>The recovered relation comes back as a materialized view, not as a table, even though the
+    /// statement reads <c>CREATE TABLE</c>: the relation kind travels in the orphan record, not in the
+    /// keyword. It also reattaches by the retired key-space's own id, because that id — not the live
+    /// view's id — is what addresses the retained rows.</para>
+    /// </summary>
+    [Test]
+    public async Task RelinkRecoversTheContentsARefreshReplaced()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+
+        // The key-space the initial population wrote into. The refresh below is what retires it.
+        string retiredStorageId = database.Schema.Tables["open_orders"].EffectiveStorageId;
+
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO orders (id, customer, total, status) VALUES (6, 'hooli', 60, 'open')");
+
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+
+        Assert.AreNotEqual(retiredStorageId, database.Schema.Tables["open_orders"].EffectiveStorageId,
+            "the refresh must adopt a new key-space, or there is no retired generation to recover");
+
+        CollectionAssert.AreEqual(
+            new List<long> { 1, 2, 3, 6 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders ORDER BY id"), "id"),
+            "the refresh must publish the rebuilt contents");
+
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+
+        OrphanTableRecord? record = await catalogs.TryGetTableOrphanAsync(database, retiredStorageId);
+        Assert.IsNotNull(record, "the replaced key-space must be retained behind an orphan record");
+        Assert.AreEqual(retiredStorageId, record!.TableId,
+            "the record must be addressed by the key-space it protects");
+
+        await ExecDdl(database, executor, dbname,
+            $"CREATE TABLE open_orders_before RELINK TO '{retiredStorageId}'");
+
+        // The recovered relation reads exactly the rows the refresh stopped serving.
+        CollectionAssert.AreEqual(
+            new List<long> { 1, 2, 3 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders_before ORDER BY id"), "id"),
+            "the relinked relation must hold the pre-refresh snapshot");
+
+        CollectionAssert.AreEqual(
+            new List<long> { 10, 20, 30 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT total FROM open_orders_before ORDER BY id"), "total"),
+            "every column of the retired generation must decode, not only the key");
+
+        // Recovering a retired generation leaves the live materialized view alone.
+        CollectionAssert.AreEqual(
+            new List<long> { 1, 2, 3, 6 },
+            Longs(await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders ORDER BY id"), "id"),
+            "the live materialized view must keep its own contents across the recovery");
+
+        TableSchema recovered = database.Schema.Tables["open_orders_before"];
+
+        Assert.AreEqual(retiredStorageId, recovered.Id,
+            "relink must reattach the retired key-space under its own id");
+        Assert.IsTrue(recovered.IsMaterializedView,
+            "CREATE TABLE ... RELINK TO must restore the captured relation kind, not an ordinary table");
+        Assert.IsNotNull(recovered.ViewDefinition,
+            "the recovered materialized view must keep its defining query");
+
+        Assert.IsNull(await catalogs.TryGetTableOrphanAsync(database, retiredStorageId),
+            "a completed relink must consume the orphan record");
+    }
 }

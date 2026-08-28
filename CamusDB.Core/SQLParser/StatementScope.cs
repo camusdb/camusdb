@@ -101,6 +101,8 @@ public static class StatementScope
             NodeType.ShowEngineStats or
             // Per-process configuration; likewise not read from any database.
             NodeType.ShowVariables or
+            // This process's own slow query log; not read from any database either.
+            NodeType.ShowSlowQueries or
             // The cluster-wide settings overlay; not read from any database either.
             NodeType.ShowClusterSettings;
 }

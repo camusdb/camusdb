@@ -227,6 +227,19 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private readonly Diagnostics.EngineMetricsCollector? engineMetrics;
 
+    /// <summary>
+    /// Times statements into the bounded slow query log, or null when the log was off when this
+    /// engine was built. Null rather than an always-present recorder with a flag, because the ring
+    /// allocates its backing array in its constructor: an engine that never enables the log should
+    /// not hold that array at all.
+    ///
+    /// <para>Turning the log off at runtime therefore stops recording without discarding what was
+    /// already recorded, and turning it on at runtime works only if the engine started with it on.
+    /// That asymmetry is what <see cref="CamusDBOptions.SlowQueryLogMaxEntries"/> being
+    /// restart-class means in practice.</para>
+    /// </summary>
+    private readonly Diagnostics.SlowQueryRecorder? slowQueries;
+
     // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
     // batches keeps transaction size manageable and allows a leader-change resume to skip
     // already-indexed rows via the persisted StartOffset checkpoint. Shared with the standalone
@@ -400,6 +413,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (options.EngineMetricsEnabled)
             engineMetrics = new Diagnostics.EngineMetricsCollector();
 
+        if (options.SlowQueryLogEnabled)
+            slowQueries = new Diagnostics.SlowQueryRecorder(options);
+
         sqlParserCache = new SQLParser.SqlParserCache(
             logger,
             options.SqlParserCacheTtlSeconds,
@@ -487,7 +503,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             userAdmin,
             backgroundSchedulers,
             clusterSettings,
-            engineMetrics
+            engineMetrics,
+            slowQueries
         );
         ctasExecutor = new Controllers.DDL.CreateTableAsSelectExecutor(
             executorContext,
@@ -601,6 +618,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         statementAuthorizer.ApplyOptions(next);
         userAdmin.ApplyOptions(next);
         selectExecutor.ApplyOptions(next);
+        slowQueries?.ApplyOptions(next);
 
         backgroundSchedulers?.ApplyOptions(next);
 
@@ -810,17 +828,91 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     #region DDL
 
-    /// <summary>Executes a parsed DDL statement, routing it to the service that owns it.</summary>
-    public Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
-        => ddlDispatcher.ExecuteDDLSQL(this, ticket);
+    /// <summary>
+    /// Executes a parsed DDL statement, routing it to the service that owns it, and times it for the
+    /// slow query log.
+    ///
+    /// <para>Unlike a query, a DDL statement returns no cursor and is finished when this call
+    /// returns, so the whole call is the duration. Schema DDL is often the slowest thing a node
+    /// does — a backfill, a replicated schema change waiting on acks — which is precisely why it is
+    /// recorded.</para>
+    /// </summary>
+    public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
+    {
+        Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+
+        if (recording is null)
+            return await ddlDispatcher.ExecuteDDLSQL(this, ticket).ConfigureAwait(false);
+
+        recording.Describe(SafeParseKind(ticket.Sql));
+
+        try
+        {
+            ExecuteDDLSQLResult result = await ddlDispatcher
+                .ExecuteDDLSQL(this, ticket.WithProbe(recording.Probe)).ConfigureAwait(false);
+
+            recording.Finish(result.ModifiedRows, Diagnostics.SlowQueryOutcome.Completed);
+            return result;
+        }
+        catch (Exception exception)
+        {
+            recording.FinishFailed(exception);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The statement's root node type for the slow query log, or <see cref="NodeType.Select"/>'s
+    /// stand-in when it cannot be parsed.
+    ///
+    /// <para>It re-parses through the same cache the dispatcher below will use, so the cost is a
+    /// dictionary lookup rather than a second parse. A parse failure here is swallowed: the
+    /// dispatcher is about to raise the real error with the real message, and a diagnostic that
+    /// changed which exception a caller sees would be worse than an entry labelled
+    /// <c>unknown</c>.</para>
+    /// </summary>
+    private NodeType? SafeParseKind(string sql)
+    {
+        try
+        {
+            return ParseSql(sql).nodeType;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Executes a SQL statement that returns no rows. Schema DDL is accepted here too and forwarded,
     /// so a client that routes every non-SELECT statement to this endpoint is never told a supported
     /// statement is unknown.
     /// </summary>
-    public Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
-        => nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket);
+    public async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
+    {
+        Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+
+        if (recording is null)
+            return await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
+
+        recording.Describe(SafeParseKind(ticket.Sql));
+
+        try
+        {
+            ExecuteNonSQLResult result = await nonQueryDispatcher
+                .ExecuteNonSQLQuery(this, ticket.WithProbe(recording.Probe)).ConfigureAwait(false);
+
+            // Rows affected stands in for rows returned: the column means "rows this statement was
+            // about", and for a mutation that is what it changed.
+            recording.Finish(result.ModifiedRows, Diagnostics.SlowQueryOutcome.Completed);
+            return result;
+        }
+        catch (Exception exception)
+        {
+            recording.FinishFailed(exception);
+            throw;
+        }
+    }
 
     /// <summary>
     /// How many times a statement re-attempts a table open that failed the schema catch-up fence

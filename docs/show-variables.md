@@ -117,3 +117,4 @@ fallback used when a transaction does not state its own.
 - [Runtime cluster settings](runtime-cluster-settings.md) — changing a setting fleet-wide with
   `SET CLUSTER SETTING`, and what `mutability` and `scope` mean for whether it takes hold.
 - [Engine statistics](engine-stats.md) — `SHOW ENGINE STATS`, the runtime-metrics counterpart.
+- [Slow query log](slow-query-log.md) — `SHOW SLOW QUERIES`, the per-statement counterpart.

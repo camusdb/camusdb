@@ -145,6 +145,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
     /// </summary>
     private async Task OverflowToSpillAsync(CancellationToken ct)
     {
+        _context.Probe?.NoteSpill();
         _scope = SpillFileManager.CreateScope(_context.SpillDirectory);
         _spillPath = _scope.OpenWriter(out _spillWriter);
 

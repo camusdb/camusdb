@@ -204,6 +204,29 @@ internal static class DerivedTableSchemaBuilder
         new("last",   ColumnType.Float64),
     ];
 
+    // SHOW SLOW QUERIES: one row per recorded statement, newest first. `duration_ms` is Float64
+    // rather than an integer because a threshold of 0 records sub-millisecond statements, and
+    // rounding those to 0 would make the column useless at exactly the setting used to debug with
+    // it. `error_code` is NULL unless the statement failed; `user` is NULL when the node is not
+    // authenticating, which is distinct from an unknown user.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowSlowQueriesSchema =
+    [
+        new("seq",           ColumnType.Integer64),
+        new("started_at",    ColumnType.String),
+        new("duration_ms",   ColumnType.Float64),
+        new("database",      ColumnType.String),
+        new("user",          ColumnType.String),
+        new("kind",          ColumnType.String),
+        new("rows_returned", ColumnType.Integer64),
+        new("rows_read",     ColumnType.Integer64),
+        new("full_scan",     ColumnType.Bool),
+        new("spilled",       ColumnType.Bool),
+        new("outcome",       ColumnType.String),
+        new("error_code",    ColumnType.String),
+        new("truncated",     ColumnType.Bool),
+        new("sql",           ColumnType.String),
+    ];
+
     // SHOW VARIABLES: one row per configuration setting this node resolved at startup. `value` and
     // `default` are rendered as strings rather than typed columns because the settings are a mix of
     // bool/int/double/string/enum and a single result set has one type per column; `type` carries the

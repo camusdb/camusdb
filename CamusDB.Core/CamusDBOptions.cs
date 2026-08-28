@@ -304,6 +304,61 @@ public sealed record CamusDBOptions
     public bool EngineMetricsEnabled { get; init; } = true;
 
     /// <summary>
+    /// Records every statement whose wall-clock duration reaches
+    /// <see cref="SlowQueryLogThresholdMs"/> into a bounded in-memory ring, readable with
+    /// <c>SHOW SLOW QUERIES</c>. Off by default: the log holds the literal SQL text of whatever ran,
+    /// so an operator turns it on deliberately.
+    ///
+    /// <para>Runtime-mutable, and honestly so: the read path asks the current options snapshot
+    /// whether to build a probe once per statement, so turning the log on affects the next statement
+    /// and turning it off stops new entries without discarding the ones already recorded.</para>
+    ///
+    /// <para>Node-scoped like the other diagnostics. Each node records the statements it served, and
+    /// nodes may legitimately disagree — an operator chasing one slow node turns the log on there
+    /// alone.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public bool SlowQueryLogEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Duration in milliseconds at or above which a statement is recorded in the slow query log.
+    /// Ignored when <see cref="SlowQueryLogEnabled"/> is <c>false</c>.
+    ///
+    /// <para><c>0</c> records every statement, which is a debugging setting and not a production
+    /// one: the ring then turns over in whatever time it takes to run
+    /// <see cref="SlowQueryLogMaxEntries"/> statements, and a genuinely slow statement is evicted by
+    /// the fast ones that followed it. Negative values are rejected.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int SlowQueryLogThresholdMs { get; init; } = 1000;
+
+    /// <summary>
+    /// Number of entries the slow query log keeps. The oldest entry is overwritten once the ring is
+    /// full, which is what bounds the log's memory: capacity times
+    /// <see cref="SlowQueryLogMaxSqlLength"/> is its ceiling, and nothing an operator does to the
+    /// workload can push it past that.
+    ///
+    /// <para>Restart-class, and deliberately not runtime-mutable: the ring allocates its backing
+    /// array once, in its constructor. A component that latches a value at construction is
+    /// restart-class no matter how convenient a live change would be, and labelling it otherwise
+    /// ships a claim the operator discovers is false in production.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int SlowQueryLogMaxEntries { get; init; } = 200;
+
+    /// <summary>
+    /// Maximum number of characters of SQL text one slow query log entry stores. Longer text is
+    /// truncated, and the entry says it was.
+    ///
+    /// <para>Without this the entry count would not bound anything: a single
+    /// <c>INSERT ... VALUES</c> with a large literal list would hold megabytes, and
+    /// <see cref="SlowQueryLogMaxEntries"/> of them would hold gigabytes. Truncation happens inside
+    /// the log rather than at the caller, so no recording path can bypass it.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int SlowQueryLogMaxSqlLength { get; init; } = 4096;
+
+    /// <summary>
     /// Serves the browser operator dashboard on the HTTP port. When false the host maps neither the
     /// dashboard pages nor the <c>/v1/dashboard/</c> endpoints, and a browser at <c>/</c> gets a 404.
     ///

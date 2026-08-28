@@ -196,7 +196,7 @@ internal sealed class QueryJoinExecutor
 
             case SortNode { Input: not null } sortNode when sortNode.OrderBy is { Count: > 0 }:
             {
-                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy, QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken));
+                IAsyncEnumerable<QueryResultRow> sorted = querySorter.SortByKeys(ExecuteJoinTree(sortNode.Input!, plan), sortNode.OrderBy, QueryExecutionContext.For(plan.Database, plan.Ticket));
                 
                 await foreach (QueryResultRow row in sorted.ConfigureAwait(false))
                     yield return row;
@@ -1614,7 +1614,7 @@ internal sealed class QueryJoinExecutor
         // With spill enabled, cap at SpillEffectiveThreshold so the Grace path is triggered
         // at the configured spill boundary instead of the (much larger) legacy NLJ cap.
         // With spill disabled, honour the legacy HashJoinMaxBuildRows cap.
-        QueryExecutionContext context = QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken);
+        QueryExecutionContext context = QueryExecutionContext.For(plan.Database, plan.Ticket);
 
         int buildCap = context.Options.SpillEnabled
             ? context.Options.SpillEffectiveThreshold
@@ -2258,7 +2258,8 @@ internal sealed class QueryJoinExecutor
             probeKeyColumns = joinNode.BuildKeyColumns;
         }
 
-        SpillScope scope = SpillFileManager.CreateScope(QueryExecutionContext.For(plan.Database, plan.Ticket.CancellationToken).SpillDirectory);
+        plan.Ticket.Probe?.NoteSpill();
+        SpillScope scope = SpillFileManager.CreateScope(QueryExecutionContext.For(plan.Database, plan.Ticket).SpillDirectory);
 
         try
         {

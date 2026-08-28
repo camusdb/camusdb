@@ -855,6 +855,57 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Reports the statements this node recorded in its slow query log, newest first, optionally
+    /// narrowed by a LIKE <paramref name="pattern"/> on the recorded SQL text.
+    ///
+    /// <para>Newest first without an ORDER BY, because that is the question the statement is asked:
+    /// an operator runs it to see what just happened. <c>seq</c> is there for the follow-up question
+    /// — a gap between two readings counts the entries the ring overwrote in between, which is the
+    /// only signal that the log is too small for the threshold in force.</para>
+    ///
+    /// <para>A null <paramref name="log"/> — the log disabled by configuration — contributes no rows
+    /// rather than raising, matching <see cref="ShowEngineStats"/>: a script polling a fleet gets the
+    /// same shape from every node whether or not that node has the log on.</para>
+    ///
+    /// <para>Node-local. The entries describe the statements this process served and are never
+    /// gathered from peers, so a cluster is inspected one node at a time — which is the point, since
+    /// an operator running this is usually asking why <em>this</em> node is slow.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowSlowQueries(SlowQueryLog? log, string? pattern)
+    {
+        await Task.CompletedTask;
+
+        if (log is null)
+            yield break;
+
+        foreach (SlowQueryEntry entry in log.Snapshot())
+        {
+            if (pattern is not null && !LikeMatch(entry.Sql, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "seq",           new ColumnValue(ColumnType.Integer64, entry.Sequence) },
+                // ISO-8601 with a UTC marker, so the value stays unambiguous when it is copied out of
+                // a terminal into an incident timeline written in another zone.
+                { "started_at",    new ColumnValue(ColumnType.String, entry.StartedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)) },
+                { "duration_ms",   new ColumnValue(ColumnType.Float64, entry.DurationMs) },
+                { "database",      new ColumnValue(ColumnType.String, entry.Database) },
+                { "user",          entry.User is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, entry.User) },
+                { "kind",          new ColumnValue(ColumnType.String, entry.Kind) },
+                { "rows_returned", new ColumnValue(ColumnType.Integer64, entry.RowsReturned) },
+                { "rows_read",     new ColumnValue(ColumnType.Integer64, entry.RowsRead) },
+                { "full_scan",     ColumnValue.FromBool(entry.FullScan) },
+                { "spilled",       ColumnValue.FromBool(entry.Spilled) },
+                { "outcome",       new ColumnValue(ColumnType.String, entry.Outcome.ToString().ToLowerInvariant()) },
+                { "error_code",    entry.ErrorCode is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, entry.ErrorCode) },
+                { "truncated",     ColumnValue.FromBool(entry.SqlTruncated) },
+                { "sql",           new ColumnValue(ColumnType.String, entry.Sql) },
+            });
+        }
+    }
+
+    /// <summary>
     /// Reports the configuration this engine is running, optionally narrowed by a LIKE
     /// <paramref name="pattern"/> on the variable name.
     ///

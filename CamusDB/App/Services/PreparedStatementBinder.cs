@@ -64,6 +64,7 @@ public static class PreparedStatementBinder
         NodeType.ShowCreateView or
         NodeType.ShowCreateMaterializedView or
         NodeType.ShowEngineStats or
+        NodeType.ShowSlowQueries or
         NodeType.ShowVariables or
         NodeType.ShowClusterSettings or
         // Preparable specifically so FOR ROW (@id) can be: the value list is an ordinary expression

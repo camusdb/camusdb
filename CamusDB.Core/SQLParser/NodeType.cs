@@ -414,6 +414,22 @@ public enum NodeType
     ShowEngineStats,
 
     /// <summary>
+    /// <c>SHOW SLOW QUERIES [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, matched
+    /// against the recorded SQL text, or null for no filter.
+    ///
+    /// <para>Reports the statements this node ran that reached the configured slow-query threshold,
+    /// newest first, with the execution facts that explain each duration. Node-local and dispatched
+    /// before any database is opened, for the same reason as <see cref="ShowEngineStats"/>: the log
+    /// is this process's own memory of what it served, and answering from the leader would hide the
+    /// node an operator is investigating.</para>
+    ///
+    /// <para>Superuser-gated, and held to a higher bar than the rest of the SHOW family: the rows
+    /// carry other users' literal SQL text, which can contain predicate values from tables the
+    /// caller holds no grant on.</para>
+    /// </summary>
+    ShowSlowQueries,
+
+    /// <summary>
     /// <c>SHOW VARIABLES [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, matched against
     /// the variable name, or null for no filter.
     ///

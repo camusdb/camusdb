@@ -27,6 +27,35 @@ internal static class QueryPlanStepAdapter
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Query plan root is null");
 
         Flatten(plan.Root, plan.Steps, plan.StepNodes);
+        NoteScanStrategy(plan);
+    }
+
+    /// <summary>
+    /// Tells the statement's diagnostic probe, if the slow query log is on, that this plan reads a
+    /// whole relation rather than seeking through an index.
+    ///
+    /// <para>It is answered here, once per plan, because this is where the access-path decision has
+    /// just been reduced to a flat list of steps. The scan loops could each infer the same fact from
+    /// their own inputs, but then every loop would have to agree with the planner about what counts
+    /// as a full scan, and a new scan shape would silently report nothing.</para>
+    ///
+    /// <para>A statement runs more than one plan when it has a join, a subquery or a derived table.
+    /// The probe belongs to the statement rather than the plan, so the flag means "some part of this
+    /// statement scanned a whole relation", which is the question an operator is actually asking.</para>
+    /// </summary>
+    private static void NoteScanStrategy(QueryPlan plan)
+    {
+        if (plan.Ticket.Probe is not { } probe)
+            return;
+
+        foreach (QueryPlanStep step in plan.Steps)
+        {
+            if (step.Type is QueryPlanStepType.FullScanFromTableIndex or QueryPlanStepType.FullScanFromIndex)
+            {
+                probe.NoteFullScan();
+                return;
+            }
+        }
     }
 
     private static void Flatten(PhysicalPlanNode node, List<QueryPlanStep> steps, List<PhysicalPlanNode> stepNodes)

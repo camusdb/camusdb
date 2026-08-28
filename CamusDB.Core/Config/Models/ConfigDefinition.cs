@@ -308,6 +308,34 @@ public class ConfigDefinition
     public bool EngineMetricsEnabled { get; set; } = true;
 
     /// <summary>
+    /// Records statements slower than <see cref="SlowQueryLogThresholdMs"/> into a bounded in-memory
+    /// ring readable with <c>SHOW SLOW QUERIES</c>. Maps to
+    /// <c>CamusDBOptions.SlowQueryLogEnabled</c> (yml <c>slow_query_log_enabled</c>). Default off.
+    /// </summary>
+    public bool SlowQueryLogEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Duration in milliseconds at or above which a statement is recorded. Must be &gt;= 0.
+    /// Maps to <c>CamusDBOptions.SlowQueryLogThresholdMs</c> (yml
+    /// <c>slow_query_log_threshold_ms</c>). Default 1000.
+    /// </summary>
+    public int SlowQueryLogThresholdMs { get; set; } = 1000;
+
+    /// <summary>
+    /// Entries the slow query log keeps before it overwrites the oldest. Must be &gt; 0.
+    /// Maps to <c>CamusDBOptions.SlowQueryLogMaxEntries</c> (yml
+    /// <c>slow_query_log_max_entries</c>). Default 200.
+    /// </summary>
+    public int SlowQueryLogMaxEntries { get; set; } = 200;
+
+    /// <summary>
+    /// Characters of SQL text one entry stores before it is truncated. Must be &gt; 0.
+    /// Maps to <c>CamusDBOptions.SlowQueryLogMaxSqlLength</c> (yml
+    /// <c>slow_query_log_max_sql_length</c>). Default 4096.
+    /// </summary>
+    public int SlowQueryLogMaxSqlLength { get; set; } = 4096;
+
+    /// <summary>
     /// Serves the browser operator dashboard on the HTTP port. Maps to
     /// <c>CamusDBOptions.DashboardEnabled</c> (yml <c>dashboard_enabled</c>). Default on.
     /// </summary>
@@ -1196,6 +1224,17 @@ public class ConfigDefinition
 
         if (AccessTokenTtl <= 0)
             throw Invalid($"'access_token_ttl' must be > 0 ms, got {AccessTokenTtl}");
+
+        if (SlowQueryLogThresholdMs < 0)
+            throw Invalid(
+                "'slow_query_log_threshold_ms' must be >= 0 ms (0 = record every statement), got " +
+                SlowQueryLogThresholdMs);
+
+        if (SlowQueryLogMaxEntries < 1)
+            throw Invalid($"'slow_query_log_max_entries' must be >= 1, got {SlowQueryLogMaxEntries}");
+
+        if (SlowQueryLogMaxSqlLength < 1)
+            throw Invalid($"'slow_query_log_max_sql_length' must be >= 1, got {SlowQueryLogMaxSqlLength}");
 
         // Each refreshed row costs one mutation per index plus the row itself, so a chunk size at
         // or near the mutation cap fails on any indexed materialized view — and it fails mid-

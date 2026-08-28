@@ -42,13 +42,27 @@ public readonly struct ExecuteSQLTicket
     /// </summary>
     public CancellationToken CancellationToken { get; }
 
+    /// <summary>
+    /// Per-statement diagnostic accumulator for the slow query log, or null when the log is off.
+    ///
+    /// <para>This is where a probe enters the engine. Every <see cref="QueryTicket"/> a statement
+    /// builds — for its own scan, for a subquery, for a derived table, for the locate scan of an
+    /// UPDATE — is built from this ticket through <c>QueryTicketAdapter</c>, so attaching the probe
+    /// once here is what makes one statement report one set of counters.</para>
+    ///
+    /// <para>An internal caller that has no statement behind it leaves it null, and every write site
+    /// is a null-conditional call.</para>
+    /// </summary>
+    public Diagnostics.StatementProbe? Probe { get; }
+
     public ExecuteSQLTicket(
         KvTransaction txnState,
         string database,
         string sql,
         Dictionary<string, ColumnValue>? parameters,
         Principal? principal = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Diagnostics.StatementProbe? probe = null)
     {
         TxnState = txnState;
         DatabaseName = database;
@@ -56,5 +70,13 @@ public readonly struct ExecuteSQLTicket
         Parameters = parameters;
         Principal = principal;
         CancellationToken = cancellationToken;
+        Probe = probe;
     }
+
+    /// <summary>
+    /// The same ticket carrying <paramref name="probe"/>. Used at the engine boundary, where the
+    /// slow query log creates the probe after the ticket has already been built by the transport.
+    /// </summary>
+    public ExecuteSQLTicket WithProbe(Diagnostics.StatementProbe? probe)
+        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe);
 }

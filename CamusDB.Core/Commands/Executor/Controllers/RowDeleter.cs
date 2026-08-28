@@ -232,12 +232,13 @@ internal sealed class RowDeleter
             offset: null,
             parameters: ticket.Parameters,
             locateColumns: locateColumns,
-            exclusivePredicateLocks: true
+            exclusivePredicateLocks: true,
+            probe: ticket.Probe
         );
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        SpillableRowList rowList = new(QueryExecutionContext.For(state.Database));
+        SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             await rowList.AddAsync(row).ConfigureAwait(false);
         await rowList.SealAsync().ConfigureAwait(false);

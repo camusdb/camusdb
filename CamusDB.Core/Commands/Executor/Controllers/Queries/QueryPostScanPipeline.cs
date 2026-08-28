@@ -32,7 +32,7 @@ internal static class QueryPostScanPipeline
     {
         // Built once for the whole pipeline: every operator below runs against the same engine and
         // the same query, so they share one context rather than each rediscovering its configuration.
-        QueryExecutionContext context = QueryExecutionContext.For(database, ticket.CancellationToken);
+        QueryExecutionContext context = QueryExecutionContext.For(database, ticket);
 
         bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
         bool havingApplied = ticket.Having is null;

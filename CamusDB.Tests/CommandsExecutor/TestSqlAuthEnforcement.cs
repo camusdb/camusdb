@@ -189,6 +189,32 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     }
 
     /// <summary>
+    /// The slow query log is held to the same bar as engine metrics, for a sharper reason: its rows
+    /// carry the literal SQL text of statements other users ran, so a predicate value from a table
+    /// this caller has no grant on can appear verbatim in the output.
+    /// </summary>
+    [Test]
+    public async Task ShowSlowQueries_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER log_reader IDENTIFIED BY 'log-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO log_reader", root);
+        Principal granted = await LoginAsync(executor, "log_reader", "log-pw");
+
+        // A grant that is enough for SHOW DATABASES is not enough here.
+        await RunServerQuery(executor, "SHOW DATABASES", granted);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunServerQuery(executor, "SHOW SLOW QUERIES", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        // The superuser is admitted. The engine under test has the log off, so it returns no rows
+        // rather than an error — which is itself the contract.
+        await RunServerQuery(executor, "SHOW SLOW QUERIES", root);
+    }
+
+    /// <summary>
     /// SHOW VARIABLES is held to the same bar as engine metrics and for the same reason: even with the
     /// secret settings masked, the output describes the node's whole security posture and limits, which
     /// no per-database grant scopes down.

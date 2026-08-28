@@ -737,11 +737,11 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     "Expected: SHOW STATISTICS FOR [TABLE] <table>");
             $$.n = new(NodeType.ShowStatistics, $5.n, null, null, null, null, null, null, null);
           }
-          /* ENGINE STATS and CLUSTER SETTINGS are matched as plain identifiers, not keywords, so
-             all four words remain usable as column and table names. The two statements share ONE
-             two-identifier production dispatched on the words — a second production with the same
-             token shape would be a reduce/reduce conflict, the same constraint SET TRANSACTION
-             LOCKING/PRIORITY documents. */
+          /* ENGINE STATS, CLUSTER SETTINGS and SLOW QUERIES are matched as plain identifiers, not
+             keywords, so all six words remain usable as column and table names. The three statements
+             share ONE two-identifier production dispatched on the words — a second production with
+             the same token shape would be a reduce/reduce conflict, the same constraint SET
+             TRANSACTION LOCKING/PRIORITY documents. */
           | TSHOW TIDENTIFIER TIDENTIFIER
           {
             if (string.Equals($2.s, "engine", System.StringComparison.OrdinalIgnoreCase) &&
@@ -750,10 +750,13 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "settings", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowClusterSettings, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowSlowQueries, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'] or SHOW CLUSTER SETTINGS [LIKE '<pattern>']");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
           }
           | TSHOW TIDENTIFIER TIDENTIFIER TLIKE string
           {
@@ -763,10 +766,13 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "settings", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowClusterSettings, $5.n, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowSlowQueries, $5.n, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'] or SHOW CLUSTER SETTINGS [LIKE '<pattern>']");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
           }
           /* VARIABLES is likewise a plain identifier rather than a keyword, so it stays usable as a
              column and table name. */

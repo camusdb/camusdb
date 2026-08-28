@@ -89,6 +89,7 @@ internal sealed class QueryScanner
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         int visibilityVersion = plan.TableSchemaVersion;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
 
         // The client's disconnect signal, carried on the ticket rather than on this iterator's
@@ -151,6 +152,7 @@ internal sealed class QueryScanner
                     cancellationToken.ThrowIfCancellationRequested();
 
                     rowsScanned++;
+                    probe?.AddRowRead();
                     if (scanStats is not null)
                     {
                         scanStats.KvScanEntries++;
@@ -198,6 +200,7 @@ internal sealed class QueryScanner
                     visibilityVersion,
                     decodeState).ConfigureAwait(false);
 
+                probe?.AddRowRead();
                 if (scanStats is not null)
                     scanStats.RowsRead++;
 
@@ -420,6 +423,7 @@ internal sealed class QueryScanner
     {
         TableDescriptor table = plan.Table;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = plan.Ticket.CancellationToken;
 
@@ -445,6 +449,7 @@ internal sealed class QueryScanner
                 cancellationToken.ThrowIfCancellationRequested();
 
                 rowsScanned++;
+                probe?.AddRowRead();
                 if (scanStats is not null)
                 {
                     scanStats.KvScanEntries++;
@@ -802,6 +807,7 @@ internal sealed class QueryScanner
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         bool unique = index.Type == IndexType.Unique;
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
 
@@ -895,6 +901,7 @@ internal sealed class QueryScanner
                     continue;
                 }
                 deps?.RecordPoint(table.Store.RowPointKey(batchRowId));
+                probe?.AddRowRead();
                 if (scanStats is not null) scanStats.RowsRead++;
                 QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,

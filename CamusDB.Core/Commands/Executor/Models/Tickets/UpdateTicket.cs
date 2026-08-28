@@ -31,6 +31,13 @@ public sealed class UpdateTicket
 
     public NodeAst? Limit { get; }
 
+    /// <summary>
+    /// Per-statement diagnostic accumulator for the slow query log, or null when the log is off.
+    /// Taken from the SQL ticket this one was created from, and handed to the locate scan's
+    /// <see cref="QueryTicket"/> so a mutation reports the same scan facts a SELECT does.
+    /// </summary>
+    public Diagnostics.StatementProbe? Probe { get; }
+
     public UpdateTicket(
         KvTransaction txnState,
         string databaseName,
@@ -40,7 +47,8 @@ public sealed class UpdateTicket
         NodeAst? where,
         List<QueryFilter>? filters,
         Dictionary<string, ColumnValue>? parameters,
-        NodeAst? limit = null
+        NodeAst? limit = null,
+        Diagnostics.StatementProbe? probe = null
     )
     {
         TxnState = txnState;
@@ -52,5 +60,6 @@ public sealed class UpdateTicket
         Filters = filters;
         Parameters = parameters;
         Limit = limit;
+        Probe = probe;
     }
 }

@@ -288,7 +288,8 @@ internal sealed class NonQueryStatementDispatcher
                                 where: rewrittenWhere,
                                 filters: deleteTicket.Filters,
                                 parameters: deleteTicket.Parameters,
-                                limit: deleteTicket.Limit);
+                                limit: deleteTicket.Limit,
+                                probe: deleteTicket.Probe);
                     }
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
@@ -456,7 +457,8 @@ internal sealed class NonQueryStatementDispatcher
             where: newWhere,
             filters: ticket.Filters,
             parameters: ticket.Parameters,
-            limit: ticket.Limit);
+            limit: ticket.Limit,
+            probe: ticket.Probe);
     }
 
     /// <summary>Maps a parsed statement's node type to the bounded <c>statement</c> metric family tag.</summary>

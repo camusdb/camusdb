@@ -38,7 +38,8 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
             where: ast.extendedOne,
             filters: null,
             parameters: ticket.Parameters,
-            limit: ast.extendedTwo
+            limit: ast.extendedTwo,
+            probe: ticket.Probe
         );
     }
 

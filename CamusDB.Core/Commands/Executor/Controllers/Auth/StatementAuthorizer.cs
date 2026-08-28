@@ -121,6 +121,17 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // The slow query log is held to a higher bar still, and for a sharper reason than the two
+        // around it: its rows carry the literal SQL text of statements other users ran, so a
+        // predicate value from a table this caller has no grant on can appear verbatim in the
+        // output. No per-database grant scopes that down, which leaves superuser.
+        if (ast.nodeType is NodeType.ShowSlowQueries)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "The slow query log requires a superuser");
+            return;
+        }
+
         // Configuration is held to the same bar, and for the same reason. Even with the three secret
         // settings masked, the output describes the node's entire security posture and limits — whether
         // authentication and TLS are on, the password hashing cost, the data directory, every rate-limit

@@ -193,6 +193,7 @@ internal sealed class QueryAggregator
                     buffer.Add(row);
                     if (buffer.Count >= threshold)
                     {
+                        context.Probe?.NoteSpill();
                         scope = SpillFileManager.CreateScope(context.SpillDirectory);
                         paths   = new string[K];
                         writers = new FileStream[K];

@@ -91,6 +91,7 @@ internal static class QueryTicketAdapter
             selectQuery: query,
             semiJoinSpecs: semiJoinSpecs,
             preparedInSets: preparedInSets,
+            probe: ticket.Probe,
             exclusivePredicateLocks: exclusivePredicateLocks,
             cacheHint: suppressCacheHint ? null : query.CacheHint,
             requiredColumnsMemo: requiredColumnsMemo,
