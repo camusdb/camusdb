@@ -154,6 +154,24 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Debug, Message = "Transaction {Outcome}: tx={TxId} in {ElapsedMs} ms")]
     public static partial void LogTransactionFinalized(ILogger logger, string outcome, string txId, long elapsedMs);
 
+    // Coordinator-unknown finalize (the rollback found no session, no retained outcome and no durable
+    // record, so it released nothing at the participants)
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rollback of tx={TxId} (age {AgeMs} ms) found no coordinator session; nothing was released and the transaction is now terminal")]
+    public static partial void LogCoordinatorUnknownTransaction(ILogger logger, string txId, long ageMs);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rollback of tx={TxId} (age {AgeMs} ms) found no coordinator session; released {Released} of {Mirrored} mirrored key(s), {Unreleased} left to expire at the storage node")]
+    public static partial void LogCoordinatorUnknownTransactionReleased(ILogger logger, string txId, long ageMs, int released, int mirrored, int unreleased);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rollback of tx={TxId} (age {AgeMs} ms) found no coordinator session; holding its {Mirrored} mirrored key(s) for {WaitMs} ms, until no session can still own them")]
+    public static partial void LogCoordinatorUnknownTransactionDeferred(ILogger logger, string txId, long ageMs, int mirrored, long waitMs);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rollback of tx={TxId} found no coordinator session, but the deferred-release budget is full; its {Mirrored} mirrored key(s) are left to expire at the storage node")]
+    public static partial void LogCoordinatorUnknownTransactionDropped(ILogger logger, string txId, int mirrored);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Releasing {Count} mirrored key(s) of tx={TxId} failed; they are left to expire at the storage node")]
+    public static partial void LogMirroredReleaseFailed(ILogger logger, Exception ex, string txId, int count);
+
     // SQL parser cache
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "SQL parser cache sweep: {Count} entries, {Hits} hits, {Misses} misses, {Evictions} evictions (cumulative)")]

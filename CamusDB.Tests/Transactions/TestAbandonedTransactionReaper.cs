@@ -104,6 +104,27 @@ public sealed class TestAbandonedTransactionReaper : SharedNodeBaseTest
         await coord.RollbackAsync(tx, CancellationToken.None);
     }
 
+    /// <summary>
+    /// A reaped transaction is finished for good: the sweep drops it from the in-flight map before it
+    /// rolls it back, so no later sweep can find it and drive a second finalize on the same handle.
+    /// This matters most for the transaction whose coordinator session is already gone — re-issuing a
+    /// rollback there can only repeat the same unknown answer, once per sweep, forever.
+    /// </summary>
+    [Test]
+    public async Task ReapedTransactionIsNotReapedAgain()
+    {
+        (string dbname, _, HttpTransactionCoordinator coord) = await SetupAsync();
+
+        KvTransaction tx = await StartSerializableRwAsync(coord, dbname);
+
+        Assert.That(await coord.ReapIdleAsync(TimeSpan.Zero, CancellationToken.None), Is.EqualTo(1));
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
+
+        // A second sweep with the same zero threshold: the entry is gone, so there is nothing to retry.
+        Assert.That(await coord.ReapIdleAsync(TimeSpan.Zero, CancellationToken.None), Is.EqualTo(0));
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
+    }
+
     [Test]
     public async Task ReapDoesNotDoubleFinalizeCommittedTransaction()
     {

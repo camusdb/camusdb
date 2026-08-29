@@ -193,6 +193,8 @@ public sealed class ServerDiagnosticsTests
             Is.EquivalentTo(new[] { "point", "primary_range", "index_range", "full" }));
         Assert.That(ServerDiagnostics.Tags.Stage.All,
             Is.EquivalentTo(new[] { "scanned", "returned" }));
+        Assert.That(ServerDiagnostics.Tags.CoordinatorUnknown.All,
+            Is.EquivalentTo(new[] { "released", "deferred", "dropped", "disabled", "no_keys" }));
     }
 
     [Test]

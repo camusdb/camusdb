@@ -6,6 +6,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Kahuna;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
@@ -1062,6 +1063,19 @@ public sealed class KvTransactionsManager : IDisposable
                 $"Transaction {tx.UniqueId} is already {tx.Status}"
             );
 
+        // Whether this rollback is the transaction's first finalize, read before the fence below
+        // overwrites the status. It gates the release-by-mirror fallback: a transaction that never
+        // began a commit cannot have a prepared intent anywhere, because only a commit prepares one.
+        // Releasing a prepared intent would discard the only route to a value that may already be
+        // committed, so the fallback must never run for a transaction that could own one.
+        //
+        // Deliberately conservative in one case: a rollback resumed after an unresolved earlier
+        // rollback arrives here already Finalizing, and gets no fallback even though nothing ever
+        // prepared for it. The status alone cannot tell that resume apart from a resumed commit, and
+        // withholding a release costs a wedge that the storage node still expires, while releasing a
+        // prepared intent would cost a committed write.
+        bool firstFinalize = tx.Status == KvTransactionStatus.Active;
+
         // Install the finalize fence but do NOT mark terminal or untrack yet: the client-visible
         // outcome must reflect what the coordinator actually returns. Rollback only reports RolledBack
         // once every intent-bearing release is acknowledged; until then it returns MustRetry, and the
@@ -1084,9 +1098,18 @@ public sealed class KvTransactionsManager : IDisposable
                 $"over {retryElapsedMs} ms; retry ROLLBACK on the same transaction"
             );
 
+        // Errored is the coordinator-unknown outcome: no session, no retained outcome, no durable
+        // record to consult. It released nothing, because the working set it finalizes from died with
+        // the session — so whatever this transaction planted is still at the participants unless the
+        // client replays it from its own key mirror.
+        if (result == KeyValueResponseType.Errored && firstFinalize)
+            await ReleaseMirroredHoldingsAsync(tx, cancellationToken).ConfigureAwait(false);
+
         // RolledBack, Aborted (a definite non-committing outcome — for a rollback request that is the
         // intended result), or Errored (the handle is unknown/expired, so the session is already gone
-        // and there is nothing left to undo): all terminal and non-committing.
+        // and there is nothing left to undo): all terminal and non-committing. Terminal in every case,
+        // including after the release pass above — a coordinator that does not know the transaction
+        // will never know it, so re-issuing the same rollback can only repeat the same answer.
         tx.Status = KvTransactionStatus.RolledBack;
 
         if (logger.IsEnabled(LogLevel.Debug))
@@ -1132,6 +1155,350 @@ public sealed class KvTransactionsManager : IDisposable
     }
 
     /// <summary>
+    /// Keys released per request in the release-by-mirror pass. A transaction that wrote a large batch
+    /// mirrors hundreds of thousands of keys; one request per key would make a reaper sweep crawl,
+    /// while one request for all of them would build a message no transport wants to carry. The
+    /// storage layer groups a chunk by partition leader and releases the groups in parallel, so a
+    /// chunk of this size is one round trip per leader rather than one per key.
+    /// </summary>
+    private const int MirroredReleaseChunkSize = 256;
+
+    /// <summary>
+    /// Attempts per chunk before its still-unreleased keys are abandoned to the storage node's own
+    /// expiry. The retry covers the transient answer — a partition whose leader is mid-election —
+    /// which clears in the time a couple of back-offs take. Anything that survives that is not
+    /// transient, and this is a best-effort pass on an already-terminal transaction: spinning here
+    /// would stall the reaper sweep that all the other abandoned transactions are queued behind.
+    /// </summary>
+    private const int MirroredReleaseMaxAttempts = 3;
+
+    /// <summary>
+    /// Releases the holdings of a transaction whose coordinator session is unknown, using the
+    /// client-side modified-key mirror as the key list.
+    ///
+    /// <para><b>Why this exists.</b> A rollback that resolves to the coordinator-unknown outcome
+    /// releases nothing: the coordinator finalizes from a working set that died with the session. The
+    /// staged writes and point locks the transaction planted stay at the participants, where an
+    /// undecided foreign intent blocks every snapshot scan of its key space for as long as it lives.
+    /// The client still holds the one remaining record of which keys those are — the modified-key set
+    /// it keeps for cache invalidation — so it replays that set as per-key releases.</para>
+    ///
+    /// <para><b>Why it is safe.</b> Each release is keyed by <c>(transaction id, key)</c> and only
+    /// removes state that transaction still owns: a key another transaction now holds is refused, and
+    /// a key whose transaction committed or aborted has nothing left to remove, so the pass is
+    /// idempotent and cannot take anything from a live transaction. The age guard covers the one case
+    /// the key check cannot: an unknown answer during a leadership change, where the session may still
+    /// be alive on another node. Past
+    /// <see cref="CamusDBOptions.AbandonedTransactionReleaseAfterMs"/> no session can be alive
+    /// anywhere. The caller adds the third condition — the transaction never began a commit — so no
+    /// prepared intent, whose fate belongs to the decision machinery, can be in the mirror.</para>
+    ///
+    /// <para>Best-effort and non-throwing by contract: it runs after the rollback's outcome is already
+    /// decided, so nothing it does may change what the caller is told. Range locks are outside it —
+    /// the coordinator owns them and the client cannot enumerate them.</para>
+    /// </summary>
+    private async Task ReleaseMirroredHoldingsAsync(KvTransaction tx, CancellationToken cancellationToken)
+    {
+        long? releaseAgeMs = KahunaSessionLifetime.AbandonedReleaseAgeMs(options);
+        long? ageMs = tx.AgeMs;
+
+        if (releaseAgeMs is null || ageMs is null)
+        {
+            // The release is disabled, or the transaction has no session clock to age (it never
+            // started one, so it planted nothing). Either way there is nothing to do.
+            Diagnostics.ServerDiagnostics.RecordCoordinatorUnknownFinalize(Diagnostics.ServerDiagnostics.Tags.CoordinatorUnknown.Disabled, 0);
+            Log.LogCoordinatorUnknownTransaction(logger, tx.UniqueId, ageMs ?? -1);
+            return;
+        }
+
+        List<(string key, KeyValueDurability durability)> mirrored = tx.GetModifiedKeyPairs();
+
+        if (mirrored.Count == 0)
+        {
+            Diagnostics.ServerDiagnostics.RecordCoordinatorUnknownFinalize(Diagnostics.ServerDiagnostics.Tags.CoordinatorUnknown.NoKeys, 0);
+            Log.LogCoordinatorUnknownTransaction(logger, tx.UniqueId, ageMs.Value);
+            return;
+        }
+
+        // Too young to release: a session for this transaction may still be alive on a node the
+        // finalize did not reach. The transaction is finished either way, but its key mirror is the
+        // only remaining record of what it planted — dropping it here would strand those keys until
+        // the storage node expires them. Hold the mirror instead and release it once the age is
+        // reached; the reaper sweep drains what is due.
+        if (ageMs <= releaseAgeMs)
+        {
+            EnqueueMirroredRelease(tx, mirrored, releaseAgeMs.Value - ageMs.Value);
+            return;
+        }
+
+        await ReleaseMirroredKeysAsync(tx.TransactionId, tx.UniqueId, ageMs.Value, mirrored, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs the release pass over <paramref name="mirrored"/> and reports the outcome. Shared by the
+    /// rollback that is already old enough and by the deferred pass the sweep drains later, so both
+    /// count and log the same way.
+    /// </summary>
+    private async Task<int> ReleaseMirroredKeysAsync(
+        Kommander.Time.HLCTimestamp transactionId,
+        string uniqueId,
+        long ageMs,
+        List<(string key, KeyValueDurability durability)> mirrored,
+        CancellationToken cancellationToken
+    )
+    {
+        int released = 0;
+        int unreleased = 0;
+
+        for (int offset = 0; offset < mirrored.Count; offset += MirroredReleaseChunkSize)
+        {
+            int count = Math.Min(MirroredReleaseChunkSize, mirrored.Count - offset);
+            List<(string key, KeyValueDurability durability)> chunk = mirrored.GetRange(offset, count);
+
+            (int chunkReleased, int chunkUnreleased) =
+                await ReleaseMirroredChunkAsync(transactionId, uniqueId, chunk, cancellationToken).ConfigureAwait(false);
+
+            released += chunkReleased;
+            unreleased += chunkUnreleased;
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // Shutdown mid-pass. The remaining keys keep the same fate they had before this pass
+                // existed, so stop rather than fight the token — and report what was actually done.
+                unreleased += mirrored.Count - (offset + count);
+                break;
+            }
+        }
+
+        Diagnostics.ServerDiagnostics.RecordCoordinatorUnknownFinalize(Diagnostics.ServerDiagnostics.Tags.CoordinatorUnknown.Released, released);
+        Log.LogCoordinatorUnknownTransactionReleased(
+            logger, uniqueId, ageMs, released, mirrored.Count, unreleased);
+
+        return released;
+    }
+
+    /// <summary>
+    /// Releases one chunk of mirrored keys, retrying only the keys the storage layer answered with its
+    /// transient signal. Returns how many keys this chunk actually released and how many were left
+    /// behind — a key another transaction now holds counts as neither, since nothing of this
+    /// transaction's remained on it. Never throws: a transport failure ends the chunk and its keys are
+    /// reported as left behind.
+    /// </summary>
+    private async Task<(int Released, int Unreleased)> ReleaseMirroredChunkAsync(
+        Kommander.Time.HLCTimestamp transactionId,
+        string uniqueId,
+        List<(string key, KeyValueDurability durability)> chunk,
+        CancellationToken cancellationToken
+    )
+    {
+        int released = 0;
+        int failed = 0;
+        List<(string key, KeyValueDurability durability)> pending = chunk;
+
+        for (int attempt = 0; attempt < MirroredReleaseMaxAttempts && pending.Count > 0; attempt++)
+        {
+            if (attempt > 0 && !await DelayBeforeMirroredReleaseRetryAsync(attempt, cancellationToken).ConfigureAwait(false))
+                break;
+
+            List<(KeyValueResponseType Type, string Key, KeyValueDurability Durability)> results;
+
+            try
+            {
+                results = await kahuna
+                    .LocateAndTryReleaseManyExclusiveLocks(transactionId, pending, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log.LogMirroredReleaseFailed(logger, ex, uniqueId, pending.Count);
+                return (released, failed + pending.Count);
+            }
+
+            // An answer per key is the contract; an empty list means the request reached no partition
+            // at all, and re-issuing the same routing would answer the same way.
+            if (results.Count == 0)
+                return (released, failed + pending.Count);
+
+            List<(string key, KeyValueDurability durability)> retryable = [];
+
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability) in results)
+            {
+                switch (type)
+                {
+                    case KeyValueResponseType.Unlocked:
+                        released++;
+                        break;
+
+                    // Nothing of this transaction's is on the key: it never landed, it was already
+                    // settled, or another transaction owns the key now. All three are the pass doing
+                    // its job — it removes only what this transaction still holds.
+                    case KeyValueResponseType.DoesNotExist:
+                    case KeyValueResponseType.AlreadyLocked:
+                        break;
+
+                    case KeyValueResponseType.MustRetry:
+                        retryable.Add((key, durability));
+                        break;
+
+                    default:
+                        // Not transient and not a release: left to the storage node's own expiry, and
+                        // counted so the log reports what the pass actually left behind.
+                        failed++;
+                        break;
+                }
+            }
+
+            pending = retryable;
+        }
+
+        return (released, failed + pending.Count);
+    }
+
+    /// <summary>
+    /// The key mirror of a finished transaction whose coordinator session was unknown while the
+    /// transaction was still too young to release, kept until the age is reached.
+    /// </summary>
+    /// <param name="TransactionId">The Kahuna identity every release is keyed by.</param>
+    /// <param name="UniqueId">The transaction's own id, for the log line that reports the release.</param>
+    /// <param name="Keys">The keys the transaction wrote — the only remaining record of what it planted.</param>
+    /// <param name="DueAtTicks">Monotonic <see cref="Stopwatch.GetTimestamp"/> mark at which the release
+    /// becomes safe. Monotonic rather than wall-clock so a clock step cannot bring it forward.</param>
+    /// <param name="AgeAtDeferralMs">How old the transaction was when the rollback met the unknown
+    /// outcome, so the eventual log line reports the transaction's real age rather than the wait.</param>
+    private readonly record struct PendingMirroredRelease(
+        Kommander.Time.HLCTimestamp TransactionId,
+        string UniqueId,
+        List<(string key, KeyValueDurability durability)> Keys,
+        long DueAtTicks,
+        long AgeAtDeferralMs);
+
+    /// <summary>
+    /// Deferred key mirrors, in the order they were parked. Guarded by <see cref="pendingReleaseSync"/>
+    /// — the sweep that drains it and the rollbacks that add to it run on different threads.
+    /// </summary>
+    private readonly List<PendingMirroredRelease> pendingMirroredReleases = [];
+
+    private readonly Lock pendingReleaseSync = new();
+
+    /// <summary>Keys currently held across all deferred mirrors, kept under the cap below.</summary>
+    private int pendingMirroredKeyCount;
+
+    /// <summary>
+    /// Ceiling on the keys held in deferred mirrors. A mirror is retained for as long as the session
+    /// ceiling — up to an hour at the shipped defaults — so an unbounded queue would let a burst of
+    /// abandoned bulk writes pin their key strings in memory for that whole window. Past the cap the
+    /// newest mirror is dropped and logged: the storage node's own expiry is still the backstop, and
+    /// refusing the newcomer keeps the mirrors already waiting, which are closest to being due.
+    /// </summary>
+    private const int MaxPendingMirroredKeys = 100_000;
+
+    /// <summary>
+    /// Holds a finished transaction's key mirror until <paramref name="waitMs"/> has passed, at which
+    /// point no session can still own its holdings and the sweep may release them. Nothing about the
+    /// transaction itself is retained — it is terminal and untracked; only the identity and the keys
+    /// are, because they are what the release needs and what nothing else in the system still knows.
+    /// </summary>
+    private void EnqueueMirroredRelease(KvTransaction tx, List<(string key, KeyValueDurability durability)> mirrored, long waitMs)
+    {
+        long ageMs = tx.AgeMs ?? 0;
+        bool accepted;
+
+        lock (pendingReleaseSync)
+        {
+            accepted = pendingMirroredKeyCount + mirrored.Count <= MaxPendingMirroredKeys;
+
+            if (accepted)
+            {
+                pendingMirroredReleases.Add(new PendingMirroredRelease(
+                    tx.TransactionId,
+                    tx.UniqueId,
+                    mirrored,
+                    Stopwatch.GetTimestamp() + (long)(waitMs * (Stopwatch.Frequency / 1000.0)),
+                    ageMs));
+
+                pendingMirroredKeyCount += mirrored.Count;
+            }
+        }
+
+        Diagnostics.ServerDiagnostics.RecordCoordinatorUnknownFinalize(
+            accepted
+                ? Diagnostics.ServerDiagnostics.Tags.CoordinatorUnknown.Deferred
+                : Diagnostics.ServerDiagnostics.Tags.CoordinatorUnknown.Dropped, 0);
+
+        if (accepted)
+            Log.LogCoordinatorUnknownTransactionDeferred(logger, tx.UniqueId, ageMs, mirrored.Count, waitMs);
+        else
+            Log.LogCoordinatorUnknownTransactionDropped(logger, tx.UniqueId, mirrored.Count);
+    }
+
+    /// <summary>
+    /// Releases the deferred key mirrors that have reached their age, and reports how many keys were
+    /// released. Called once per reaper sweep: a mirror is deferred precisely because it was not yet
+    /// safe to release, and this is what makes that "not yet" mean "later" instead of "never".
+    ///
+    /// <para>Never throws — it is background cleanup, and the sweep that calls it must survive
+    /// whatever one database's storage node is doing.</para>
+    /// </summary>
+    public async Task<int> ReleaseDueMirroredHoldingsAsync(CancellationToken cancellationToken = default)
+    {
+        long now = Stopwatch.GetTimestamp();
+        List<PendingMirroredRelease> due = [];
+
+        lock (pendingReleaseSync)
+        {
+            // Walk backwards so an entry can be taken out by index as it is claimed; the list is small
+            // (it is capped by key count) and this keeps claim and removal in one pass under the lock.
+            for (int i = pendingMirroredReleases.Count - 1; i >= 0; i--)
+            {
+                PendingMirroredRelease entry = pendingMirroredReleases[i];
+
+                if (entry.DueAtTicks > now)
+                    continue;
+
+                due.Add(entry);
+                pendingMirroredReleases.RemoveAt(i);
+                pendingMirroredKeyCount -= entry.Keys.Count;
+            }
+        }
+
+        if (due.Count == 0)
+            return 0;
+
+        int released = 0;
+
+        foreach (PendingMirroredRelease entry in due)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            released += await ReleaseMirroredKeysAsync(
+                entry.TransactionId, entry.UniqueId, entry.AgeAtDeferralMs, entry.Keys, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return released;
+    }
+
+    /// <summary>
+    /// Waits out the back-off before the next attempt at a chunk of mirrored releases. Returns
+    /// <see langword="false"/> without waiting when the wait was cancelled, so the pass stops instead
+    /// of surfacing a cancellation from an already-decided rollback.
+    /// </summary>
+    private static async Task<bool> DelayBeforeMirroredReleaseRetryAsync(int attempt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(FinalizeRetryDelayMs(attempt - 1), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Rolls back the transaction only if it has not already been committed or rolled back.
     /// Safe to call in a <c>finally</c> or <c>catch</c> block without knowing the outcome.
     /// </summary>
@@ -1148,5 +1515,13 @@ public sealed class KvTransactionsManager : IDisposable
     public void Dispose()
     {
         activeTransactions.Clear();
+
+        // Parked key mirrors die with the manager. Their keys keep the storage node's own expiry as
+        // their backstop, exactly as they would have if the process had exited instead.
+        lock (pendingReleaseSync)
+        {
+            pendingMirroredReleases.Clear();
+            pendingMirroredKeyCount = 0;
+        }
     }
 }

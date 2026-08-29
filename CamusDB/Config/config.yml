@@ -154,6 +154,19 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # transaction_idle_timeout_ms: 300000     # idle cutoff before rollback; <= 0 disables the reaper
 # transaction_reaper_interval_ms: 30000   # sweep interval; must be > 0
 
+# Release of an abandoned transaction's holdings. A rollback the storage node answers with "unknown
+# transaction" — no session, no retained outcome, no durable record — releases nothing, because the
+# working set it finalizes from died with the session. The staged writes and point locks that
+# transaction planted then stay on their keys and block every scan of that key space. The keys the
+# client still remembers are replayed as per-key releases once the transaction reaches this age; each
+# release removes only state that transaction still owns, so one that in fact committed or aborted
+# loses nothing. The age exists because an unknown answer during a leader change is not proof of a
+# dead session. A transaction reaped before reaching it keeps its key list parked until it does, and
+# the reaper sweep releases it then — the reap itself is never retried.
+# 0 derives it from the session-timeout ceiling plus the node's reclaim grace; an explicit value must
+# be >= max_serializable_transaction_lifetime_ms; a negative value disables the release.
+# abandoned_transaction_release_after_ms: 0  # 0 = derive, > 0 = explicit age, < 0 = disabled
+
 # Prepared statements. A gRPC handle dies with the BatchExecute stream that minted it, so it needs
 # no timeout — only a per-stream cap. A REST handle has no such event to end it (HTTP connections are
 # pooled, multiplexed and load-balanced), so it is scoped to this node and to the principal that

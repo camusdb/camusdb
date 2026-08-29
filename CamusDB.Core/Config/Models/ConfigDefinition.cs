@@ -535,6 +535,14 @@ public class ConfigDefinition
     public int TransactionReaperIntervalMs { get; set; } = 30_000;
 
     /// <summary>
+    /// Age in milliseconds past which a rollback answered with "unknown transaction" releases the
+    /// transaction's holdings from the client-side key mirror. <c>0</c> — the default — derives it from
+    /// the Kahuna session-timeout ceiling plus the coordinator's reclaim grace; a positive value
+    /// overrides that; a negative value disables the release.
+    /// </summary>
+    public int AbandonedTransactionReleaseAfterMs { get; set; }
+
+    /// <summary>
     /// Idle timeout in milliseconds for a REST prepared statement before the reaper drops it.
     /// &lt;= 0 disables reaping, leaving handles alive until closed or the process exits. gRPC handles
     /// are unaffected — they die with their stream. Default 600 000 (10 min).
@@ -1132,6 +1140,19 @@ public class ConfigDefinition
 
         if (TransactionReaperIntervalMs <= 0)
             throw Invalid($"'transaction_reaper_interval_ms' must be > 0, got {TransactionReaperIntervalMs}");
+
+        // Releasing a transaction's holdings from the client-side key mirror is only sound once no live
+        // session can still own them, and a session may live for the whole serializable lifetime. An
+        // explicit age below that lifetime could strip a running transaction of its locks after a
+        // finalize was merely mis-routed during a leader change, so reject it rather than let the two
+        // knobs disagree. 0 (derive) and a negative value (disable) are exempt: neither claims an age.
+        if (AbandonedTransactionReleaseAfterMs > 0
+            && MaxSerializableTransactionLifetimeMs > 0
+            && AbandonedTransactionReleaseAfterMs < MaxSerializableTransactionLifetimeMs)
+            throw Invalid(
+                $"'abandoned_transaction_release_after_ms' ({AbandonedTransactionReleaseAfterMs}) must be >= " +
+                $"'max_serializable_transaction_lifetime_ms' ({MaxSerializableTransactionLifetimeMs}); " +
+                "a smaller age could release the holdings of a transaction that is still running");
 
         // Prepared-statement knobs. The sweep interval must be positive: the reaper would otherwise
         // have to invent a value, and a typo like -1 would silently become a scan loop rather than the

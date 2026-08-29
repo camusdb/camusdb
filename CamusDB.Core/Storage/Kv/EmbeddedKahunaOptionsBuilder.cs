@@ -426,9 +426,11 @@ public static class EmbeddedKahunaOptionsBuilder
         // it never lowers an explicit one (max(...) guards the case where an explicit cap already
         // exceeds the lifetime). A non-positive lifetime disables the engine cap, leaving the node
         // default untouched.
-        int lifetimeMs = options.MaxSerializableTransactionLifetimeMs;
-        if (lifetimeMs > 0 && baseline.MaxTransactionTimeout < lifetimeMs)
-            baseline.MaxTransactionTimeout = lifetimeMs;
+        // The same composition is mirrored client-side to decide when a coordinator-unknown
+        // transaction is old enough to have its holdings released, so both read it from
+        // KahunaSessionLifetime rather than each computing it.
+        baseline.MaxTransactionTimeout = KahunaSessionLifetime.MaxSessionTimeoutMs(
+            baseline.MaxTransactionTimeout, options.MaxSerializableTransactionLifetimeMs);
 
         if (options.MemoryProfile == MemoryProfile.Dev)
             ApplySmallFixedCacheDefaults(baseline, kahuna);

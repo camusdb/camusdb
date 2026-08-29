@@ -271,6 +271,7 @@ public static class ConfigResolver
         SequenceRetryBudgetMs = config.SequenceRetryBudgetMs,
         TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs,
         TransactionReaperIntervalMs = config.TransactionReaperIntervalMs,
+        AbandonedTransactionReleaseAfterMs = config.AbandonedTransactionReleaseAfterMs,
         PreparedStatementIdleTimeoutMs = config.PreparedStatementIdleTimeoutMs,
         PreparedStatementSweepIntervalMs = config.PreparedStatementSweepIntervalMs,
         GrpcMaxPreparedStatementsPerStream = config.GrpcMaxPreparedStatementsPerStream,

@@ -86,6 +86,7 @@ public class ConfigReader
         "sequence_retry_budget_ms",
         "transaction_idle_timeout_ms",
         "transaction_reaper_interval_ms",
+        "abandoned_transaction_release_after_ms",
         "prepared_statement_idle_timeout_ms",
         "prepared_statement_sweep_interval_ms",
         "grpc_max_prepared_statements_per_stream",

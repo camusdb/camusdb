@@ -259,6 +259,58 @@ interval would silently break serializable isolation.
 
 ---
 
+## 8b. When the coordinator does not know the transaction
+
+A commit or rollback is routed to the coordinator that owns the session. Sometimes it finds nothing:
+no session, no retained outcome from a recent finalize, and no durable record to consult. The
+coordinator answers with its unknown outcome and logs `Trying to rollback unknown transaction`.
+
+That answer is terminal, but it is not clean. The coordinator releases from its own working set, and
+that working set died with the session — so it releases nothing. Every write the transaction made
+planted a point intent with **no expiry** (the write path takes its exclusive lock with
+`expiresMs = 0`, which the storage node reads as "owned by the session, cleared by its cleanup").
+With the session gone, nothing clears them: a snapshot scan that reaches such a key can never prove
+the undecided intent lands outside its snapshot, so it fails or waits for as long as the intent
+lives — which, absent cleanup, is forever.
+
+The client holds the one remaining record of which keys those are: the modified-key set each
+transaction keeps for cache invalidation. So a rollback that meets the unknown outcome replays that
+set as per-key releases keyed by the transaction id. Three conditions gate it, and all three are
+required:
+
+1. **The transaction never began a commit.** Only a commit prepares an intent, and a prepared
+   intent's fate belongs to the decision machinery — releasing one would discard the only route to a
+   value that may already be committed. A transaction still `Active` when the rollback started cannot
+   own one.
+2. **It is older than `abandoned_transaction_release_after_ms`.** An unknown answer is not always
+   proof of a dead session: a leadership change can route a finalize to a node that never held it.
+   Past the session-timeout ceiling plus the coordinator's reclaim grace — what the setting derives
+   by default — no session is alive anywhere, whatever the routing did.
+3. **The release is keyed by `(transaction id, key)`.** It removes only state that transaction still
+   owns. A key another transaction now holds is refused; a key whose transaction committed or aborted
+   has nothing left to remove. The pass is therefore idempotent and cannot take anything from a live
+   transaction.
+
+Condition 2 is usually not met at the moment of the reap, and that is the point of what follows. The
+reaper reclaims an abandoned transaction after a few idle minutes; the age at which no session can
+still own its holdings is the session ceiling, an hour at the shipped defaults. So the rollback
+**parks the key mirror** and finishes the transaction — terminal, untracked, never finalized again —
+and the reaper's ordinary tick releases the mirror once its age is reached. Parking is what keeps
+"not yet safe to release" from meaning "never released": once the transaction is dropped, nothing
+else in the system still knows which keys it planted. Parked mirrors are capped in total keys, and a
+mirror refused by that cap is logged, because the storage node's own expiry is then its only backstop.
+
+The pass itself is best-effort and runs once: a key it cannot release is left to that same expiry.
+Range locks are outside it — the coordinator owns them, and the client cannot enumerate them. The
+transaction is terminal from the first unknown answer either way; a coordinator that does not know a
+transaction will never come to know it, so re-issuing the same rollback can only repeat the answer.
+
+What a run's artifacts show: the counter `camus.transaction.coordinator_unknown`, tagged `released`,
+`deferred` (parked until its age), `dropped` (refused by the cap), `disabled` or `no_keys`, plus one
+warning per transaction naming it and how many of its mirrored keys were released.
+
+---
+
 ## 9. What a transaction's life looks like now
 
 ```
@@ -340,6 +392,11 @@ If you touch a write, read, lock, or transaction-lifecycle path, keep these true
 - **`MaxSerializableTransactionLifetimeMs`** doubles as the Kahuna session `Timeout`: it bounds
   an abandoned session so the server reaper reclaims its locks after that window plus a grace
   period.
+- **`AbandonedTransactionReleaseAfterMs`** is the age past which a rollback that meets the
+  coordinator-unknown outcome releases the transaction's holdings from the client-side key mirror
+  (§8b). `0` derives it from the session-timeout ceiling plus the coordinator's reclaim grace; a
+  positive value overrides that and must be at least the serializable lifetime; a negative value
+  disables the release.
 
 ---
 

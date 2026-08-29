@@ -242,6 +242,20 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
+    /// Releases the key mirrors of abandoned transactions that have reached the age at which no
+    /// coordinator session can still own their holdings, across every database this node holds open.
+    /// Returns how many keys were released.
+    ///
+    /// <para>Separate from <see cref="ReapIdleAsync"/> and deliberately so: a reap that met the
+    /// coordinator-unknown outcome finishes the transaction there and then, but its holdings can only
+    /// be released once the transaction is old enough, which is usually later than the reap. The
+    /// transaction is gone from the in-flight map by then, so this drains a queue rather than
+    /// re-visiting a tracked entry — nothing re-attempts a finalize on a handle already reaped.</para>
+    /// </summary>
+    public Task<int> ReleaseDueMirroredHoldingsAsync(CancellationToken cancellationToken = default) =>
+        executor.ReleaseDueMirroredHoldingsAsync(cancellationToken);
+
+    /// <summary>
     /// Commits the transaction. When the transaction is tracked, a per-transaction finalize claim
     /// ensures at most one commit/rollback drives it at a time: a concurrent duplicate (e.g. a
     /// client that timed out on a slow commit and re-issued it) is rejected with

@@ -884,6 +884,37 @@ public sealed record CamusDBOptions
     public int TransactionReaperIntervalMs { get; init; } = 30_000;
 
     /// <summary>
+    /// Age, in milliseconds, past which a rollback that the coordinator answers with "unknown
+    /// transaction" releases the transaction's holdings from the client-side key mirror instead of
+    /// leaving them behind.
+    ///
+    /// <para>An unknown answer means the coordinator has no session, no retained outcome and no
+    /// durable record for the handle, so it releases nothing: the working set it would have released
+    /// died with the session. The staged writes and point locks that transaction planted stay at the
+    /// participants, where they block every scan of their key space. The client still holds the one
+    /// remaining record of those keys — the modified-key set it keeps for cache invalidation — so past
+    /// this age the rollback replays it as per-key releases keyed by the transaction id.</para>
+    ///
+    /// <para>The age exists because an unknown answer is not always proof of a dead session: a
+    /// leadership change can route a finalize to a node that never held the session. Past this bound
+    /// no session can be alive anywhere, whatever the routing did. Each release only removes state
+    /// still owned by that transaction id, so a transaction that in fact committed or aborted releases
+    /// nothing.</para>
+    ///
+    /// <para>A transaction reaped before it reaches this age — the usual case, since the reaper
+    /// reclaims an abandoned transaction after a few idle minutes — has its key mirror parked and
+    /// released by a later reaper sweep. The transaction itself is finished at the first unknown
+    /// answer and is never finalized again; only the release waits.</para>
+    ///
+    /// <para><c>0</c> — the default — derives the age from the Kahuna session-timeout ceiling plus the
+    /// coordinator's reclaim grace. A positive value overrides that derivation, and is how a soak or a
+    /// test compresses the timeline. A negative value disables the release, leaving an orphaned
+    /// holding to the storage node's own expiry.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int AbandonedTransactionReleaseAfterMs { get; init; }
+
+    /// <summary>
     /// Per-bucket shared-point-lock count at which a Serializable+RW transaction escalates from
     /// individual singleton <c>[key,key]</c> range locks to one whole-bucket <c>[null,null)</c>
     /// Shared range lock. Once escalated, subsequent reads on the same bucket need no additional

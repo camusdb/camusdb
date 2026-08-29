@@ -284,6 +284,42 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal int OpenDatabaseCount => databaseDescriptors.Descriptors.Count;
 
     /// <summary>
+    /// Releases, across every database this node holds open, the key mirrors of abandoned transactions
+    /// that have reached the age at which no coordinator session can still own their holdings.
+    /// Returns how many keys were released.
+    ///
+    /// <para>A rollback that met the coordinator-unknown outcome while its transaction was still too
+    /// young to release parks the transaction's key mirror instead of dropping it — see
+    /// <see cref="Transactions.KvTransactionsManager.ReleaseDueMirroredHoldingsAsync"/>. Nothing else
+    /// will ever come back for those keys: the transaction is terminal and untracked, and the mirror is
+    /// the only remaining record of what it planted. This is the sweep that finishes the job, driven by
+    /// the abandoned-transaction reaper on its ordinary tick.</para>
+    ///
+    /// <para>Only databases that are already open are visited, and a descriptor still opening is
+    /// skipped: a background sweep must never be the thing that opens a database (or blocks on one
+    /// opening), and a database that is not open holds no mirrors.</para>
+    /// </summary>
+    public async Task<int> ReleaseDueMirroredHoldingsAsync(CancellationToken cancellationToken = default)
+    {
+        int released = 0;
+
+        foreach (KeyValuePair<string, Nito.AsyncEx.AsyncLazy<DatabaseDescriptor>> database in databaseDescriptors.Descriptors)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
+
+            if (!database.Value.IsStarted || !database.Value.Task.IsCompletedSuccessfully)
+                continue;
+
+            released += await database.Value.Task.Result.Transactions
+                .ReleaseDueMirroredHoldingsAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return released;
+    }
+
+    /// <summary>
     /// Whether this node currently holds an open descriptor for <paramref name="databaseId"/>.
     ///
     /// <para>The key is the database <b>id</b>, not its name: the descriptor cache is keyed by id so

@@ -11,6 +11,7 @@ using System.IO;
 using NUnit.Framework;
 
 using CamusDB.Core;
+using CamusDB.Core.Config;
 using CamusDB.Core.Config.Models;
 using CamusDB.Core.Storage.Kv;
 using Kahuna;
@@ -570,6 +571,76 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // renewal-margin cross-check is skipped.
         ConfigDefinition config = new() { RangeLockExpiresMs = 0 };
         Assert.DoesNotThrow(() => config.Validate());
+    }
+
+    // ── Age at which a coordinator-unknown transaction's holdings may be released ─────────────────
+
+    [Test]
+    public void AbandonedReleaseAge_DerivesFromTheSessionCeilingPlusGrace()
+    {
+        // Unset (0) means derive. The ceiling is the session-timeout clamp the node will enforce — here
+        // raised from the engine's serializable lifetime — and the grace covers the two windows in which
+        // a reaped session's work can still land.
+        CamusDBOptions options = CamusDBOptions.Default with { MaxSerializableTransactionLifetimeMs = 600_000 };
+
+        Assert.That(
+            KahunaSessionLifetime.AbandonedReleaseAgeMs(options),
+            Is.EqualTo(600_000 + KahunaSessionLifetime.CoordinatorReclaimGraceMs));
+    }
+
+    [Test]
+    public void AbandonedReleaseAge_MirrorsAnExplicitNodeClamp()
+    {
+        // With the engine cap disabled the node's own clamp is what bounds a session, so the mirror must
+        // follow the configured value rather than Kahuna's default.
+        CamusDBOptions options = CamusDBOptions.Default with
+        {
+            MaxSerializableTransactionLifetimeMs = 0,
+            Kahuna = new KahunaOptionsConfig { MaxTransactionTimeoutMs = 900_000 },
+        };
+
+        Assert.That(
+            KahunaSessionLifetime.AbandonedReleaseAgeMs(options),
+            Is.EqualTo(900_000 + KahunaSessionLifetime.CoordinatorReclaimGraceMs));
+    }
+
+    [Test]
+    public void AbandonedReleaseAge_HonoursAnExplicitAgeAndTheDisabledValue()
+    {
+        Assert.That(
+            KahunaSessionLifetime.AbandonedReleaseAgeMs(
+                CamusDBOptions.Default with { AbandonedTransactionReleaseAfterMs = 120_000 }),
+            Is.EqualTo(120_000));
+
+        Assert.That(
+            KahunaSessionLifetime.AbandonedReleaseAgeMs(
+                CamusDBOptions.Default with { AbandonedTransactionReleaseAfterMs = -1 }),
+            Is.Null,
+            "a negative age disables the release entirely");
+    }
+
+    [Test]
+    public void AbandonedReleaseAge_BelowSerializableLifetime_IsRejected()
+    {
+        // A session may live for the whole serializable lifetime, so an age under it could release the
+        // holdings of a transaction that is still running.
+        ConfigDefinition config = new()
+        {
+            MaxSerializableTransactionLifetimeMs = 3_600_000,
+            AbandonedTransactionReleaseAfterMs = 60_000,
+        };
+
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => config.Validate())!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("abandoned_transaction_release_after_ms"));
+        Assert.That(ex.Message, Does.Contain("max_serializable_transaction_lifetime_ms"));
+    }
+
+    [Test]
+    public void AbandonedReleaseAge_DeriveAndDisableAreAccepted()
+    {
+        Assert.DoesNotThrow(() => new ConfigDefinition { AbandonedTransactionReleaseAfterMs = 0 }.Validate());
+        Assert.DoesNotThrow(() => new ConfigDefinition { AbandonedTransactionReleaseAfterMs = -1 }.Validate());
     }
 
     // ── Partition placement + leader balancing ───────────────────────────────

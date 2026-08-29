@@ -93,6 +93,12 @@ public static class ServerDiagnostics
     private static readonly Histogram<long> StagedMutations =
         Meter.CreateHistogram<long>("camus.transaction.staged_mutations", unit: "{mutation}", description: "Staged KV mutations per committed transaction.");
 
+    private static readonly Counter<long> CoordinatorUnknownFinalize =
+        Meter.CreateCounter<long>("camus.transaction.coordinator_unknown", unit: "{transaction}", description: "Finalizes the coordinator answered with an unknown transaction, by what the reap did about it.");
+
+    private static readonly Counter<long> MirroredKeysReleased =
+        Meter.CreateCounter<long>("camus.transaction.mirrored_keys_released", unit: "{key}", description: "Keys released from a coordinator-unknown transaction's client-side key mirror.");
+
     // ── Record helpers (all no-ops when disabled) ───────────────────────────────
 
     public static void RecordRequest(string operation, string transport, string outcome, double milliseconds)
@@ -175,6 +181,27 @@ public static class ServerDiagnostics
         if (!Enabled)
             return;
         StagedMutations.Record(count);
+    }
+
+    /// <summary>
+    /// Records a finalize that resolved to the coordinator-unknown outcome, tagged by what followed:
+    /// <c>released</c> (the transaction was old enough, so its mirrored keys were replayed as
+    /// releases), <c>deferred</c> (parked until it reaches the release age), <c>dropped</c> (parking
+    /// refused because the deferred-release budget is full), <c>disabled</c> (the release is switched
+    /// off, or the transaction never opened a session), or <c>no_keys</c> (nothing was ever written,
+    /// so there is nothing to release).
+    ///
+    /// <para>Counted separately from an ordinary rollback on purpose: the two are indistinguishable in
+    /// the transaction counter, yet one released the transaction's holdings and the other left them
+    /// behind. Without this, a reap that leaves a wedge is invisible in a run's artifacts.</para>
+    /// </summary>
+    public static void RecordCoordinatorUnknownFinalize(string disposition, long keysReleased)
+    {
+        if (!Enabled)
+            return;
+        CoordinatorUnknownFinalize.Add(1, new TagList { { "disposition", disposition } });
+        if (keysReleased > 0)
+            MirroredKeysReleased.Add(keysReleased);
     }
 
     public static void RecordParse(bool cacheHit, double milliseconds)
@@ -262,6 +289,31 @@ public static class ServerDiagnostics
             public const string Canceled = "canceled";
             public const string InternalError = "internal_error";
             public static readonly IReadOnlyList<string> All = new[] { Ok, DomainError, Conflict, Canceled, InternalError };
+        }
+
+        /// <summary>
+        /// What a rollback did about a transaction the coordinator did not know. One value per exit of
+        /// the release-by-mirror path, so a run's artifacts distinguish a reap that cleared the
+        /// transaction's holdings from one that left them behind.
+        /// </summary>
+        public static class CoordinatorUnknown
+        {
+            /// <summary>The mirrored keys were replayed as releases.</summary>
+            public const string Released = "released";
+
+            /// <summary>Too young to release; the key mirror is parked until it reaches the age.</summary>
+            public const string Deferred = "deferred";
+
+            /// <summary>Parking was refused — the deferred-release budget is full.</summary>
+            public const string Dropped = "dropped";
+
+            /// <summary>The release is switched off, or the transaction never opened a session.</summary>
+            public const string Disabled = "disabled";
+
+            /// <summary>The transaction wrote nothing, so it planted nothing to release.</summary>
+            public const string NoKeys = "no_keys";
+
+            public static readonly IReadOnlyList<string> All = new[] { Released, Deferred, Dropped, Disabled, NoKeys };
         }
 
         public static class Transport
