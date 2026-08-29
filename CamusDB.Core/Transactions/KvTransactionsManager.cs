@@ -798,30 +798,59 @@ public sealed class KvTransactionsManager : IDisposable
         int commitAttempts = 0;
         try
         {
-            for (int attempt = 0; ; attempt++)
+            try
             {
-                // The coordinator owns the working set: every confirmed write and exclusive point lock
-                // was folded server-side as the operation completed, so commit supplies only the routing
-                // handle.
-                commitRequestIssued = true;
-                commitAttempts++;
-                
-                (result, string? anchor) = await kahuna.LocateAndCommitTransaction(
-                        tx.Handle, 
-                        cancellationToken
-                    ).ConfigureAwait(false);
+                for (int attempt = 0; ; attempt++)
+                {
+                    // The coordinator owns the working set: every confirmed write and exclusive point lock
+                    // was folded server-side as the operation completed, so commit supplies only the routing
+                    // handle.
+                    commitRequestIssued = true;
+                    commitAttempts++;
 
-                // Fold the coordinator's canonical record anchor onto the handle the moment it is known —
-                // including alongside a non-terminal MustRetry — so a finalize retried after the live
-                // coordinator session is lost still routes to the durable decision rather than returning
-                // an unknown Errored. No-op (stays null) on the best-effort path.
-                tx.CaptureRecordAnchor(anchor);
+                    (result, string? anchor) = await kahuna.LocateAndCommitTransaction(
+                            tx.Handle,
+                            cancellationToken
+                        ).ConfigureAwait(false);
 
-                if (result != KeyValueResponseType.MustRetry)
-                    break;
+                    // Fold the coordinator's canonical record anchor onto the handle the moment it is known —
+                    // including alongside a non-terminal MustRetry — so a finalize retried after the live
+                    // coordinator session is lost still routes to the durable decision rather than returning
+                    // an unknown Errored. No-op (stays null) on the best-effort path.
+                    tx.CaptureRecordAnchor(anchor);
 
-                if (!await DelayBeforeFinalizeRetryAsync(attempt, commitTimer, cancellationToken).ConfigureAwait(false))
-                    break;
+                    if (result != KeyValueResponseType.MustRetry)
+                        break;
+
+                    if (!await DelayBeforeFinalizeRetryAsync(attempt, commitTimer, cancellationToken).ConfigureAwait(false))
+                        break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (CamusDBException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // A transport or unexpected fault thrown AFTER the commit request left this node (a
+                // Kahuna internode RpcException when the coordinator's node dies mid-commit, a routing
+                // failure, anything unmapped) says nothing about the transaction's outcome: the commit
+                // may already be durable. Letting the raw exception escape surfaced it to clients as a
+                // definite-looking generic error (CADB0000), and a commit that HAD landed was then
+                // journalled as failed — observed as a leaked write in the fault-injection soaks. The
+                // truthful contract is the same as the MustRetry-exhausted branch below: the outcome is
+                // unresolved, the transaction stays Finalizing and tracked, and the caller must retry
+                // the SAME commit on the SAME handle (never replay the operation). The finally block
+                // fences and evicts the cache exactly as for any unknown outcome.
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionFinalizeUnresolved,
+                    $"Transaction {tx.UniqueId} commit outcome is unknown after {commitAttempts} attempt(s) " +
+                    $"over {commitTimer.GetElapsedMilliseconds()} ms ({ex.GetType().Name}: {ex.Message}); " +
+                    "retry COMMIT on the same transaction (do not re-run the operation)");
             }
 
             if (result == KeyValueResponseType.Committed)

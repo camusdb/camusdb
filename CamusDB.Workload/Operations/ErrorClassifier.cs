@@ -57,23 +57,32 @@ public static class ErrorClassifier
     // the durable outcome could not be read back; CADB0509 (TransactionFinalizeUnresolved) is the
     // commit-outcome-not-yet-known signal by construction. A transaction reported under either can have
     // committed durably — treating it as a definite non-commit tells the per-row attribution the transfer
-    // applied nothing, and a commit that did land then reads as a leaked write. Both must widen the
+    // applied nothing, and a commit that did land then reads as a leaked write. All must widen the
     // ambiguity, not close it.
     private const string TransactionAlreadyCompleted = "CADB0501";
     private const string FinalizeUnresolved = "CADB0509";
 
+    // CADB0000 is not a verdict either: the server stamps it on any UNEXPECTED exception that escaped
+    // to the RPC boundary, and the gRPC client fabricates the same code for a trailer-less transport
+    // failure (a node that died mid-call). Neither shape says anything about the transaction's outcome.
+    // In the split-nemesis fault soak, transfers whose commit had durably applied were answered CADB0000
+    // when the coordinator's node was SIGKILLed, and counting the code as a definite abort reported the
+    // engine's committed writes as leaks.
+    private const string InternalUnmapped = "CADB0000";
+
     /// <summary>
     /// True when a <see cref="CamusException"/> reports that the commit outcome is unavailable rather than a
-    /// server decision. Two shapes qualify: a transport failure that came back with no error code and a
-    /// message naming a gRPC transport condition (deadline / unavailable / cancelled); and an explicit
+    /// server decision. Three shapes qualify: a transport failure that came back with no error code and a
+    /// message naming a gRPC transport condition (deadline / unavailable / cancelled); an explicit
     /// "outcome unavailable / unresolved" server code (CADB0501 / CADB0509), whose own contract is that the
-    /// commit may already have committed. A plain empty code alone is not enough for the transport case —
-    /// real server errors whose code the wire dropped did carry a verdict — which is why the codeless branch
-    /// also requires the transport-condition message.
+    /// commit may already have committed; and the generic internal code (CADB0000), which marks an
+    /// unexpected exception or a fabricated transport verdict, never a transaction decision. A plain empty
+    /// code alone is not enough for the transport case — real server errors whose code the wire dropped did
+    /// carry a verdict — which is why the codeless branch also requires the transport-condition message.
     /// </summary>
     private static bool CarriesNoVerdict(CamusException camus)
     {
-        if (camus.Code is TransactionAlreadyCompleted or FinalizeUnresolved)
+        if (camus.Code is TransactionAlreadyCompleted or FinalizeUnresolved or InternalUnmapped)
             return true;
 
         if (!string.IsNullOrEmpty(camus.Code))

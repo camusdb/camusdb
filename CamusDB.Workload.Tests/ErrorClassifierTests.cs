@@ -141,4 +141,30 @@ public sealed class ErrorClassifierTests
             new CamusException("CADB0501", "a commit or rollback is in progress"), commitSubmitted: false);
         Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
     }
+
+    /// <summary>
+    /// CADB0000 is the server's stamp for an UNEXPECTED exception at the RPC boundary, and the gRPC
+    /// client fabricates the same code for a trailer-less transport failure (a node that died
+    /// mid-call). Neither is a transaction verdict. In the split-nemesis fault soak, commits that had
+    /// durably applied were answered CADB0000 when the coordinator's node was SIGKILLed, and counting
+    /// the code as a definite abort reported the engine's own committed writes as leaked.
+    /// </summary>
+    [Test]
+    public void InternalUnmappedCodeDuringCommitIsIndeterminate()
+    {
+        var ex = new CamusException("CADB0000", "Status(StatusCode=\"Unavailable\", Detail=\"Error reading next message\")");
+        (OperationStatus status, string returnedCode) = ErrorClassifier.Classify(ex, commitSubmitted: true);
+        Assert.That(status, Is.EqualTo(OperationStatus.Indeterminate));
+        Assert.That(returnedCode, Is.EqualTo("CADB0000"), "the underlying code survives for errors.json aggregation");
+    }
+
+    [Test]
+    public void InternalUnmappedCodeBeforeCommitStaysADefiniteDomainError()
+    {
+        // Before the commit request nothing could have landed: an internal error on a read or update
+        // aborts the transaction definitively and must not inflate the ambiguity band.
+        (OperationStatus status, _) = ErrorClassifier.Classify(
+            new CamusException("CADB0000", "Internal server error"), commitSubmitted: false);
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
+    }
 }
