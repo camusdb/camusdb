@@ -72,7 +72,7 @@ public sealed class RunOptions : CommonOptions
     [Option("workers", Default = 64, HelpText = "Number of concurrent workers (in-flight ops in closed-loop).")]
     public int Workers { get; set; }
 
-    [Option("concurrency-sweep", HelpText = "Closed-loop: comma-separated worker counts, e.g. 1,8,16,32,64,128.")]
+    [Option("concurrency-sweep", HelpText = "Closed-loop: comma-separated worker counts, e.g. 1,8,16,32,64,128,256. Each point runs the full measured pipeline into its own <output>/workers-N directory and reconciles independently, so every point is a complete run bundle. A cross-point sweep.csv and sweep.md are written at the top level.")]
     public string? ConcurrencySweep { get; set; }
 
     [Option("read-percent", Default = 60, HelpText = "Percent of operations that are read-only point reads.")]
@@ -117,6 +117,29 @@ public sealed class RunOptions : CommonOptions
     [Option("no-row-attribution", Default = false, HelpText = "Transfer workloads: skip the per-row balance/version check and judge atomicity on SUM(balance) alone. The aggregate cannot see leaked writes that cancel out, so a run started with this flag can report PASS while atomicity is broken. It costs one full scan before the run and one after; use it only when that scan is genuinely unaffordable.")]
     public bool NoRowAttribution { get; set; }
 
+    [Option("metrics-endpoint", Separator = ',', HelpText = "Per-node Prometheus endpoints to scrape for the whole run, as name=url (repeatable, or comma-separated): camus1=http://camus1:5095/metrics. Collected into node-metrics.csv and used for the per-node sections of bottleneck-report.md. Omitted means no server-side time series is collected.")]
+    public IEnumerable<string> MetricsEndpoints { get; set; } = Array.Empty<string>();
+
+    [Option("metrics-interval", Default = "5s", HelpText = "Scrape interval for --metrics-endpoint (minimum 1s).")]
+    public string MetricsInterval { get; set; } = "5s";
+
+    [Option("node-endpoint", Separator = ',', HelpText = "Per-node HTTP API bases, as name=url (repeatable, or comma-separated): camus1=http://camus1:5095. Each node is asked for /v1/version, /v1/cluster/health and SHOW VARIABLES, and the answers are written to cluster-facts.json so a later comparison can refuse two runs that were not on the same build or durability settings.")]
+    public IEnumerable<string> NodeEndpoints { get; set; } = Array.Empty<string>();
+
+    /// <summary>
+    /// A copy of these options for one sweep point. It clones every field rather than listing the ones
+    /// that matter: a sweep must vary exactly the worker count, and a hand-written copy silently drops
+    /// whatever option is added to this class next.
+    /// </summary>
+    public RunOptions CloneFor(int workers, string output)
+    {
+        RunOptions clone = (RunOptions)MemberwiseClone();
+        clone.Workers = workers;
+        clone.Output = output;
+        clone.ConcurrencySweep = null;
+        return clone;
+    }
+
     [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), or fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2).")]
     public string Workload { get; set; } = "accounts";
 }
@@ -142,6 +165,52 @@ public sealed class ReportOptions
     [Option("output", Required = true, HelpText = "Run directory containing manifest.json and summary.json; the report is written here.")]
     public string Output { get; set; } = "";
 
-    [Option("metrics", Required = true, HelpText = "Path to a scraped Prometheus /metrics text file from the server.")]
-    public string Metrics { get; set; } = "";
+    [Option("metrics", HelpText = "Path to a scraped Prometheus /metrics text file from the server. Required unless --node-metrics is given.")]
+    public string? Metrics { get; set; }
+
+    [Option("node-metrics", HelpText = "Path to a node-metrics.csv collected by a run's --metrics-endpoint sampler. Adds the per-node sections (work distribution, per-node storage/WAL, backlog growth) to the report.")]
+    public string? NodeMetrics { get; set; }
+}
+
+/// <summary>
+/// Compares two finished run directories and refuses the pair when a field that must not differ did.
+/// Pure post-processing — it connects to nothing and reads only what the runs already wrote.
+/// </summary>
+[Verb("compare", HelpText = "Compare two run directories; refuse the pair when an invariant field differs.")]
+public sealed class CompareOptions
+{
+    [Option("baseline", Required = true, HelpText = "Run directory to compare against.")]
+    public string Baseline { get; set; } = "";
+
+    [Option("candidate", Required = true, HelpText = "Run directory being judged.")]
+    public string Candidate { get; set; } = "";
+
+    [Option("allow", Separator = ',', HelpText = "Field names whose difference is the thing under test and may be waived, e.g. workers. Waivers are printed in the report.")]
+    public IEnumerable<string> Allow { get; set; } = Array.Empty<string>();
+
+    [Option("require-ratio", HelpText = "Fail unless the candidate reaches this multiple of the baseline's completed ops/s, e.g. 10.0.")]
+    public double? RequireRatio { get; set; }
+
+    [Option("require-ops", HelpText = "Fail unless the candidate reaches this absolute completed ops/s floor, e.g. 2100.")]
+    public double? RequireOps { get; set; }
+
+    [Option("p99-budget-ms", HelpText = "Fail when the candidate's worst read/write p99 exceeds this frozen latency budget. A throughput gain bought with a collapsing tail is not a gain.")]
+    public double? P99BudgetMs { get; set; }
+
+    [Option("output", HelpText = "Write the verdict to comparison.md in this directory as well as to the console.")]
+    public string? Output { get; set; }
+}
+
+/// <summary>
+/// Aggregates repeated runs of one workload into a baseline: the median a later run is measured
+/// against, and how much the repetitions disagreed. Pure post-processing.
+/// </summary>
+[Verb("baseline", HelpText = "Summarize repeated runs of one workload: median throughput and how repeatable it is.")]
+public sealed class BaselineOptions
+{
+    [Option("runs", Required = true, Separator = ',', HelpText = "Run directories to aggregate (repeatable, or comma-separated). At least three are needed before a spread means anything.")]
+    public IEnumerable<string> Runs { get; set; } = Array.Empty<string>();
+
+    [Option("output", HelpText = "Write the result to baseline.md in this directory as well as to the console.")]
+    public string? Output { get; set; }
 }

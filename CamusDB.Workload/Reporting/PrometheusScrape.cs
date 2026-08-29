@@ -25,7 +25,17 @@ public sealed class PrometheusScrape
 
     private PrometheusScrape(List<PromSample> samples) => _samples = samples;
 
-    public static PrometheusScrape Parse(string text)
+    /// <summary>Every sample in the scrape, in the order the exporter emitted them.</summary>
+    public IReadOnlyList<PromSample> Samples => _samples;
+
+    public static PrometheusScrape Parse(string text) => new(ParseSamples(text));
+
+    /// <summary>
+    /// Parses the exposition text into flat samples. Exposed separately from <see cref="Parse"/> so the
+    /// multi-node collector can stream samples into its time series without building a query object it
+    /// would immediately discard.
+    /// </summary>
+    public static List<PromSample> ParseSamples(string text)
     {
         List<PromSample> samples = new();
         foreach (string rawLine in text.Split('\n'))
@@ -67,7 +77,7 @@ public sealed class PrometheusScrape
 
             samples.Add(new PromSample(name, labels, value));
         }
-        return new PrometheusScrape(samples);
+        return samples;
     }
 
     private static void ParseLabels(string block, Dictionary<string, string> labels)

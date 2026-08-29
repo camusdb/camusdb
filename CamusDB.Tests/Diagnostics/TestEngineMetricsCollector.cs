@@ -24,8 +24,15 @@ namespace CamusDB.Tests.Diagnostics;
 /// meter name, so a real embedded engine running in a neighbouring test publishes into the same
 /// listener; filtering by a unique instrument name is what keeps these assertions exact instead of
 /// merely approximate.</para>
+///
+/// <para>Non-parallelizable, like <c>ServerDiagnosticsTests</c> next door. The assembly opts into
+/// <c>ParallelScope.Fixtures</c>, and one assertion here budgets allocation in fractions of a byte
+/// per measurement — a figure that a neighbouring fixture's concurrent work on the same process-wide
+/// listener perturbs enough to fail. Filtering by unique instrument name keeps the counts exact; it
+/// does nothing for allocation, which is why this has to run alone.</para>
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 internal sealed class TestEngineMetricsCollector
 {
     private Meter meter = null!;

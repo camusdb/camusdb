@@ -371,11 +371,23 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     internal IReadOnlyList<string> LastGateLaggards { get; private set; } = [];
 
     /// <summary>
+    /// The options this engine was constructed with — the values Kahuna is actually running, after
+    /// CamusDB's mode-specific baseline and any configuration overrides were folded together.
+    ///
+    /// <para>Retained solely so a node can report them. <c>SHOW VARIABLES</c> answers from the
+    /// configuration layer, which reports an engine key the operator never set as unset — true, but
+    /// useless to a benchmark that has to prove two runs used the same durability settings, since the
+    /// baseline underneath it is invisible there. This is the resolved instance.</para>
+    /// </summary>
+    public EmbeddedKahunaOptions Options { get; }
+
+    /// <summary>
     /// Constructs the embedded engine with the provided options.
     /// </summary>
     public EmbeddedKahuna(EmbeddedKahunaOptions options, ILoggerFactory? loggerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
+        Options = options;
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
         WireWalRestoreBuffer();
@@ -394,6 +406,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ILoggerFactory? loggerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
+        Options = options;
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
         WireWalRestoreBuffer();
