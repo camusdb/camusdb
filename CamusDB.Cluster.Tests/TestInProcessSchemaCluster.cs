@@ -42,9 +42,14 @@ public sealed class TestInProcessSchemaCluster
         await cluster.OpenDatabaseOnAllNodesAsync(db);
         InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
 
+        // The schema log is keyed by the database's opaque id, not by its user-facing name:
+        // SchemaReplicator.ApplyAsync drops an entry whose Database does not equal database.Id,
+        // and the schema-log partition is derived from the same id.
+        string dbId = leader.Database!.Id;
+
         SchemaChangeLogEntry entry = new()
         {
-            Database = db,
+            Database = dbId,
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
@@ -72,7 +77,7 @@ public sealed class TestInProcessSchemaCluster
         };
 
         SchemaReplicationResult result = await leader.Kahuna.ReplicateSchemaChangeAsync(
-            db,
+            dbId,
             Serializator.Serialize(entry)
         );
 
@@ -125,7 +130,7 @@ public sealed class TestInProcessSchemaCluster
         ));
     }
 
-    // A3: pause node 2 → DDL on leader → nodes 0/1 converge, node 2 lags →
+    // Fault injection: pause node 2 → DDL on leader → nodes 0/1 converge, node 2 lags →
     // resume node 2 → node 2 catches up via Kommander replay.
     //
     // Uses a short SchemaAckLiveNodeLease so the paused (fully isolated) node is
@@ -217,7 +222,7 @@ public sealed class TestInProcessSchemaCluster
             "All nodes should have the table after full convergence");
     }
 
-    // A3: ForceLeaderChangeAsync blocks the current leader, waits for a new election,
+    // ForceLeaderChangeAsync blocks the current leader, waits for a new election,
     // and returns the new leader. Subsequent DDL on the new leader converges on all
     // unblocked nodes.
     //
@@ -276,7 +281,7 @@ public sealed class TestInProcessSchemaCluster
             "Live nodes must converge on DDL issued to new leader");
     }
 
-    // B2: CREATE INDEX on the leader must be visible on every node via table.Schema.Indexes
+    // CREATE INDEX on the leader must be visible on every node via table.Schema.Indexes
     // and usable via FORCE_INDEX without a reopen, proving the schema log carries the change.
     [Test]
     public async Task AddIndexOnLeaderConvergesAcrossNodesWithoutReopen()
@@ -376,7 +381,7 @@ public sealed class TestInProcessSchemaCluster
         }
     }
 
-    // B2: DROP INDEX on the leader must remove the index from every node's table.Schema.Indexes
+    // DROP INDEX on the leader must remove the index from every node's table.Schema.Indexes
     // without reopen, and FORCE_INDEX must subsequently fail on all nodes.
     [Test]
     public async Task DropIndexOnLeaderConvergesAcrossNodesWithoutReopen()
@@ -455,7 +460,7 @@ public sealed class TestInProcessSchemaCluster
         }
     }
 
-    // D3: a cluster ADD COLUMN drives the column through the staged sequence to Public on
+    // A cluster ADD COLUMN drives the column through the staged sequence to Public on
     // every node, and the WriteOnly→Public backfill physically materializes the default into
     // pre-existing rows. The physical-bytes assertion is essential: a normal SELECT injects the
     // default for a missing Public column at read time (injectMissingCurrentColumns), so a
@@ -555,7 +560,7 @@ public sealed class TestInProcessSchemaCluster
         Assert.AreEqual(5, physicallyBackfilled, "all 5 pre-existing rows must be physically backfilled");
     }
 
-    // B3 resume: a unique index add with 600 rows (2 batches: 500 + 100) is interrupted
+    // Backfill resume: a unique index add with 600 rows (2 batches: 500 + 100) is interrupted
     // between the two batches by a forced leader change. The new leader must:
     //   (a) resume from the persisted StartOffset (not from row 0), evidenced by the
     //       intermediate-checkpoint hook firing exactly once across the whole run — if
@@ -743,7 +748,7 @@ public sealed class TestInProcessSchemaCluster
             "FORCE_INDEX must return all rows after leader-change resume completes the index");
     }
 
-    // DS11.5a — F1a persist-exhaustion policy:
+    // Persist-exhaustion policy:
     //   • An injected persist fault never leaves the proposer having acked-and-returned-success
     //     for a version it did not persist — the committed log is the source of truth.
     //   • The DDL call must succeed (commit was live), but the proposer node is marked
@@ -764,7 +769,7 @@ public sealed class TestInProcessSchemaCluster
         InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
 
         // Inject a persist fault — every call to PersistSchemaCheckpointAsync will throw.
-        leader.Executor.Catalogs.TestPersistCheckpointException = new IOException("injected checkpoint fault for F1a test");
+        leader.Executor.Catalogs.TestPersistCheckpointException = new IOException("injected checkpoint fault for the persist-exhaustion test");
 
         // The DDL must NOT throw: the Raft commit already succeeded and is live cluster-wide.
         // Only the proposer's KV checkpoint failed; the committed log remains the source of truth.
@@ -825,12 +830,12 @@ public sealed class TestInProcessSchemaCluster
             "Exception message must mention 'degraded'");
     }
 
-    // DS11.5b — F1a persist-exhaustion on the A2 resume path:
+    // Persist-exhaustion on the resume path:
     //   When a new leader's ResumeJobsAsync (triggered by RegisterSchemaLeaderCallback)
-    //   exhausts persist retries, the same F1a policy must apply: the resuming node is
+    //   exhausts persist retries, the same policy must apply: the resuming node is
     //   marked SchemaSubsystemDegraded and steps down so a healthy peer can take over.
     //   This exercises SchemaReplicator.Register's leader-callback finally block, which
-    //   is a separate fire path from ExecuteDdlInTransaction (tested in DS11.5a).
+    //   is a separate fire path from ExecuteDdlInTransaction (tested above).
     [Test]
     public async Task ResumeJobsPersistExhaustionMarksResumingNodeDegradedAndStepsDown()
     {
@@ -862,9 +867,12 @@ public sealed class TestInProcessSchemaCluster
         // Plant a coordinator job in KV (replicated to all nodes). The job targets adding
         // a column; the first resume step will call ReplicateAddColumnInStateAsync which
         // invokes PersistSchemaCheckpointWithRetryAsync — where the fault fires.
+        // ResumeJobsAsync resolves a job by immutable table id and deletes any job whose id
+        // matches no live table, so a job without TableId is discarded as stale before it runs.
         PersistedCoordinatorJob fakeJob = new()
         {
             TableName = "resume_test_tbl",
+            TableId = nodeA.Database!.Schema.Tables["resume_test_tbl"].Id!,
             ElementName = "new_col",
             TargetState = SchemaElementState.Public,
             ElementKind = SchemaElementKind.Column,
@@ -877,7 +885,7 @@ public sealed class TestInProcessSchemaCluster
         // Pick a non-leader node to become the new leader; inject a fault on it
         // before the election so its ResumeJobsAsync call exhausts persist retries.
         InProcessSchemaCluster.Node nodeB = cluster.Nodes.First(n => n.Index != nodeA.Index);
-        nodeB.Executor.Catalogs.TestPersistCheckpointException = new IOException("F1a A2 resume fault");
+        nodeB.Executor.Catalogs.TestPersistCheckpointException = new IOException("injected checkpoint fault on the resume path");
 
         try
         {
@@ -923,7 +931,7 @@ public sealed class TestInProcessSchemaCluster
             "Degraded resuming node must have stepped down schema-partition leadership");
     }
 
-    // DS10.2 — DROP COLUMN on the leader converges on every node, and rows written under the
+    // DROP COLUMN on the leader converges on every node, and rows written under the
     // PRE-drop schema version still decode on every node (the dropped column reads as absent;
     // the surviving columns read correctly). Proves positional/versioned decode survives a drop
     // cluster-wide.
@@ -997,7 +1005,7 @@ public sealed class TestInProcessSchemaCluster
         }
     }
 
-    // DS10.3 — DROP TABLE on the leader converges (table gone on every node) and an in-flight
+    // DROP TABLE on the leader converges (table gone on every node) and an in-flight
     // transaction that pinned the table before the drop fails cleanly at commit rather than
     // committing against a table that no longer exists.
     [Test]
@@ -1054,7 +1062,7 @@ public sealed class TestInProcessSchemaCluster
         Assert.IsNotNull(pinEx, "A transaction pinned to a dropped table must fail at commit");
     }
 
-    // DS10.6 — Concurrent DML on a follower while the leader runs the staged ADD COLUMN must lose
+    // Concurrent DML on a follower while the leader runs the staged ADD COLUMN must lose
     // no COMMITTED writes and never produce a missing-column read error. Inserts that race a
     // schema-version transition are rejected (typed exception) — that is correct back-pressure,
     // not a lost write — so we count only committed inserts and assert all of them survive on
@@ -1163,7 +1171,7 @@ public sealed class TestInProcessSchemaCluster
         }
     }
 
-    // DS10.5 — DDL issued on a FOLLOWER is forwarded to the schema leader, applied there, and
+    // DDL issued on a FOLLOWER is forwarded to the schema leader, applied there, and
     // converges on every node. Uses the opt-in in-process leader forwarder (production uses
     // HttpSchemaDdlForwarder; that HTTP path is covered by TestSchemaDdlForwarding).
     [Test]
@@ -1212,7 +1220,7 @@ public sealed class TestInProcessSchemaCluster
             "forwarded ADD COLUMN must converge to Public on every node");
     }
 
-    // E2 — no false eviction of an idle-but-alive node. With a finite ack lease, liveness is now
+    // No false eviction of an idle-but-alive node. With a finite ack lease, liveness is now
     // sourced from real Raft activity (GetActiveNodes), not from an apply-derived "last applied"
     // signal. So a follower that is alive (still answering Raft heartbeats) but has applied no
     // schema delta for longer than the lease must STILL be waited on by the ack gate. The proof:
@@ -1251,7 +1259,7 @@ public sealed class TestInProcessSchemaCluster
         // nodes genuinely active — exactly the case the old mechanism would have false-evicted.
         await Task.Delay(lease + TimeSpan.FromMilliseconds(1000)).ConfigureAwait(false);
 
-        // Direct proof of the E2 membership source: despite being schema-idle for longer than the
+        // Direct proof of the membership source: despite being schema-idle for longer than the
         // lease, both followers are still in the leader's Raft active set within the lease window,
         // so the ack gate will keep waiting on them (the apply-derived signal would have dropped
         // them here).
@@ -1301,7 +1309,7 @@ public sealed class TestInProcessSchemaCluster
         ifNotExists: false
     );
 
-    // DS11.2 — Replication failure → typed exception, nothing committed. When the leader cannot
+    // Replication failure → typed exception, nothing committed. When the leader cannot
     // reach a commit quorum (both followers isolated), a DDL must fail with a typed
     // CamusDBException and leave every node's schema version unchanged — the entry is rolled back,
     // never half-applied.
@@ -1349,7 +1357,7 @@ public sealed class TestInProcessSchemaCluster
         }
     }
 
-    // DS11.3 — Node rejoin / catch-up is covered by PausedNodeLagsAndCatchesUpOnResume (pause a
+    // Node rejoin / catch-up is covered by PausedNodeLagsAndCatchesUpOnResume (pause a
     // node, commit DDL with quorum, resume + reopen, assert it catches up). A multi-DDL variant
     // was prototyped but is fixture-flaky for a Raft reason, not a schema one: a fully-isolated
     // node bumps its term while paused (it times out and campaigns even with outbound blocked), so
@@ -1358,26 +1366,26 @@ public sealed class TestInProcessSchemaCluster
     // the replicated checkpoint from the KV-partition leader) is identical regardless of how many
     // DDLs were missed, so the single-DDL test exercises the same path deterministically.
 
-    // DS11.5b — Checkpoint-rollback recovery (F1b) is NOT a cluster test here, by design.
+    // Checkpoint-rollback recovery is NOT a cluster test here, by design.
     //
     // Recovering a delta whose checkpoint persist faulted (and which no other node re-persisted)
     // requires replaying that committed entry from the Raft log via OnLogRestored — which fires
     // only on a node *restart* (StartAsync), not on a database reopen. The in-process fixture
     // shares one long-lived Kahuna node per process and cannot restart it mid-test, so the
     // un-persisted delta cannot be reconstructed through the reopen path (LoadMeta reads only the
-    // replicated KV checkpoint, which never contains that delta). This is the documented F1b
+    // replicated KV checkpoint, which never contains that delta). This is the documented
     // restore-trigger limitation of InProcessSchemaCluster.
     //
-    // The F1b recovery *mechanics* are therefore unit-tested in
+    // The recovery *mechanics* are therefore unit-tested in
     // CamusDB.Tests/CommandsExecutor/TestSchemaRestoreF1b.cs instead:
     //   • ReopenRestoresSchemaVersionFromWal            — close+reopen restores schema from KV.
     //   • PersistFullCheckpointIsIdempotentAndLoadableAfterReopen — PersistFullSchemaCheckpointAsync
-    //     (the F1b re-persist) yields a valid, loadable checkpoint.
+    //     (the re-persist) yields a valid, loadable checkpoint.
     //   • GapInRestoreThrowsTypedCamusDbException        — restore fails loud on a gap (never silent).
 
-    // ── E3: Schema Ack Transport ──────────────────────────────────────────────
+    // ── Schema Ack Transport ────────────────────────────────────────────────
 
-    // E3-1: the two-version gate blocks on a behind follower and releases once the
+    // The two-version gate blocks on a behind follower and releases once the
     // relayed ack from that follower arrives. This verifies that SchemaAckTracker is
     // per-instance (not static) and that InProcessSchemaAckRelay delivers remote acks
     // to the leader's tracker — the full production ack-transport path in-process.
@@ -1390,15 +1398,20 @@ public sealed class TestInProcessSchemaCluster
         await cluster.OpenDatabaseOnAllNodesAsync(db);
         InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
 
+        // Acks are keyed by the database's opaque id, which is what SchemaReplicator.Register
+        // and the production gate both use. Keying by the user-facing name puts the records in a
+        // different bucket from the relayed ones, and the gate then sees only the local node.
+        string dbId = leader.Database!.Id;
+
         // Seed all nodes at version 0 (simulates SchemaReplicator.Register).
         foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
-            n.Kahuna.RecordLocalSchemaApplied(db, 0);
+            n.Kahuna.RecordLocalSchemaApplied(dbId, 0);
 
         // Only the leader acks version 1 — gate must block while followers are still at 0.
-        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+        leader.Kahuna.RecordLocalSchemaApplied(dbId, 1);
 
         bool partialAck = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromMilliseconds(100), liveNodeLease: Timeout.InfiniteTimeSpan, cancellationToken: CancellationToken.None);
+            dbId, 1, TimeSpan.FromMilliseconds(100), cancellationToken: CancellationToken.None);
         Assert.IsFalse(partialAck, "Gate must block when followers have not yet acked");
 
         // Simulate follower applies arriving via the in-process ack relay: each follower
@@ -1410,18 +1423,18 @@ public sealed class TestInProcessSchemaCluster
                 continue;
             // RecordAndPublishSchemaApplied records locally on the follower and fires
             // the relay that calls leader.RecordRemoteSchemaAck.
-            n.Kahuna.RecordAndPublishSchemaApplied(db, 1);
+            n.Kahuna.RecordAndPublishSchemaApplied(dbId, 1);
         }
 
         // Give the fire-and-forget relay tasks time to execute.
         await Task.Delay(TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
 
         bool allAcked = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromSeconds(3), liveNodeLease: Timeout.InfiniteTimeSpan, cancellationToken: CancellationToken.None);
+            dbId, 1, TimeSpan.FromSeconds(3), cancellationToken: CancellationToken.None);
         Assert.IsTrue(allAcked, "Gate must release once all follower acks are relayed to the leader");
     }
 
-    // E3-2: each node's SchemaAckTracker is independent — a follower's per-instance
+    // Each node's SchemaAckTracker is independent — a follower's per-instance
     // tracker is not visible to the leader's tracker without the relay. This test
     // verifies that the per-instance isolation is real (no shared static remains).
     [Test]
@@ -1433,26 +1446,28 @@ public sealed class TestInProcessSchemaCluster
         await cluster.OpenDatabaseOnAllNodesAsync(db);
         InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
 
+        string dbId = leader.Database!.Id;
+
         // Seed v0 on all nodes.
         foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
-            n.Kahuna.RecordLocalSchemaApplied(db, 0);
+            n.Kahuna.RecordLocalSchemaApplied(dbId, 0);
 
         // Ack version 1 ONLY on each follower's own local tracker (not via relay).
         foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
         {
             if (n.Index == leader.Index)
                 continue;
-            n.Kahuna.RecordLocalSchemaApplied(db, 1);
+            n.Kahuna.RecordLocalSchemaApplied(dbId, 1);
         }
 
         // Leader has not acked yet, and follower acks did not reach the leader's tracker.
         bool gateResult = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1, TimeSpan.FromMilliseconds(100), liveNodeLease: Timeout.InfiniteTimeSpan, cancellationToken: CancellationToken.None);
+            dbId, 1, TimeSpan.FromMilliseconds(100), cancellationToken: CancellationToken.None);
         Assert.IsFalse(gateResult,
             "Gate must still block: follower local acks must not bleed into the leader's per-instance tracker");
     }
 
-    // E3-3: gate proceeds on timeout when an ack is dropped (no relay for one follower).
+    // The gate proceeds on timeout when an ack is dropped (no relay for one follower).
     // The lease-based liveness gate (finite SchemaAckLiveNodeLease) is the backstop.
     [Test]
     public async Task AckTransport_GateTimeoutWhenAckDropped()
@@ -1483,7 +1498,7 @@ public sealed class TestInProcessSchemaCluster
             "Gate must proceed once the lease expires for behind followers (dropped ack backstop)");
     }
 
-    // §3.4 / H5 safety — the quorum backstop must NOT fire on the pre-proposal gate
+    // Ack-gate safety — the quorum backstop must NOT fire on the pre-proposal gate
     // (enforceFullConvergence=true path). The pre-proposal gate enforces the two-version
     // invariant: relaxing it with a backstop would let the proposer advance N→N+1 while a
     // minority sits at N−1. This test verifies the API contract: with enforceFullConvergence=true,
@@ -1504,15 +1519,16 @@ public sealed class TestInProcessSchemaCluster
 
         // Leader + one follower ack version 1 (quorum = 2/3); one follower is silent.
         InProcessSchemaCluster.Node silentFollower = cluster.Nodes.First(n => n.Index != leader.Index);
-        leader.Kahuna.RecordLocalSchemaApplied(db, 0);
-        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+        string dbId = leader.Database!.Id;
+        leader.Kahuna.RecordLocalSchemaApplied(dbId, 0);
+        leader.Kahuna.RecordLocalSchemaApplied(dbId, 1);
         foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
         {
             if (n.Index == leader.Index || n.Index == silentFollower.Index)
                 continue;
             // Ack via relay so the leader's tracker sees it.
-            n.Kahuna.RecordLocalSchemaApplied(db, 0);
-            n.Kahuna.RecordAndPublishSchemaApplied(db, 1);
+            n.Kahuna.RecordLocalSchemaApplied(dbId, 0);
+            n.Kahuna.RecordAndPublishSchemaApplied(dbId, 1);
         }
 
         // Give the relay tasks time to land on the leader.
@@ -1521,7 +1537,7 @@ public sealed class TestInProcessSchemaCluster
         // With enforceFullConvergence=true the backstop must be suppressed — quorum (2/3) is
         // satisfied but the silent third follower prevents full convergence → gate must time out.
         bool blocked = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1,
+            dbId, 1,
             timeout: TimeSpan.FromMilliseconds(150),
             enforceFullConvergence: true,
             cancellationToken: CancellationToken.None);
@@ -1531,16 +1547,17 @@ public sealed class TestInProcessSchemaCluster
 
         // Control: without enforceFullConvergence the backstop fires on quorum (2/3) and the gate unblocks.
         bool backstopFired = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1,
+            dbId, 1,
             timeout: TimeSpan.FromSeconds(2),
             enforceFullConvergence: false,
-            cancellationToken: CancellationToken.None);
+            cancellationToken: CancellationToken.None
+        );
 
         Assert.IsTrue(backstopFired,
             "Post-commit gate without enforceFullConvergence must proceed once quorum backstop fires (2/3 acked)");
     }
 
-    // §3.4 — fence: DML on a node whose HeadSchemaVersion is more than one version ahead of
+    // Schema fence: DML on a node whose HeadSchemaVersion is more than one version ahead of
     // its applied SchemaVersion must be rejected with SchemaCatchingUp so the node does not
     // decode rows with a stale schema. HeadSchemaVersion is advanced directly (simulating the
     // window between ObserveSchemaEntryHead and the in-memory apply) to trigger the fence without
@@ -1606,7 +1623,7 @@ public sealed class TestInProcessSchemaCluster
             $"Error code must be SchemaCatchingUp, got: {ex.Code} — {ex.Message}");
     }
 
-    // H5 §3.4a #2 — fault-injected quorum backstop: one follower is isolated at the Raft
+    // Fault-injected quorum backstop: one follower is isolated at the Raft
     // transport layer so it cannot receive schema-log entries and therefore cannot ack.
     // The remaining two nodes (leader + one healthy follower) form both Raft quorum and the
     // schema-ack quorum (⌊3/2⌋+1 = 2). After SchemaAckQuorumBackstopDelay the post-commit
@@ -1674,7 +1691,7 @@ public sealed class TestInProcessSchemaCluster
             $"Expected QuorumBackstop but gate outcome was {leader.Kahuna.LastGateOutcome}; " +
             "the isolated follower should not have acked");
 
-        // Observability (H5 §3.4a #3): the gate must name the lagging follower, not just report
+        // Observability: the gate must name the lagging follower, not just report
         // "one or more nodes", and the always-on quorum-backstop metric must have ticked.
         string pausedEndpoint = pausedFollower.Kahuna.Raft.GetLocalEndpoint();
         CollectionAssert.Contains(leader.Kahuna.LastGateLaggards, pausedEndpoint,
@@ -1721,7 +1738,7 @@ public sealed class TestInProcessSchemaCluster
         }
     }
 
-    // §1 / H5 — dead-node liveness: DDL must proceed permanently after one node is killed,
+    // Dead-node liveness: DDL must proceed permanently after one node is killed,
     // NOT via the quorum backstop (which is post-commit only) but via the pre-proposal gate
     // evicting the dead member from GetLiveSchemaNodes().
     //
@@ -1802,7 +1819,7 @@ public sealed class TestInProcessSchemaCluster
             "Both surviving nodes must have tbl_v2 after the dead-node DDL round");
     }
 
-    // H5 §3.4a #2 — no-quorum timeout: only the leader has acked (1 of 3 nodes);
+    // No-quorum timeout: only the leader has acked (1 of 3 nodes);
     // quorum requires 2, so the backstop fires but HasQuorumAcked returns false →
     // WaitForSchemaAcksAsync returns false and LastGateOutcome is Timeout.
     // This is the path where DDL correctly blocks because quorum was never reached.
@@ -1821,14 +1838,15 @@ public sealed class TestInProcessSchemaCluster
 
         // Only the leader acks version 1 (1/3). The other two have not acked.
         // Quorum = ⌊3/2⌋+1 = 2, so HasQuorumAcked returns false → Timeout outcome.
-        leader.Kahuna.RecordLocalSchemaApplied(db, 0);
-        leader.Kahuna.RecordLocalSchemaApplied(db, 1);
+        string dbId = leader.Database!.Id;
+        leader.Kahuna.RecordLocalSchemaApplied(dbId, 0);
+        leader.Kahuna.RecordLocalSchemaApplied(dbId, 1);
 
         // Wait long enough for the backstop to have fired.
         await Task.Delay(200).ConfigureAwait(false);
 
         bool result = await leader.Kahuna.WaitForSchemaAcksAsync(
-            db, 1,
+            dbId, 1,
             timeout: TimeSpan.FromMilliseconds(400),
             enforceFullConvergence: false,
             cancellationToken: CancellationToken.None);
@@ -1839,17 +1857,17 @@ public sealed class TestInProcessSchemaCluster
             $"Expected Timeout outcome but got {leader.Kahuna.LastGateOutcome}");
     }
 
-    // ── C2: Key-range sharding data path across nodes ─────────────────────────
+    // ── Key-range sharding data path across nodes ───────────────────────────
 
     // Kahuna's RangeMapStore.MetaPartitionId — the partition whose leader is the only node that
-    // can commit a range-descriptor seed. A node that is NOT this leader must forward the seed (K1).
+    // can commit a range-descriptor seed. A node that is NOT this leader must forward the seed.
     private const int MetaPartitionId = 0;
 
-    // C2 (docs/key-range-sharding-spec.md §5) — end-to-end key-range data path across a 3-node
-    // cluster with CAMUS_KEY_RANGE_SHARDING ON. This pins the K1 seed-forwarding gap: with
-    // InitialPartitions >= 2 and the flag on, the FIRST table open + INSERT is issued from a node
-    // that is NOT the meta-partition (P0) leader, so registering the row key space must forward the
-    // range-descriptor seed to the meta leader. Without K1 the first write throws
+    // End-to-end key-range data path across a 3-node cluster with CAMUS_KEY_RANGE_SHARDING ON.
+    // This pins the seed-forwarding gap: with InitialPartitions >= 2 and the flag on, the FIRST
+    // table open + INSERT is issued from a node that is NOT the meta-partition (P0) leader, so
+    // registering the row key space must forward the range-descriptor seed to the meta leader.
+    // Without that forwarding the first write throws
     // "No range descriptor covers key '{tableId}:r/...'"; with the published 0.3.3 fix it succeeds.
     // A spread of rows is then inserted from the non-leader writer and read back, ordered, from a
     // DIFFERENT node — proving cluster-wide routing + the ordered-scan property.
@@ -1873,7 +1891,7 @@ public sealed class TestInProcessSchemaCluster
         await cluster.WaitForSchemaLeaderNodeAsync(db);
 
         // Choose a writer that does NOT lead the meta partition, so opening the table on it
-        // forwards the range-descriptor seed to the meta leader (the K1 path under test).
+        // forwards the range-descriptor seed to the meta leader (the path under test).
         InProcessSchemaCluster.Node writer = await NonMetaLeaderNodeAsync(cluster);
 
         // CREATE TABLE from the writer — forwarded to the schema leader, converges on all nodes.
@@ -1893,8 +1911,8 @@ public sealed class TestInProcessSchemaCluster
         await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
 
         // INSERT a spread of rows from the writer. The first INSERT opens the table on the writer
-        // (non-meta-leader) node → RegisterKeyRangeAsync → K1 seed forwarding to the meta leader.
-        // A "No range descriptor covers key" here is the exact failure C2 pins; with 0.3.3 it must
+        // (non-meta-leader) node → RegisterKeyRangeAsync → seed forwarding to the meta leader.
+        // A "No range descriptor covers key" here is the exact failure this test pins; with 0.3.3 it must
         // not surface (the call would throw a CamusDBException and fail the test).
         for (int i = 0; i < rowCount; i++)
         {
@@ -1934,7 +1952,7 @@ public sealed class TestInProcessSchemaCluster
     }
 
     // Returns a cluster node that is NOT the current leader of the meta partition (P0). Opening a
-    // table on such a node exercises the K1 seed-forwarding path (the seed must be forwarded to the
+    // table on such a node exercises the seed-forwarding path (the seed must be forwarded to the
     // meta leader rather than committed locally).
     private static async Task<InProcessSchemaCluster.Node> NonMetaLeaderNodeAsync(InProcessSchemaCluster cluster)
     {

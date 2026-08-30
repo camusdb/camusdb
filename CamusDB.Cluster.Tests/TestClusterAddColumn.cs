@@ -24,7 +24,7 @@ using CamusDB.Tests.Cluster;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// End-to-end cluster tests for the D3 ADD COLUMN path (ExecuteClusterAddColumnAsync).
+/// End-to-end cluster tests for the cluster ADD COLUMN path (ExecuteClusterAddColumnAsync).
 ///
 /// These tests exercise the full command-executor path — not just the coordinator directly —
 /// so they cover the semaphore wrap, the backfill firing before Public, existing rows
@@ -94,7 +94,7 @@ public sealed class TestClusterAddColumn
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Golden-path D3 test: <c>executor.AlterTable(AddColumn)</c> on a table with existing
+    /// Golden-path test: <c>executor.AlterTable(AddColumn)</c> on a table with existing
     /// rows.  Verifies that:
     /// <list type="bullet">
     ///   <item>All three nodes converge to <c>Public</c> after the coordinator completes.</item>
@@ -176,7 +176,7 @@ public sealed class TestClusterAddColumn
     }
 
     /// <summary>
-    /// Crash-in-window D3 test: simulates a leader crash between the <c>WriteOnly</c> Raft
+    /// Crash-in-window test: simulates a leader crash between the <c>WriteOnly</c> Raft
     /// commit and the backfill transaction commit.  Without the fix the new leader's
     /// <c>ResumeJobsAsync</c> drives <c>WriteOnly → Public</c> without backfilling, leaving
     /// pre-existing rows with <c>TypeNull</c> for the new column.

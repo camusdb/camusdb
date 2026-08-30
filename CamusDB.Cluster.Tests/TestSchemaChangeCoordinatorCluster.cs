@@ -24,7 +24,7 @@ using CamusDB.Tests.Cluster;
 namespace CamusDB.Tests.Catalogs;
 
 /// <summary>
-/// Tests for <see cref="SchemaChangeCoordinator"/> (D1).
+/// Tests for <see cref="SchemaChangeCoordinator"/>.
 ///
 /// Exercises the staged online-schema-change sequence on a 3-node in-process cluster,
 /// verifying that each intermediate version is acked by all nodes before the coordinator

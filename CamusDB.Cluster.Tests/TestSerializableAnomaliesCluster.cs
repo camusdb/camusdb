@@ -446,11 +446,17 @@ public sealed class TestSerializableAnomaliesCluster
         await ReadBalanceAsync(db, executor, txB, aliceId);
         await ReadBalanceAsync(db, executor, txB, bobId);
 
-        // TxA tries to update alice — TxB holds S on alice → AlreadyLocked.
+        // TxA tries to update alice — TxB holds S on alice, so the X upgrade cannot be granted.
+        // Two error codes express that refusal, and which one surfaces depends on whether the
+        // storage layer rejects the lock at once or exhausts its lock-wait deadline first:
+        // TransactionConflict for an immediate rejection, TransactionMustRetry for the deadline.
+        // Both are pre-write and retryable — nothing of TxA reached the table either way — so the
+        // property under test is that the write is refused, not which of the two codes carries it.
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(db, executor, txA, aliceId, -50L));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
-            "Cluster: TxA write-skew attempt must fail with TransactionConflict");
+        Assert.That(ex?.Code, Is.EqualTo(CamusDBErrorCodes.TransactionConflict)
+                                .Or.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+            $"Cluster: TxA write-skew attempt must be refused as a conflict or a lock-wait retry, got {ex?.Code}: {ex?.Message}");
 
         await database.Transactions.RollbackAsync(txA);
 
@@ -494,8 +500,12 @@ public sealed class TestSerializableAnomaliesCluster
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(db, executor, txA, aliceId, 999L));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
-            "Cluster: lost-update write must fail with TransactionConflict");
+        // Same two-code refusal as the write-skew case: an immediate lock rejection reports
+        // TransactionConflict, and the same refusal reported after the storage layer's lock-wait
+        // deadline reports TransactionMustRetry. Both are pre-write, so TxA wrote nothing either way.
+        Assert.That(ex?.Code, Is.EqualTo(CamusDBErrorCodes.TransactionConflict)
+                                .Or.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+            $"Cluster: lost-update write must be refused as a conflict or a lock-wait retry, got {ex?.Code}: {ex?.Message}");
 
         await database.Transactions.RollbackAsync(txA);
 
@@ -632,7 +642,11 @@ public sealed class TestSerializableAnomaliesCluster
                     parameters: null));
                 await database.Transactions.CommitAsync(txA);
             }
-            catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionConflict)
+            // TransactionConflict is an immediate lock rejection; TransactionMustRetry is the same
+            // refusal reported after the storage layer's lock-wait deadline elapses. Both mean the
+            // update never reached the table, which is what "TxA aborted" records here.
+            catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionConflict ||
+                                              ex.Code == CamusDBErrorCodes.TransactionMustRetry)
             {
                 txAAborted = true;
                 await database.Transactions.RollbackAsync(txA);

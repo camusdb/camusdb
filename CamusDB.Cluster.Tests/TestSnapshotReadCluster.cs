@@ -49,7 +49,7 @@ namespace CamusDB.Tests.Cluster;
 ///
 /// Coverage notes (not blockers):
 ///
-/// K3 safe-time: Kahuna's prepared-but-uncommitted safe-time wait is not directly exercised
+/// Safe-time: Kahuna's prepared-but-uncommitted safe-time wait is not directly exercised
 /// here. Every write fully commits before the snapshot is opened; no test races a snapshot read
 /// against a write whose commit timestamp straddles T. Covered by Kahuna's TestSnapshotSafeTime;
 /// a CamusDB-level test would require prepare/commit injection hooks that don't exist today.

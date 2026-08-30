@@ -33,10 +33,10 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Cluster;
 
 /// <summary>
-/// Task 16: Multi-partition RW serializable acceptance tests.
+/// Multi-partition RW serializable acceptance tests.
 ///
 /// <para>
-/// The anomaly suite (Tasks 11 + cluster mirror) runs at <c>partitions: 1</c> — it varies
+/// The single-partition anomaly suite and its cluster mirror run at <c>partitions: 1</c> — it varies
 /// replica count, not partition count. A single-partition setup routes every key to the same
 /// Kahuna Raft group, so all locks and 2PC votes are handled by one partition leader. This
 /// suite proves the same serializability guarantees hold at <c>partitions: 2</c>, where:

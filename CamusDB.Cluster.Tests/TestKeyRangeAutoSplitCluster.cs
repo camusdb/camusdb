@@ -116,7 +116,11 @@ public sealed class TestKeyRangeAutoSplitCluster
         await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
 
         InProcessSchemaCluster.Node writer = cluster.Nodes[0];
-        TableDescriptor table = await writer.Database!.TableDescriptors["readings"];
+
+        // Open through the executor rather than indexing TableDescriptors: that cache holds only
+        // the tables this node has already opened, so a node that has merely applied the CREATE
+        // has no entry yet and the indexer throws KeyNotFoundException.
+        TableDescriptor table = await writer.Executor.OpenTable(new OpenTableTicket(db, "readings"));
         string keySpace = table.Store.RowKeySpace;
 
         Assert.AreEqual("KeyRange", KeyRangeSplitHarness.RoutingModeOn(writer, keySpace),

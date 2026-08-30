@@ -139,14 +139,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 continue;
             }
 
-            // DS10.5: opt-in forwarder that routes a follower's DDL ticket to the current schema
+            // Opt-in forwarder that routes a follower's DDL ticket to the current schema
             // leader node. Shared across nodes (it resolves the leader dynamically); only
             // followers invoke it (the leader handles DDL locally). Off by default so the rest of
             // the suite keeps the "follower DDL throws leader-required" behaviour that
             // RunOnSchemaLeaderAsync relies on.
             ClusterLeaderForwarder? forwarder = wireLeaderForwarder ? new ClusterLeaderForwarder() : null;
 
-            // E3: in-process ack relay — routes each follower's RecordAndPublishSchemaApplied
+            // In-process ack relay — routes each follower's RecordAndPublishSchemaApplied
             // notification to the current leader's RecordRemoteSchemaAck, replacing the
             // co-location side-effect of the old static SchemaAckTracker. Every node gets the
             // relay so the leader's per-instance tracker receives real follower acks.
@@ -261,7 +261,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         }
     }
 
-    // E3: in-process equivalent of the HTTP schema-ack transport. Delivers a follower's applied
+    // In-process equivalent of the HTTP schema-ack transport. Delivers a follower's applied
     // version directly to the target leader node's RecordRemoteSchemaAck, replacing the
     // co-location side effect of the old static SchemaAckTracker. Synchronous delivery ensures
     // the leader's tracker is updated before the next WaitForSchemaAcksAsync poll fires.
@@ -287,7 +287,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         }
     }
 
-    // DS10.5: in-process equivalent of HttpSchemaDdlForwarder — re-runs a forwarded DDL ticket on
+    // In-process equivalent of HttpSchemaDdlForwarder — re-runs a forwarded DDL ticket on
     // the current schema-leader node's executor (the normal leader replicated path) and returns
     // its applied result. No HTTP, no op-id dedup (tests don't retry); the leader executor's own
     // AmISchemaLeader check prevents any re-forward loop.
@@ -500,7 +500,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         node.Database = await node.Executor.OpenDatabase(databaseName).ConfigureAwait(false);
     }
 
-    // ── A3: Fault-injection transport hooks ──────────────────────────────────
+    // ── Fault-injection transport hooks ────────────────────────────────────
 
     /// <summary>
     /// Fully isolates the given node at the Raft transport layer — blocks both its inbound
@@ -809,7 +809,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     /// Wraps <see cref="InMemoryCommunication"/> with per-endpoint delivery filters.
     /// Blocking a recipient drops all Raft messages sent TO that endpoint.
     /// Blocking a sender drops all Raft messages sent FROM that endpoint.
-    /// Used by the A3 fault-injection methods on <see cref="InProcessSchemaCluster"/>.
+    /// Used by the fault-injection methods on <see cref="InProcessSchemaCluster"/>.
     /// </summary>
     internal sealed class FaultInjectingCommunication : ICommunication
     {
