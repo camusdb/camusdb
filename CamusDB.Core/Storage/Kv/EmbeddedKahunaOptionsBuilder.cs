@@ -24,6 +24,13 @@ public static class EmbeddedKahunaOptionsBuilder
     /// a <c>kahuna:</c> config block overrides the backend. Keeps the cluster-specific election timeouts
     /// (2000/4000 ms). A <c>kahuna: { storage: sqlite, wal_storage: sqlite }</c> override restores the
     /// former sqlite behavior for callers that need it.
+    ///
+    /// <para>Enables the single-fsync commit fast path by default, matching both standalone baselines:
+    /// an auto-commit proposal acks once its propose quorum is durable and its commit marker rides the
+    /// next durable flush, removing one serial fsync from the commit critical path without weakening
+    /// durability. Kahuna's own embedded default is off, so the value is stated here rather than
+    /// inherited — a future change to Kahuna's default must not silently move CamusDB's. A
+    /// <c>kahuna.wal_single_fsync_commit</c> config value still overrides it.</para>
     /// </summary>
     public static EmbeddedKahunaOptions ClusterBaseline(ConfigDefinition config, CamusDBOptions options)
     {
@@ -44,6 +51,7 @@ public static class EmbeddedKahunaOptionsBuilder
             WalStorage = "rocksdb",
             WalPath = Path.Combine(dataDir, "wal"),
             WalRevision = "v1",
+            RaftWalSingleFsyncCommit = true,
             StartElectionTimeout = 2000,
             EndElectionTimeout = 4000,
             // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000

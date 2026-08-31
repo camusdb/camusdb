@@ -95,6 +95,36 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void ClusterBaseline_EnablesSingleFsyncCommitByDefault()
+    {
+        // Cluster mode was the only mode still on the two-fsync commit path — both standalone
+        // baselines already opt in. Kahuna's own embedded default is off, so the baseline must state
+        // the value: a future change to Kahuna's default must not silently move CamusDB's.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.RaftWalSingleFsyncCommit, Is.True);
+        Assert.That(built.RaftWalGroupCommitLingerMs, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void WalSingleFsyncCommitOff_OverridesClusterBaseline()
+    {
+        // The documented escape hatch: an explicit kahuna.wal_single_fsync_commit = false restores
+        // the two-fsync commit path over the enabled cluster default.
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { WalSingleFsyncCommit = false },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.RaftWalSingleFsyncCommit, Is.False);
+    }
+
+    [Test]
     public void KahunaStorageRocksdb_OverridesStandaloneBaseline()
     {
         KahunaOptionsConfig kahuna = new() { Storage = "rocksdb" };

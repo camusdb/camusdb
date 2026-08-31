@@ -363,9 +363,10 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   more ready commits into ONE group fsync, so many concurrent commits amortize a single disk barrier
 #   instead of each fsyncing alone. Raises WAL batch density and throughput for a small, bounded latency
 #   floor per commit; data is still fsync'd before a commit is acked. Try 1-2 for write-heavy loads.
-# wal_single_fsync_commit (Kahuna embedded default false): removes one serial fsync from the commit
-#   path — an auto-commit proposal acks once the propose quorum is durable and its commit marker rides
-#   the next durable flush, without weakening durability. Recommended true for standalone write throughput.
+# wal_single_fsync_commit (Kahuna embedded default false; CamusDB baseline true in BOTH modes): removes
+#   one serial fsync from the commit path — an auto-commit proposal acks once the propose quorum is
+#   durable and its commit marker rides the next durable flush, without weakening durability. The
+#   standalone and cluster baselines both enable it; set false to restore the two-fsync commit path.
 #
 # To opt out of the rocksdb default and use sqlite for both KV and WAL:
 # kahuna:
@@ -379,7 +380,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   wal_revision: v1
 #   wal_sync_writes: true
 #   wal_group_commit_linger_ms: 0
-#   wal_single_fsync_commit: false
+#   wal_single_fsync_commit: true   # CamusDB baseline (both modes); false restores the two-fsync commit path
 #   default_transaction_timeout_ms: 5000
 #   max_transaction_timeout_ms: 3600000  # hard cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset => derived from that lifetime so a long serializable txn is not clamped/reaped early
 #   max_concurrent_sessions: 0           # 0 = no admission gate. For CamusDB this is a ceiling on concurrent WORK (a session per transaction), not on connections — see docs/transaction-priority.md
