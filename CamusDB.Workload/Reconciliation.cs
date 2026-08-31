@@ -343,8 +343,10 @@ public static class Reconciliation
             }
             catch (Exception ex)
             {
-                Operations.OperationStatus status = Operations.ErrorClassifier.Classify(ex).Status;
-                bool retryable = status is Operations.OperationStatus.Conflict or Operations.OperationStatus.Transient;
+                // Reconciliation reads are idempotent, so the retry bar is lower here than on the
+                // write path: a transport failure carrying a server code is still worth another
+                // attempt. See ErrorClassifier.IsRetryableForIdempotentRead.
+                bool retryable = Operations.ErrorClassifier.IsRetryableForIdempotentRead(ex);
                 bool budgetSpent = Stopwatch.GetElapsedTime(startedAt) >= budget;
                 if (!retryable || budgetSpent || attempt >= MaxScalarAttempts || ct.IsCancellationRequested)
                     throw;

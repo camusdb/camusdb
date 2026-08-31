@@ -88,13 +88,27 @@ public sealed class ErrorClassifierTests
         Assert.That(status, Is.EqualTo(OperationStatus.Indeterminate));
     }
 
+    /// <summary>
+    /// A transport failure before any commit was submitted is <b>Transient</b>, and above all is not
+    /// <c>Indeterminate</c>: no commit was requested, so nothing can have landed.
+    ///
+    /// <para>This assertion previously expected <c>DomainError</c>. That was the classification of the
+    /// day rather than the property under test — the guard here has always been against sweeping a
+    /// pre-commit failure into the ambiguity band. <c>Transient</c> preserves that and corrects a
+    /// second problem: a domain error is not retryable, so a reconciliation query that hit a
+    /// restarting node gave up after six seconds of a ten-minute budget and reported "could not
+    /// verify". Two runs of a correctness gate were lost to it.</para>
+    /// </summary>
     [Test]
-    public void CodelessTransportFailureBeforeCommitKeepsItsOrdinaryClassification()
+    public void CodelessTransportFailureBeforeCommitIsTransientAndNeverIndeterminate()
     {
         (OperationStatus status, _) = ErrorClassifier.Classify(
             new CamusException("", "Status(StatusCode=\"Unavailable\")"), commitSubmitted: false);
-        Assert.That(status, Is.EqualTo(OperationStatus.DomainError),
+
+        Assert.That(status, Is.Not.EqualTo(OperationStatus.Indeterminate),
             "no commit was requested, so nothing can have landed");
+        Assert.That(status, Is.EqualTo(OperationStatus.Transient),
+            "a transport failure is retryable; a domain error is not, and reconciliation depends on the difference");
     }
 
     [Test]
@@ -166,5 +180,100 @@ public sealed class ErrorClassifierTests
         (OperationStatus status, _) = ErrorClassifier.Classify(
             new CamusException("CADB0000", "Internal server error"), commitSubmitted: false);
         Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
+    }
+}
+
+/// <summary>
+/// Covers transport failures arriving as a <c>CamusException</c> without a server code. These were
+/// classified as domain errors, which made them non-retryable: a post-run reconciliation gave up
+/// after six seconds of a ten-minute budget and reported "could not verify" for a cluster that was
+/// only restarting a killed node. Two runs of a correctness gate were lost that way.
+/// </summary>
+[TestFixture]
+public sealed class TransportFailureClassificationTests
+{
+    [Test]
+    public void ClassifiesASubchannelFailureAsTransient()
+    {
+        var (status, _) = ErrorClassifier.Classify(new CamusException("", "Error connecting to subchannel."));
+
+        Assert.That(status, Is.EqualTo(OperationStatus.Transient));
+    }
+
+    [Test]
+    public void ClassifiesAnUnavailableServerAsTransient()
+    {
+        var (status, _) = ErrorClassifier.Classify(new CamusException("", "Status(StatusCode=Unavailable)"));
+
+        Assert.That(status, Is.EqualTo(OperationStatus.Transient));
+    }
+
+    [Test]
+    public void NeverReinterpretsACodedServerAnswerFromItsMessage()
+    {
+        // A coded exception is the server's verdict. Reading its text would let a domain error whose
+        // message happens to mention a connection be retried as though the server never answered.
+        var (status, code) = ErrorClassifier.Classify(
+            new CamusException("CADB0000", "Error connecting to subchannel."));
+
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
+        Assert.That(code, Is.EqualTo("CADB0000"));
+    }
+
+    [Test]
+    public void LeavesAnOrdinaryUncodedDomainErrorAlone()
+    {
+        var (status, _) = ErrorClassifier.Classify(new CamusException("", "table does not exist"));
+
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
+    }
+}
+
+/// <summary>
+/// Covers the retry bar for idempotent reads. Reconciliation and connection-open use it because
+/// re-running them cannot change the database; the measured write path deliberately does not.
+///
+/// <para>Four runs of a correctness gate were lost before this existed: a query against a node
+/// restarting from an injected kill failed as "Error connecting to subchannel" carrying CADB0000,
+/// which is a domain error and therefore not retryable, so a ten-minute budget was abandoned after
+/// zero seconds and the run reported "could not verify".</para>
+/// </summary>
+[TestFixture]
+public sealed class IdempotentReadRetryTests
+{
+    [Test]
+    public void RetriesATransportFailureThatCarriesAServerCode()
+    {
+        // The exact shape that cost the gate its runs.
+        Assert.That(
+            ErrorClassifier.IsRetryableForIdempotentRead(
+                new CamusException("CADB0000", "Error connecting to subchannel.")),
+            Is.True);
+    }
+
+    [Test]
+    public void StillTreatsThatSameErrorAsADomainErrorForAWrite()
+    {
+        // The permissive bar must not leak into Classify: CADB0000 is also stamped on genuine
+        // unexpected server exceptions, and the ambiguity band depends on it keeping that meaning.
+        var (status, _) = ErrorClassifier.Classify(new CamusException("CADB0000", "Error connecting to subchannel."));
+
+        Assert.That(status, Is.EqualTo(OperationStatus.DomainError));
+    }
+
+    [Test]
+    public void RetriesConflictsAndTransientsAsBefore()
+    {
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentRead(new TimeoutException()), Is.True);
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentRead(new CamusException("CADB0502", "conflict")), Is.True);
+    }
+
+    [Test]
+    public void DoesNotRetryAGenuineDomainError()
+    {
+        // A permanent error must still end the read, or a broken query burns the whole budget.
+        Assert.That(
+            ErrorClassifier.IsRetryableForIdempotentRead(new CamusException("CADB0001", "table does not exist")),
+            Is.False);
     }
 }

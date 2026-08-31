@@ -86,8 +86,10 @@ public sealed class ConnectionSet : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                bool retryable = Operations.ErrorClassifier.Classify(ex).Status
-                    is Operations.OperationStatus.Transient or Operations.OperationStatus.Conflict;
+                // Opening a connection changes nothing, so it retries on the same permissive bar as an
+                // idempotent read: a transport failure that arrives carrying a server code is still
+                // worth another attempt while the budget lasts.
+                bool retryable = Operations.ErrorClassifier.IsRetryableForIdempotentRead(ex);
                 if (!retryable || Stopwatch.GetElapsedTime(startedAt) >= OpenBudget || ct.IsCancellationRequested)
                     throw;
 

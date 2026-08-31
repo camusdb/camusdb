@@ -96,6 +96,67 @@ public static class ErrorClassifier
             || message.Contains("Canceled", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// A client exception that reports a transport failure rather than a server verdict: the
+    /// connection could not be established or was torn down.
+    ///
+    /// <para>Only consulted when the exception carries <b>no server error code</b>, the same guard
+    /// <see cref="CarriesNoVerdict"/> uses. A coded exception is the server's answer and is never
+    /// reinterpreted from its message text.</para>
+    ///
+    /// <para>This matters beyond bookkeeping. A transport failure is retryable and a domain error is
+    /// not, so misclassifying one ended a post-run reconciliation after six seconds of a
+    /// ten-minute budget — reporting "could not verify" for a cluster that was merely restarting a
+    /// killed node. It also inflates the domain-error count under a fault, burying real domain errors
+    /// among tens of thousands of connection failures.</para>
+    /// </summary>
+    private static bool IsTransportFailure(CamusException camus)
+    {
+        if (!string.IsNullOrEmpty(camus.Code))
+            return false;
+
+        string message = camus.Message;
+        return message.Contains("subchannel", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Error connecting", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Whether an <b>idempotent read</b> should be retried after this exception.
+    ///
+    /// <para>Deliberately more permissive than <see cref="Classify"/>, and used only by post-run
+    /// reconciliation. Reconciliation issues <c>SUM</c>, <c>COUNT</c> and a row scan; re-running one
+    /// cannot change the database, so the caution that governs the write path does not apply. The
+    /// measured run keeps <see cref="Classify"/> untouched.</para>
+    ///
+    /// <para>The case that forced this: a query against a node still restarting from an injected kill
+    /// fails as <c>Error connecting to subchannel</c> carrying code <c>CADB0000</c>. That code is a
+    /// domain error for a write and must stay one — the server stamps it on genuine unexpected
+    /// exceptions too — but for a read it is worth another attempt. Classifying it by message alone
+    /// inside <see cref="Classify"/> was tried and rejected: it would reinterpret a coded server
+    /// verdict from its text, and it would disturb the ambiguity band that the loss detection depends
+    /// on.</para>
+    ///
+    /// <para>The retry budget remains the bound. A permanently broken cluster still costs the full
+    /// budget and still reports "could not verify" — honest, where abandoning after zero seconds and
+    /// reporting the same thing was not.</para>
+    /// </summary>
+    public static bool IsRetryableForIdempotentRead(Exception ex)
+    {
+        if (Classify(ex).Status is OperationStatus.Conflict or OperationStatus.Transient)
+            return true;
+
+        // Transport shape, whatever code rode along with it.
+        string message = ex.Message;
+        return message.Contains("subchannel", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Error connecting", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static (OperationStatus Status, string Code) Classify(Exception ex)
     {
         if (ex is CamusException camus)
@@ -103,6 +164,8 @@ public static class ErrorClassifier
             string code = string.IsNullOrEmpty(camus.Code) ? "CADB_UNKNOWN" : camus.Code;
             if (code is LockConflict or MustRetry or LifetimeExceeded || SerializableRetryHelper.IsRetryable(camus))
                 return (OperationStatus.Conflict, code);
+            if (IsTransportFailure(camus))
+                return (OperationStatus.Transient, code);
             return (OperationStatus.DomainError, code);
         }
 
