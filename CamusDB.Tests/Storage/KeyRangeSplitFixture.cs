@@ -109,22 +109,35 @@ public abstract class KeyRangeSplitFixture : BaseTest
 
         KvTransaction tx = await database.Transactions.BeginAsync();
 
-        for (int i = 0; i < count; i++)
+        try
         {
-            string id = ObjectIdGenerator.Generate().ToString();
-            ids.Add(id);
+            for (int i = 0; i < count; i++)
+            {
+                string id = ObjectIdGenerator.Generate().ToString();
+                ids.Add(id);
 
-            await executor.Insert(new InsertTicket(
-                txnState: tx, databaseName: db, tableName: "readings",
-                values: new() { new() {
-                    { "id",     new(ColumnType.Id,        id) },
-                    { "label",  new(ColumnType.String,    $"reading-{startingAt + i}") },
-                    { "amount", new(ColumnType.Integer64, (long)(startingAt + i)) },
-                }}));
+                await executor.Insert(new InsertTicket(
+                    txnState: tx, databaseName: db, tableName: "readings",
+                    values: new() { new() {
+                        { "id",     new(ColumnType.Id,        id) },
+                        { "label",  new(ColumnType.String,    $"reading-{startingAt + i}") },
+                        { "amount", new(ColumnType.Integer64, (long)(startingAt + i)) },
+                    }}));
+            }
+
+            await database.Transactions.CommitAsync(tx);
+            return ids;
         }
-
-        await database.Transactions.CommitAsync(tx);
-        return ids;
+        catch
+        {
+            // Roll the failed batch back before surfacing the error. A batch refused mid-flight —
+            // by a split's quiesce fence, for example — still holds staged intents and key locks;
+            // abandoning it leaves those planted for the reaper to find much later, and every
+            // snapshot read of the range (including the next split's own copy) waits on them
+            // until then. The caller decides whether the failure ends the test.
+            await database.Transactions.RollbackIfNotCompletedAsync(tx);
+            throw;
+        }
     }
 
     // -----------------------------------------------------------------------

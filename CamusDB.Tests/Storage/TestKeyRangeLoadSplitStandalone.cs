@@ -355,9 +355,11 @@ public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixtu
 
         for (long value = 0; elapsed.Elapsed < budget; value++)
         {
+            KvTransaction? tx = null;
+
             try
             {
-                KvTransaction tx = await database.Transactions.BeginAsync();
+                tx = await database.Transactions.BeginAsync();
 
                 await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
                     tx, db, $"UPDATE readings SET amount = {value} WHERE label = 'reading-0'", null));
@@ -367,7 +369,11 @@ public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixtu
             catch (CamusDBException)
             {
                 // The same retry contract as the insert loop: a conflict or a missed deadline is a
-                // skipped iteration, not a failure.
+                // skipped iteration, not a failure — but the dead transaction must still be rolled
+                // back, or its staged intents stay planted and block every later snapshot read of
+                // the range (including the split machinery this fixture exists to exercise).
+                if (tx is not null)
+                    await database.Transactions.RollbackIfNotCompletedAsync(tx);
             }
         }
     }
