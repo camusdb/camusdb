@@ -295,6 +295,32 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
+    /// Commits the transaction against <paramref name="database"/>, or — when the statement produced
+    /// no descriptor — releases the transaction it never used and reports no causal token.
+    ///
+    /// <para>Every autocommit query path calls this instead of <see cref="CommitAsync(DatabaseDescriptor,KvTransaction,CancellationToken)"/>,
+    /// so a server-level statement that reaches the autocommit path cannot crash it. Such a statement
+    /// (<c>SHOW GRANTS</c>, <c>SHOW DATABASES</c> and the rest of
+    /// <see cref="CamusDB.Core.SQLParser.StatementScope.IsServerLevelQuery"/>) opens no database and
+    /// returns a null descriptor; the transport is supposed to keep it off this path entirely, and
+    /// this is the second line of defence for the day one is added to the executor and not to that
+    /// list. The rows are already produced by the time this runs, so degrading to a rollback returns
+    /// the correct answer instead of a <see cref="NullReferenceException"/>.</para>
+    ///
+    /// <para>The rollback is the right release: the transaction is read-only and has written nothing,
+    /// and rolling it back drops any promoted identity and its shared range locks.</para>
+    /// </summary>
+    public async Task<HLCTimestamp> CommitOrReleaseAsync(
+        DatabaseDescriptor? database, KvTransaction tx, CancellationToken cancellationToken = default)
+    {
+        if (database is not null)
+            return await CommitAsync(database, tx, cancellationToken).ConfigureAwait(false);
+
+        await RollbackIfNotCompletedAsync(tx, cancellationToken).ConfigureAwait(false);
+        return default;
+    }
+
+    /// <summary>
     /// Commits a tracked transaction using the manager recorded at <see cref="StartAsync"/> time,
     /// without requiring the caller to supply a <see cref="DatabaseDescriptor"/>. Intended for use
     /// by the gRPC service layer, where the transaction handle carries no database reference.

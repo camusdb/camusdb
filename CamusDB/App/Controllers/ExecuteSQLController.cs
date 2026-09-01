@@ -165,12 +165,9 @@ public sealed class ExecuteSQLController : CommandsController
 
             LogExecutingSqlRedacted(sql);
 
-            // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no
-            // database context or transaction.
-            if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-                                   or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats
-                                   or NodeType.ShowVariables or NodeType.ShowClusterSettings
-                                   or NodeType.ShowSlowQueries)
+            // A server-level query reads the registry, the auth catalog or this process's own
+            // state, so it needs neither a database context nor a transaction.
+            if (StatementScope.IsServerLevelQuery(resolved.RootType))
             {
                 QuerySchemaHolder schemaHolder = new();
                 ExecuteSQLTicket ticket = new(
@@ -250,10 +247,10 @@ public sealed class ExecuteSQLController : CommandsController
                     // serializable retry can restart cleanly (no bytes are written until the
                     // response is serialized after this handler returns, well after commit).
                     List<QueryResultRow> rows = [];
-                    (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
+                    (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row);
-                    causalToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
                     resultColumns = ToColumnDtos(schemaHolder.Schema);
                     resultSchema = schemaHolder.Schema;
@@ -375,12 +372,9 @@ public sealed class ExecuteSQLController : CommandsController
 
         try
         {
-            // SHOW DATABASES / BRANCHES / ANCESTORS operate on the registry and need no database
-            // context or transaction.
-            if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-                                   or NodeType.ShowOrphanDatabases or NodeType.ShowEngineStats
-                                   or NodeType.ShowVariables or NodeType.ShowClusterSettings
-                                   or NodeType.ShowSlowQueries)
+            // A server-level query reads the registry, the auth catalog or this process's own
+            // state, so it needs neither a database context nor a transaction.
+            if (StatementScope.IsServerLevelQuery(resolved.RootType))
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
@@ -437,7 +431,7 @@ public sealed class ExecuteSQLController : CommandsController
                     );
                     (DatabaseDescriptor? db, int count) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                     total = count;
-                    causalToken = await transactions.CommitAsync(db!, tx, CancellationToken.None).ConfigureAwait(false);
+                    causalToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -494,7 +488,9 @@ public sealed class ExecuteSQLController : CommandsController
     /// Runs the query ticket, writes the schema header, then streams each row through
     /// <paramref name="ndjson"/>, flushing to the network periodically so memory stays bounded and the
     /// client receives rows incrementally. Returns the resolved <see cref="DatabaseDescriptor"/> (so an
-    /// autocommit caller can commit) and the streamed row count. The header is written only after
+    /// autocommit caller can commit) and the streamed row count. The descriptor is <c>null</c> for a
+    /// server-level statement, which opens no database; an autocommit caller must therefore commit
+    /// through <c>CommitOrReleaseAsync</c>, never by dereferencing it. The header is written only after
     /// <see cref="CommandExecutor.ExecuteSQLQuery"/> succeeds, so a setup failure leaves the response
     /// unstarted and reportable as a clean HTTP error.
     /// </summary>

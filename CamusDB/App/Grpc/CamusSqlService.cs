@@ -129,10 +129,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             NodeAst ast = executor.ParseSql(sql);
             QueryStreamSink sink = new(responseStream);
 
-            // SHOW DATABASES / BRANCHES / ANCESTORS need no db context or transaction.
-            if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases
-                or NodeType.ShowEngineStats or NodeType.ShowVariables or NodeType.ShowClusterSettings
-                or NodeType.ShowSlowQueries)
+            // A server-level query needs no database context and no transaction.
+            if (StatementScope.IsServerLevelQuery(ast.nodeType))
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: null!,
@@ -178,14 +176,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>
     /// Core query execution, agnostic to the output transport: runs the ticket, writes the schema
     /// through <paramref name="sink"/> (always, even for an empty result), then streams each row.
-    /// Returns the resolved <see cref="DatabaseDescriptor"/> so an autocommit caller can commit.
+    /// Returns the resolved <see cref="DatabaseDescriptor"/> so an autocommit caller can commit, or
+    /// <c>null</c> for a server-level statement, which opens no database — an autocommit caller must
+    /// therefore commit through <c>CommitOrReleaseAsync</c>, never by dereferencing this.
     /// Throws domain exceptions unchanged — the RPC boundary maps them.
     ///
     /// <para>When <paramref name="cacheMeta"/> is supplied the query executor populates it with the cache
     /// verdict as the cursor drains, so it is readable only after this method returns — a caller must
     /// therefore emit it after the last row, never before.</para>
     /// </summary>
-    private async Task<DatabaseDescriptor> StreamQueryAsync(
+    private async Task<DatabaseDescriptor?> StreamQueryAsync(
         ExecuteSQLTicket ticket,
         IQueryRowSink sink,
         CancellationToken ct,
@@ -194,7 +194,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         try
         {
             QuerySchemaHolder schemaHolder = new();
-            (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) =
+            (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
                 await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
 
             await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
@@ -287,8 +287,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     principal: principal,
                     cancellationToken: innerCt
                 );
-                DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, innerCt, cacheMeta).ConfigureAwait(false);
-                commitToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
+                DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, innerCt, cacheMeta).ConfigureAwait(false);
+                commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 return commitToken;
             }
             catch
@@ -808,9 +808,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
 
-        if (resolved.RootType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors or NodeType.ShowOrphanDatabases
-                or NodeType.ShowEngineStats or NodeType.ShowVariables or NodeType.ShowClusterSettings
-                or NodeType.ShowSlowQueries)
+        // A server-level query needs no database context and no transaction.
+        if (StatementScope.IsServerLevelQuery(resolved.RootType))
         {
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: resolved.Database, sql: sql,
@@ -844,8 +843,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     txnState: tx, database: resolved.Database, sql: sql,
                     parameters: resolved.Parameters, principal: principal,
                     cancellationToken: ct);
-                DatabaseDescriptor db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
-                commitToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
+                DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
+                commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {

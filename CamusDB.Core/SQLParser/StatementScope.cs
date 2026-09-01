@@ -85,24 +85,40 @@ public static class StatementScope
         NodeType.AlterMaterializedViewRenameTo;
 
     /// <summary>
+    /// True for the row-returning statements the query executor answers <b>before</b> opening a
+    /// database: they read the cross-database registry, the server-level auth catalog, or this
+    /// process's own state, and they return <c>null</c> where every other query returns a
+    /// <c>DatabaseDescriptor</c>.
+    ///
+    /// <para>A transport must run these with no transaction at all. Sending one down the autocommit
+    /// path fails twice over: with no database named, the begin is refused outright ("DatabaseName is
+    /// required"), and with one named, the begin succeeds and the commit then dereferences the null
+    /// descriptor. Both were live: <c>SHOW GRANTS</c> was absent from the copy of this list that each
+    /// of the four query entry points carried inline, and failed on every path a client could reach
+    /// it through. One list, one place — the same reason
+    /// <see cref="IsDatabaseScopedMutation"/> exists for the no-rows entry points.</para>
+    /// </summary>
+    public static bool IsServerLevelQuery(NodeType nodeType) => nodeType is
+        NodeType.ShowDatabases or
+        NodeType.ShowBranches or
+        NodeType.ShowAncestors or
+        NodeType.ShowOrphanDatabases or
+        // Grants live in the shared auth keyspace, not in any database.
+        NodeType.ShowGrants or
+        // Per-process metrics; there is no database to read them from.
+        NodeType.ShowEngineStats or
+        // Per-process configuration; likewise not read from any database.
+        NodeType.ShowVariables or
+        // This process's own slow query log; not read from any database either.
+        NodeType.ShowSlowQueries or
+        // The cluster-wide settings overlay; not read from any database either.
+        NodeType.ShowClusterSettings;
+
+    /// <summary>
     /// True for statements that are valid without a context database — every database-scoped
-    /// mutation above, plus the server-level introspection statements, which resolve their own
-    /// target (or none at all) rather than reading the current database's schema.
+    /// mutation above, plus the server-level queries, which resolve their own target (or none at
+    /// all) rather than reading the current database's schema.
     /// </summary>
     public static bool AllowsEmptyContextDatabase(NodeType nodeType) =>
-        IsDatabaseScopedMutation(nodeType) ||
-        nodeType is
-            NodeType.ShowDatabases or
-            NodeType.ShowBranches or
-            NodeType.ShowAncestors or
-            NodeType.ShowOrphanDatabases or
-            NodeType.ShowGrants or
-            // Per-process metrics; there is no database to read them from.
-            NodeType.ShowEngineStats or
-            // Per-process configuration; likewise not read from any database.
-            NodeType.ShowVariables or
-            // This process's own slow query log; not read from any database either.
-            NodeType.ShowSlowQueries or
-            // The cluster-wide settings overlay; not read from any database either.
-            NodeType.ShowClusterSettings;
+        IsDatabaseScopedMutation(nodeType) || IsServerLevelQuery(nodeType);
 }

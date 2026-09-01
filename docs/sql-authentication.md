@@ -147,6 +147,11 @@ REVOKE INSERT ON my_database.* FROM myapp;
 SHOW GRANTS FOR myapp;                                                  -- one row per (object, privileges)
 ```
 
+Grants are server-level, so `SHOW GRANTS` needs no database in scope: send it with the database field
+empty, or with any database — the answer is the same either way. `SHOW GRANTS` without `FOR` reports
+the authenticated caller's own grants, so it requires an authenticated session; with authentication
+off, name the user explicitly.
+
 Privileges: `SELECT`, `INSERT`, `UPDATE`, `DELETE` (DML); `CREATE TABLE`, `DROP`, `ALTER`, `INDEX`,
 `CREATE` (DDL); `ALL [PRIVILEGES]` (the union at grant time — it does **not** silently widen when new
 privileges are added later).
@@ -265,3 +270,94 @@ export CAMUSDB_BOOTSTRAP_PASSWORD="$(openssl rand -base64 24)"
 #   POST /login {app, …}                            -> token
 #   POST /execute-sql-query  (Bearer <app token>)   -> enforced per table
 ```
+
+## 8. Migrating an existing unauthenticated installation
+
+You do not need to export, reload, or rewrite anything. Authentication is a startup switch plus a
+one-time bootstrap seed. Your databases, tables, rows, indexes and backups are untouched by it.
+
+The reason an existing install converts cleanly: the user catalog lives in its own reserved
+`_system/auth/` key prefix, separate from every user database. An installation that never had
+authentication on has an **empty** user catalog, which is exactly the state §1 seeds from. At the next
+start the server finds zero users and creates the bootstrap superuser. Nothing pre-existing is
+migrated or rewritten, because nothing pre-existing lives in that prefix.
+
+### 8.1 Single host
+
+1. Set the secrets in the environment (never in `config.yml`):
+
+   ```sh
+   export CAMUSDB_AUTH_ENABLED=true
+   export CAMUSDB_AUTH_TOKEN_KEY="$(openssl rand -hex 32)"
+   export CAMUSDB_BOOTSTRAP_USER=admin
+   export CAMUSDB_BOOTSTRAP_PASSWORD="$(openssl rand -base64 24)"
+   ```
+
+2. Restart the server. `authentication_enabled` is a restart-class setting — there is no `SET` that
+   flips it on a running node, by design (a live flip would change enforcement mid-statement).
+3. Log in at `POST /login` as the bootstrap superuser and keep the token.
+4. Create one user per application, as that superuser:
+   `CREATE USER app IDENTIFIED BY '…';`
+5. Grant each application exactly the privileges it needs:
+   `GRANT SELECT, INSERT ON app_db.* TO app;`
+6. Point each client at `/login`, then have it send `Authorization: Bearer <token>` on every request.
+
+### 8.2 Grant before you cut the clients over
+
+This is the one step that turns a migration into an outage. Before the restart every caller had full
+access; after it, **only the superuser does**. The superuser bypasses every check, but every other
+identity starts with no privileges at all, so an application that worked yesterday gets
+`403 Insufficient privilege` on its first statement.
+
+Do steps 4 and 5 while the old clients are still running unauthenticated, or during a planned window —
+not after you have already switched them.
+
+Two properties of grants matter while you plan the migration:
+
+- A grant binds to the object's **immutable id**, not its name. A table you drop and recreate does not
+  inherit its old grants; a rename keeps them. Re-grant after any recreate.
+- The privilege is checked against **every** table a statement touches. A join, a subquery or a
+  semi-join needs the privilege on each referenced table, not just the one in `FROM`.
+
+Audit what each application actually reads and writes before you write the `GRANT` statements. A
+`SHOW GRANTS FOR <user>` afterwards confirms what landed.
+
+### 8.3 Clusters
+
+- **The token key must be identical on every node.** A node started with a different
+  `CAMUSDB_AUTH_TOKEN_KEY` cannot verify a token another node issued, so requests fail depending on
+  which node they reach.
+- **A rolling restart leaves an unauthenticated window.** Each node enforces its *own* flag; the
+  server does not refuse to join a cluster whose other nodes disagree. Until a node restarts with
+  `CAMUSDB_AUTH_ENABLED=true`, it keeps serving unauthenticated requests on its own ports. Either
+  restart the fleet together, or block client traffic to the not-yet-restarted nodes for the duration.
+  Treat a half-migrated cluster as still unauthenticated.
+- **Concurrent startups are safe.** The bootstrap is a transactional create-if-absent: several nodes
+  starting at once yield one winner, and a node that loses does not overwrite the winner's password.
+- **Set `require_tls_when_auth_enabled` deliberately** (§2, TLS) — a cluster usually sits behind an
+  ingress or a mesh that terminates TLS in front of the node.
+
+### 8.4 Behavior that changes on the day
+
+Expect these, so they do not read as breakage:
+
+- **Operator dashboard.** With authentication off it serves loopback only, because there is no
+  principal to gate its panels on. With authentication on it moves to a session cookie on its own
+  routes, so your access path to it changes. See `docs/operator-dashboard.md`.
+- **Catalog listings become filtered.** `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES` and
+  `SHOW ANCESTORS` list only what the caller can reach. A caller with no grants gets an empty result,
+  not an error — an empty list after the migration means "no grants yet", not "no tables".
+- **`current_user()` and `is_superuser()` stop returning `NULL`.** They return `NULL` only while
+  authentication is off. SQL or a view that tests them for `NULL` changes behavior.
+- **gRPC clients need the same token**, in the `authorization` request metadata, obtained from the
+  `CamusAuth` service. An HTTP-only migration plan misses them.
+
+### 8.5 Rolling back
+
+Unset `CAMUSDB_AUTH_ENABLED` and restart. Enforcement stops everywhere.
+
+The users, password verifiers and grants stay in the catalog — nothing is deleted by the rollback. A
+later re-enable therefore finds a **non-empty** catalog, skips the bootstrap entirely, and keeps the
+accounts you already created. The bootstrap values are ignored from that point on, so a forgotten
+superuser password is *not* recoverable by re-running the bootstrap: fix it with `ALTER USER` from a
+session that still has superuser, before you roll back.
