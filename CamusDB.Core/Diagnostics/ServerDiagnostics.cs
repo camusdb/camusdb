@@ -81,6 +81,12 @@ public static class ServerDiagnostics
         Meter.CreateCounter<long>("camus.query_cache.requests", unit: "{lookup}", description: "Query-result-cache lookups by result.");
 
     // ── Transactions ────────────────────────────────────────────────────────────
+    // Both instruments below are recorded from the one place that owns the transaction manager's
+    // tracking map, so a transaction is counted once on entry and once on exit and the gauge equals
+    // the map's size. Two consequences worth knowing when reading them: a read-only snapshot that
+    // opens no server-side transaction (the zero-identity fast path) is not tracked and so does not
+    // appear, and a transaction that leaks in the map shows up as a gauge that does not return to
+    // zero — which is the truth, not an instrumentation defect.
     private static readonly Counter<long> TransactionCount =
         Meter.CreateCounter<long>("camus.transaction.count", unit: "{transaction}", description: "Transaction lifecycle events.");
 

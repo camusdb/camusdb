@@ -224,10 +224,12 @@ public sealed class KvTransactionsManager : IDisposable
             }
         }
 
+        // Through Untrack, not a bare TryRemove: every exit from the tracking map must go through the
+        // one place that keeps the active-transaction gauge equal to the map.
         foreach (KeyValuePair<Kommander.Time.HLCTimestamp, KvTransaction> entry in activeTransactions)
         {
             if (entry.Value.Status != KvTransactionStatus.Active)
-                activeTransactions.TryRemove(entry);
+                Untrack(entry.Value);
         }
     }
 
@@ -260,14 +262,57 @@ public sealed class KvTransactionsManager : IDisposable
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Transaction tracking identity {tx.ClientId} is already registered to a live transaction");
+
+        // Lifecycle accounting rides the tracking map, and only the tracking map. TryAdd above
+        // succeeded exactly once for this transaction and the pair-remove in Untrack succeeds exactly
+        // once, so the counter cannot double-count a retried commit and the up/down gauge cannot
+        // drift: its value is the size of activeTransactions by construction. Recording at the ten
+        // separate status assignments instead would have to be right at every one of them, and a
+        // gauge that is wrong on one path reads as a leak forever.
+        Diagnostics.ServerDiagnostics.RecordTransaction(
+            Diagnostics.ServerDiagnostics.Tags.Operation.Begin,
+            Diagnostics.ServerDiagnostics.Tags.Outcome.Ok);
+
+        Diagnostics.ServerDiagnostics.AddActiveTransaction(ModeTag(tx), 1);
     }
 
     private void Untrack(KvTransaction tx)
     {
         // Pair-remove: only removes the entry when it still maps to this exact transaction, so a
         // later transaction reusing the same client id is never untracked by a stale finalize.
-        activeTransactions.TryRemove(new KeyValuePair<Kommander.Time.HLCTimestamp, KvTransaction>(tx.ClientId, tx));
+        if (!activeTransactions.TryRemove(new KeyValuePair<Kommander.Time.HLCTimestamp, KvTransaction>(tx.ClientId, tx)))
+            return;
+
+        Diagnostics.ServerDiagnostics.AddActiveTransaction(ModeTag(tx), -1);
+
+        // The terminal status is assigned immediately before every untrack, so it is the outcome.
+        // A transaction that leaves the map without one was dropped rather than finalized (only
+        // Dispose does that, draining a manager that still holds live transactions), which is a
+        // cancellation from the caller's point of view — recorded rather than silently omitted, so
+        // begin and terminal counts stay balanced.
+        (string operation, string outcome) = tx.Status switch
+        {
+            KvTransactionStatus.Committed =>
+                (Diagnostics.ServerDiagnostics.Tags.Operation.Commit, Diagnostics.ServerDiagnostics.Tags.Outcome.Ok),
+            KvTransactionStatus.RolledBack =>
+                (Diagnostics.ServerDiagnostics.Tags.Operation.Rollback, Diagnostics.ServerDiagnostics.Tags.Outcome.Ok),
+            _ =>
+                (Diagnostics.ServerDiagnostics.Tags.Operation.Rollback, Diagnostics.ServerDiagnostics.Tags.Outcome.Canceled),
+        };
+
+        Diagnostics.ServerDiagnostics.RecordTransaction(operation, outcome);
     }
+
+    /// <summary>
+    /// The mode tag for the active-transaction gauge. Read from <see cref="KvTransaction.IsReadOnly"/>
+    /// because it is fixed at construction: the increment and the decrement must carry the same tag or
+    /// the gauge splits into two series that each drift, and a transaction's declared mode can be
+    /// changed by <c>SET TRANSACTION</c> between the two.
+    /// </summary>
+    private static string ModeTag(KvTransaction tx)
+        => tx.IsReadOnly
+            ? Diagnostics.ServerDiagnostics.Tags.TransactionMode.ReadOnly
+            : Diagnostics.ServerDiagnostics.Tags.TransactionMode.ReadWrite;
 
     /// <summary>
     /// Starts a new Kahuna transaction and returns a <see cref="KvTransaction"/> that
@@ -1514,6 +1559,12 @@ public sealed class KvTransactionsManager : IDisposable
 
     public void Dispose()
     {
+        // Drain through Untrack rather than clearing: a disposed manager has no active transactions,
+        // and a gauge left standing at whatever was live when it died reads as a leak for the rest of
+        // the process's life.
+        foreach (KvTransaction tx in activeTransactions.Values)
+            Untrack(tx);
+
         activeTransactions.Clear();
 
         // Parked key mirrors die with the manager. Their keys keep the storage node's own expiry as
