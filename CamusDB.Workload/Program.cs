@@ -467,6 +467,39 @@ public static class Program
                 ct).ConfigureAwait(false);
         }
 
+        // What the cluster says it is. Captured after the measured window so the recorded placement is
+        // the one the run left behind, and never allowed to fail the run: this is provenance for a
+        // measurement that already happened. It comes before the bottleneck report because that report
+        // attributes each partition's work to the node leading it, and the placement is where
+        // leadership is known.
+        Cluster.ClusterFacts? clusterFacts = null;
+        if (nodeEndpoints.Count > 0)
+        {
+            try
+            {
+                Cluster.ClusterProbe probe = new(nodeEndpoints, o.Database);
+                await using CamusConnection rangeReader = await OpenSingleAsync(o, ct).ConfigureAwait(false);
+                Cluster.ClusterFacts facts = await probe.CaptureAsync(rangeReader, dataset.TableNames, ct).ConfigureAwait(false);
+                clusterFacts = facts;
+
+                await File.WriteAllTextAsync(
+                    Path.Combine(o.Output, "cluster-facts.json"), Cluster.ClusterProbe.Serialize(facts), ct).ConfigureAwait(false);
+
+                Console.WriteLine($"  Cluster fingerprint : {facts.DurabilityFingerprint}");
+                foreach (Cluster.NodeFacts node in facts.Nodes)
+                {
+                    foreach (string error in node.Errors)
+                        Console.Error.WriteLine($"  ⚠ node '{node.Node}' could not answer {error}");
+                }
+                foreach (string error in facts.Errors)
+                    Console.Error.WriteLine($"  ⚠ {error}");
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                Console.Error.WriteLine($"  ⚠ could not capture cluster facts: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         // Server-side evidence, when the run collected it. Written before reconciliation for the same
         // reason the measured artifacts are: a cluster that is still settling must not cost the run the
         // metrics it already gathered.
@@ -489,36 +522,8 @@ public static class Program
             }
 
             await WriteBottleneckReportAsync(
-                o.Output, manifest, summary, sampler, metrics, measure, clientResourceSummary, ct).ConfigureAwait(false);
-        }
-
-        // What the cluster says it is. Captured after the measured window so the recorded placement is
-        // the one the run left behind, and never allowed to fail the run: this is provenance for a
-        // measurement that already happened.
-        if (nodeEndpoints.Count > 0)
-        {
-            try
-            {
-                Cluster.ClusterProbe probe = new(nodeEndpoints, o.Database);
-                await using CamusConnection rangeReader = await OpenSingleAsync(o, ct).ConfigureAwait(false);
-                Cluster.ClusterFacts facts = await probe.CaptureAsync(rangeReader, dataset.TableNames, ct).ConfigureAwait(false);
-
-                await File.WriteAllTextAsync(
-                    Path.Combine(o.Output, "cluster-facts.json"), Cluster.ClusterProbe.Serialize(facts), ct).ConfigureAwait(false);
-
-                Console.WriteLine($"  Cluster fingerprint : {facts.DurabilityFingerprint}");
-                foreach (Cluster.NodeFacts node in facts.Nodes)
-                {
-                    foreach (string error in node.Errors)
-                        Console.Error.WriteLine($"  ⚠ node '{node.Node}' could not answer {error}");
-                }
-                foreach (string error in facts.Errors)
-                    Console.Error.WriteLine($"  ⚠ {error}");
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                Console.Error.WriteLine($"  ⚠ could not capture cluster facts: {ex.GetType().Name}: {ex.Message}");
-            }
+                o.Output, manifest, summary, sampler, metrics, measure, clientResourceSummary, clusterFacts, ct)
+                .ConfigureAwait(false);
         }
 
         // Reconciliation (outside the measured window). Never crashes the run: neither a query that
@@ -567,7 +572,8 @@ public static class Program
     /// </summary>
     private static async Task WriteBottleneckReportAsync(
         string output, RunManifest manifest, RunSummary summary, Reporting.MetricsSampler sampler,
-        RunMetrics metrics, TimeSpan measure, ClientResources? clientResources, CancellationToken ct)
+        RunMetrics metrics, TimeSpan measure, ClientResources? clientResources,
+        Cluster.ClusterFacts? facts, CancellationToken ct)
     {
         try
         {
@@ -586,7 +592,7 @@ public static class Program
             string report = Reporting.BottleneckReport.Build(
                 manifest, summary, scrape, series,
                 Reporting.MetricsWindow.Measured(metrics.MeasureStartUtc, measure.TotalSeconds),
-                clientResources);
+                clientResources, facts);
 
             await File.WriteAllTextAsync(Path.Combine(output, "bottleneck-report.md"), report, ct).ConfigureAwait(false);
         }
@@ -737,7 +743,15 @@ public static class Program
         // covers every sample collected, which includes warm-up and drain — so it says which it used.
         Reporting.MetricsWindow window = ReadMeasuredWindow(o.Output) ?? Reporting.MetricsWindow.All;
 
-        string report = Reporting.BottleneckReport.Build(manifest, summary, scrape, series, window);
+        // Placement comes from the run's own capture. Rebuilding a report without it still works; the
+        // partitions simply carry no leader and no tables, which the section says out loud.
+        string factsPath = Path.Combine(o.Output, "cluster-facts.json");
+        Cluster.ClusterFacts? facts = File.Exists(factsPath)
+            ? Cluster.ClusterProbe.Deserialize(await File.ReadAllTextAsync(factsPath, ct).ConfigureAwait(false))
+            : null;
+
+        string report = Reporting.BottleneckReport.Build(
+            manifest, summary, scrape, series, window, clientResources: null, facts: facts);
         string reportPath = Path.Combine(o.Output, "bottleneck-report.md");
         await File.WriteAllTextAsync(reportPath, report, ct).ConfigureAwait(false);
         Console.WriteLine($"Wrote {reportPath}");

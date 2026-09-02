@@ -233,4 +233,67 @@ public sealed class NodeMetricsTests
     [Test]
     public void GrowthVerdict_CallsAnIdleSeriesIdle()
         => Assert.That(BottleneckReport.GrowthVerdict(first: 0, last: 0, max: 0), Is.EqualTo("idle"));
+
+    // ── Label matching and per-label queries ──────────────────────────────────
+
+    [Test]
+    public void LabelValue_ReadsOneLabelExactly()
+    {
+        const string labels = "operation_class=Client;otel_scope_name=Kommander;partition_id=10";
+
+        Assert.That(MetricsCsv.LabelValue(labels, "partition_id"), Is.EqualTo("10"));
+        Assert.That(MetricsCsv.LabelValue(labels, "operation_class"), Is.EqualTo("Client"));
+        Assert.That(MetricsCsv.LabelValue(labels, "absent"), Is.Null);
+    }
+
+    /// <summary>
+    /// The reason exact matching exists at all: a substring search for <c>partition_id=1</c> hits
+    /// <c>partition_id=10</c>, which would fold a busy partition's samples into a quiet one's and
+    /// report a hotspot that is an artifact of string matching.
+    /// </summary>
+    [Test]
+    public void HasLabel_DoesNotMatchALongerValueByPrefix()
+    {
+        Assert.That(MetricsCsv.HasLabel("partition_id=10", "partition_id", "1"), Is.False);
+        Assert.That(MetricsCsv.HasLabel("partition_id=10", "partition_id", "10"), Is.True);
+    }
+
+    [Test]
+    public void HasLabel_DoesNotMatchALongerKeyByPrefix()
+    {
+        Assert.That(MetricsCsv.HasLabel("sub_partition_id=1", "partition_id", "1"), Is.False);
+    }
+
+    [Test]
+    public void LabelValues_DiscoversThePartitionsSeenAndOrdersThemNumerically()
+    {
+        NodeMetricsSeries series = NodeMetricsSeries.From(new[]
+        {
+            new MetricPoint(At(0), "camus1", "raft_executor_operations_total", "partition_id=10", 1),
+            new MetricPoint(At(0), "camus1", "raft_executor_operations_total", "partition_id=2", 1),
+            new MetricPoint(At(0), "camus1", "raft_executor_operations_total", "partition_id=1", 1),
+        });
+
+        Assert.That(series.LabelValues("raft_executor_operations", "partition_id", MetricsWindow.All),
+                    Is.EqualTo(new[] { "1", "2", "10" }));
+    }
+
+    [Test]
+    public void DeltaWhere_CountsOnlyTheMatchingLabelSet()
+    {
+        NodeMetricsSeries series = NodeMetricsSeries.From(new[]
+        {
+            new MetricPoint(At(0), "camus1", "raft_executor_operations_total", "operation_class=Client;partition_id=1", 100),
+            new MetricPoint(At(60), "camus1", "raft_executor_operations_total", "operation_class=Client;partition_id=1", 400),
+            new MetricPoint(At(0), "camus1", "raft_executor_operations_total", "operation_class=Control;partition_id=1", 0),
+            new MetricPoint(At(60), "camus1", "raft_executor_operations_total", "operation_class=Control;partition_id=1", 9_000),
+            new MetricPoint(At(0), "camus1", "raft_executor_operations_total", "operation_class=Client;partition_id=10", 0),
+            new MetricPoint(At(60), "camus1", "raft_executor_operations_total", "operation_class=Client;partition_id=10", 5_000),
+        });
+
+        double? delta = series.DeltaWhere("raft_executor_operations", MetricsWindow.All, "camus1",
+            ("partition_id", "1"), ("operation_class", "Client"));
+
+        Assert.That(delta, Is.EqualTo(300));
+    }
 }

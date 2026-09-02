@@ -58,8 +58,11 @@ public sealed class ClusterProbe
         using HttpClient http = new() { Timeout = _timeout };
 
         List<NodeFacts> nodes = new();
+        Dictionary<string, PlacementView> placements = new(StringComparer.Ordinal);
         foreach (NodeTarget node in _nodes)
-            nodes.Add(await CaptureNodeAsync(http, node, ct).ConfigureAwait(false));
+        {
+            nodes.Add(await CaptureNodeAsync(http, node, placements, ct).ConfigureAwait(false));
+        }
 
         List<string> errors = new();
         List<IReadOnlyDictionary<string, string>> ranges = new();
@@ -88,12 +91,74 @@ public sealed class ClusterProbe
             Nodes: nodes,
             Ranges: ranges,
             Errors: errors,
-            DurabilityFingerprint: Fingerprint(nodes));
+            DurabilityFingerprint: Fingerprint(nodes))
+        {
+            Partitions = MergePlacement(placements),
+        };
     }
 
-    private async Task<NodeFacts> CaptureNodeAsync(HttpClient http, NodeTarget node, CancellationToken ct)
+    /// <summary>
+    /// Folds every node's answer into one partition map with leadership resolved to node names.
+    ///
+    /// <para>The committed map itself is cluster-wide, so any answering node supplies a partition's
+    /// state, generation, replication factor and replica set; the first answer wins and later ones
+    /// only contribute leadership. Leadership is the part that is local belief, and it is taken from
+    /// whichever nodes claimed it — none, one, or, during an election, more than one.</para>
+    /// </summary>
+    private static IReadOnlyList<PartitionFacts> MergePlacement(IReadOnlyDictionary<string, PlacementView> placements)
+    {
+        SortedDictionary<int, PartitionFacts> merged = new();
+        SortedDictionary<int, List<string>> claimants = new();
+
+        foreach ((string node, PlacementView view) in placements.OrderBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            foreach (PartitionView partition in view.Partitions)
+            {
+                if (!merged.ContainsKey(partition.PartitionId))
+                {
+                    merged[partition.PartitionId] = new PartitionFacts(
+                        PartitionId: partition.PartitionId,
+                        State: partition.State,
+                        Generation: partition.Generation,
+                        EffectiveReplicationFactor: partition.EffectiveReplicationFactor,
+                        Leader: null,
+                        Replicas: partition.Replicas);
+                }
+
+                if (!partition.LeaderLocal)
+                    continue;
+
+                if (!claimants.TryGetValue(partition.PartitionId, out List<string>? who))
+                    claimants[partition.PartitionId] = who = new List<string>();
+                who.Add(node);
+            }
+        }
+
+        List<PartitionFacts> result = new();
+        foreach ((int id, PartitionFacts partition) in merged)
+        {
+            string? leader = claimants.TryGetValue(id, out List<string>? who) ? string.Join(" + ", who) : null;
+            result.Add(partition with { Leader = leader });
+        }
+        return result;
+    }
+
+    /// <summary>What one node answered at <c>/v1/cluster/placement</c>, reduced to what a report uses.</summary>
+    private sealed record PlacementView(IReadOnlyList<PartitionView> Partitions);
+
+    private sealed record PartitionView(
+        int PartitionId,
+        string State,
+        long Generation,
+        int EffectiveReplicationFactor,
+        bool LeaderLocal,
+        IReadOnlyList<string> Replicas);
+
+    private async Task<NodeFacts> CaptureNodeAsync(
+        HttpClient http, NodeTarget node, IDictionary<string, PlacementView> placements, CancellationToken ct)
     {
         List<string> errors = new();
+        List<int> leads = new();
         string? server = null;
         string? runtime = null;
         List<NodeComponent> components = new();
@@ -159,6 +224,64 @@ public sealed class ClusterProbe
             errors.Add($"/v1/engine-settings: {ex.GetType().Name}: {ex.Message}");
         }
 
+        // Placement, which is where a hot partition becomes attributable. The committed map is
+        // cluster-wide, but leadership is local belief, so this has to be asked of every node: each
+        // partition has exactly one leader, and collecting what every node claims is the only way to
+        // see the whole distribution.
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(
+                await http.GetStringAsync(new Uri(node.MetricsUrl, "/v1/cluster/placement"), ct).ConfigureAwait(false));
+
+            List<PartitionView> partitions = new();
+            if (doc.RootElement.TryGetProperty("partitions", out JsonElement list) && list.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in list.EnumerateArray())
+                {
+                    if (!item.TryGetProperty("partitionId", out JsonElement idElement) ||
+                        !idElement.TryGetInt32(out int partitionId))
+                    {
+                        continue;
+                    }
+
+                    bool leaderLocal = item.TryGetProperty("leaderLocal", out JsonElement leaderElement) &&
+                                       leaderElement.ValueKind == JsonValueKind.True;
+
+                    List<string> replicas = new();
+                    if (item.TryGetProperty("replicas", out JsonElement replicaList) &&
+                        replicaList.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement replica in replicaList.EnumerateArray())
+                        {
+                            string? endpoint = replica.TryGetProperty("endpoint", out JsonElement e) ? e.GetString() : null;
+                            string? role = replica.TryGetProperty("role", out JsonElement r) ? r.GetString() : null;
+                            if (endpoint is not null)
+                                replicas.Add(role is null ? endpoint : $"{endpoint} ({role})");
+                        }
+                    }
+
+                    partitions.Add(new PartitionView(
+                        PartitionId: partitionId,
+                        State: item.TryGetProperty("state", out JsonElement s) ? s.GetString() ?? "" : "",
+                        Generation: item.TryGetProperty("generation", out JsonElement g) && g.TryGetInt64(out long gen) ? gen : 0,
+                        EffectiveReplicationFactor: item.TryGetProperty("effectiveReplicationFactor", out JsonElement f) &&
+                                                    f.TryGetInt32(out int rf) ? rf : 0,
+                        LeaderLocal: leaderLocal,
+                        Replicas: replicas));
+
+                    if (leaderLocal)
+                        leads.Add(partitionId);
+                }
+            }
+
+            leads.Sort();
+            placements[node.Name] = new PlacementView(partitions);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            errors.Add($"/v1/cluster/placement: {ex.GetType().Name}: {ex.Message}");
+        }
+
         // SHOW VARIABLES is node-local by design: it reports the configuration the engine that answered
         // resolved, which is exactly why it has to be asked of each node rather than of the pool.
         try
@@ -188,7 +311,10 @@ public sealed class ClusterProbe
             Ready: ready,
             Variables: variables,
             EngineSettings: engineSettings,
-            Errors: errors);
+            Errors: errors)
+        {
+            LeadsPartitions = leads,
+        };
     }
 
     /// <summary>Runs a statement and materializes its rows as string maps, which is all a manifest needs.</summary>
