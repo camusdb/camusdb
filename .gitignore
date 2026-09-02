@@ -36,3 +36,5 @@ artifacts/
 bench/node_modules/
 CamusDB/Data/
 CamusDB.Cluster.Tests/TestResults
+CamusDB.Workload.Tests/TestResults
+CamusDB.Grpc.Client.Tests/TestResults/

@@ -168,10 +168,82 @@ public sealed class NodeMetricsSeries
     }
 
     /// <summary>
+    /// The distinct values one label key takes on a metric inside the window, ordered numerically when
+    /// they are all numbers and alphabetically otherwise.
+    ///
+    /// <para>A report cannot know a cluster's partition ids in advance — they depend on the configured
+    /// partition count, and a split creates new ones mid-run. Asking the collected data which ones it
+    /// saw is the only way a per-partition table stays correct across topologies.</para>
+    /// </summary>
+    public IReadOnlyList<string> LabelValues(string metric, string labelKey, MetricsWindow window)
+    {
+        string? resolved = Resolve(metric);
+        if (resolved is null)
+            return [];
+
+        HashSet<string> values = new(StringComparer.Ordinal);
+        foreach (MetricPoint p in _points)
+        {
+            if (!string.Equals(p.Metric, resolved, StringComparison.Ordinal))
+                continue;
+            if (!window.Contains(p.UnixMs))
+                continue;
+            if (MetricsCsv.LabelValue(p.Labels, labelKey) is string value)
+                values.Add(value);
+        }
+
+        List<string> ordered = values.ToList();
+        if (ordered.All(v => long.TryParse(v, out _)))
+            ordered.Sort((a, b) => long.Parse(a).CompareTo(long.Parse(b)));
+        else
+            ordered.Sort(StringComparer.Ordinal);
+        return ordered;
+    }
+
+    /// <summary>
+    /// The increase of a counter over the window, restricted to samples whose labels match every
+    /// <paramref name="labels"/> pair exactly. Prefer this over <c>labelContains</c> whenever a label
+    /// value can be a prefix of another — a partition id is the standard case.
+    /// </summary>
+    public double? DeltaWhere(
+        string metric, MetricsWindow window, string? node, params (string Key, string Value)[] labels)
+    {
+        List<(long At, double Value)> series = Reduce(metric, window, node, Matches);
+        if (series.Count == 0)
+            return null;
+        if (series.Count == 1)
+            return 0;
+
+        double total = 0;
+        for (int i = 1; i < series.Count; i++)
+        {
+            double step = series[i].Value - series[i - 1].Value;
+            if (step > 0)
+                total += step;
+        }
+        return total;
+
+        bool Matches(string candidate)
+        {
+            foreach ((string key, string value) in labels)
+            {
+                if (!MetricsCsv.HasLabel(candidate, key, value))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Collapses the matching samples to one value per instant, ordered by instant. Values that share
     /// an instant are summed across label sets.
     /// </summary>
     private List<(long At, double Value)> Reduce(string metric, MetricsWindow window, string? node, string? labelContains)
+        => Reduce(metric, window, node,
+                  labelContains is null ? null : labels => labels.Contains(labelContains, StringComparison.Ordinal));
+
+    private List<(long At, double Value)> Reduce(
+        string metric, MetricsWindow window, string? node, Func<string, bool>? labelFilter)
     {
         string? resolved = Resolve(metric);
         if (resolved is null)
@@ -184,7 +256,7 @@ public sealed class NodeMetricsSeries
                 continue;
             if (node is not null && !string.Equals(p.Node, node, StringComparison.Ordinal))
                 continue;
-            if (labelContains is not null && !p.Labels.Contains(labelContains, StringComparison.Ordinal))
+            if (labelFilter is not null && !labelFilter(p.Labels))
                 continue;
             if (!window.Contains(p.UnixMs))
                 continue;

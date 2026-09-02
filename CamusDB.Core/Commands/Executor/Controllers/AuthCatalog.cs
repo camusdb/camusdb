@@ -116,11 +116,14 @@ public sealed class AuthCatalog
     // Startup load
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Loads the auth catalog into memory at open time, waiting out a cluster that is still
+    /// assembling. See <see cref="StartupLoadRetry"/> for why the budget, rather than the exception
+    /// type, decides what is worth retrying.
+    /// </summary>
     private async Task LoadAsync()
     {
         Stopwatch sw = Stopwatch.StartNew();
-        const int retryDelayMs = 200;
-        const int maxWaitMs = 30_000;
 
         while (true)
         {
@@ -130,9 +133,9 @@ public sealed class AuthCatalog
                 Volatile.Write(ref loadedGeneration, await ReadGenerationAsync().ConfigureAwait(false));
                 return;
             }
-            catch (RaftException) when (sw.ElapsedMilliseconds < maxWaitMs)
+            catch (Exception ex) when (StartupLoadRetry.ShouldRetry(ex, sw.ElapsedMilliseconds))
             {
-                await Task.Delay(retryDelayMs).ConfigureAwait(false);
+                await Task.Delay(StartupLoadRetry.RetryDelayMs).ConfigureAwait(false);
             }
         }
     }

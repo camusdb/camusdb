@@ -7,6 +7,7 @@
 
 using System.Globalization;
 using System.Text;
+using CamusDB.Workload.Cluster;
 using CamusDB.Workload.Metrics;
 using CamusDB.Workload.Results;
 
@@ -36,7 +37,8 @@ public static class BottleneckReport
         PrometheusScrape? scrape,
         NodeMetricsSeries? series = null,
         MetricsWindow? window = null,
-        ClientResources? clientResources = null)
+        ClientResources? clientResources = null,
+        ClusterFacts? facts = null)
     {
         MetricsWindow w = window ?? MetricsWindow.All;
         bool hasSeries = series is not null && !series.IsEmpty;
@@ -77,7 +79,10 @@ public static class BottleneckReport
             AppendClientHeadroom(sb, clientResources);
 
         if (hasSeries)
+        {
             AppendWorkDistribution(sb, manifest, series!, w);
+            AppendConcentration(sb, series!, facts, w);
+        }
 
         // ── Server stage latency ────────────────────────────────────────────────
         double? handler = scrape?.HistogramMean("camus_request_duration_milliseconds");
@@ -304,6 +309,257 @@ public static class BottleneckReport
             sb.AppendLine("> run measures one gateway's capacity, not the cluster's.");
         }
         sb.AppendLine();
+    }
+
+
+    /// <summary>
+    /// Where the work concentrated: the four shares a scaling claim rests on, each a delta over the
+    /// measured window rather than an impression.
+    ///
+    /// <para>Hash routing places one table's key space on one partition, so raising the partition
+    /// count cannot spread a single hot table. That makes the partition count useless as evidence of
+    /// scaling and makes these shares the only honest substitute: a cluster is using its nodes when
+    /// the busiest gateway, partition, leader and disk each carry near an even share, and it is not
+    /// when any one of them carries most of the work — however many partitions exist.</para>
+    ///
+    /// <para>Partition work counts the <c>Client</c> and <c>Replication</c> executor classes and drops
+    /// <c>Control</c> and <c>Maintenance</c>. Heartbeats and timers accrue on a partition at a fixed
+    /// rate whether or not it carries load — a few thousand per window on every partition in a
+    /// three-node cluster — so including them would flatten every share toward evenness and hide the
+    /// hotspot this section exists to find.</para>
+    ///
+    /// <para>Leadership comes from the placement capture, not from the metrics. A leader could be
+    /// guessed from which node logged the most replication traffic for a partition, but that is an
+    /// inference about Kommander's internals; every node answers <c>/v1/cluster/placement</c> with the
+    /// partitions it believes it leads, and the plan requires a hotspot to be a measured number.</para>
+    /// </summary>
+    private static void AppendConcentration(
+        StringBuilder sb, NodeMetricsSeries series, ClusterFacts? facts, MetricsWindow w)
+    {
+        sb.AppendLine("## Concentration — the four shares (measured window)").AppendLine();
+
+        // ── Gateway and disk: per node ──────────────────────────────────────────
+        IReadOnlyList<(string Node, double Delta)> requests = series.PerNodeDelta("camus_request_count", w);
+        IReadOnlyList<(string Node, double Delta)> walOps = series.PerNodeDelta("raft_wal_operations", w);
+
+        // ── Partition: per partition id, summed across the nodes that reported it ──
+        IReadOnlyList<string> partitionIds = series.LabelValues("raft_executor_operations", "partition_id", w);
+        SortedDictionary<string, PartitionWork> work = new(PartitionIdOrder.Instance);
+
+        foreach (string partitionId in partitionIds)
+        {
+            double client = 0;
+            double replication = 0;
+            foreach (string node in series.Nodes)
+            {
+                // Per node, then summed: a node restarted inside the window resets its counters, and a
+                // fleet-wide reduction would swallow that node's whole contribution as one negative step.
+                client += series.DeltaWhere("raft_executor_operations", w, node,
+                    ("partition_id", partitionId), ("operation_class", "Client")) ?? 0;
+                replication += series.DeltaWhere("raft_executor_operations", w, node,
+                    ("partition_id", partitionId), ("operation_class", "Replication")) ?? 0;
+            }
+            work[partitionId] = new PartitionWork(client, replication);
+        }
+
+        double partitionTotal = work.Values.Sum(p => p.Total);
+
+        // ── Leader: partition work attributed through the placement capture ─────
+        Dictionary<string, string> leaderOf = new(StringComparer.Ordinal);
+        HashSet<string> placed = new(StringComparer.Ordinal);
+        foreach (PartitionFacts partition in facts?.Partitions ?? [])
+        {
+            string id = partition.PartitionId.ToString(CultureInfo.InvariantCulture);
+            placed.Add(id);
+            if (partition.Leader is string leader)
+                leaderOf[id] = leader;
+        }
+
+        SortedDictionary<string, double> byLeader = new(StringComparer.Ordinal);
+        double attributed = 0;
+        foreach ((string partitionId, PartitionWork p) in work)
+        {
+            if (!leaderOf.TryGetValue(partitionId, out string? leader))
+                continue;
+            byLeader[leader] = byLeader.TryGetValue(leader, out double existing) ? existing + p.Total : p.Total;
+            attributed += p.Total;
+        }
+
+        // ── The summary the plan asks each run to report ────────────────────────
+        sb.AppendLine("| Busiest | Share | Carried by | Of total | Measured from |");
+        sb.AppendLine("|---|---|---|---|---|");
+        AppendShare(sb, "Gateway", requests, "camus_request_count_total");
+        AppendPartitionShare(sb, work, partitionTotal, "raft_executor_operations_total (Client+Replication)");
+        if (byLeader.Count > 0)
+            AppendShare(sb, "Raft leader", byLeader.Select(kv => (kv.Key, kv.Value)).ToList(), "the above, attributed via /v1/cluster/placement");
+        else
+            sb.AppendLine("| Raft leader | n/a | n/a | n/a | no leader claimed a partition in `cluster-facts.json` |");
+        AppendShare(sb, "Disk (WAL)", walOps, "raft_wal_operations_total");
+        sb.AppendLine();
+
+        if (partitionTotal > 0)
+        {
+            (string Id, PartitionWork W) hottest = work.OrderByDescending(kv => kv.Value.Total).Select(kv => (kv.Key, kv.Value)).First();
+            double share = hottest.W.Total / partitionTotal;
+            int carrying = work.Count(kv => kv.Value.Total > 0);
+            double even = 1.0 / Math.Max(carrying, 1);
+
+            if (carrying <= 1)
+            {
+                sb.AppendLine($"> **Single partition** — partition {hottest.Id} took every executor operation in the");
+                sb.AppendLine("> window. Nothing in this run measures horizontal scaling; it measures one leader's");
+                sb.AppendLine("> capacity. Adding partitions will not change that on its own, because hash routing");
+                sb.AppendLine("> places one table's key space on one partition.");
+            }
+            else if (share > 1.5 * even)
+            {
+                sb.AppendLine($"> **Concentrated** — {carrying} partition(s) carried work and the busiest, partition " +
+                              $"{hottest.Id}, took {Pct(share)}, above 1.5x an even {Pct(even)} share. Read any");
+                sb.AppendLine("> throughput number here as that partition's ceiling, not the cluster's.");
+            }
+            else
+            {
+                sb.AppendLine($"> **Spread** — {carrying} partition(s) carried work, busiest share {Pct(share)} against " +
+                              $"an even {Pct(even)}.");
+            }
+            sb.AppendLine();
+        }
+
+        if (byLeader.Count > 0 && attributed > 0)
+        {
+            (string Node, double Ops) busiest = byLeader.OrderByDescending(kv => kv.Value).Select(kv => (kv.Key, kv.Value)).First();
+            double leaderShare = busiest.Ops / attributed;
+
+            if (byLeader.Count == 1)
+            {
+                sb.AppendLine($"> **One leader** — '{busiest.Node}' led every partition that carried work, so it took all");
+                sb.AppendLine("> of it. An even gateway share does not contradict this and does not soften it: requests");
+                sb.AppendLine("> spread across three nodes and then converged on one node's Raft group and one node's");
+                sb.AppendLine("> disk. This run measures that node's durable-write capacity.");
+                sb.AppendLine();
+            }
+            else if (leaderShare > 1.5 / byLeader.Count)
+            {
+                sb.AppendLine($"> **Uneven leadership** — {byLeader.Count} node(s) led partitions that carried work and " +
+                              $"'{busiest.Node}' took {Pct(leaderShare)}, above 1.5x an even {Pct(1.0 / byLeader.Count)}");
+                sb.AppendLine("> share. Leadership, not the gateway pool, is what decides which disk does the durable work.");
+                sb.AppendLine();
+            }
+        }
+
+        // ── Per-partition detail ────────────────────────────────────────────────
+        if (work.Count > 0)
+        {
+            IReadOnlyDictionary<string, List<string>> tables = TablesByPartition(facts);
+
+            sb.AppendLine("| Partition | Client ops | Replication ops | Total | Share | Leader | Tables |");
+            sb.AppendLine("|---|---|---|---|---|---|---|");
+            foreach ((string partitionId, PartitionWork p) in work)
+            {
+                string leader = leaderOf.TryGetValue(partitionId, out string? who) ? who : "n/a";
+                string relations = tables.TryGetValue(partitionId, out List<string>? names) ? string.Join(", ", names) : "—";
+                sb.AppendLine($"| {partitionId} | {Fc(p.Client)} | {Fc(p.Replication)} | {Fc(p.Total)} | " +
+                              $"{Share(p.Total, partitionTotal)} | {leader} | {relations} |");
+            }
+            sb.AppendLine();
+
+            if (facts is null)
+            {
+                sb.AppendLine("> No `cluster-facts.json` was available, so partitions carry neither a leader nor the");
+                sb.AppendLine("> tables that landed on them. Rebuild the report next to that file to attribute them.");
+                sb.AppendLine();
+            }
+            else if (attributed < partitionTotal)
+            {
+                // Two very different absences. A partition the placement map never listed is a system
+                // partition — the schema log is the standard case, and it carries a rounding error's
+                // worth of traffic. A partition the map listed with nobody claiming it is an election.
+                double unlisted = work.Where(kv => !placed.Contains(kv.Key)).Sum(kv => kv.Value.Total);
+                double unclaimed = partitionTotal - attributed - unlisted;
+
+                if (unclaimed > 0)
+                {
+                    sb.AppendLine($"> {Pct(unclaimed / partitionTotal)} of the partition work sat on partitions the placement");
+                    sb.AppendLine("> map listed but no node claimed to lead, which is what an election in progress looks like.");
+                }
+                if (unlisted > 0)
+                {
+                    sb.AppendLine($"> A further {Pct(unlisted / partitionTotal)} sat on partitions outside the placement map —");
+                    sb.AppendLine("> system partitions such as the schema log, which are not part of the data key space.");
+                }
+                sb.AppendLine();
+            }
+        }
+    }
+
+    /// <summary>Executor work one partition cost the fleet, split by the class that produced it.</summary>
+    private readonly record struct PartitionWork(double Client, double Replication)
+    {
+        public double Total => Client + Replication;
+    }
+
+    private static void AppendShare(
+        StringBuilder sb, string what, IReadOnlyList<(string Name, double Value)> parts, string evidence)
+    {
+        double total = parts.Sum(p => p.Value);
+        if (total <= 0)
+        {
+            sb.AppendLine($"| {what} | n/a | n/a | n/a | `{evidence}` reported nothing in the window |");
+            return;
+        }
+
+        (string Name, double Value) busiest = parts.OrderByDescending(p => p.Value).First();
+        sb.AppendLine($"| {what} | {Share(busiest.Value, total)} | {busiest.Name} | " +
+                      $"{Fc(busiest.Value)} / {Fc(total)} | `{evidence}` |");
+    }
+
+    private static void AppendPartitionShare(
+        StringBuilder sb, IReadOnlyDictionary<string, PartitionWork> work, double total, string evidence)
+    {
+        if (total <= 0)
+        {
+            sb.AppendLine($"| Key/value partition | n/a | n/a | n/a | `{evidence}` reported nothing in the window |");
+            return;
+        }
+
+        (string Id, PartitionWork W) busiest = work.OrderByDescending(kv => kv.Value.Total).Select(kv => (kv.Key, kv.Value)).First();
+        sb.AppendLine($"| Key/value partition | {Share(busiest.W.Total, total)} | partition {busiest.Id} | " +
+                      $"{Fc(busiest.W.Total)} / {Fc(total)} | `{evidence}` |");
+    }
+
+    /// <summary>
+    /// The relations <c>SHOW RANGES</c> placed on each partition, so a concentrated partition names the
+    /// tables that collided on it rather than leaving the reader to join two files by hand.
+    /// </summary>
+    private static IReadOnlyDictionary<string, List<string>> TablesByPartition(ClusterFacts? facts)
+    {
+        Dictionary<string, List<string>> byPartition = new(StringComparer.Ordinal);
+        foreach (IReadOnlyDictionary<string, string> range in facts?.Ranges ?? [])
+        {
+            if (!range.TryGetValue("partition_id", out string? partitionId) || string.IsNullOrEmpty(partitionId))
+                continue;
+            if (!range.TryGetValue("relation", out string? relation) || string.IsNullOrEmpty(relation))
+                continue;
+
+            if (!byPartition.TryGetValue(partitionId, out List<string>? names))
+                byPartition[partitionId] = names = new List<string>();
+            if (!names.Contains(relation, StringComparer.Ordinal))
+                names.Add(relation);
+        }
+        return byPartition;
+    }
+
+    /// <summary>Orders partition ids numerically, so partition 10 follows 9 rather than 1.</summary>
+    private sealed class PartitionIdOrder : IComparer<string>
+    {
+        public static PartitionIdOrder Instance { get; } = new();
+
+        public int Compare(string? x, string? y)
+        {
+            if (long.TryParse(x, out long a) && long.TryParse(y, out long b))
+                return a.CompareTo(b);
+            return string.CompareOrdinal(x, y);
+        }
     }
 
     /// <summary>

@@ -43,6 +43,42 @@ public static class MetricsCsv
                                       .Select(kv => $"{kv.Key}={kv.Value}"));
     }
 
+    /// <summary>
+    /// The value of one label in a canonical label string, or null when the label is absent.
+    ///
+    /// <para>Exact on the key, which a substring search is not: <c>partition_id=1</c> occurs inside
+    /// <c>partition_id=10</c>, so a filter written the obvious way would fold a busy partition's
+    /// samples into a quiet one's and report a hotspot that is an artifact of string matching.</para>
+    /// </summary>
+    public static string? LabelValue(string labels, string key)
+    {
+        if (labels.Length == 0 || key.Length == 0)
+            return null;
+
+        int from = 0;
+        while (from <= labels.Length)
+        {
+            int end = labels.IndexOf(';', from);
+            if (end < 0)
+                end = labels.Length;
+
+            int equals = labels.IndexOf('=', from);
+            if (equals > from && equals < end &&
+                string.CompareOrdinal(labels, from, key, 0, key.Length) == 0 && equals - from == key.Length)
+            {
+                return labels[(equals + 1)..end];
+            }
+
+            from = end + 1;
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether a canonical label string carries exactly <c>key=value</c>.</summary>
+    public static bool HasLabel(string labels, string key, string value)
+        => string.Equals(LabelValue(labels, key), value, StringComparison.Ordinal);
+
     public static string RenderRow(in MetricPoint p)
     {
         StringBuilder sb = new();

@@ -660,15 +660,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// every partition (<see cref="EmbeddedKahuna.WaitUntilStartedAsync"/>) before calling this, which
     /// closes the main boot race where the eagerly-started scan reached the node before the registry
     /// bucket's partition existed and failed with <see cref="Kommander.RaftException"/> ("Invalid
-    /// partition"). The bounded retry below remains as a secondary guard against a momentary
-    /// leadership blip during the scan (e.g. a re-election); it surfaces the error only if it persists
-    /// past the window, since a persistent failure is a real one.</para>
+    /// partition"). The bounded retry below remains as a secondary guard against a momentary fault
+    /// during the scan — a re-election, or a peer that has not finished its own boot, since the scan
+    /// hash-routes and so often has to reach one. It surfaces the error only if it persists past the
+    /// window, since a persistent failure is a real one; see <see cref="StartupLoadRetry"/> for why
+    /// that judgement is made on the budget rather than on the exception type.</para>
     /// </summary>
     private async Task LoadAsync()
     {
         Stopwatch sw = Stopwatch.StartNew();
-        const int retryDelayMs = 200;
-        const int maxWaitMs = 30_000;
 
         while (true)
         {
@@ -680,10 +680,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 Volatile.Write(ref loadedGeneration, await ReadGenerationAsync().ConfigureAwait(false));
                 return;
             }
-            catch (RaftException) when (sw.ElapsedMilliseconds < maxWaitMs)
+            catch (Exception ex) when (StartupLoadRetry.ShouldRetry(ex, sw.ElapsedMilliseconds))
             {
-                // Partition still coming online during boot; wait and re-scan from a clean slate.
-                await Task.Delay(retryDelayMs).ConfigureAwait(false);
+                // Still assembling: a partition coming online, an election, or a peer that has not
+                // finished its own boot. Wait and re-scan from a clean slate.
+                await Task.Delay(StartupLoadRetry.RetryDelayMs).ConfigureAwait(false);
             }
         }
     }
