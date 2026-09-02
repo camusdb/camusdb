@@ -32,9 +32,11 @@ namespace CamusDB.Tests.Transactions;
 /// increments climbs forever and reads as a transaction leak that is not happening. Both failure
 /// modes are silent, which is why they are pinned here rather than left to inspection.</para>
 ///
-/// <para>Non-parallelizable: <see cref="ServerDiagnostics.Enabled"/> is a process-wide gate and the
-/// listener below observes a process-wide meter, so a concurrent fixture recording transactions would
-/// be counted into these assertions.</para>
+/// <para>Non-parallelizable: <see cref="ServerDiagnostics.Enabled"/> is a process-wide gate, so a
+/// concurrent fixture flipping it would silence the events asserted here. The meter is process-wide
+/// too, but that is handled by attribution rather than by scheduling — see <see cref="OwningFlow"/>:
+/// running alone is not enough, because background work from engines that earlier fixtures left
+/// alive records on the same instruments at its own pace.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -42,10 +44,34 @@ public sealed class TestTransactionLifecycleMetrics
 {
     private sealed record Captured(string Instrument, long Value, string? Operation, string? Outcome, string? Mode);
 
+    /// <summary>
+    /// Marks the execution context whose measurements a test owns.
+    ///
+    /// <para>The two instruments are process-wide, and their tags carry no manager identity (a
+    /// per-manager tag would be unbounded cardinality in production). Every transaction manager
+    /// alive in the test process records on them: a leaked fixture's debounced statistics flush, an
+    /// auto-analyze or TTL sweep, an orphan reclaim — all on by default, all begun on their own
+    /// schedule. One of those landing a begin inside a test's window, and ending after its
+    /// assertions, read as a gauge that never came back to zero.</para>
+    ///
+    /// <para>What does separate the events is the execution context. A measurement is recorded
+    /// synchronously inside Track/Untrack, on the async flow of whoever called BeginAsync, CommitAsync,
+    /// RollbackAsync or Dispose — for everything asserted here, the test method's own flow, which the
+    /// marker set in <see cref="StartListener"/> follows across every await. Background work started
+    /// elsewhere runs on a flow that never saw the marker, so its measurements are dropped at capture
+    /// time, deterministically, rather than tolerated by a looser assertion.</para>
+    /// </summary>
+    private static readonly AsyncLocal<object?> OwningFlow = new();
+
     private static (MeterListener Listener, List<Captured> Events) StartListener()
     {
         List<Captured> events = new();
         MeterListener listener = new();
+
+        // Set on the caller's flow: this method runs synchronously on the test method's execution
+        // context, so the marker is what every later await in that test carries.
+        object flow = new();
+        OwningFlow.Value = flow;
 
         listener.InstrumentPublished = (instrument, l) =>
         {
@@ -56,6 +82,11 @@ public sealed class TestTransactionLifecycleMetrics
 
         listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
         {
+            // The callback runs on the recorder's flow. Anything not descending from this test's
+            // context belongs to another manager in the process — see OwningFlow.
+            if (!ReferenceEquals(OwningFlow.Value, flow))
+                return;
+
             // Copied out of the ref struct before anything else: a ReadOnlySpan cannot be captured by
             // the local function that would otherwise read it.
             string? operation = null, outcome = null, mode = null;
@@ -254,5 +285,52 @@ public sealed class TestTransactionLifecycleMetrics
 
         lock (events)
             Assert.That(events, Is.Empty, "a node that has not opted in must do no diagnostics work at all");
+    }
+
+    [Test]
+    public async Task ATransactionFromAnotherManagerInTheProcessIsNotAttributedToThisFixture()
+    {
+        (MeterListener listener, List<Captured> events) = StartListener();
+        using MeterListener _ = listener;
+
+        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("tlm7");
+        await using EmbeddedKahuna __ = node;
+
+        // A second manager stands in for every other engine alive in this test process — a leaked
+        // fixture's debounced statistics flush, an auto-analyze or TTL sweep — whose transactions
+        // record on the same process-wide instruments. It begins on an execution context that does
+        // not descend from this test, exactly as background work does, and holds its transaction
+        // open across the assertions below, which is the interleaving that inflated the gauge in CI.
+        using KvTransactionsManager foreign = new(node.Kahuna, CamusDBOptions.Default);
+        TaskCompletionSource<KvTransaction> foreignBegun = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        ServerDiagnostics.Enabled = true;
+
+        Task foreignWork;
+        using (ExecutionContext.SuppressFlow())
+        {
+            foreignWork = Task.Run(async () =>
+            {
+                KvTransaction foreignTx = await foreign.BeginAsync();
+                foreignBegun.SetResult(foreignTx);
+                await release.Task;
+                await foreign.RollbackAsync(foreignTx);
+            });
+        }
+
+        await foreignBegun.Task;
+
+        await mgr.CommitAsync(await mgr.BeginAsync());
+
+        Assert.That(Count(events, ServerDiagnostics.Tags.Operation.Begin, ServerDiagnostics.Tags.Outcome.Ok),
+            Is.EqualTo(1), "only this test's own begin is attributed to it");
+        Assert.That(Count(events, ServerDiagnostics.Tags.Operation.Commit, ServerDiagnostics.Tags.Outcome.Ok),
+            Is.EqualTo(1));
+        Assert.That(ActiveGauge(events), Is.Zero,
+            "the foreign transaction is still live, and it is not this fixture's to count");
+
+        release.SetResult();
+        await foreignWork;
     }
 }
