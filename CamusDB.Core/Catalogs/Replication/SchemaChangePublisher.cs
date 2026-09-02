@@ -10,7 +10,6 @@ using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Storage.Kv;
 using Microsoft.Extensions.Logging;
 
@@ -93,7 +92,7 @@ internal sealed class SchemaChangePublisher
                 ? viewBeingDropped.Id
                 : null;
 
-        byte[] bytes = Serializator.Serialize(entry);
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(entry);
         SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Id, bytes, CancellationToken.None).ConfigureAwait(false);
 
         if (result.Outcome != SchemaReplicationOutcome.Committed)

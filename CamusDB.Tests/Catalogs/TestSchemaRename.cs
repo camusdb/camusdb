@@ -18,6 +18,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Catalogs.Replication;
 
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
@@ -49,7 +50,7 @@ public sealed class TestSchemaRename
             FromVersion = from,
             ToVersion = to,
             Op = op,
-            Payload = Serializator.Serialize(payload)
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(payload)
         };
     }
 
@@ -217,13 +218,13 @@ public sealed class TestSchemaRename
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
-        byte[] create = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] create = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "robots-id",
                 TableName = "robots",
@@ -232,13 +233,13 @@ public sealed class TestSchemaRename
         });
         await replicator.ApplyAsync(database, partitionId, create);
 
-        byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] rename = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 1,
             ToVersion = 2,
             Op = SchemaOp.RenameTable,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = "robots",
                 Kind = SchemaRenameKind.Table,
@@ -270,13 +271,13 @@ public sealed class TestSchemaRename
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
-        byte[] create = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] create = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "robots-id",
                 TableName = "robots",
@@ -289,13 +290,13 @@ public sealed class TestSchemaRename
         });
         await replicator.ApplyAsync(database, partitionId, create);
 
-        byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] rename = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 1,
             ToVersion = 2,
             Op = SchemaOp.RenameColumn,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = "robots",
                 Kind = SchemaRenameKind.Column,
@@ -324,31 +325,31 @@ public sealed class TestSchemaRename
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
-        byte[] create = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] create = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db, FromVersion = 0, ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "robots-id", TableName = "robots",
                 Columns = [new() { Id = "id-col", Name = "id", Type = ColumnType.Id, NotNull = true }]
             })
         });
-        byte[] addIdx = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] addIdx = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db, FromVersion = 1, ToVersion = 2,
             Op = SchemaOp.AddIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaIndexPayload
             {
                 TableName = "robots", IndexName = "name_idx",
                 Index = new TableIndexSchema("idx-1", "name_idx", ["id-col"], IndexType.Multi, SchemaElementState.Public)
             })
         });
-        byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] rename = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db, FromVersion = 2, ToVersion = 3,
             Op = SchemaOp.RenameIndex,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = "robots", Kind = SchemaRenameKind.Index,
                 ElementName = "name_idx", NewName = "label_idx"
@@ -738,7 +739,7 @@ public sealed class TestSchemaRename
     // ─── Payload round-trip ───────────────────────────────────────────────────
 
     [Test]
-    public void SchemaRenamePayload_AllThreeKinds_RoundTripThroughSerializator()
+    public void SchemaRenamePayload_AllThreeKinds_RoundTripThroughEntryCodec()
     {
         SchemaChangeLogEntry[] entries =
         [
@@ -749,8 +750,8 @@ public sealed class TestSchemaRename
 
         foreach (SchemaChangeLogEntry entry in entries)
         {
-            byte[] bytes = Serializator.Serialize(entry);
-            SchemaChangeLogEntry rt = Serializator.Unserialize<SchemaChangeLogEntry>(bytes);
+            byte[] bytes = SchemaChangeLogEntryCodec.Encode(entry);
+            SchemaChangeLogEntry rt = SchemaChangeLogEntryCodec.Decode(bytes);
 
             Assert.AreEqual(entry.Op, rt.Op);
             Assert.AreEqual(entry.Database, rt.Database);
@@ -758,8 +759,8 @@ public sealed class TestSchemaRename
             Assert.AreEqual(entry.ToVersion, rt.ToVersion);
             Assert.Greater(rt.Payload.Length, 0);
 
-            SchemaRenamePayload p = Serializator.Unserialize<SchemaRenamePayload>(rt.Payload);
-            SchemaRenamePayload orig = Serializator.Unserialize<SchemaRenamePayload>(entry.Payload);
+            SchemaRenamePayload p = rt.GetPayload<SchemaRenamePayload>();
+            SchemaRenamePayload orig = entry.GetPayload<SchemaRenamePayload>();
             Assert.AreEqual(orig.Kind, p.Kind);
             Assert.AreEqual(orig.TableName, p.TableName);
             Assert.AreEqual(orig.ElementName, p.ElementName);
@@ -781,13 +782,13 @@ public sealed class TestSchemaRename
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
         // 1. Apply CreateTable "robots".
-        byte[] create = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] create = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "robots-id",
                 TableName = "robots",
@@ -810,13 +811,13 @@ public sealed class TestSchemaRename
         Assert.True(database.TableDescriptors.ContainsKey("robots"));
 
         // 3. Apply RenameTable "robots" → "machines".
-        byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] rename = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 1,
             ToVersion = 2,
             Op = SchemaOp.RenameTable,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = "robots",
                 Kind = SchemaRenameKind.Table,
@@ -845,13 +846,13 @@ public sealed class TestSchemaRename
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
-        byte[] create = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] create = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "robots-id",
                 TableName = "robots",
@@ -870,13 +871,13 @@ public sealed class TestSchemaRename
                 tableSchema.Id!, tableSchema.Name!, tableSchema,
                 new KvTableStore(kahuna.Kahuna, CamusDBOptions.Default, database.Id, tableSchema.Id!))));
 
-        byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] rename = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 1,
             ToVersion = 2,
             Op = SchemaOp.RenameColumn,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = "robots",
                 Kind = SchemaRenameKind.Column,
@@ -903,13 +904,13 @@ public sealed class TestSchemaRename
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
 
-        byte[] create = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] create = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "robots-id",
                 TableName = "robots",
@@ -918,13 +919,13 @@ public sealed class TestSchemaRename
         });
         await replicator.ApplyAsync(database, partitionId, create);
 
-        byte[] addIdx = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] addIdx = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 1,
             ToVersion = 2,
             Op = SchemaOp.AddIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaIndexPayload
             {
                 TableName = "robots",
                 IndexName = "name_idx",
@@ -942,13 +943,13 @@ public sealed class TestSchemaRename
                 tableSchema.Id!, tableSchema.Name!, tableSchema,
                 new KvTableStore(kahuna.Kahuna, CamusDBOptions.Default, database.Id, tableSchema.Id!))));
 
-        byte[] rename = Serializator.Serialize(new SchemaChangeLogEntry
+        byte[] rename = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
         {
             Database = db,
             FromVersion = 2,
             ToVersion = 3,
             Op = SchemaOp.RenameIndex,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = "robots",
                 Kind = SchemaRenameKind.Index,

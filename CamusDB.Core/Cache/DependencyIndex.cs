@@ -36,8 +36,10 @@ internal sealed class DependencyIndex
 {
     // keyspace bucket → set of entry IDs
     private readonly Dictionary<string, HashSet<string>> _rangeIndex  = new(StringComparer.Ordinal);
+    
     // KV point key → set of entry IDs
     private readonly Dictionary<string, HashSet<string>> _pointIndex  = new(StringComparer.Ordinal);
+    
     // "{databaseId}:{tableId}" → set of entry IDs
     private readonly Dictionary<string, HashSet<string>> _schemaIndex = new(StringComparer.Ordinal);
 
@@ -51,6 +53,7 @@ internal sealed class DependencyIndex
         {
             if (!_rangeIndex.TryGetValue(range, out HashSet<string>? ids))
                 _rangeIndex[range] = ids = new HashSet<string>(StringComparer.Ordinal);
+            
             ids.Add(entryId);
         }
 
@@ -58,14 +61,17 @@ internal sealed class DependencyIndex
         {
             if (!_pointIndex.TryGetValue(point, out HashSet<string>? ids))
                 _pointIndex[point] = ids = new HashSet<string>(StringComparer.Ordinal);
+            
             ids.Add(entryId);
         }
 
         foreach ((string tableId, _, _) in deps.SchemaDeps)
         {
             string key = databaseId + ":" + tableId;
+            
             if (!_schemaIndex.TryGetValue(key, out HashSet<string>? ids))
                 _schemaIndex[key] = ids = new HashSet<string>(StringComparer.Ordinal);
+            
             ids.Add(entryId);
         }
     }
@@ -140,5 +146,4 @@ internal sealed class DependencyIndex
             ? (IEnumerable<string>)ids
             : [];
     }
-
 }

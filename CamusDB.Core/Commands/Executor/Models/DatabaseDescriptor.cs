@@ -12,6 +12,7 @@ using CamusDB.Core.Cache;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using System.Collections.Concurrent;
+using System.Text;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -36,6 +37,68 @@ internal sealed class DatabaseUseHandle : IDisposable
 public sealed record DatabaseDescriptor : IDisposable
 {
     public string Id { get; }
+
+    /// <summary>
+    /// <see cref="Id"/> as UTF-8, encoded once when the descriptor is built. Every committed
+    /// schema-log entry delivered to this database's subscriber carries the owning database's id
+    /// in its byte frame, and the subscriber compares the two to decide whether the entry is its
+    /// own. Re-encoding the id for that comparison would allocate on every delivery, including the
+    /// deliveries the subscriber exists only to drop. The array is never handed out.
+    /// </summary>
+    private readonly byte[] idUtf8;
+
+    /// <summary>UTF-8 view of <see cref="Id"/> for allocation-free comparison against frame bytes.</summary>
+    internal ReadOnlySpan<byte> IdUtf8 => idUtf8;
+
+    // Schema-log entries this database's subscriber actually deserialized, as opposed to skipped
+    // from the entry's byte frame. Test-only instrumentation: the skip paths are cheap precisely
+    // because they never decode, and nothing but a test can observe the difference.
+    private long schemaEntriesDecoded;
+
+    /// <summary>
+    /// How many schema-log entries this database decoded since it was opened. Test-only: it exists
+    /// so a test can assert that a foreign-database entry, or one this node already applied, costs
+    /// no decode, and that a proposer decodes its own entry once rather than once per delivery.
+    /// </summary>
+    internal long SchemaEntriesDecoded => Interlocked.Read(ref schemaEntriesDecoded);
+
+    /// <summary>Counts one decode. Called by the schema replicator, never by production readers.</summary>
+    internal void CountSchemaEntryDecode() => Interlocked.Increment(ref schemaEntriesDecoded);
+
+    /// <summary>
+    /// The schema version the last applied delta produced, paired with a digest of the entry bytes
+    /// it was carried in. Held as one object so a reader outside the schema lock cannot observe the
+    /// version of one delta next to the digest of another.
+    /// </summary>
+    private sealed record AppliedSchemaEntry(long ToVersion, ulong Fingerprint);
+
+    private AppliedSchemaEntry? lastAppliedSchemaEntry;
+
+    /// <summary>
+    /// Records which delta this node most recently applied. Called from the schema apply and
+    /// restore paths with the lock held, so the two fields always move together.
+    /// </summary>
+    internal void RecordAppliedSchemaEntry(long toVersion, ulong fingerprint)
+    {
+        Volatile.Write(ref lastAppliedSchemaEntry, new AppliedSchemaEntry(toVersion, fingerprint));
+    }
+
+    /// <summary>
+    /// True when the given entry is the one this node last applied, so re-applying it would do
+    /// nothing. The proposer of a DDL change is delivered its own entry twice — once through
+    /// replication and once through the local apply that lets it observe the change before it
+    /// returns — and this is what lets the second delivery be dropped without deserializing it.
+    ///
+    /// <para>The digest is what makes the answer safe. Two different deltas can claim the same
+    /// target version when two nodes propose against the same base; that case must reach the apply
+    /// path and fail as out-of-order, and it does, because its digest differs. A false answer here
+    /// is therefore only ever "no", which costs a decode and nothing else.</para>
+    /// </summary>
+    internal bool WasSchemaEntryApplied(long toVersion, ulong fingerprint)
+    {
+        AppliedSchemaEntry? applied = Volatile.Read(ref lastAppliedSchemaEntry);
+        return applied is not null && applied.ToVersion == toVersion && applied.Fingerprint == fingerprint;
+    }
 
     /// <summary>
     /// Configuration of the engine this database belongs to. Carried here so per-table and per-scan
@@ -416,6 +479,7 @@ public sealed record DatabaseDescriptor : IDisposable
     {
         Options = options;
         Id = id;
+        idUtf8 = Encoding.UTF8.GetBytes(id);
         _name = name;
         Kahuna = kahuna;
         Transactions = transactions;

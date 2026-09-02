@@ -17,6 +17,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Catalogs.Replication;
 using Kommander.Time;
 
 namespace CamusDB.Tests.Catalogs;
@@ -33,7 +34,7 @@ public sealed class TestSchemaChangeLogEntry
             FromVersion = 1,
             ToVersion = 2,
             Op = op,
-            Payload = Serializator.Serialize(payload)
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(payload)
         };
     }
 
@@ -394,8 +395,8 @@ public sealed class TestSchemaChangeLogEntry
 
         foreach (SchemaChangeLogEntry entry in entries)
         {
-            byte[] bytes = Serializator.Serialize(entry);
-            SchemaChangeLogEntry roundTrip = Serializator.Unserialize<SchemaChangeLogEntry>(bytes);
+            byte[] bytes = SchemaChangeLogEntryCodec.Encode(entry);
+            SchemaChangeLogEntry roundTrip = SchemaChangeLogEntryCodec.Decode(bytes);
 
             Assert.AreEqual(entry.Ts, roundTrip.Ts);
             Assert.AreEqual(entry.Database, roundTrip.Database);

@@ -32,6 +32,8 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(SchemaAlterColumnPayload))]
 [JsonSerializable(typeof(SchemaColumnPayload))]
 [JsonSerializable(typeof(SchemaDropTablePayload))]
+[JsonSerializable(typeof(SchemaRelinkTablePayload))]
+[JsonSerializable(typeof(SchemaTruncateTablePayload))]
 [JsonSerializable(typeof(SchemaIndexPayload))]
 [JsonSerializable(typeof(SchemaElementStatePayload))]
 [JsonSerializable(typeof(SchemaRenameKind))]

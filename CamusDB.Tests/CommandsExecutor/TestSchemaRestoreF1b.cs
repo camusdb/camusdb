@@ -19,6 +19,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Catalogs.Replication;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -159,14 +160,14 @@ internal sealed class TestSchemaRestoreF1b : BaseTest
             FromVersion = database.Schema.SchemaVersion + 1,  // gap: skips current version
             ToVersion = database.Schema.SchemaVersion + 2,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableName = "should_never_exist",
                 Columns = []
             })
         };
 
-        byte[] bytes = Serializator.Serialize(gapEntry);
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(gapEntry);
 
         SchemaReplicator replicator = new(executor.Catalogs, logger);
 

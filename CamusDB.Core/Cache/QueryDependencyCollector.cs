@@ -59,10 +59,13 @@ internal sealed class QueryDependencyCollector
     public QueryDependencyCollector(CamusDBOptions options) => this.options = options;
 
     private readonly HashSet<string> _rangeDeps  = new(StringComparer.Ordinal);
+    
     private readonly HashSet<string> _pointDeps  = new(StringComparer.Ordinal);
+    
     private readonly List<(string TableId, int SchemaVersion, long ContentsGeneration)> _schemaDeps = new();
 
     private bool _capExceeded;
+    
     private bool _pointDepsTruncated;
 
     /// <summary>

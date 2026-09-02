@@ -16,6 +16,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -44,7 +45,7 @@ public sealed class TestSchemaReplicator
         DatabaseDescriptor database = CreateDescriptor(db, kahuna);
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
-        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 0, 1));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1));
 
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
@@ -64,7 +65,7 @@ public sealed class TestSchemaReplicator
         DatabaseDescriptor database = CreateDescriptor(db, kahuna);
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
-        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 2, 3));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 2, 3));
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => replicator.ApplyAsync(database, partitionId, bytes));
 
@@ -88,13 +89,13 @@ public sealed class TestSchemaReplicator
         Assert.True(await replicator.ApplyAsync(
             database,
             partitionId,
-            Serializator.Serialize(CreateTableEntry(db, 0, 1, "robots_a"))
+            SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1, "robots_a"))
         ));
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => replicator.ApplyAsync(
             database,
             partitionId,
-            Serializator.Serialize(CreateTableEntry(db, 0, 1, "robots_b"))
+            SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1, "robots_b"))
         ));
 
         Assert.NotNull(ex);
@@ -114,7 +115,7 @@ public sealed class TestSchemaReplicator
         DatabaseDescriptor database = CreateDescriptor(db, kahuna);
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
-        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 0, 1, "robots_a"));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1, "robots_a"));
 
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
@@ -138,7 +139,7 @@ public sealed class TestSchemaReplicator
         Assert.True(await replicator.ApplyAsync(
             database,
             partitionId,
-            Serializator.Serialize(CreateTableEntry(db, 0, 1))
+            SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1))
         ));
 
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
@@ -186,12 +187,189 @@ public sealed class TestSchemaReplicator
         DatabaseDescriptor database = CreateDescriptor(db, kahuna);
         SchemaReplicator replicator = CreateReplicator();
         int partitionId = database.Kahuna.SchemaLogPartition(db);
-        byte[] bytes = Serializator.Serialize(CreateTableEntry("other_db", 0, 1));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry("other_db", 0, 1));
 
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
 
         Assert.AreEqual(0, database.Schema.SchemaVersion);
         Assert.AreEqual(0, database.Schema.Tables.Count);
+    }
+
+    [Test]
+    public async Task ApplyAsync_ForeignDatabaseEntryCostsNoDecodeAndNoAllocation()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry("other_db", 0, 1));
+
+        // Warm up: the very first call JITs the whole apply path, which allocates once and would
+        // swamp the measurement of the steady-state skip.
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        // The assertion stays outside the measured loop: an NUnit constraint allocates, and it
+        // would be counted against the code under test.
+        //
+        // The bound rather than zero: a debug build emits every async state machine as a class, so
+        // each call heap-allocates one whatever its body does. What the bound proves is that
+        // nothing else is allocated — decoding this entry costs well over a kilobyte in the entry
+        // object, its payload array and the JSON reader's buffers.
+        bool skipped = true;
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100; i++)
+            skipped &= await replicator.ApplyAsync(database, partitionId, bytes);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+        Assert.True(skipped);
+
+        Assert.AreEqual(0, database.SchemaEntriesDecoded, "an entry for another database must never be deserialized");
+        Assert.LessOrEqual(allocated, 100 * AsyncCallAllocationBound, "dropping an entry for another database must allocate nothing of its own");
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+    }
+
+    [Test]
+    public async Task ApplyAsync_RedeliveredEntryCostsNoSecondDecode()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1));
+
+        // The shape a proposer sees: the same bytes arrive through replication and again through
+        // the local apply that lets it observe its own change.
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+        Assert.AreEqual(1, database.SchemaEntriesDecoded);
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.AreEqual(1, database.SchemaEntriesDecoded, "the second delivery must be dropped from the frame");
+        Assert.AreEqual(1, database.Schema.SchemaVersion);
+
+        bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
+            db,
+            1,
+            TimeSpan.FromMilliseconds(100),
+            liveNodeLease: TimeSpan.FromMinutes(1),
+            cancellationToken: CancellationToken.None
+        );
+
+        Assert.IsTrue(acked, "the dropped delivery must still re-ack the version it names");
+    }
+
+    [Test]
+    public async Task ApplyAsync_PreFramingForeignDatabaseEntryStillDecodes()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        // An entry written before the frame existed carries no header, so it can only be dropped
+        // after a full decode. That path has to keep working until log compaction retires them.
+        byte[] bytes = Serializator.Serialize(CreateTableEntry("other_db", 0, 1));
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
+
+        Assert.AreEqual(1, database.SchemaEntriesDecoded);
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+    }
+
+    [Test]
+    public async Task ApplyAsync_CorruptFramedEntryFailsLoudly()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        // Header intact, body cut in half: the entry names this database and a version this node has
+        // not reached, so it must reach the decode and surface rather than be silently dropped.
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1));
+        byte[] truncated = bytes.AsSpan(0, bytes.Length - (bytes.Length / 3)).ToArray();
+
+        Assert.ThrowsAsync<CamusDBException>(() => replicator.ApplyAsync(database, partitionId, truncated));
+
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+    }
+
+    [Test]
+    public async Task RestoreAsync_ForeignDatabaseEntryCostsNoDecodeAndNoAllocation()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry("other_db", 0, 1));
+
+        Assert.True(await replicator.RestoreAsync(database, bytes));
+
+        bool skipped = true;
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100; i++)
+            skipped &= await replicator.RestoreAsync(database, bytes);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+        Assert.True(skipped);
+
+        Assert.AreEqual(0, database.SchemaEntriesDecoded);
+        Assert.LessOrEqual(allocated, 100 * AsyncCallAllocationBound);
+        Assert.AreEqual(0, database.Schema.SchemaVersion);
+    }
+
+    [Test]
+    public async Task RestoreAsync_EntryAlreadyInTheCheckpointCostsNoDecode()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+
+        // Replay always starts from the committed tail, so a node whose checkpoint is already ahead
+        // of an entry sees it again with nothing left to do.
+        database.Schema.SchemaVersion = 4;
+
+        Assert.True(await replicator.RestoreAsync(database, SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1))));
+
+        Assert.AreEqual(0, database.SchemaEntriesDecoded);
+        Assert.AreEqual(4, database.Schema.SchemaVersion);
+        Assert.AreEqual(0, database.Schema.Tables.Count);
+    }
+
+    [Test]
+    public async Task RestoreAsync_ReplaysPreFramingAndFramedEntriesInOneChain()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+
+        // A log that spans the format change: entries written by the old build, then by this one.
+        Assert.True(await replicator.RestoreAsync(database, Serializator.Serialize(LegacyCreateTableEntry(db, 0, 1, "robots_a"))));
+        Assert.True(await replicator.RestoreAsync(database, SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 1, 2, "robots_b"))));
+
+        Assert.AreEqual(2, database.Schema.SchemaVersion);
+        Assert.True(database.Schema.Tables.ContainsKey("robots_a"));
+        Assert.True(database.Schema.Tables.ContainsKey("robots_b"));
     }
 
     [Test]
@@ -211,7 +389,7 @@ public sealed class TestSchemaReplicator
         int partitionId = database.Kahuna.SchemaLogPartition(db);
         await database.Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None);
 
-        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 0, 1));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1));
 
         Assert.True(await replicator.ApplyAsync(database, partitionId, bytes));
 
@@ -241,7 +419,7 @@ public sealed class TestSchemaReplicator
         Assert.True(await replicator.ApplyAsync(
             database,
             partitionId,
-            Serializator.Serialize(CreateTableEntry(db, 0, 1))
+            SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1))
         ));
 
         TableSchema tableSchema = database.Schema.Tables["robots"];
@@ -254,7 +432,7 @@ public sealed class TestSchemaReplicator
         Assert.True(await replicator.ApplyAsync(
             database,
             partitionId,
-            Serializator.Serialize(DropTableEntry(db, 1, 2))
+            SchemaChangeLogEntryCodec.Encode(DropTableEntry(db, 1, 2))
         ));
 
         Assert.AreEqual(0, database.TableDescriptors.Count);
@@ -280,7 +458,7 @@ public sealed class TestSchemaReplicator
             SchemaHistory = [new() { Version = 0, Columns = [new("id-col", "id", ColumnType.Id, true, null)] }]
         };
 
-        byte[] bytes = Serializator.Serialize(AddColumnEntry(db, 0, 1));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(AddColumnEntry(db, 0, 1));
 
         Assert.True(await replicator.RestoreAsync(database, bytes));
 
@@ -323,7 +501,7 @@ public sealed class TestSchemaReplicator
             ]
         };
 
-        byte[] bytes = Serializator.Serialize(SetElementStateEntry(
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(SetElementStateEntry(
             db,
             0,
             1,
@@ -351,7 +529,7 @@ public sealed class TestSchemaReplicator
         string db = NextSchemaLogDatabaseName(kahuna);
         DatabaseDescriptor database = CreateDescriptor(db, kahuna);
         SchemaReplicator replicator = CreateReplicator();
-        byte[] bytes = Serializator.Serialize(CreateTableEntry(db, 2, 3));
+        byte[] bytes = SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 2, 3));
 
         Assert.ThrowsAsync<CamusDBException>(
             async () => await replicator.RestoreAsync(database, bytes),
@@ -381,6 +559,13 @@ public sealed class TestSchemaReplicator
 
         Assert.AreEqual(1, second.DisposeCount);
     }
+
+    /// <summary>
+    /// Bytes one call to an async method may allocate before the measurement means something. A
+    /// debug build emits the state machine as a class, so the allocation exists no matter what the
+    /// method does; it is two orders of magnitude below the cost of deserializing an entry.
+    /// </summary>
+    private const long AsyncCallAllocationBound = 256;
 
     private static void ProbeSchemaSemaphore(DatabaseDescriptor database)
     {
@@ -440,7 +625,7 @@ public sealed class TestSchemaReplicator
             FromVersion = fromVersion,
             ToVersion = toVersion,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableName = tableName,
                 Columns =
@@ -461,6 +646,19 @@ public sealed class TestSchemaReplicator
         };
     }
 
+    /// <summary>
+    /// An entry exactly as the engine wrote it before the frame existed: UTF-16 JSON around a
+    /// UTF-16 JSON payload. Callers still have to encode it with <c>Serializator.Serialize</c>;
+    /// this only builds the object whose payload bytes are in the old form.
+    /// </summary>
+    private static SchemaChangeLogEntry LegacyCreateTableEntry(string db, long fromVersion, long toVersion, string tableName = "robots")
+    {
+        SchemaChangeLogEntry entry = CreateTableEntry(db, fromVersion, toVersion, tableName);
+        entry.Payload = Serializator.Serialize(entry.GetPayload<SchemaCreateTablePayload>());
+        entry.PayloadFormat = SchemaPayloadFormat.Utf16Legacy;
+        return entry;
+    }
+
     private static SchemaChangeLogEntry AddColumnEntry(string db, long fromVersion, long toVersion)
     {
         return new()
@@ -469,7 +667,7 @@ public sealed class TestSchemaReplicator
             FromVersion = fromVersion,
             ToVersion = toVersion,
             Op = SchemaOp.AddColumn,
-            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaAlterColumnPayload
             {
                 TableName = "robots",
                 Column = new()
@@ -489,7 +687,7 @@ public sealed class TestSchemaReplicator
             FromVersion = fromVersion,
             ToVersion = toVersion,
             Op = SchemaOp.DropTable,
-            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = "robots" })
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload { TableName = "robots" })
         };
     }
 
@@ -507,7 +705,7 @@ public sealed class TestSchemaReplicator
             FromVersion = fromVersion,
             ToVersion = toVersion,
             Op = SchemaOp.SetElementState,
-            Payload = Serializator.Serialize(new SchemaElementStatePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaElementStatePayload
             {
                 TableName = "robots",
                 ElementName = elementName,

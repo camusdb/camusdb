@@ -6,8 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using System.Text.Json.Serialization;
+
 using Kommander.Time;
-using CamusDB.Core.Serializer;
+using CamusDB.Core.Catalogs.Replication;
 
 namespace CamusDB.Core.Catalogs.Models;
 
@@ -47,6 +49,17 @@ public sealed class SchemaChangeLogEntry
     public byte[] Payload { get; set; } = [];
 
     /// <summary>
+    /// How <see cref="Payload"/> is encoded. Never replicated — the frame the entry arrived in
+    /// says which form its bytes are, and <see cref="SchemaChangeLogEntryCodec.Decode"/> stamps it
+    /// here. A freshly built entry is UTF-8, because every builder encodes its payload through
+    /// <see cref="SchemaChangeLogEntryCodec.EncodePayload{T}"/>; an entry recovered from bytes
+    /// written before the framed format carries <see cref="SchemaPayloadFormat.Utf16Legacy"/>
+    /// instead, and only <see cref="GetPayload{T}"/> ever looks at the difference.
+    /// </summary>
+    [JsonIgnore]
+    public SchemaPayloadFormat PayloadFormat { get; set; } = SchemaPayloadFormat.Utf8;
+
+    /// <summary>
     /// Memoized deserialized form of <see cref="Payload"/>. A single apply touches the payload
     /// several times (idempotency check, delta apply, table-name resolution, checkpoint persist),
     /// and each used to pay a full deserialization; the cache makes those after the first free.
@@ -65,9 +78,7 @@ public sealed class SchemaChangeLogEntry
         if (decodedPayload is T cached)
             return cached;
 
-        T payload = Serializator.Unserialize<T>(Payload);
-        if (payload is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid payload for schema operation '{Op}'");
+        T payload = SchemaChangeLogEntryCodec.DecodePayload<T>(Payload, PayloadFormat, Op);
 
         decodedPayload = payload;
         return payload;

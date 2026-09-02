@@ -46,8 +46,11 @@ public sealed class CachedQueryRunner
 
     /// <summary>Configuration for this engine; injected, never ambient.</summary>
     private readonly CamusDBOptions _options;
+    
     private readonly CachedQueryResult _pendingResult;
+    
     private readonly CacheGenerationToken _token;
+    
     private readonly CancellationToken _ct;
 
     /// <summary>

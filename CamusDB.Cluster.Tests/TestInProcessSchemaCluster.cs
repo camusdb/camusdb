@@ -19,7 +19,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Serializer;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -53,7 +53,7 @@ public sealed class TestInProcessSchemaCluster
             FromVersion = 0,
             ToVersion = 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = "000000000000000000000101",
                 TableName = "robots",
@@ -78,7 +78,7 @@ public sealed class TestInProcessSchemaCluster
 
         SchemaReplicationResult result = await leader.Kahuna.ReplicateSchemaChangeAsync(
             dbId,
-            Serializator.Serialize(entry)
+            SchemaChangeLogEntryCodec.Encode(entry)
         );
 
         Assert.AreEqual(SchemaReplicationOutcome.Committed, result.Outcome);

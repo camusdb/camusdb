@@ -9,7 +9,6 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -67,7 +66,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.CreateTable,
-            Payload = Serializator.Serialize(new SchemaCreateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = tableId,
                 TableName = ticket.TableName,
@@ -99,7 +98,7 @@ internal static class SchemaChangeEntryFactory
                 FromVersion = database.Schema.SchemaVersion,
                 ToVersion = database.Schema.SchemaVersion + 1,
                 Op = SchemaOp.RenameColumn,
-                Payload = Serializator.Serialize(new SchemaRenamePayload
+                Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
                 {
                     TableName = ticket.TableName,
                     Kind = SchemaRenameKind.Column,
@@ -127,7 +126,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = op,
-            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaAlterColumnPayload
             {
                 TableName = ticket.TableName,
                 Column = column
@@ -144,7 +143,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropTable,
-            Payload = Serializator.Serialize(new SchemaDropTablePayload { TableName = tableName, Deferred = deferred })
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload { TableName = tableName, Deferred = deferred })
         };
     }
 
@@ -161,7 +160,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.RenameTable,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = ticket.TableName,
                 Kind = SchemaRenameKind.Table,
@@ -197,7 +196,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.RelinkTable,
-            Payload = Serializator.Serialize(new SchemaRelinkTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRelinkTablePayload
             {
                 // Preserve the original id so the reattached table's store reads the retained rows/indexes.
                 TableId = orphan.TableId,
@@ -245,7 +244,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.AddIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaIndexPayload
             {
                 TableName = ticket.TableName,
                 IndexName = ticket.IndexName,
@@ -267,7 +266,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaIndexPayload
             {
                 TableName = ticket.TableName,
                 IndexName = ticket.IndexName
@@ -462,7 +461,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.AddColumn,
-            Payload = Serializator.Serialize(new SchemaAlterColumnPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaAlterColumnPayload
             {
                 TableName = tableName,
                 // Built through FromColumnInfo, never field by field: a hand-copied list silently
@@ -484,7 +483,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.SetElementState,
-            Payload = Serializator.Serialize(new SchemaElementStatePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaElementStatePayload
             {
                 TableName = tableName,
                 ElementName = elementName,
@@ -504,7 +503,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.AddIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaIndexPayload
             {
                 TableName = tableName,
                 IndexName = indexBuildInfo.IndexName,
@@ -536,7 +535,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropIndex,
-            Payload = Serializator.Serialize(new SchemaIndexPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaIndexPayload
             {
                 TableName = tableName,
                 IndexName = indexName
@@ -554,7 +553,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.SetTableSettings,
-            Payload = Serializator.Serialize(new SchemaSetTableSettingsPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetTableSettingsPayload
             {
                 TableName = tableName,
                 Settings = new Dictionary<string, string>(settings, StringComparer.Ordinal),
@@ -573,7 +572,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.SetComment,
-            Payload = Serializator.Serialize(new SchemaSetCommentPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetCommentPayload
             {
                 TableName = tableName,
                 Target = target,
@@ -593,7 +592,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.AddCheckConstraint,
-            Payload = Serializator.Serialize(new SchemaCheckConstraintPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCheckConstraintPayload
             {
                 TableName = tableName,
                 ConstraintName = constraintName,
@@ -617,7 +616,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropCheckConstraint,
-            Payload = Serializator.Serialize(new SchemaCheckConstraintPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCheckConstraintPayload
             {
                 TableName = tableName,
                 ConstraintName = constraintName,
@@ -637,7 +636,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.SetColumnNotNull,
-            Payload = Serializator.Serialize(new SchemaSetColumnNotNullPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetColumnNotNullPayload
             {
                 TableName = tableName,
                 ColumnName = columnName,
@@ -660,7 +659,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.RenameIndex,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = ticket.TableName,
                 Kind = SchemaRenameKind.Index,
@@ -684,7 +683,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = replace ? SchemaOp.ReplaceView : SchemaOp.CreateView,
-            Payload = Serializator.Serialize(new SchemaViewPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaViewPayload
             {
                 ViewId = viewId,
                 ViewName = viewName,
@@ -702,7 +701,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropView,
-            Payload = Serializator.Serialize(new SchemaDropViewPayload { ViewName = viewName })
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropViewPayload { ViewName = viewName })
         };
     }
 
@@ -721,7 +720,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.RenameView,
-            Payload = Serializator.Serialize(new SchemaRenamePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
             {
                 TableName = viewName,
                 Kind = SchemaRenameKind.View,
@@ -740,7 +739,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.SetViewDefinition,
-            Payload = Serializator.Serialize(new SchemaSetViewDefinitionPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetViewDefinitionPayload
             {
                 ViewName = viewName,
                 Definition = definition
@@ -764,7 +763,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.SetMaterializedViewState,
-            Payload = Serializator.Serialize(new SchemaSetMatViewStatePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetMatViewStatePayload
             {
                 TableId = tableId,
                 IsPopulated = isPopulated,
@@ -793,7 +792,7 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.TruncateTable,
-            Payload = Serializator.Serialize(new SchemaTruncateTablePayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaTruncateTablePayload
             {
                 TableId = tableId,
                 TableName = tableName,

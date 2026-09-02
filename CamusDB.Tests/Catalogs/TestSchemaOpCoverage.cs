@@ -17,6 +17,7 @@ using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
+using CamusDB.Core.Catalogs.Replication;
 using Kommander.Time;
 
 namespace CamusDB.Tests.Catalogs;
@@ -102,7 +103,7 @@ public sealed class TestSchemaOpCoverage
             NewStorageId = "S2"
         };
 
-        SchemaChangeLogEntry entry = Entry(SchemaOp.TruncateTable, Serializator.Serialize(payload));
+        SchemaChangeLogEntry entry = Entry(SchemaOp.TruncateTable, SchemaChangeLogEntryCodec.EncodePayload(payload));
 
         Assert.IsFalse(
             SchemaDeltaApplier.WasSchemaDeltaApplied(schema, entry),
@@ -130,7 +131,7 @@ public sealed class TestSchemaOpCoverage
         schema.SchemaVersion = 1;
 
         SchemaViewPayload create = new() { ViewName = "v_robots", ViewId = "V1" };
-        SchemaChangeLogEntry createEntry = Entry(SchemaOp.CreateView, Serializator.Serialize(create));
+        SchemaChangeLogEntry createEntry = Entry(SchemaOp.CreateView, SchemaChangeLogEntryCodec.EncodePayload(create));
 
         Assert.IsFalse(
             SchemaDeltaApplier.WasSchemaDeltaApplied(schema, createEntry),
@@ -145,7 +146,7 @@ public sealed class TestSchemaOpCoverage
         );
 
         SchemaDropViewPayload drop = new() { ViewName = "v_robots" };
-        SchemaChangeLogEntry dropEntry = Entry(SchemaOp.DropView, Serializator.Serialize(drop));
+        SchemaChangeLogEntry dropEntry = Entry(SchemaOp.DropView, SchemaChangeLogEntryCodec.EncodePayload(drop));
 
         Assert.IsFalse(
             SchemaDeltaApplier.WasSchemaDeltaApplied(schema, dropEntry),

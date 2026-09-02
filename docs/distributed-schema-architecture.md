@@ -159,7 +159,8 @@ class SchemaChangeLogEntry {
     long ToVersion;        // == FromVersion + 1
     SchemaOp Op;           // CreateTable | DropTable | AddColumn | DropColumn |
                            // AddIndex | DropIndex | SetElementState
-    byte[] Payload;        // op-specific, serialized (e.g. SchemaCreateTablePayload)
+    byte[] Payload;        // op-specific, UTF-8 JSON (e.g. SchemaCreateTablePayload); read
+                           // through GetPayload<T>(), never parsed directly — see §3.1
 }
 ```
 
@@ -178,6 +179,48 @@ source of truth for indexes is `TableSchema.Indexes`, persisted per-object along
 A cluster `ADD INDEX` is driven by the coordinator as a staged
 `AddIndex(DeleteOnly) → SetElementState(WriteOnly) → [backfill] → SetElementState(Public)`
 sequence — see §7.3 and §8.2.
+
+### 3.1 How an entry is written on the wire
+
+An entry is replicated as a fixed header followed by the entry itself as UTF-8 JSON. The one place
+that writes and reads these bytes is `SchemaChangeLogEntryCodec`:
+
+```text
+[0]        0x01                    framed format, version 1
+[1]        database-id length      1 byte, so at most 255 UTF-8 bytes
+[2..]      database id             UTF-8
+           from-version            int64, little-endian
+           to-version              int64, little-endian
+           body                    the whole SchemaChangeLogEntry as UTF-8 JSON
+```
+
+The header repeats three fields that are also in the body, and that repetition is the point. Every
+open database subscribes to its own schema-log partition, several databases can hash to the same
+partition, and the node that proposed a change is delivered its own entry **twice** — once through
+the replication callback and once through the local apply that lets the proposer observe its change
+before the statement returns (§5.2). A subscriber therefore drops far more entries than it applies.
+Reading the header answers both reasons to drop one — *not my database*, and *already applied* —
+without deserializing anything and without allocating.
+
+"Already applied" needs one thing the versions alone cannot give. A re-delivery of the entry that
+produced the current version and a *different* entry claiming that same target version carry
+identical from/to versions; the first must be dropped and the second must fail loudly as an
+out-of-order change (§6.1). So `ApplyAsync` also compares a 64-bit digest of the entry bytes against
+the digest of the delta the node last applied. Same digest means the same delta, and nothing else is
+ever dropped from the header. `RestoreAsync` needs no digest: replay delivers the committed tail in
+order, and it already treats every entry at or below the current version as done.
+
+**The pre-framing form.** Entries written before this format are the entry as UTF-16 JSON, with a
+payload that is itself UTF-16 JSON nested inside as base64. They begin `0x7B 0x00` — `{` in UTF-16 LE
+— so a first byte of `0x01` cannot be one of them and the decoder branches on that byte alone. Both
+forms decode, and a decoded entry remembers which form it came from so its payload is read with the
+matching reader. The old form disappears from a cluster when log compaction retires those entries;
+nothing rewrites them.
+
+**Upgrade constraint: every node in a cluster must run the same build.** A build without this codec
+cannot read a framed entry — it fails with a JSON error and Kommander raises a replication error.
+That is deliberate. The log type string is unchanged, so an old node fails loudly instead of
+filtering the entry out by type and silently falling behind. There is no dual-write mode.
 
 `SetElementState` carries a `SchemaElementKind { Column, Index }` discriminator
 (`SchemaElementStatePayload.ElementKind`, default `Column` so legacy entries deserialize
@@ -338,6 +381,14 @@ so multi-node tests can exercise apply/convergence without standing up HTTP endp
 ### 6.1 `SchemaReplicator.ApplyAsync` (per committed entry, on every node)
 
 ```
+read the entry's frame (no decode, no allocation — see §3.1):
+  if the frame names another database:                return true
+  observe the committed head (fence)
+  if ToVersion <= current SchemaVersion
+     and the digest matches the delta last applied:   record ack(ToVersion); return true
+
+decode the entry
+
 under Schema.Semaphore:
   if entry.FromVersion != current SchemaVersion:
       if entry.ToVersion <= current && WasSchemaDeltaApplied(...):

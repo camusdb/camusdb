@@ -27,6 +27,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.App.Controllers;
 using CamusDB.App.Services;
 
@@ -502,7 +503,7 @@ internal sealed class TestCommentOnHardening : BaseTest
             FromVersion = schema.SchemaVersion,
             ToVersion = schema.SchemaVersion + 1,
             Op = SchemaOp.SetComment,
-            Payload = Serializator.Serialize(new SchemaSetCommentPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetCommentPayload
             {
                 TableName = "t",
                 Target = CommentTarget.Column,
@@ -539,7 +540,7 @@ internal sealed class TestCommentOnHardening : BaseTest
             FromVersion = schema.SchemaVersion,
             ToVersion = schema.SchemaVersion + 1,
             Op = SchemaOp.SetComment,
-            Payload = Serializator.Serialize(new SchemaSetCommentPayload
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetCommentPayload
             {
                 TableName = "t",
                 Target = CommentTarget.Column,

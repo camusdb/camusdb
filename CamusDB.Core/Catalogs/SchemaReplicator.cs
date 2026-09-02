@@ -6,8 +6,8 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.Serializer;
 using CamusDB.Core.Transactions;
 using Microsoft.Extensions.Logging;
 
@@ -18,6 +18,13 @@ namespace CamusDB.Core.Catalogs;
 /// subscribes a database to its schema-log partition; from then on every committed
 /// <see cref="SchemaChangeLogEntry"/> arrives at <see cref="ApplyAsync"/> (live replication)
 /// or <see cref="RestoreAsync"/> (log recovery on open).
+///
+/// Both entry points read the entry's byte frame before they deserialize anything. A partition
+/// carries the traffic of every database that hashes to it, and the node that proposed a change is
+/// delivered its own entry twice, so most deliveries have nothing to do; the frame names the owning
+/// database and the version the delta produces, which is enough to drop those deliveries without
+/// allocating. See <see cref="SchemaChangeLogEntryCodec"/> for the frame and for the digest that
+/// separates a re-delivery from a different delta claiming the same version.
 ///
 /// <see cref="ApplyAsync"/> enforces ordering/idempotency (skip already-applied versions,
 /// throw on gaps) and mutates the in-memory schema on every node. It does <b>not</b> persist
@@ -116,7 +123,40 @@ public sealed class SchemaReplicator
         if (partitionId != database.SchemaLogPartition)
             return true;
 
-        SchemaChangeLogEntry entry = DecodeEntry(bytes);
+        // The entry's byte frame names its database and the version it produces, so both reasons to
+        // drop an entry are decided here, before anything is deserialized. Every open database
+        // subscribes to its own partition and several databases can share one, so most deliveries
+        // are for somebody else; and a proposer is delivered its own entry twice, once through
+        // replication and once through the local apply that lets it observe its change. Decoding
+        // for either of those is pure waste.
+        if (SchemaChangeLogEntryCodec.TryReadHeader(bytes, out SchemaEntryHeader header))
+        {
+            if (!header.DatabaseId.SequenceEqual(database.IdUtf8))
+                return true;
+
+            // Publish the committed head before the skip, exactly as the decoded path does below:
+            // the fence gap must stay visible to concurrent DML whether or not this entry has
+            // anything left to apply.
+            database.ObserveSchemaEntryHead(header.ToVersion);
+
+            // Only the entry this node last applied may be dropped here, and it is recognized by
+            // its digest rather than by its version. A different delta can claim the same target
+            // version — two nodes proposing against one base — and that case must reach the apply
+            // path below and fail as out-of-order rather than be acked as already done.
+            //
+            // Safe outside the schema lock because the branch applies nothing: it re-acks a version
+            // this node has already reached, and the ack is idempotent. A concurrent apply that
+            // advances the version in between only means the ack names a version that is likewise
+            // applied. The in-lock checks below remain the correctness gate.
+            if (header.ToVersion <= database.Schema.SchemaVersion &&
+                database.WasSchemaEntryApplied(header.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes)))
+            {
+                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, header.ToVersion);
+                return true;
+            }
+        }
+
+        SchemaChangeLogEntry entry = DecodeEntry(database, bytes);
 
         if (!string.Equals(entry.Database, database.Id, StringComparison.Ordinal))
             return true;
@@ -180,6 +220,10 @@ public sealed class SchemaReplicator
             Diagnostics.SchemaDiag.Log(
                 $"APPLIED node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
                 $"entry={entry.FromVersion}->{entry.ToVersion} newLocalVer={database.Schema.SchemaVersion}");
+
+            // Remember what was applied so the proposer's second delivery of these same bytes is
+            // recognized from the frame and never deserialized again.
+            database.RecordAppliedSchemaEntry(entry.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes));
 
             database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
 
@@ -367,7 +411,28 @@ public sealed class SchemaReplicator
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(bytes);
 
-        SchemaChangeLogEntry entry = DecodeEntry(bytes);
+        // Same frame read as the live apply path: replay delivers every committed entry on this
+        // partition, including the ones belonging to other databases that share it and the ones
+        // this node's checkpoint already contains.
+        if (SchemaChangeLogEntryCodec.TryReadHeader(bytes, out SchemaEntryHeader header))
+        {
+            if (!header.DatabaseId.SequenceEqual(database.IdUtf8))
+                return true;
+
+            database.ObserveSchemaEntryHead(header.ToVersion);
+
+            // Restore needs no digest check, unlike the live apply path. Replay delivers the
+            // committed tail in order, and the decoded path below already treats every entry at or
+            // below the current version as done without inspecting what it carries; the version
+            // alone is the whole condition it evaluates.
+            if (header.ToVersion <= database.Schema.SchemaVersion)
+            {
+                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, header.ToVersion);
+                return true;
+            }
+        }
+
+        SchemaChangeLogEntry entry = DecodeEntry(database, bytes);
 
         if (!string.Equals(entry.Database, database.Id, StringComparison.Ordinal))
             return true;
@@ -406,6 +471,8 @@ public sealed class SchemaReplicator
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
+            database.RecordAppliedSchemaEntry(entry.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes));
+
             database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
 
             return true;
@@ -416,13 +483,14 @@ public sealed class SchemaReplicator
         }
     }
 
-    private static SchemaChangeLogEntry DecodeEntry(byte[] bytes)
+    /// <summary>
+    /// Deserializes an entry and records that this database paid for it. The count is what a test
+    /// reads to prove the frame-header skips above are doing their job; production never looks at it.
+    /// </summary>
+    private static SchemaChangeLogEntry DecodeEntry(DatabaseDescriptor database, byte[] bytes)
     {
-        SchemaChangeLogEntry? entry = Serializator.Unserialize<SchemaChangeLogEntry>(bytes);
-        if (entry is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid schema replication entry");
-
-        return entry;
+        database.CountSchemaEntryDecode();
+        return SchemaChangeLogEntryCodec.Decode(bytes);
     }
 
     private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)

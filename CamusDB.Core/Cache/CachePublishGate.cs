@@ -128,7 +128,7 @@ public sealed class CachePublishGate
     /// </summary>
     public CacheGenerationToken SnapshotGenerations(IReadOnlyCollection<string> keyspaces)
     {
-        var snapshot = new Dictionary<string, long>(keyspaces.Count, StringComparer.Ordinal);
+        Dictionary<string, long> snapshot = new Dictionary<string, long>(keyspaces.Count, StringComparer.Ordinal);
         foreach (string ks in keyspaces)
             snapshot[ks] = _generations.GetValueOrDefault(ks, 0L);
         return new CacheGenerationToken(snapshot);
