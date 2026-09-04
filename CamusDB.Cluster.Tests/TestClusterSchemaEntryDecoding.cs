@@ -19,6 +19,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.Cluster;
 
@@ -27,7 +28,10 @@ namespace CamusDB.Tests.Cluster;
 /// every database that hashes to it, and the node that proposed a change is delivered its own entry
 /// twice — once through replication and once through the local apply that lets it observe the change
 /// before the statement returns. These tests pin the resulting decode counts, which is the only way
-/// to see that the frame-header skips are engaged: the schema converges either way.
+/// to see that the frame-header skips are engaged: the schema converges either way. The same
+/// counters also pin the subscriber's idle state: a pure data workload must leave them untouched,
+/// because the subscriber runs inline in the partition's commit pipeline and any work it did per
+/// data commit would tax every transaction in the cluster.
 /// </summary>
 [TestFixture]
 // Serial: boots a multi-node in-process cluster. Concurrent clusters contend for ports and skew
@@ -138,6 +142,127 @@ public sealed class TestClusterSchemaEntryDecoding
                 bystanderDescriptors[i].SchemaEntriesDecoded,
                 $"node {i} deserialized an entry belonging to another database"
             );
+    }
+
+    [Test]
+    public async Task DmlNeverTouchesTheSchemaReplicationPipeline()
+    {
+        // One partition, deliberately: data commits and the schema log then share a Raft
+        // partition, which is the shape where an accidental coupling would surface. The schema
+        // subscriber must stay idle under a pure data workload — its decode counter and the
+        // schema fence must not move — because anything it does per data commit runs inline in
+        // the partition's serial apply pipeline and becomes a tax on every commit in the cluster.
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 1);
+        string db = cluster.NextSchemaLogDatabaseName();
+
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+        await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "robots",
+            columns:
+            [
+                new ColumnInfo("id", ColumnType.Id),
+                new ColumnInfo("name", ColumnType.String)
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        long[] decodedBefore = DecodeCounts(cluster);
+        long[] headBefore = [.. cluster.Nodes.Select(node => node.Database!.HeadSchemaVersion)];
+        long[] versionBefore = [.. cluster.Nodes.Select(node => node.Database!.Schema.SchemaVersion)];
+
+        // A committed data workload: inserts, then updates of the same rows, each in its own
+        // transaction so every iteration runs the full commit path.
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.Insert(new InsertTicket(
+                    txnState: tx,
+                    databaseName: db,
+                    tableName: "robots",
+                    values:
+                    [
+                        new Dictionary<string, ColumnValue>
+                        {
+                            ["id"] = new(ColumnType.Id, $"0000000000000000000{i + 1:D5}"),
+                            ["name"] = new(ColumnType.String, $"robot-{i}"),
+                        }
+                    ]
+                ));
+                await leader.Database!.Transactions.CommitAsync(tx);
+            }
+
+            for (int i = 0; i < 20; i++)
+            {
+                KvTransaction tx = await leader.Database!.Transactions.BeginAsync();
+                await leader.Executor.Update(new UpdateTicket(
+                    txnState: tx,
+                    databaseName: db,
+                    tableName: "robots",
+                    plainValues: new() { { "name", new(ColumnType.String, $"renamed-{i}") } },
+                    exprValues: null,
+                    where: null,
+                    filters: new() { new("id", "=", new(ColumnType.Id, $"0000000000000000000{i + 1:D5}")) },
+                    parameters: null
+                ));
+                await leader.Database!.Transactions.CommitAsync(tx);
+            }
+        });
+
+        // Reads on every node, so each node's own scan path runs too.
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            KvTransaction tx = await node.Database!.Transactions.BeginAsync();
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await node.Executor.Query(new QueryTicket(
+                txnState: tx,
+                databaseName: db,
+                tableName: "robots",
+                index: null,
+                projection: null,
+                filters: null,
+                where: null,
+                orderBy: null,
+                limit: null,
+                offset: null,
+                parameters: null
+            ));
+
+            int rows = 0;
+            await foreach (QueryResultRow _ in cursor)
+                rows++;
+
+            await node.Database!.Transactions.CommitAsync(tx);
+            Assert.AreEqual(20, rows, $"node {node.Index} did not read the committed rows back");
+        }
+
+        for (int i = 0; i < cluster.Nodes.Length; i++)
+        {
+            Assert.AreEqual(
+                decodedBefore[i],
+                cluster.Nodes[i].Database!.SchemaEntriesDecoded,
+                $"node {i} decoded a schema entry during a pure data workload"
+            );
+            Assert.AreEqual(
+                headBefore[i],
+                cluster.Nodes[i].Database!.HeadSchemaVersion,
+                $"node {i} observed a schema-log head advance during a pure data workload"
+            );
+            Assert.AreEqual(
+                versionBefore[i],
+                cluster.Nodes[i].Database!.Schema.SchemaVersion,
+                $"node {i} changed its schema version during a pure data workload"
+            );
+        }
     }
 
     [Test]
