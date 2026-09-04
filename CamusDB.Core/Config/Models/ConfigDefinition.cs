@@ -363,6 +363,14 @@ public class ConfigDefinition
     public int DatabaseIdleEvictionMs { get; set; } = 15 * 60 * 1000;
 
     /// <summary>
+    /// Interval of the cluster-mode schema freshness sweep that probes every open database's
+    /// durable checkpoint version and reloads a schema that silently fell behind, in milliseconds.
+    /// <c>&lt;= 0</c> disables the sweep. Maps to <c>CamusDBOptions.SchemaFreshnessCheckIntervalMs</c>
+    /// (yml <c>schema_freshness_check_interval_ms</c>). Default 10 seconds.
+    /// </summary>
+    public int SchemaFreshnessCheckIntervalMs { get; set; } = 10_000;
+
+    /// <summary>
     /// Enables cost-based access-path selection in the query planner.
     /// When <c>true</c> (default), the planner costs all viable index steps for ANALYZEd tables
     /// and picks the cheapest. When <c>false</c>, the rule-based (score-based) path is used

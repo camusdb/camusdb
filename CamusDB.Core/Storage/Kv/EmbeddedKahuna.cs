@@ -77,10 +77,19 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     // would find alreadyCompleted==false, the already-buffered early entries would never replay,
     // and RestoreAsync's gap check would throw loudly rather than silently diverge.
     //
-    // Drain-once invariant: _walRestoreDrainedPartitions prevents a second open of the same
+    // Drain-once invariant: _walRestoreDrainedSubscribers prevents a second open of the same
     // database from re-firing onRestoreFinished (and thus PersistFullSchemaCheckpointAsync) on
     // an already-current checkpoint. Without it alreadyCompleted stays true forever (the set is
     // never cleared), so every OpenDatabase would trigger a needless full re-persist.
+    //
+    // Keyed by (partition, database), NOT by partition alone: several databases hash their schema
+    // logs onto one partition, and each must get its own replay of the buffered restore entries —
+    // RestoreAsync skips the other databases' entries by id. A per-partition key let the first
+    // database opened consume and discard the buffer, so every later database on that partition
+    // silently lost its restore replay (and its post-replay checkpoint re-persist). For the same
+    // reason the buffer itself is retained for the process lifetime instead of being removed on
+    // the first drain; it holds only the schema-log tail of the startup WAL restore, which is
+    // bounded by the WAL checkpoint anchor.
     //
     // Thread safety: all reads/writes protected by _walRestoreBufferLock.
     // Concurrency note: between buffer replay entries the schema semaphore is released, so a
@@ -90,7 +99,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     private readonly Lock _walRestoreBufferLock = new();
     private readonly Dictionary<int, List<byte[]>> _walRestoreBuffer = new();
     private readonly HashSet<int> _walRestoreCompletedPartitions = new();
-    private readonly HashSet<int> _walRestoreDrainedPartitions = new();
+    private readonly HashSet<(int PartitionId, string DatabaseId)> _walRestoreDrainedSubscribers = new();
 
     // Stored so DisposeAsync can unregister them from Raft's event chains.
     private Func<int, RaftLog, Task<bool>>? _walRestoreLogHandler;
@@ -1105,21 +1114,16 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
                 // Drain buffered entries that arrived before this subscriber registered
                 // (mid-restore case: subscriber saw only the tail via OnLogRestored).
+                // The buffer is copied, not removed: other databases sharing this partition
+                // drain the same entries for themselves when they open.
                 List<byte[]>? buffered;
                 bool shouldFire;
                 lock (_walRestoreBufferLock)
                 {
-                    shouldFire = !_walRestoreDrainedPartitions.Contains(schemaPartition);
-                    if (shouldFire)
-                    {
-                        _walRestoreBuffer.TryGetValue(schemaPartition, out buffered);
-                        _walRestoreBuffer.Remove(schemaPartition);
-                        _walRestoreDrainedPartitions.Add(schemaPartition);
-                    }
-                    else
-                    {
-                        buffered = null;
-                    }
+                    shouldFire = _walRestoreDrainedSubscribers.Add((schemaPartition, db));
+                    buffered = shouldFire && _walRestoreBuffer.TryGetValue(schemaPartition, out List<byte[]>? list)
+                        ? [.. list]
+                        : null;
                 }
 
                 if (!shouldFire)
@@ -1144,7 +1148,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         // completed before this subscriber registered (the common cluster startup order where
         // OpenDatabase runs after WaitForLeaderAsync), drain the buffer and fire onRestoreFinished
         // so the subscriber catches up to the WAL head.
-        // Drain-once guard: if a previous open already consumed this partition's buffer, skip.
+        // Drain-once guard, per (partition, database): a previous open of THIS database already
+        // replayed the buffer, skip; a previous open of ANOTHER database on the same partition
+        // replayed only its own entries, so this database still gets its replay. The buffer is
+        // copied, not removed, for the same reason.
         if (db is not null)
         {
             int schemaPartition = SchemaLogPartition(db);
@@ -1153,17 +1160,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             lock (_walRestoreBufferLock)
             {
                 shouldDrain = _walRestoreCompletedPartitions.Contains(schemaPartition) &&
-                              !_walRestoreDrainedPartitions.Contains(schemaPartition);
-                if (shouldDrain)
-                {
-                    _walRestoreBuffer.TryGetValue(schemaPartition, out buffered);
-                    _walRestoreBuffer.Remove(schemaPartition);
-                    _walRestoreDrainedPartitions.Add(schemaPartition);
-                }
-                else
-                {
-                    buffered = null;
-                }
+                              _walRestoreDrainedSubscribers.Add((schemaPartition, db));
+                buffered = shouldDrain && _walRestoreBuffer.TryGetValue(schemaPartition, out List<byte[]>? list)
+                    ? [.. list]
+                    : null;
             }
 
             if (shouldDrain)
@@ -1204,11 +1204,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
             lock (_walRestoreBufferLock)
             {
-                // Stop buffering once a subscriber has already drained this partition
-                // (_walRestoreDrainedPartitions is set when the buffer is consumed).
-                if (_walRestoreDrainedPartitions.Contains(partitionId))
-                    return Task.FromResult(true);
-
+                // Buffer unconditionally: OnLogRestored only fires during the startup WAL restore,
+                // and the buffer must survive the first drain because every database sharing this
+                // partition replays it independently (drains are keyed per partition AND database).
                 if (!_walRestoreBuffer.TryGetValue(partitionId, out List<byte[]>? list))
                     _walRestoreBuffer[partitionId] = list = new();
 
@@ -1530,7 +1528,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         {
             _walRestoreBuffer.Clear();
             _walRestoreCompletedPartitions.Clear();
-            _walRestoreDrainedPartitions.Clear();
+            _walRestoreDrainedSubscribers.Clear();
         }
 
         await node.DisposeAsync().ConfigureAwait(false);

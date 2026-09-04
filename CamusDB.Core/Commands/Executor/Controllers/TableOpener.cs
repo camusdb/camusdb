@@ -8,6 +8,7 @@
 
 using Nito.AsyncEx;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -70,7 +71,7 @@ internal sealed class TableOpener
                 $"'{tableName}' is a view and cannot be written to: CamusDB has no updatable views yet, " +
                 "so writes must target the underlying table");
 
-        TableSchema tableSchema = catalogs.GetTableSchema(database, tableName);
+        TableSchema tableSchema = await GetTableSchemaWithFreshnessRetry(database, tableName).ConfigureAwait(false);
 
         // Per-table privilege enforcement. This is the universal chokepoint for a table access — every
         // top-level, join, subquery, semi-join, DML, DDL, and EXPLAIN path resolves its descriptor here
@@ -102,6 +103,48 @@ internal sealed class TableOpener
 
     public ValueTask<TableDescriptor> Open(DatabaseDescriptor database, TableSource tableSource) =>
         Open(database, tableSource.TableName);
+
+    /// <summary>
+    /// Resolves a table's schema, treating a miss as a possible symptom of a stale in-memory
+    /// catalog rather than only as a user error. A node that missed a committed CREATE TABLE
+    /// delivery (the database was unopened, or the delta landed in the open-time load-to-register
+    /// gap) has no local signal of the loss — the fence cannot see an entry that was never
+    /// delivered — so the miss itself is the detector. Before failing, probe the durable schema
+    /// checkpoint; when it is ahead of memory the schema is reloaded and the lookup retried once.
+    /// The probe is single-flight and cooldown-limited per database, so lookups of genuinely
+    /// nonexistent tables cost at most one extra KV read per cooldown window.
+    /// </summary>
+    private async ValueTask<TableSchema> GetTableSchemaWithFreshnessRetry(DatabaseDescriptor database, string tableName)
+    {
+        try
+        {
+            return catalogs.GetTableSchema(database, tableName);
+        }
+        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TableDoesntExist)
+        {
+            bool reconciled = false;
+
+            try
+            {
+                reconciled = await catalogs.ReconcileSchemaFreshnessAsync(
+                    database, SchemaFreshnessReconciler.MissTriggeredCooldownMs).ConfigureAwait(false);
+            }
+            catch (Exception probeEx)
+            {
+                // The probe is a repair attempt riding an error path; a probe failure must
+                // surface the original, actionable miss rather than a KV transport error.
+                logger.LogWarning(
+                    probeEx,
+                    "Schema freshness probe after a miss of table '{Table}' failed for database '{Db}'",
+                    tableName, database.Name);
+            }
+
+            if (!reconciled)
+                throw;
+
+            return catalogs.GetTableSchema(database, tableName);
+        }
+    }
 
     private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {

@@ -55,6 +55,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly DatabaseEvictor databaseEvictor;
 
+    private readonly SchemaFreshnessSweeper schemaFreshnessSweeper;
+
     private readonly DatabaseDropper databaseDroper;
 
     private readonly DatabaseDescriptors databaseDescriptors;
@@ -409,6 +411,15 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Started here rather than alongside the KV-backed schedulers: eviction reads nothing but this
         // engine's own descriptor cache, so it has no registry or partition-readiness to wait for.
         databaseEvictor.Start();
+
+        // Repairs a node whose in-memory schema silently fell behind the durable checkpoint —
+        // committed schema deltas are delivered exactly once, so one that commits while a database
+        // is unopened (or inside the open-time load-to-register gap) never reaches this node's
+        // catalog. Cluster mode only: a standalone node applies its own deltas in-process and
+        // cannot fall behind its own checkpoint.
+        schemaFreshnessSweeper = new(databaseDescriptors, catalogs, logger, options.SchemaFreshnessCheckIntervalMs);
+        if (isClusterMode)
+            schemaFreshnessSweeper.Start();
         databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
         tableOpener = new(catalogs, logger);
@@ -687,6 +698,13 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// deterministically; the periodic sweep that will call it on a timer is configuration-driven.
     /// </summary>
     internal int EvictIdleDatabasesForTests(long idleWindowMs) => databaseEvictor.EvictIdle(idleWindowMs);
+
+    /// <summary>
+    /// Test-only seam: runs one schema freshness sweep over every open database and returns how
+    /// many stale schemas were repaired. Drives the sweep deterministically instead of waiting out
+    /// the configured timer tick.
+    /// </summary>
+    internal Task<int> SweepSchemaFreshnessForTests() => schemaFreshnessSweeper.SweepOnceAsync();
 
     /// <summary>
     /// Test-only seam: attempts to release one database and reports why it was or was not released, so
@@ -1423,6 +1441,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Before the closer: stopping the sweep first means it can never be mid-eviction while
         // shutdown is disposing the very descriptors it is inspecting.
         await databaseEvictor.DisposeAsync().ConfigureAwait(false);
+
+        // Same ordering argument: the freshness sweep probes descriptors, so it must stop before
+        // the closer disposes them.
+        await schemaFreshnessSweeper.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

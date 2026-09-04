@@ -410,6 +410,20 @@ public sealed record CamusDBOptions
     public int DatabaseIdleEvictionMs { get; init; } = 15 * 60 * 1000;
 
     /// <summary>
+    /// Interval, in milliseconds, of the background schema freshness sweep in cluster mode. Each
+    /// tick compares every open database's in-memory schema version with its durable checkpoint
+    /// version — one small KV read per database — and reloads the schema when memory is behind,
+    /// which means committed schema deltas were never delivered to this node (the database was
+    /// unopened when they committed, or they landed in the open-time load-to-register gap). The
+    /// sweep bounds such an episode to one tick; without it a node can serve a stale schema
+    /// indefinitely with no error in its own log. A value <c>&lt;= 0</c> disables the loop (used by
+    /// tests that drive a sweep manually). Ignored in standalone mode, where a node applies its own
+    /// deltas in-process and cannot fall behind. Default is 10 seconds.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int SchemaFreshnessCheckIntervalMs { get; init; } = 10_000;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of a database-registry drop-intent fence (the mutex taken by
     /// <c>DROP</c>/<c>RELINK</c>/the orphan GC per database id and per table). The fence's KV key carries
     /// this as a native expiry: a holder that crashes without releasing frees the fence once the lease

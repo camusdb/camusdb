@@ -131,6 +131,7 @@ public class ConfigReader
         "orphan_retention_ms",
         "orphan_reclaim_interval_ms",
         "database_idle_eviction_ms",
+        "schema_freshness_check_interval_ms",
         "engine_metrics_enabled",
         "slow_query_log_enabled",
         "slow_query_log_threshold_ms",

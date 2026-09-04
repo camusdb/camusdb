@@ -50,33 +50,15 @@ internal static class SchemaLoader
         // descriptors that captured the old references must be rebuilt.
         database.TableDescriptors.Clear();
 
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-
         try
         {
-            IKahuna kahuna = database.Kahuna.Kahuna;
+            SchemaSnapshot snapshot = await LoadSnapshotAsync(database).ConfigureAwait(false);
 
-            (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, MetaKeys.VersionKey(database.Id), -1,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
-
-            // A database with persisted schema has a version key. Absent ⟹ a fresh database with an
-            // empty schema (version 0, no tables) — there is no legacy single-blob fallback to read
-            // (backwards compatibility is intentionally not supported).
-            if (schemaType == KeyValueResponseType.Get && schemaEntry?.Value is not null)
+            if (snapshot.HasPersistedSchema)
             {
-                database.Schema.SchemaVersion = MetaJsonSerializer.DeserializeCompat(schemaEntry.Value, MetaJsonContext.Default.Int64);
-                database.Schema.Tables = await LoadTablesAsync(database, tx).ConfigureAwait(false);
-
-                // Views load after tables so a view's recorded dependency ids can be checked against
-                // relations that are already in the map; a view is only ever a consumer of tables and
-                // of earlier views, never the reverse, so this one ordering is sufficient.
-                database.Schema.Views = await LoadViewsAsync(database, tx).ConfigureAwait(false);
+                database.Schema.SchemaVersion = snapshot.SchemaVersion;
+                database.Schema.Tables = snapshot.Tables;
+                database.Schema.Views = snapshot.Views;
             }
 
             // Both maps were replaced wholesale above, so the id index has to be built from them
@@ -91,20 +73,8 @@ internal static class SchemaLoader
             // gate and any other check that compares the two fields after a process restart.
             database.ObserveSchemaEntryHead(database.Schema.SchemaVersion);
 
-            (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, MetaKeys.SystemKey(database.Id), -1,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
-
-            if (systemType == KeyValueResponseType.Get && systemEntry?.Value is not null)
-            {
-                SystemSchema? system =
-                    MetaJsonSerializer.DeserializeCompat(systemEntry.Value, MetaJsonContext.Default.SystemSchema);
-                if (system is not null)
-                    database.SystemSchema = system;
-            }
+            if (snapshot.System is not null)
+                database.SystemSchema = snapshot.System;
 
             // Populate TableSchema.Indexes in-memory for any table that still carries
             // its indexes only in the legacy SystemSchema blob. The migration is in-memory
@@ -116,8 +86,97 @@ internal static class SchemaLoader
         }
         finally
         {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             database.TableDescriptors.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Reads only the persisted schema version key. This is the cheap probe the freshness
+    /// reconciler runs before it pays for a full snapshot load: one KV read that answers
+    /// "did the durable checkpoint move past what this node has in memory". Returns null when
+    /// the key is absent, which means a fresh database that never persisted schema.
+    /// </summary>
+    internal static async Task<long?> TryReadPersistedVersionAsync(DatabaseDescriptor database)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        try
+        {
+            (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) =
+                await database.Kahuna.Kahuna.LocateAndTryGetValue(
+                    tx.TransactionId, MetaKeys.VersionKey(database.Id), -1,
+                    HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            if (type != KeyValueResponseType.Get || entry?.Value is null)
+                return null;
+
+            return MetaJsonSerializer.DeserializeCompat(entry.Value, MetaJsonContext.Default.Int64);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Reads a complete, mutually consistent copy of the database's persisted schema — version,
+    /// tables, views and system blob — in one transaction, without touching the descriptor.
+    /// <see cref="LoadMetaAsync"/> installs the result on a fresh descriptor;
+    /// <see cref="SchemaFreshnessReconciler"/> installs it on a live one, under the schema lock,
+    /// only when the persisted version is ahead of memory.
+    /// </summary>
+    internal static async Task<SchemaSnapshot> LoadSnapshotAsync(DatabaseDescriptor database)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        try
+        {
+            IKahuna kahuna = database.Kahuna.Kahuna;
+            SchemaSnapshot snapshot = new();
+
+            (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
+                await kahuna.LocateAndTryGetValue(
+                    tx.TransactionId, MetaKeys.VersionKey(database.Id), -1,
+                    HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            // A database with persisted schema has a version key. Absent ⟹ a fresh database with an
+            // empty schema (version 0, no tables) — there is no legacy single-blob fallback to read
+            // (backwards compatibility is intentionally not supported).
+            if (schemaType == KeyValueResponseType.Get && schemaEntry?.Value is not null)
+            {
+                snapshot.HasPersistedSchema = true;
+                snapshot.SchemaVersion = MetaJsonSerializer.DeserializeCompat(schemaEntry.Value, MetaJsonContext.Default.Int64);
+                snapshot.Tables = await LoadTablesAsync(database, tx).ConfigureAwait(false);
+
+                // Views load after tables so a view's recorded dependency ids can be checked against
+                // relations that are already in the map; a view is only ever a consumer of tables and
+                // of earlier views, never the reverse, so this one ordering is sufficient.
+                snapshot.Views = await LoadViewsAsync(database, tx).ConfigureAwait(false);
+            }
+
+            (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
+                await kahuna.LocateAndTryGetValue(
+                    tx.TransactionId, MetaKeys.SystemKey(database.Id), -1,
+                    HLCTimestamp.Zero,
+                    KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+
+            if (systemType == KeyValueResponseType.Get && systemEntry?.Value is not null)
+                snapshot.System = MetaJsonSerializer.DeserializeCompat(systemEntry.Value, MetaJsonContext.Default.SystemSchema);
+
+            return snapshot;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
 
@@ -200,7 +259,7 @@ internal static class SchemaLoader
     /// the populated <c>Indexes</c> list to the table's KV entry via
     /// <c>PersistSchemaTableAsync</c>.
     /// </summary>
-    private static void MigrateIndexesFromSystemSchema(DatabaseDescriptor database)
+    internal static void MigrateIndexesFromSystemSchema(DatabaseDescriptor database)
     {
         if (database.SystemSchema.Indexes.Count == 0)
             return;

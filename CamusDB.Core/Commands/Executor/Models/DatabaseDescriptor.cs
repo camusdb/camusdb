@@ -234,6 +234,41 @@ public sealed record DatabaseDescriptor : IDisposable
         await Kahuna.StepDownSchemaPartitionAsync(Id, CancellationToken.None).ConfigureAwait(false);
     }
 
+    // Schema freshness reconciliation gate: makes the checkpoint-staleness probe single-flight
+    // per descriptor and rate-limits repeated probes. A probe is one KV read of the version key;
+    // the gate exists so a burst of misses against a nonexistent table cannot multiply that read.
+    private long _lastSchemaFreshnessCheckTicks;
+
+    private int _schemaFreshnessCheckInFlight;
+
+    /// <summary>
+    /// Tries to claim the schema freshness probe for this descriptor. Returns false when another
+    /// probe is in flight, or when the last probe started less than <paramref name="cooldownMs"/>
+    /// ago (0 disables the cooldown but keeps the single-flight guarantee). A successful claim
+    /// must be released with <see cref="ExitSchemaFreshnessCheck"/> in a finally block.
+    /// </summary>
+    internal bool TryEnterSchemaFreshnessCheck(long cooldownMs)
+    {
+        long now = Environment.TickCount64;
+
+        if (cooldownMs > 0)
+        {
+            long last = Volatile.Read(ref _lastSchemaFreshnessCheckTicks);
+            if (last != 0 && now - last < cooldownMs)
+                return false;
+        }
+
+        if (Interlocked.CompareExchange(ref _schemaFreshnessCheckInFlight, 1, 0) != 0)
+            return false;
+
+        Volatile.Write(ref _lastSchemaFreshnessCheckTicks, now);
+        return true;
+    }
+
+    /// <summary>Releases the claim taken by <see cref="TryEnterSchemaFreshnessCheck"/>.</summary>
+    internal void ExitSchemaFreshnessCheck()
+        => Interlocked.Exchange(ref _schemaFreshnessCheckInFlight, 0);
+
     // Fence: highest schema-log entry ToVersion received by this node (committed in Raft,
     // delivered to ApplyAsync or RestoreAsync), regardless of whether it has been applied to the
     // in-memory schema yet. Monotonically increasing; updated before the schema lock is acquired.

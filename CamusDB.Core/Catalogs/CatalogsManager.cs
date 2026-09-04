@@ -149,6 +149,15 @@ public sealed class CatalogsManager
         => SchemaLoader.LoadSchemaCheckpoint(buffer);
 
     /// <summary>
+    /// Reloads the in-memory schema from the durable KV checkpoint when the checkpoint version is
+    /// ahead of memory — the repair for committed schema deltas that were never delivered to this
+    /// node. Returns true only when a newer snapshot was installed. See
+    /// <see cref="SchemaFreshnessReconciler"/> for the delivery gap this closes.
+    /// </summary>
+    public async Task<bool> ReconcileSchemaFreshnessAsync(DatabaseDescriptor database, long cooldownMs = 0)
+        => await SchemaFreshnessReconciler.TryReconcileAsync(database, cooldownMs, logger).ConfigureAwait(false);
+
+    /// <summary>
     /// Copies the source database's metadata namespace into the branch's namespace, as-of
     /// <paramref name="forkT"/>. See <see cref="BranchMetaCopier"/> for the snapshot and locking
     /// contract the caller must satisfy.

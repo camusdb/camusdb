@@ -178,6 +178,24 @@ internal sealed class DatabaseOpener
         // ApplyAsync fires after the Raft commit and updates database.Schema.SchemaVersion.
         schemaReplicator.Register(databaseDescriptor, coordinator);
 
+        // A committed schema delta delivered between the LoadMetaAsync read above and the Register
+        // call is consumed with no subscriber and never redelivered, so this node would keep the
+        // pre-delta schema with nothing to correct it. Re-probe the durable checkpoint now that the
+        // subscription is live; a delta whose checkpoint was persisted in the gap is installed here,
+        // and one whose checkpoint lands later is caught by the miss-triggered and periodic probes.
+        // Best-effort: the probe repairs a rare race and must not fail an otherwise good open.
+        try
+        {
+            await catalogs.ReconcileSchemaFreshnessAsync(databaseDescriptor).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Post-open schema freshness probe failed for database '{Db}'; the periodic probe will retry",
+                name);
+        }
+
         Log.LogDatabaseOpened(logger, name);
 
         return databaseDescriptor;

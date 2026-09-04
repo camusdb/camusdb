@@ -240,7 +240,11 @@ internal sealed class SchemaAckTracker
             if (acks is null || !acks.Nodes.TryGetValue(node, out NodeAck ack))
             {
                 // A node with no ack record for this database hasn't opened it yet and isn't
-                // serving it. It will catch up via RestoreAsync when it does open.
+                // serving it. When it does open, it loads the durable checkpoint the proposer
+                // persisted, and the freshness probes (open-time, miss-triggered, periodic sweep)
+                // repair the case where the checkpoint had not yet landed at load time — the
+                // committed delta itself is delivered only to registered subscribers, so an
+                // unopened node never receives it. See SchemaFreshnessReconciler.
                 // - schemaVersion == 0: the cluster is at version 0 (pre-first-DDL); all nodes
                 //   are implicitly at 0 even without a record — gate must not block.
                 // - acks != null: at least one node has opened the database and recorded an ack,

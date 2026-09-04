@@ -547,6 +547,16 @@ sound for the real threat model: a node lagging *schema-apply* while caught up o
 advancing `HeadSchemaVersion` (the entry was received) and is fenced; a *fully* partitioned node
 receives neither new schema nor new data, so it has nothing newer to mis-decode.
 
+**What the fence cannot see: an entry that was never delivered.** `HeadSchemaVersion` advances
+only when an entry reaches `ApplyAsync`/`RestoreAsync`. Kommander delivers each committed entry
+exactly once, to whichever subscribers exist at that instant, and never redelivers it — so a delta
+that commits while a database is *unopened* on some node, or inside the open-time gap between the
+checkpoint read and the subscription registration (`DatabaseOpener.LoadDatabase`), leaves that
+node's head equal to its applied version. The fence passes, no error is raised anywhere, and the
+node serves the stale schema indefinitely (observed in production as one node answering a third of
+a cluster's traffic with `TableDoesntExist` for a full run). The freshness reconciler in §6.4 is
+the repair for exactly this blind spot.
+
 Because the fence fires in `TableOpener.Open` *before* any write or schema-version pin, the in-flight
 transaction is untouched and the same operation is safe to re-run. `ExecuteNonSQLQuery` exploits this:
 it auto-retries a `SchemaCatchingUp` DML a few times with a short exponential backoff, so a brief lag
@@ -566,6 +576,47 @@ results against a stale schema.
 > `QuorumBackstopActivations` and `SchemaCatchingUp` `FenceRejections` (global + per-database) so a
 > lagging follower is observable as a number, not just a log line. (Wiring those counters to an
 > external metrics exporter is left for when the codebase grows one.)
+
+### 6.4 Schema freshness reconciliation — repairing undelivered deltas
+
+The delivery model has a structural hole the fence cannot cover (§6.3): a committed delta reaches
+only the subscribers registered at commit time. A database subscribes per node, only while open,
+and `DatabaseOpener.LoadDatabase` registers the subscription *after* it reads the checkpoint — so a
+delta that commits while the database is unopened on a node, or inside that load-to-register gap,
+is consumed with no subscriber and is gone. The node's in-memory catalog silently diverges from the
+cluster with `head == applied`, and nothing in the ack gate blocks it: a node with no ack record is
+deliberately skipped (it "hasn't opened the database").
+
+`SchemaFreshnessReconciler` closes the hole using the durable checkpoint as a staleness detector
+and repair source. The proposer persists `{db}/meta/*` after every committed delta (§6.1), so the
+persisted `{db}/meta/version` is a cluster-visible floor on the committed head. The reconciler:
+
+1. probes that one key (a single KV read, single-flight per descriptor, cooldown-limited);
+2. when it is ahead of memory, loads a full snapshot (version, tables, views, system blob) in one
+   transaction **without** the schema lock — holding the lock across KV reads would stall the apply
+   pipeline, which yields on that lock;
+3. installs the snapshot under `Schema.Semaphore` only if it is *still* ahead — a concurrent live
+   apply that raced past the snapshot wins and the snapshot is discarded (monotonic install);
+4. clears the descriptor cache, invalidates cached results/statistics for every relation the swap
+   touched, advances the fence head, and acks the reached version to the leader's gate.
+
+Three triggers, all funnelled through the same reconciler:
+
+- **Open-time** — `DatabaseOpener.LoadDatabase` re-probes right after registering the subscription,
+  closing the load-to-register gap for any delta whose checkpoint already landed;
+- **Miss-triggered** — `TableOpener.Open` probes before letting `TableDoesntExist` surface: a miss
+  may be a user typo, but it is also the only signal a node that missed a `CREATE TABLE` will ever
+  produce. The cooldown bounds the cost of typo storms to one KV read per second per database;
+- **Periodic sweep** — `SchemaFreshnessSweeper` (cluster mode only, `SchemaFreshnessCheckIntervalMs`,
+  default 10s) probes every open database each tick, catching the silent variants — a missed
+  `DROP TABLE`/`ADD COLUMN` produces no miss on this node, and a missed `CREATE` whose checkpoint
+  landed after the open-time probe stays invisible until something queries it.
+
+A delayed live delivery that arrives *after* a reconcile jumped past it is absorbed by
+`ApplyAsync`'s idempotency: the structural `WasSchemaDeltaApplied` check recognizes the entry's
+effect in the reloaded schema and re-acks. What the reconciler deliberately does **not** repair is a
+checkpoint that is itself behind the committed log (persist exhaustion, §10) — that remains the
+restart-replay path's job, because only the log knows more than the checkpoint.
 
 ---
 
@@ -1083,14 +1134,16 @@ on an older layout decode with their own version and read `age` with current vis
 - ~~**Ack transport / per-instance tracker.**~~ **Implemented.** `SchemaAckTracker` is now
   a per-`EmbeddedKahuna` instance. `RecordAndPublishSchemaApplied` sends follower acks to the
   leader via `ISchemaAckSender` (HTTP in production, in-process relay in tests). See §6.2.
-- **Auto-recovery without restart.** Restart-replay durability is now implemented: on open,
+- **Auto-recovery without restart.** Restart-replay durability is implemented: on open,
   the restore path reads the persisted checkpoint version as a *floor*, replays committed schema
   entries to head, re-persists the checkpoint, and clears the degraded flag (`SchemaReplicator.
-  OnSchemaRestoreFinishedAsync`, covered by the schema-restore replay tests). A degraded node therefore
-  reconciles a stale/failed checkpoint against the committed log on reopen, and a node that
-  missed DDLs while offline converges. The remaining gap is doing the same reconciliation
-  **without** a restart (a live degraded node re-persisting in place); today recovery still
-  rides the reopen path.
+  OnSchemaRestoreFinishedAsync`, covered by the schema-restore replay tests). Live recovery from a
+  *stale in-memory catalog* is also implemented: the freshness reconciler (§6.4) detects a
+  checkpoint version ahead of memory and reloads in place, without a restart, via the open-time,
+  miss-triggered, and periodic-sweep probes. The remaining gap is the inverse case — a live node
+  whose *checkpoint* is behind the committed log after persist exhaustion re-persisting in place;
+  that recovery still rides the restart-replay path, because only the log carries what the
+  checkpoint lost.
 - **Auto-retry on schema-version conflict.** A DML/read transaction whose pin is invalidated by a
   concurrent `ALTER` currently fails (§9) rather than transparently retrying against the new
   version.

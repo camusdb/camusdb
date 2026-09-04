@@ -228,6 +228,7 @@ public static class ConfigResolver
         OrphanRetentionMs = config.OrphanRetentionMs,
         OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs,
         DatabaseIdleEvictionMs = config.DatabaseIdleEvictionMs,
+        SchemaFreshnessCheckIntervalMs = config.SchemaFreshnessCheckIntervalMs,
 
         EngineMetricsEnabled = config.EngineMetricsEnabled,
         SlowQueryLogEnabled = config.SlowQueryLogEnabled,
