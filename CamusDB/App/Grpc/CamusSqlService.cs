@@ -536,13 +536,23 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         int maxBuffered = maxInFlight * 8;
         SemaphoreSlim readBuffer = new(maxBuffered, maxBuffered);
 
-        // Per-txn-handle serial chains so same-handle ops run strictly in arrival order. The chain is
-        // per stream (this call): it orders only same-handle ops that arrive here, which is why the
-        // client must pin all of a transaction's ops to one stream — see the client routing contract.
-        // Keyed by the raw (pt, counter) pair rather than a formatted string so no per-op key string
-        // is allocated on the multiplexed hot path.
-        Dictionary<(long Pt, uint Counter), Task> chains = new();
-        List<Task> ops = new();
+        // Per-txn-handle serial chains so same-handle ops run strictly in arrival order, plus the
+        // outstanding-op count that teardown waits on. The chain is per stream (this call): it orders
+        // only same-handle ops that arrive here, which is why the client must pin all of a
+        // transaction's ops to one stream — see the client routing contract. Keyed by the raw
+        // (pt, counter) pair rather than a formatted string so no per-op key string is allocated on
+        // the multiplexed hot path. The tracker deliberately keeps no history of finished ops: a
+        // stream lives for a whole client session, so a per-op Task kept here would retain one async
+        // state machine per op for that session — see the BatchStreamTracker summary.
+        BatchStreamTracker tracker = new(maxBuffered);
+
+        // One delegate for the whole stream instead of a closure per op: releasing the read-buffer
+        // slot and reporting completion are the same two steps for every op.
+        Action<Task> onOpCompleted = completed =>
+        {
+            readBuffer.Release();
+            tracker.Complete(completed);
+        };
 
         // Transactions begun by a batched START on this stream but not yet finalized. A stream that
         // ends (normally or by cancellation) without a matching COMMIT/ROLLBACK must not leak an open
@@ -564,32 +574,48 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 await readBuffer.WaitAsync(ct).ConfigureAwait(false);
 
                 (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
+
+                // Reserve the outstanding-op reference before the op exists: an op can finish before
+                // this line returns, and its completion callback must not decrement a count that was
+                // never incremented.
+                tracker.Enter();
+
                 Task op;
+                (long Pt, uint Counter)? tail = null;
                 if (handleKey is { } hk)
                 {
-                    Task prev = chains.TryGetValue(hk, out Task? p) ? p : Task.CompletedTask;
+                    Task prev = tracker.PredecessorFor(hk);
                     op = RunBatchOpAfterAsync(prev, inFlight, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
-                    chains[hk] = op;
+                    tail = hk;
                 }
                 else
                 {
                     op = RunBatchOpGatedAsync(inFlight, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
                 }
 
-                _ = op.ContinueWith(_ => readBuffer.Release(), TaskScheduler.Default);
-                ops.Add(op);
+                // Attach the completion callback before anything else can fail: without it the
+                // reserved reference above would never come back and teardown would wait forever.
+                _ = op.ContinueWith(onOpCompleted, TaskScheduler.Default);
+
+                if (tail is { } recorded)
+                    tracker.RecordTail(recorded, op);
             }
 
-            await Task.WhenAll(ops).ConfigureAwait(false);
+            await tracker.DrainAsync().ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             // Client dropped the stream. In-flight ops observe ct and roll back their own autocommit
             // work; drain best-effort so nothing is left running.
-            try { await Task.WhenAll(ops).ConfigureAwait(false); } catch { /* handled per-op */ }
+            try { await tracker.DrainAsync().ConfigureAwait(false); } catch { /* handled per-op */ }
         }
         finally
         {
+            // A read-loop failure that is neither a normal end nor a cancel skips both drains above.
+            // Draining here too keeps the rule that no op is still running when the survivors roll
+            // back. Draining twice is safe; the second call waits for the same signal.
+            try { await tracker.DrainAsync().ConfigureAwait(false); } catch { /* handled per-op */ }
+
             await RollbackStartedSurvivorsAsync(startedHandles).ConfigureAwait(false);
         }
     }

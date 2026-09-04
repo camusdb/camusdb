@@ -1012,6 +1012,50 @@ public class TestGrpcSqlService : BaseTest
     }
 
     [Test]
+    public async Task BatchExecute_ManyTransactionsOnOneStream_SurviveChainPruning()
+    {
+        string dbName = await CreateTestDatabaseWithTableAsync(
+            "CREATE TABLE items (id oid PRIMARY KEY, name string(100))");
+
+        // A stream keeps no history of finished ops, and it drops the per-handle chain entry of a
+        // handle whose last op finished. Both happen many times inside this one stream because the
+        // narrow in-flight limit lowers the read buffer, and the chain map sweeps at twice that
+        // buffer. The engine-level assertion is that pruning finished handles changes no outcome.
+        CamusSqlService narrow = new(serviceExecutor, coordinator, logger,
+            TestHostApplicationLifetime.Instance, new CamusDB.App.Services.ForegroundRequestGauge(),
+            Options with { GrpcBatchMaxInFlight = 1 });
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> reader = new();
+        ObservingStreamWriter<BatchExecuteResponse> writer = new();
+        Task server = narrow.BatchExecute(reader, writer, Ctx());
+
+        const int transactions = 40;
+
+        for (int i = 0; i < transactions; i++)
+        {
+            int start = (i * 3) + 1;
+
+            reader.Push(BStart(start, dbName));
+            TxnHandle handle = (await writer.WaitFor(m =>
+                m.RequestId == start && m.PayloadCase == BatchExecuteResponse.PayloadOneofCase.StartReply)).StartReply;
+
+            reader.Push(BNonQuery(start + 1, dbName,
+                $"INSERT INTO items (id, name) VALUES (gen_id(), 'n{i}')", handle));
+            reader.Push(BCommit(start + 2, dbName, handle));
+
+            BatchExecuteResponse commit = await writer.WaitFor(m => m.RequestId == start + 2 && IsTerminal(m));
+            Assert.That(commit.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.CommitReply),
+                $"transaction {i} must commit over the shared stream");
+        }
+
+        reader.Complete();
+        await server;
+
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync(dbName, "SELECT id FROM items");
+        GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: transactions, "id");
+    }
+
+    [Test]
     public async Task BatchExecute_EmptyQuery_SchemaThenQueryCompleteNoRows()
     {
         string dbName = await CreateTestDatabaseWithTableAsync(
