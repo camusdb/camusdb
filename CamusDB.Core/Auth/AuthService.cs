@@ -20,9 +20,10 @@ namespace CamusDB.Core.Auth;
 /// <para>Ordinary requests never run the KDF — they validate the random token's HMAC and read a cached
 /// authorization snapshot bounded by <see cref="CamusDBOptions.AuthenticationCacheTtl"/>, so a revoke on
 /// another node takes effect within that window. A cache hit still re-checks the token's secret HMAC on
-/// every request, so the cache never authenticates a token by id alone. Login is rate-limited per
-/// account and source and the number of concurrent KDF operations is capped, so a login flood cannot
-/// exhaust CPU or memory.</para>
+/// every request, so the cache never authenticates a token by id alone. Login is rate-limited per source
+/// and per (account, source), and the number of concurrent KDF operations is capped, so a login flood
+/// cannot exhaust CPU or memory — see <see cref="RegisterAttempt"/> for why one ceiling is not
+/// enough.</para>
 /// </summary>
 public sealed class AuthService
 {
@@ -35,7 +36,13 @@ public sealed class AuthService
     private readonly ConcurrentDictionary<string, CachedSession> principalCache = new(StringComparer.Ordinal);
 
     // "account\nsource" -> (attempts, window start). Fixed one-minute window; bounded and self-purging.
+    // Its key carries an attacker-chosen account name, so this map alone cannot bound a flood — see
+    // RegisterAttempt for why the per-source map below is the one that does.
     private readonly ConcurrentDictionary<string, (int Count, DateTime WindowStart)> loginAttempts = new(StringComparer.Ordinal);
+
+    // source -> (attempts, window start), counted across every account that source names. The key is
+    // not chosen by the request, so one caller occupies exactly one entry here no matter what it sends.
+    private readonly ConcurrentDictionary<string, (int Count, DateTime WindowStart)> sourceAttempts = new(StringComparer.Ordinal);
 
     // A fixed verifier used to spend comparable work on an unknown/passwordless user so a failed login
     // takes about as long whether or not the account exists (reduces enumeration by timing).
@@ -66,8 +73,9 @@ public sealed class AuthService
     /// Verifies credentials and, on success, issues a short-lived opaque bearer token whose session is
     /// persisted (storing only the token's HMAC). Failure — unknown user, no password, or wrong
     /// password — throws <see cref="CamusDBErrorCodes.AuthenticationFailed"/> with a uniform shape after
-    /// spending comparable work. Rate-limited per (account, <paramref name="source"/>); a login flood
-    /// surfaces as <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.
+    /// spending comparable work. Rate-limited per <paramref name="source"/> and per
+    /// (account, <paramref name="source"/>); a login flood surfaces as
+    /// <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/>.
     ///
     /// <para>Returns the session's absolute expiry alongside the token: it is the same deadline
     /// <see cref="ResolvePrincipalAsync"/> later enforces, so a client can renew ahead of it instead of
@@ -75,6 +83,10 @@ public sealed class AuthService
     /// </summary>
     public async Task<LoginResult> LoginAsync(string user, string password, string source = "")
     {
+        // Startup already refuses an absent or weak key (see AuthSecretPolicy), so reaching this with
+        // an empty one means the engine was built without that path — a test harness, or a host that
+        // skipped bootstrap. Kept as a guard rather than removed: minting a token under an empty HMAC
+        // key would produce a forgeable session, and failing here is cheaper than discovering that.
         if (string.IsNullOrEmpty(options.AccessTokenServerKey))
             throw new CamusDBException(CamusDBErrorCodes.InvalidConfig, "Access token server key is not configured");
 
@@ -248,30 +260,81 @@ public sealed class AuthService
         principalCache[tokenId] = new CachedSession(principal, secretMac, expires);
     }
 
+    /// <summary>
+    /// Counts one login attempt against two rolling-minute ceilings, and throws
+    /// <see cref="CamusDBErrorCodes.TooManyAuthAttempts"/> when either is exceeded.
+    ///
+    /// <para><b>Why there are two ceilings, not one.</b> The per-(account, source) counter is the
+    /// brute-force stop, but its key contains an account name the caller chooses freely. A caller that
+    /// varies the name lands on a fresh key every time, so it never reaches that ceiling and instead
+    /// inserts one map entry per attempt. The per-source counter closes that: its key is the connection's
+    /// own address, which the request cannot pick, so a flood from one place occupies one entry and trips
+    /// one ceiling however many accounts it names.</para>
+    ///
+    /// <para><b>The two maps must fail differently when full.</b> Filling the per-source map takes that
+    /// many distinct addresses, which is an attack in itself, so it fails closed. The per-(account,
+    /// source) map is filled by naming accounts, so failing closed there would let one caller refuse
+    /// logins for every user on the node; it stops recording new keys instead and leaves admission to
+    /// the per-source ceiling, which has already counted the attempt.</para>
+    ///
+    /// <para>Both counters advance on success as well as failure, so a valid credential replayed in a
+    /// loop is bounded too.</para>
+    /// </summary>
     private void RegisterAttempt(string account, string source)
     {
         DateTime now = DateTime.UtcNow;
 
-        // Bound the limiter: purge expired windows when it grows, and fail closed (global admission
-        // budget) if it is still full, so a flood of unique account/source keys cannot grow memory.
-        if (loginAttempts.Count >= options.LoginRateLimitMaxEntries)
-        {
-            foreach (KeyValuePair<string, (int Count, DateTime WindowStart)> entry in loginAttempts)
-            {
-                if (now - entry.Value.WindowStart > RateWindow)
-                    loginAttempts.TryRemove(entry.Key, out _);
-            }
-            if (loginAttempts.Count >= options.LoginRateLimitMaxEntries)
-                throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Authentication is saturated; retry later");
-        }
+        // The per-source ceiling first: it is the one that holds when the account name varies, and it
+        // must count the attempt even if the finer counter below is skipped.
+        if (!TryPurgeToCapacity(sourceAttempts, now))
+            throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Authentication is saturated; retry later");
 
+        if (Count(sourceAttempts, source, now) > options.LoginMaxAttemptsPerSourcePerMinute)
+            throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Too many authentication attempts; retry later");
+
+        // A full per-(account, source) map sheds keys it is not already tracking, rather than refusing
+        // the request. The attempt is counted above either way, so nothing goes unbounded — only the
+        // finer attribution is lost, and only for accounts first seen while a flood is in progress. A
+        // key already in the map keeps counting, so an attack cannot mask a brute-force attempt against
+        // an account that was being tracked before it started.
         string key = $"{account}\n{source}";
-        (int Count, DateTime WindowStart) updated = loginAttempts.AddOrUpdate(
+        if (!TryPurgeToCapacity(loginAttempts, now) && !loginAttempts.ContainsKey(key))
+            return;
+
+        if (Count(loginAttempts, key, now) > options.LoginMaxAttemptsPerMinute)
+            throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Too many authentication attempts; retry later");
+    }
+
+    /// <summary>
+    /// Advances <paramref name="key"/>'s counter within the current window and returns the new count.
+    /// A window older than <see cref="RateWindow"/> restarts at one.
+    /// </summary>
+    private static int Count(
+        ConcurrentDictionary<string, (int Count, DateTime WindowStart)> map, string key, DateTime now)
+    {
+        return map.AddOrUpdate(
             key,
             _ => (1, now),
-            (_, existing) => now - existing.WindowStart > RateWindow ? (1, now) : (existing.Count + 1, existing.WindowStart));
+            (_, existing) => now - existing.WindowStart > RateWindow ? (1, now) : (existing.Count + 1, existing.WindowStart)).Count;
+    }
 
-        if (updated.Count > options.LoginMaxAttemptsPerMinute)
-            throw new CamusDBException(CamusDBErrorCodes.TooManyAuthAttempts, "Too many authentication attempts; retry later");
+    /// <summary>
+    /// Drops entries whose window has closed once <paramref name="map"/> reaches its configured size,
+    /// and reports whether there is room for a new key. False means the purge could not free any, which
+    /// each caller answers differently — see <see cref="RegisterAttempt"/>.
+    /// </summary>
+    private bool TryPurgeToCapacity(
+        ConcurrentDictionary<string, (int Count, DateTime WindowStart)> map, DateTime now)
+    {
+        if (map.Count < options.LoginRateLimitMaxEntries)
+            return true;
+
+        foreach (KeyValuePair<string, (int Count, DateTime WindowStart)> entry in map)
+        {
+            if (now - entry.Value.WindowStart > RateWindow)
+                map.TryRemove(entry.Key, out _);
+        }
+
+        return map.Count < options.LoginRateLimitMaxEntries;
     }
 }

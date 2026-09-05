@@ -29,8 +29,24 @@ namespace CamusDB.App.Services;
 /// </summary>
 public static class DashboardSession
 {
-    /// <summary>Name of the browser session cookie. It carries the same opaque token <c>/login</c> issues.</summary>
-    public const string CookieName = "camus_session";
+    /// <summary>
+    /// Name of the browser session cookie. It carries the same opaque token <c>/login</c> issues.
+    ///
+    /// <para>The <c>__Host-</c> prefix is not decoration: a browser refuses to store a cookie under it
+    /// unless the cookie is <c>Secure</c>, has <c>Path=/</c>, and names no <c>Domain</c>. That makes the
+    /// three properties this cookie depends on enforced by the browser rather than only asserted by the
+    /// server, and it stops a sibling host on the same registrable domain from writing a cookie this
+    /// host would then read.</para>
+    ///
+    /// <para>The consequence is worth stating: the dashboard must be reached over HTTPS, or over
+    /// loopback, which browsers treat as a secure context. A plaintext connection to a remote address
+    /// cannot hold this cookie, so sign-in there does not work — which is the intended outcome for a
+    /// page that exchanges a password.</para>
+    ///
+    /// <para>Renaming it invalidates sessions in flight at upgrade. A signed-in operator signs in
+    /// again, once.</para>
+    /// </summary>
+    public const string CookieName = "__Host-camus_session";
 
     /// <summary>Prefix of the dashboard's JSON endpoints.</summary>
     public const string ApiPrefix = "/v1/dashboard/";
@@ -96,4 +112,27 @@ public static class DashboardSession
         string.Equals(path, SignInPage, StringComparison.OrdinalIgnoreCase)
         || string.Equals(path, "/v1/dashboard/login", StringComparison.OrdinalIgnoreCase)
         || string.Equals(path, "/v1/dashboard/logout", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The page the exception handler re-executes when a request fails
+    /// (<c>app.UseExceptionHandler</c>). It renders a request id and nothing else.
+    /// </summary>
+    public const string ErrorPage = "/Error";
+
+    /// <summary>
+    /// Whether <paramref name="path"/> may be served with no credential at all, independently of the
+    /// dashboard's cookie rule.
+    ///
+    /// <para>Only the error page qualifies. It needs its own answer because neither of the other two
+    /// is right for it. Left in the public-user bucket, the exception handler's re-execution is itself
+    /// refused, so a browser that hits a server fault receives a 401 JSON body instead of the page —
+    /// and the access log records an authentication failure in place of the original 500, which points
+    /// incident response at the wrong thing. Classified as a dashboard page instead, the failure answer
+    /// becomes a redirect to sign-in, which hides a server fault behind a login prompt.</para>
+    ///
+    /// <para>Serving it anonymously is safe because the page carries no data: its whole content is the
+    /// request id its own model reads from the trace identifier.</para>
+    /// </summary>
+    public static bool IsUnauthenticatedPage(string path) =>
+        string.Equals(path, ErrorPage, StringComparison.OrdinalIgnoreCase);
 }

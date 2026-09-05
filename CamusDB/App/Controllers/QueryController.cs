@@ -132,7 +132,7 @@ public sealed class QueryController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new QueryResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new QueryResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 
@@ -177,7 +177,7 @@ public sealed class QueryController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new QueryResponse("failed", "CA0000", e.Message));
+            return new JsonResult(new QueryResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e)));
         }
     }
 }

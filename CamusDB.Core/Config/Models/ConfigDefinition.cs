@@ -437,6 +437,34 @@ public class ConfigDefinition
     public string RaftCertificate { get; set; } = "";
 
     /// <summary>
+    /// Path to a PFX certificate for the client-facing gRPC port. Empty falls back to
+    /// <see cref="RaftCertificate"/>, and the listener binds plaintext <c>h2c</c> when both are empty.
+    ///
+    /// <para>It is separate from the Raft certificate because the two listeners face different
+    /// networks. The Raft port is peer-only and an internal certificate suffices; the gRPC port faces
+    /// clients, which need one their own trust store accepts. One shared file forces those two
+    /// audiences to agree on a certificate, and generally they cannot.</para>
+    /// </summary>
+    public string GrpcCertificate { get; set; } = "";
+
+    /// <summary>
+    /// Whether this node reaches its peers' HTTP endpoints over TLS.
+    ///
+    /// <para>It selects the scheme the peer resolver builds for the three node-to-node HTTP channels:
+    /// schema-DDL forwarding, cluster-settings forwarding, and query-fragment exchange. Two of those
+    /// carry the shared node secret in a header, so while this is off that secret crosses the wire in
+    /// the clear and anyone who can observe peer traffic holds it.</para>
+    ///
+    /// <para>An <see cref="HttpPeers"/> entry that already carries its own scheme wins for that peer.
+    /// This setting decides the scheme for entries that do not, and for the uniform-port fallback used
+    /// when a peer is missing from that list.</para>
+    ///
+    /// <para>Default <c>false</c>, which is what every existing cluster does today. Turning it on
+    /// requires the peers to actually serve HTTPS on their HTTP port.</para>
+    /// </summary>
+    public bool PeerTlsEnabled { get; set; } = false;
+
+    /// <summary>
     /// When authentication is enabled, refuse credential-bearing requests arriving over a plaintext
     /// (non-TLS) connection — a bearer token or password on the wire is trivially stolen. Loopback
     /// peers are exempt either way, so single-host development needs no certificate. Default
@@ -816,10 +844,29 @@ public class ConfigDefinition
     public int LoginMaxAttemptsPerMinute { get; set; } = 20;
 
     /// <summary>
-    /// Upper bound on the login rate-limiter's tracked (account, source) keys. Must be &gt;= 1.
-    /// Default 100 000. Maps to <c>CamusDBOptions.LoginRateLimitMaxEntries</c>.
+    /// Login attempts from one source address per rolling minute, counted across every account that
+    /// source names. Must be &gt;= 1. Default 200. Maps to
+    /// <c>CamusDBOptions.LoginMaxAttemptsPerSourcePerMinute</c>.
+    ///
+    /// <para>Set it well above <c>login_max_attempts_per_minute</c>: several legitimate users can
+    /// share one address behind a proxy or a NAT gateway. This ceiling stops a flood; the per-account
+    /// one stops a brute-force attempt.</para>
+    /// </summary>
+    public int LoginMaxAttemptsPerSourcePerMinute { get; set; } = 200;
+
+    /// <summary>
+    /// Upper bound on the login rate-limiter's tracked keys, applied separately to the per-source and
+    /// per-(account, source) counters. Must be &gt;= 1. Default 100 000. Maps to
+    /// <c>CamusDBOptions.LoginRateLimitMaxEntries</c>.
     /// </summary>
     public int LoginRateLimitMaxEntries { get; set; } = 100_000;
+
+    /// <summary>
+    /// How often the background sweep deletes expired session records, in milliseconds. Default
+    /// 300 000 (five minutes); <c>&lt;= 0</c> switches the sweep off. Maps to
+    /// <c>CamusDBOptions.SessionReaperIntervalMs</c>.
+    /// </summary>
+    public int SessionReaperIntervalMs { get; set; } = 300_000;
 
     /// <summary>
     /// Maximum staleness, in milliseconds, of a per-node authorization cache hit; 0 forces an
@@ -1239,6 +1286,10 @@ public class ConfigDefinition
 
         if (LoginMaxAttemptsPerMinute < 1)
             throw Invalid($"'login_max_attempts_per_minute' must be >= 1, got {LoginMaxAttemptsPerMinute}");
+
+        if (LoginMaxAttemptsPerSourcePerMinute < 1)
+            throw Invalid(
+                $"'login_max_attempts_per_source_per_minute' must be >= 1, got {LoginMaxAttemptsPerSourcePerMinute}");
 
         if (LoginRateLimitMaxEntries < 1)
             throw Invalid($"'login_rate_limit_max_entries' must be >= 1, got {LoginRateLimitMaxEntries}");

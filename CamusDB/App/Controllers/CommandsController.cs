@@ -81,6 +81,36 @@ public abstract class CommandsController : ControllerBase
     /// </summary>
     protected void LogCommandFailure(CamusDBException e) => CommandFailureLog.LogFailure(logger, e);
 
+    /// <summary>
+    /// The house code every controller reports for a failure the engine did not classify.
+    /// </summary>
+    protected const string UnclassifiedErrorCode = "CA0000";
+
+    /// <summary>
+    /// Logs an unclassified exception in full and returns the message to send the client instead.
+    ///
+    /// <para><b>Why the real message must not travel.</b> An exception that reached a controller's
+    /// generic catch was not shaped for a caller: its text routinely carries file paths, KV key names,
+    /// or internal state. A <see cref="CamusDBException"/> is different — those messages are the domain
+    /// error surface that clients branch on — so this is only for the unclassified case, and callers
+    /// must keep passing a domain error's own message through.</para>
+    ///
+    /// <para>The returned text carries the request's trace identifier, which is also on the logged
+    /// line. That is what keeps the answer useful: the caller reports an opaque id, and the operator
+    /// greps for it and finds the stack trace. Reusing <c>TraceIdentifier</c> rather than minting a
+    /// second identifier means the id also matches the one the error page shows.</para>
+    /// </summary>
+    protected string LogUnclassifiedFailure(Exception e)
+    {
+        string requestId = HttpContext.TraceIdentifier;
+
+        logger.LogError(
+            "Unhandled failure on {Path} [{RequestId}]: {Name}: {Message}\n{StackTrace}",
+            Request.Path.Value, requestId, e.GetType().Name, e.Message, e.StackTrace);
+
+        return $"An internal error occurred. Reference: {requestId}";
+    }
+
     protected async Task<Principal?> ResolveRequestPrincipalAsync()
     {
         if (!options.AuthenticationEnabled)

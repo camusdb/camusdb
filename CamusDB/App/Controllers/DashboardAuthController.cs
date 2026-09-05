@@ -51,6 +51,10 @@ public sealed class DashboardAuthController : CommandsController
         // A credential answer must never be cached by an intermediary.
         Response.Headers.CacheControl = "no-store";
 
+        // Captured while the body is still readable, so the failure log below can name the account.
+        string? attemptedAccount = null;
+        string source = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
+
         try
         {
             // 404, matching the page: with the dashboard switched off this surface does not exist
@@ -69,16 +73,24 @@ public sealed class DashboardAuthController : CommandsController
             LoginRequest? request = await JsonSerializer
                 .DeserializeAsync<LoginRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
 
+            attemptedAccount = request?.User;
+
             if (request is null || string.IsNullOrEmpty(request.User) || request.Password is null)
                 throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
 
-            string source = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
             LoginResult result = await executor.LoginAsync(request.User, request.Password, source).ConfigureAwait(false);
 
+            AuthAudit.LoginSucceeded(logger, request.User, source);
+
+            // Secure is unconditional, not Request.IsHttps. Behind a TLS-terminating proxy the
+            // inbound hop is plaintext even though the browser connected over HTTPS, so keying the
+            // flag off this connection dropped it in exactly the deployment that needed it most.
+            // Setting it always is also what the __Host- prefix requires, and it removes any need to
+            // trust an X-Forwarded-Proto header — a header the server cannot verify.
             Response.Cookies.Append(DashboardSession.CookieName, result.Token, new CookieOptions
             {
                 HttpOnly = true,
-                Secure = Request.IsHttps,
+                Secure = true,
                 SameSite = SameSiteMode.Strict,
                 Path = "/",
                 Expires = new DateTimeOffset(result.ExpiresAt, TimeSpan.Zero),
@@ -88,9 +100,7 @@ public sealed class DashboardAuthController : CommandsController
         }
         catch (CamusDBException e)
         {
-            // Never log the credential. The code is enough to tell a bad password from a locked-out
-            // user or a rate limit.
-            logger.LogWarning("Dashboard sign-in failed: {Code}", e.Code);
+            AuthAudit.LoginFailed(logger, attemptedAccount ?? "", source, e.Code);
 
             return new JsonResult(new DashboardLoginResponse
             {
@@ -124,6 +134,8 @@ public sealed class DashboardAuthController : CommandsController
             if (!string.IsNullOrEmpty(token))
                 await executor.LogoutAsync(token).ConfigureAwait(false);
 
+            AuthAudit.LoggedOut(logger, HttpContext.Connection.RemoteIpAddress?.ToString() ?? "");
+
             return new JsonResult(new DashboardLoginResponse { Redirect = DashboardSession.SignInPage });
         }
         catch (CamusDBException e)
@@ -139,10 +151,12 @@ public sealed class DashboardAuthController : CommandsController
         }
         finally
         {
+            // The attributes must match the ones the cookie was written with, or the browser treats
+            // this as a different cookie and leaves the original in place.
             Response.Cookies.Delete(DashboardSession.CookieName, new CookieOptions
             {
                 HttpOnly = true,
-                Secure = Request.IsHttps,
+                Secure = true,
                 SameSite = SameSiteMode.Strict,
                 Path = "/",
             });

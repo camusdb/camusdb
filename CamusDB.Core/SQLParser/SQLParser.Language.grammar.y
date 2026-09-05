@@ -587,6 +587,22 @@ create_user_stmt : TCREATE TUSER any_identifier { $$.n = new(NodeType.CreateUser
 
 alter_user_stmt : TALTER TUSER any_identifier TIDENTIFIED TWITH any_identifier TBY auth_secret { $$.n = new(NodeType.AlterUser, $3.n, $8.n, $6.n, null, null, null, null, null); }
                 | TALTER TUSER any_identifier TIDENTIFIED TBY auth_secret { $$.n = new(NodeType.AlterUser, $3.n, $6.n, null, null, null, null, null, null); }
+                | TALTER TUSER any_identifier TIDENTIFIED TWITH any_identifier TBY auth_secret TIDENTIFIER auth_secret
+                  {
+                    if (!string.Equals($9.s, "replace", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Expected: ALTER USER ... IDENTIFIED BY ... REPLACE ..., got '" + $9.s + "'");
+                    $$.n = new(NodeType.AlterUser, $3.n, $8.n, $6.n, $10.n, null, null, null, null);
+                  }
+                | TALTER TUSER any_identifier TIDENTIFIED TBY auth_secret TIDENTIFIER auth_secret
+                  {
+                    if (!string.Equals($7.s, "replace", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Expected: ALTER USER ... IDENTIFIED BY ... REPLACE ..., got '" + $7.s + "'");
+                    $$.n = new(NodeType.AlterUser, $3.n, $6.n, null, $8.n, null, null, null, null);
+                  }
                 ;
 
 drop_user_stmt : TDROP TUSER any_identifier { $$.n = new(NodeType.DropUser, $3.n, null, null, null, null, null, null, null); }

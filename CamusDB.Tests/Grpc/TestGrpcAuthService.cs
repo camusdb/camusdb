@@ -47,7 +47,7 @@ internal sealed class TestGrpcAuthService : BaseTest
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
         AuthenticationEnabled = true,
-        AccessTokenServerKey = "test-grpc-auth-key",
+        AccessTokenServerKey = "test-grpc-auth-key-padded-to-meet-the-32-byte-secret-floor",
         BootstrapSuperuser = "root",
         BootstrapSuperuserPassword = "root-password",
     };

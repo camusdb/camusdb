@@ -55,7 +55,7 @@ public sealed class DropDatabaseController : CommandsController
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new DropDatabaseResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new DropDatabaseResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

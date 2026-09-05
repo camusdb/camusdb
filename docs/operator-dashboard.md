@@ -43,9 +43,33 @@ never reclaim one.
 
 **With authentication enabled**, a browser at `/` is redirected to `/SignIn`. The form exchanges the
 password for the same short-lived token `/login` issues, and stores it in a cookie named
-`camus_session`. The cookie is `HttpOnly`, so page scripts cannot read it; `SameSite=Strict`, so
-another site cannot cause it to be sent; and `Secure` whenever the connection is TLS. It expires when
-the token does. Sign out revokes the token and clears the cookie.
+`__Host-camus_session`. The cookie is `HttpOnly`, so page scripts cannot read it; `SameSite=Strict`,
+so another site cannot cause it to be sent; and always `Secure`. It expires when the token does.
+Sign out revokes the token and clears the cookie.
+
+The `__Host-` prefix makes the browser enforce three properties rather than trusting the server to
+assert them: the cookie must be `Secure`, must have `Path=/`, and must name no `Domain`. The last one
+also stops another host on the same registrable domain from writing a cookie this one would read.
+
+**The dashboard therefore needs HTTPS, or loopback.** `Secure` is set unconditionally, not from
+whether this particular connection was TLS. Behind a proxy that terminates TLS, the inbound hop is
+plaintext even though the browser connected over HTTPS, and reading the flag off that hop dropped it
+in exactly the deployment that needed it. Setting it always is also what removes any need to trust an
+`X-Forwarded-Proto` header, which the server cannot verify. Browsers treat loopback as a secure
+context, so local development is unaffected; a plaintext connection to a remote address cannot hold
+the cookie, and sign-in there will not work.
+
+### Browser security headers
+
+The dashboard's pages and the error page carry a `Content-Security-Policy`, `X-Frame-Options: DENY`
+and `X-Content-Type-Options: nosniff`. The JSON endpoints deliberately do not: a policy means nothing
+on a response no browser treats as a document, and sending one there would only invite a future
+policy written for the dashboard to be inherited by an endpoint nobody re-read.
+
+The policy allows inline script only through a per-request nonce, because two pages need one inline
+script each — the theme stamp that has to run before the first paint, and the sign-in handler. If you
+add a script or a stylesheet to a dashboard page, serve it from `wwwroot` rather than inlining it, or
+the browser will refuse it.
 
 The cookie authenticates the dashboard's pages and its `/v1/dashboard/` endpoints, and nothing else.
 Every other route — `/execute-sql-non-query`, `/insert`, `/start-transaction` and the rest — still

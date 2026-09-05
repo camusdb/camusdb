@@ -79,13 +79,39 @@ internal sealed class StatementAuthorizer
         if (principal is null)
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
 
-        // ALTER USER: a caller may always change THEIR OWN password; changing another user's requires
-        // superuser. (Principal.UserName is normalized; normalize the AST target to compare.)
+        // ALTER USER splits three ways. (Principal.UserName is normalized; normalize the AST target.)
+        //
+        //  - Changing your own password requires proving you know the current one, through the REPLACE
+        //    clause. Without it a stolen bearer token converts into permanent account takeover: the
+        //    thief rotates the password and logs back in, and the credential-epoch bump that invalidates
+        //    the stolen token does not help, because they know the replacement. Superusers are held to
+        //    this too — the account most worth taking over is the one that needs the check most.
+        //  - A superuser changing SOMEONE ELSE's password does not present the old one. That is the
+        //    account-recovery path, and demanding a secret the operator is resetting precisely because
+        //    it is unknown would make recovery impossible.
+        //  - Anyone else changing someone else's password is refused.
+        //
+        // Only the presence of the clause is decided here. Verifying the secret needs the catalog and
+        // happens in UserAdminService.AlterUser.
         if (ast.nodeType is NodeType.AlterUser)
         {
             string target = ast.leftAst!.yytext!.ToLowerInvariant();
-            if (principal.IsSuperuser || string.Equals(target, principal.UserName, StringComparison.Ordinal))
+            bool self = string.Equals(target, principal.UserName, StringComparison.Ordinal);
+
+            if (self)
+            {
+                if (ast.extendedTwo is not null)
+                    return;
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege,
+                    "Changing your own password requires the current one: " +
+                    "ALTER USER <name> IDENTIFIED BY <new> REPLACE <current>");
+            }
+
+            if (principal.IsSuperuser)
                 return;
+
             throw new CamusDBException(
                 CamusDBErrorCodes.InsufficientPrivilege, "Changing another user's password requires a superuser");
         }
@@ -154,9 +180,32 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // SHOW GRANTS reads its own caller's privileges freely, and anyone else's only as a superuser.
+        // Its output is the full privilege layout of the named account: whether it exists, whether it is
+        // a superuser, and every database and table it can reach. That is the same reconnaissance
+        // material the three statements above are gated for, and no per-database grant scopes it down.
+        // SHOW DATABASES is not a precedent for leaving it open — that output is filtered to what the
+        // caller can already see, and this one is not filtered at all.
+        if (ast.nodeType is NodeType.ShowGrants)
+        {
+            string? grantTarget = ast.leftAst?.yytext?.ToLowerInvariant();
+
+            // The bare form resolves to the caller downstream, so there is nothing to compare yet.
+            if (grantTarget is null
+                || principal.IsSuperuser
+                || string.Equals(grantTarget, principal.UserName, StringComparison.Ordinal))
+                return;
+
+            // Deliberately does not say whether the named account exists. Refusing before the catalog
+            // is read is what closes the existence oracle that the executor's UserDoesNotExist would
+            // otherwise hand to any authenticated caller.
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege, "Reading another user's grants requires a superuser");
+        }
+
         // Server-level introspection: any authenticated caller may run these.
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-            or NodeType.ShowOrphanDatabases or NodeType.ShowGrants)
+            or NodeType.ShowOrphanDatabases)
             return;
 
         // CREATE TABLE is checked at DATABASE scope here — the table does not exist yet, so it cannot

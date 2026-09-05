@@ -36,6 +36,60 @@ internal sealed class TestSqlCredentialRedactor
     }
 
     /// <summary>
+    /// A self-service password change names two credentials, and only the first follows
+    /// <c>IDENTIFIED … BY</c>. The second — the password the account holds right now — is reached
+    /// through <c>REPLACE</c>, which a scan looking only for the first keyword walks straight past.
+    /// If anything, it is the more damaging of the two to leave in a log: it is the secret currently
+    /// in force, while the other is about to be.
+    /// </summary>
+    [TestCase("ALTER USER bob IDENTIFIED BY 'brand-new' REPLACE 'in-force'")]
+    [TestCase("alter user bob identified by 'brand-new' replace 'in-force'")]
+    [TestCase("ALTER USER bob IDENTIFIED WITH sha256_password BY 'brand-new' REPLACE 'in-force'")]
+    [TestCase("ALTER USER bob IDENTIFIED BY E'brand\\'new' REPLACE E'in\\'force'")]
+    public void RedactsBothPasswordsOfAReplaceClause(string sql)
+    {
+        string redacted = SqlCredentialRedactor.Redact(sql);
+
+        Assert.That(redacted, Does.Not.Contain("brand"), redacted);
+        Assert.That(redacted, Does.Not.Contain("force"), redacted);
+
+        // Two literals masked, not one: a single mask would mean the scan stopped after the first.
+        Assert.AreEqual(2, CountOccurrences(redacted, "'***'"), redacted);
+
+        // The statement is still readable as a statement — the point is to log it, minus the secrets.
+        Assert.That(redacted, Does.Contain("ALTER USER").IgnoreCase);
+    }
+
+    /// <summary>
+    /// A bare <c>REPLACE</c> with nothing that parses as a literal after it must leave the statement
+    /// alone rather than masking to the end. The clause is optional, so a statement without it is the
+    /// common case and must survive unchanged past the first mask.
+    /// </summary>
+    [Test]
+    public void LeavesATrailingReplaceWithNoLiteralAlone()
+    {
+        string redacted = SqlCredentialRedactor.Redact("ALTER USER bob IDENTIFIED BY 'secret' REPLACE");
+
+        Assert.That(redacted, Does.Not.Contain("secret"));
+        Assert.AreEqual(1, CountOccurrences(redacted, "'***'"), redacted);
+        Assert.That(redacted, Does.EndWith("REPLACE"));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0;
+        int at = 0;
+
+        while ((at = haystack.IndexOf(needle, at, System.StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            at += needle.Length;
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// An <c>E'…'</c> password is the case that breaks a plain-literal pattern: the escaped quote
     /// ends the match early and everything after it — including the rest of the password — survives
     /// into the log.

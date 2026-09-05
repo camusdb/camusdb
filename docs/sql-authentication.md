@@ -22,12 +22,17 @@ Authentication configuration comes from the **environment / secret provider — 
 | Variable | Meaning |
 | --- | --- |
 | `CAMUSDB_AUTH_ENABLED` | `true` turns authentication and enforcement on. Anything else = off (default). |
-| `CAMUSDB_AUTH_TOKEN_KEY` | Server-side key used to HMAC token secrets at rest. Required when auth is on; **must be identical on every cluster node**. Use a long random value from your secret manager. |
+| `CAMUSDB_AUTH_TOKEN_KEY` | Server-side key used to HMAC token secrets at rest. Required when auth is on; **must be identical on every cluster node**. At least 32 bytes — the server refuses to start with less. Use a random value from your secret manager, e.g. `openssl rand -hex 32`. |
 | `CAMUSDB_BOOTSTRAP_USER` | Name of the first superuser to create when the catalog is empty. |
 | `CAMUSDB_BOOTSTRAP_PASSWORD` | That superuser's initial password. Read once at first start, used to hash, then dropped from process memory. |
 
 On startup with auth enabled:
 
+- Both operator-supplied secrets — `CAMUSDB_AUTH_TOKEN_KEY` and, when set, `CAMUSDB_NODE_SECRET` —
+  must be **at least 32 bytes**, or the server refuses to start and names the variable that failed.
+  A short token key voids the whole point of hashing tokens at rest: anyone who obtains the catalog
+  can then forge sessions offline. An unset node secret is a valid single-node configuration; it
+  leaves the peer routes refused rather than weakly guarded.
 - If the user catalog is **empty**, the server creates exactly one **superuser** from the bootstrap
   values (a transactional create-if-absent, so concurrent cluster startups yield one winner without
   overwriting a password).
@@ -124,8 +129,12 @@ CREATE USER myapp IDENTIFIED BY 'app-password';        -- plugin defaults to sha
 CREATE USER IF NOT EXISTS myapp IDENTIFIED BY '…';
 CREATE USER grant_target;                               -- no password: a grant target that cannot log in
 
--- rotate a password (invalidates that user's existing tokens)
-ALTER USER admin IDENTIFIED WITH sha256_password BY 'new-strong-password';
+-- change your own password: the current one must be presented with REPLACE
+ALTER USER admin IDENTIFIED BY 'new-strong-password' REPLACE 'current-password';
+ALTER USER admin IDENTIFIED WITH sha256_password BY 'new-strong-password' REPLACE 'current-password';
+
+-- a superuser resets SOMEONE ELSE's password without knowing the old one
+ALTER USER myapp IDENTIFIED BY 'new-strong-password';
 
 -- remove a user and all its grants
 DROP USER myapp;
@@ -134,7 +143,23 @@ DROP USER IF EXISTS myapp;
 
 Only `sha256_password` is accepted; any other plugin is rejected. Passwords are capped at 1 KiB.
 Network clients should **bind the password as a query parameter** rather than inline it in SQL, so it
-does not leak into client history, tracing, or query logs.
+does not leak into client history, tracing, or query logs. Both literals of a `REPLACE` form are
+redacted from logs, not only the first.
+
+A rotation invalidates that user's existing tokens, including the one that made the request.
+
+### Why `REPLACE` is required for your own password
+
+Changing your own password proves you know the current one. Without that rule, anyone holding a live
+bearer token can take the account permanently: they set a new password and log back in with it. The
+credential epoch does invalidate the stolen token, but the attacker chose the replacement, so the
+real owner is locked out instead.
+
+The rule applies to a superuser changing their own password too. That is the account most worth
+taking over, so exempting it would leave the largest hole open.
+
+A superuser changing **another** user's password presents no old secret. That is the recovery path,
+and requiring a secret nobody knows is what recovery exists to avoid.
 
 ## 4. Granting privileges
 
@@ -151,6 +176,13 @@ Grants are server-level, so `SHOW GRANTS` needs no database in scope: send it wi
 empty, or with any database — the answer is the same either way. `SHOW GRANTS` without `FOR` reports
 the authenticated caller's own grants, so it requires an authenticated session; with authentication
 off, name the user explicitly.
+
+**Reading another account's grants requires a superuser.** With authentication on, `SHOW GRANTS FOR
+<other>` is refused with `InsufficientPrivilege`, and the refusal is the same whether or not that
+account exists — so it cannot be used to enumerate the catalog. Your own grants are always readable,
+by either spelling. The output is the full privilege layout of the account named: which databases
+and tables it reaches, and whether it is a superuser. `SHOW VARIABLES`, `SHOW ENGINE STATS` and
+`SHOW SLOW QUERIES` are held to the same bar for the same reason.
 
 Privileges: `SELECT`, `INSERT`, `UPDATE`, `DELETE` (DML); `CREATE TABLE`, `DROP`, `ALTER`, `INDEX`,
 `CREATE` (DDL); `ALL [PRIVILEGES]` (the union at grant time — it does **not** silently widen when new

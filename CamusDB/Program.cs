@@ -231,15 +231,22 @@ builder.WebHost.ConfigureKestrel(kestrel =>
                 o.UseHttps(config.RaftCertificate);
         });
     }
-    // Dedicated client-facing gRPC port — HTTP/2 only. Plaintext (h2c) is fine for local dev;
-    // set grpc_cert (reuses raft_certificate) for TLS in exposed deployments.
+    // Dedicated client-facing gRPC port — HTTP/2 only. Plaintext (h2c) is fine for local dev; set
+    // grpc_certificate for TLS in exposed deployments. It falls back to raft_certificate so existing
+    // configurations keep working, but the two are separate settings because the ports face different
+    // networks: the Raft port is peer-only, while this one faces clients whose trust store must accept
+    // whatever it presents.
     if (config.GrpcEnabled)
     {
+        string grpcCertificate = !string.IsNullOrEmpty(config.GrpcCertificate)
+            ? config.GrpcCertificate
+            : config.RaftCertificate;
+
         kestrel.ListenAnyIP(config.GrpcPort, o =>
         {
             o.Protocols = HttpProtocols.Http2;
-            if (!string.IsNullOrEmpty(config.RaftCertificate))
-                o.UseHttps(config.RaftCertificate);
+            if (!string.IsNullOrEmpty(grpcCertificate))
+                o.UseHttps(grpcCertificate);
         });
     }
 });
@@ -285,7 +292,7 @@ if (config.IsClusterMode)
     // http_peers/uniform-port semantics; it used to live inline here, duplicated per channel.
     builder.Services.AddSingleton<CamusDB.Core.Config.PeerEndpointResolver>(services =>
         new CamusDB.Core.Config.PeerEndpointResolver(
-            config.Peers, config.HttpPeers, config.HttpPort,
+            config.Peers, config.HttpPeers, config.HttpPort, config.PeerTlsEnabled,
             services.GetRequiredService<ILogger<ICamusDB>>()));
 
     builder.Services.AddSingleton<ISchemaDdlForwarder>(services =>
@@ -435,6 +442,7 @@ if (diagnosticsActive)
 // Reclaims abandoned explicit transactions (client opened one and never committed/rolled back) so
 // their locks — renewed forever by the range-lock heartbeat — cannot be held indefinitely.
 builder.Services.AddHostedService<AbandonedTransactionReaper>();
+builder.Services.AddHostedService<ExpiredSessionReaper>();
 
 // Drops prepared statements a REST client stopped using. A gRPC handle dies with its stream; a REST
 // handle has no such event, so an idle timeout is what keeps abandoned ones from accumulating.
@@ -493,6 +501,11 @@ WebApplication app = builder.Build();
 foreach (string warning in KeyRangeSplitStartupChecks.Inspect(config, camusOptions))
     app.Logger.LogWarning("{KeyRangeSplitWarning}", warning);
 
+// Same reasoning, different subject: a cluster whose peer traffic is plaintext starts and runs
+// normally, and only an observer on the network can tell. See TransportSecurityStartupChecks.
+foreach (string warning in TransportSecurityStartupChecks.Inspect(config))
+    app.Logger.LogWarning("{TransportSecurityWarning}", warning);
+
 if (config.IsClusterMode)
 {
     app.MapGrpcRaftRoutes();
@@ -529,6 +542,7 @@ app.UseMiddleware<CamusDB.App.Services.ForegroundRequestGaugeMiddleware>();
 
 // Transport-wide authentication: rejects unauthenticated requests to every data/DDL/transaction route
 // (not just /execute-sql-*) when auth is enabled, and publishes the principal for per-table enforcement.
+app.UseMiddleware<CamusDB.App.Middleware.SecurityHeadersMiddleware>();
 app.UseMiddleware<CamusDB.App.Middleware.AuthenticationMiddleware>();
 
 app.MapControllers();

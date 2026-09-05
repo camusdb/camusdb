@@ -1383,18 +1383,56 @@ public sealed record CamusDBOptions
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int LoginMaxAttemptsPerMinute { get; init; } = 20;
 
+    /// <summary>
+    /// Maximum login attempts from one source address per rolling minute, counted across every account
+    /// that source names.
+    ///
+    /// <para>This is the ceiling that actually bounds a flood, and it exists because the per-account
+    /// ceiling above cannot. An account name is attacker-chosen, so a caller that varies it never
+    /// reaches the per-account limit and never stops. A source address is not chosen by the request, so
+    /// one flooder occupies one counter here however many accounts it names.</para>
+    ///
+    /// <para>Deliberately far above <see cref="LoginMaxAttemptsPerMinute"/>: several legitimate users
+    /// can share one address behind a proxy or a NAT gateway, and this ceiling must not refuse them.
+    /// It is a flood stop, not a brute-force stop — the per-account ceiling is the brute-force stop.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int LoginMaxAttemptsPerSourcePerMinute { get; init; } = 200;
+
     /// <summary>Upper bound on the per-node authenticated-principal cache size, so random/invalid token
     /// ids cannot grow it without bound.</summary>
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int AuthenticationCacheMaxEntries { get; init; } = 10_000;
 
     /// <summary>
-    /// Upper bound on the login rate-limiter's tracked (account, source) keys. Beyond it the limiter
-    /// purges expired windows and, if still full, fails login closed — so a flood of unique account or
-    /// source values cannot grow memory without bound.
+    /// Upper bound on the login rate-limiter's tracked keys, applied to the per-source counters and to
+    /// the finer per-(account, source) counters separately. Beyond it the limiter purges expired
+    /// windows, so a flood of unique account or source values cannot grow memory without bound.
+    ///
+    /// <para>The two maps behave differently when a purge cannot free space, and the difference is the
+    /// point. The per-source map fails login closed, because filling it needs that many distinct
+    /// source addresses and that is itself an attack. The per-(account, source) map instead stops
+    /// recording new keys and lets the request through to the per-source ceiling, because its keys
+    /// carry an attacker-chosen account name and failing closed there would let one caller refuse
+    /// logins for everyone.</para>
     /// </summary>
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int LoginRateLimitMaxEntries { get; init; } = 100_000;
+
+    /// <summary>
+    /// How often the background sweep deletes session records whose absolute expiry has passed.
+    ///
+    /// <para>Sessions have no storage TTL, and the token lifetime is short with re-login as the only
+    /// refresh, so without this sweep every login that is not followed by a logout leaves a key in the
+    /// auth bucket forever. The growth is not just storage: the drop-user path scans that bucket, so
+    /// dead sessions make an unrelated statement slower over time.</para>
+    ///
+    /// <para>Set to <c>&lt;= 0</c> to switch the sweep off. The interval is read once when the sweep
+    /// starts, which is why this is restart-class.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int SessionReaperIntervalMs { get; init; } = 300_000;
+
 
     /// <summary>
     /// When authentication is enabled, refuse credential-bearing requests that arrive over a plaintext

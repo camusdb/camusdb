@@ -83,7 +83,7 @@ public sealed class TransactionsController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new StartTransactionResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new StartTransactionResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 
@@ -121,7 +121,7 @@ public sealed class TransactionsController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new CommitTransactionResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CommitTransactionResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 
@@ -157,7 +157,7 @@ public sealed class TransactionsController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new CommitTransactionResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CommitTransactionResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

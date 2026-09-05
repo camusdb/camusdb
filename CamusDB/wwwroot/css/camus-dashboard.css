@@ -414,3 +414,10 @@ footer .shell { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* Two rules that used to be style="" attributes on the markup. They moved here so the
+   Content-Security-Policy can keep style-src at 'self': a nonce does not cover a style
+   attribute, so leaving them inline would have required 'unsafe-inline' for the whole
+   page — a large concession for two margins. */
+.signin-heading { margin-bottom: 1.25rem; }
+.cluster-version-note { margin: 0 0 .9rem; }

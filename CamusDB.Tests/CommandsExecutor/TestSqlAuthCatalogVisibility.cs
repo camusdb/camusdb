@@ -39,7 +39,7 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
         AuthenticationEnabled = true,
-        AccessTokenServerKey = "test-key",
+        AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor",
         BootstrapSuperuser = "root",
         BootstrapSuperuserPassword = "root-pw",
     };

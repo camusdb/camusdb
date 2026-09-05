@@ -91,7 +91,7 @@ public sealed class PreparedStatementsController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new PrepareStatementResponse("failed", "CA0000", e.Message)
+            return new JsonResult(new PrepareStatementResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))
             {
                 ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds,
             })
@@ -134,7 +134,7 @@ public sealed class PreparedStatementsController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new CloseStatementResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CloseStatementResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

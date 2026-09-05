@@ -637,6 +637,62 @@ public sealed class AuthCatalog
         await RunInTransactionAsync(tx => DeleteAuthKey(tx, SessionKey(tokenId))).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Deletes every session whose absolute expiry is at or before <paramref name="now"/>, and returns
+    /// how many were removed.
+    ///
+    /// <para>Sessions carry no storage TTL, and the only other deletions are an explicit logout and a
+    /// drop of the owning user. With a short token lifetime and re-login as the only refresh, a client
+    /// that reconnects on a timer leaves one dead key per reconnection, permanently. The cost is not
+    /// only storage: <see cref="ScanUserSessionKeysAsync"/> reads and deserializes this whole family, so
+    /// dead sessions make dropping an unrelated user slower for as long as the deployment lives.</para>
+    ///
+    /// <para><b>Safe to run concurrently on every node.</b> A record is deleted only after its own
+    /// expiry has passed, at which point no path can still authenticate it, and the delete is idempotent
+    /// — so two nodes sweeping at once, or one sweeping twice, produce the same result as one. That is
+    /// why this needs no leader election.</para>
+    ///
+    /// <para>The scan is taken first and the deletes follow it, rather than deleting inside the
+    /// iteration, because a locked delete against the range being scanned would contend with the scan's
+    /// own read of it.</para>
+    /// </summary>
+    /// <param name="now">The instant to judge expiry against; a record expiring exactly now is reaped.</param>
+    public async Task<int> ReapExpiredSessionsAsync(DateTime now)
+    {
+        List<string> expired = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, AuthBucket, null, true, null, true, 1000,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        {
+            if (entry.Value is null || !key.StartsWith(SessionKeyPrefix, StringComparison.Ordinal))
+                continue;
+
+            SessionRecord session = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SessionRecord);
+            if (session.ExpiresAt <= now)
+                expired.Add(key);
+        }
+
+        int reaped = 0;
+
+        foreach (string key in expired)
+        {
+            // One transaction per key so a single contended record cannot fail the whole sweep. The
+            // next sweep retries whatever this one could not take.
+            try
+            {
+                await RunInTransactionAsync(tx => DeleteAuthKey(tx, key)).ConfigureAwait(false);
+                reaped++;
+            }
+            catch (CamusDBException)
+            {
+                // Left for the next sweep: the record is already expired and cannot authenticate.
+            }
+        }
+
+        return reaped;
+    }
+
     private async Task<byte[]?> GetAuthValueAsync(string key)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
@@ -705,9 +761,14 @@ public sealed class AuthCatalog
 
     /// <summary>Scans the session keys belonging to <paramref name="normalizedUser"/> so a drop can
     /// remove them. Best-effort: a session that survives a race is already unusable (its user record is
-    /// gone, so token resolution fails), this just prevents the storage/metadata leak.</summary>
+    /// gone, so token resolution fails), this just prevents the storage/metadata leak.
+    ///
+    /// <para>An already-expired record is skipped rather than added to the drop. It cannot authenticate
+    /// anyone, and <see cref="ReapExpiredSessionsAsync"/> owns removing it — so between sweeps this path
+    /// does not pay to delete keys that are on their way out anyway.</para></summary>
     private async Task<List<string>> ScanUserSessionKeysAsync(KvTransaction tx, string normalizedUser)
     {
+        DateTime now = DateTime.UtcNow;
         List<string> keys = [];
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
@@ -718,6 +779,9 @@ public sealed class AuthCatalog
                 continue;
 
             SessionRecord s = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SessionRecord);
+            if (s.ExpiresAt <= now)
+                continue;
+
             if (Normalize(s.User) == normalizedUser)
                 keys.Add(key);
         }

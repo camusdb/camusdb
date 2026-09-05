@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
@@ -89,11 +91,18 @@ public sealed class AuthenticationMiddleware
             return;
         }
 
+        // The error page renders a request id and nothing else, and refusing it would answer a server
+        // fault with an authentication failure. DashboardSession.IsUnauthenticatedPage holds the rest.
+        if (DashboardSession.IsUnauthenticatedPage(path))
+        {
+            await next(context).ConfigureAwait(false);
+            return;
+        }
+
         // Node-to-node forwarding: authenticate the peer by shared secret, not a user token.
         if (path.StartsWith("/internal/", StringComparison.OrdinalIgnoreCase))
         {
-            if (string.IsNullOrEmpty(options.NodeSecret)
-                || !string.Equals(context.Request.Headers["X-Camus-Node-Secret"], options.NodeSecret, StringComparison.Ordinal))
+            if (!NodeSecretMatches(context, options.NodeSecret))
             {
                 await WriteErrorAsync(context, CamusDBErrorCodes.AuthenticationFailed, "Node authentication required").ConfigureAwait(false);
                 return;
@@ -163,6 +172,40 @@ public sealed class AuthenticationMiddleware
         return authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
             ? authorization["Bearer ".Length..].Trim()
             : null;
+    }
+
+    /// <summary>
+    /// Compares the presented <c>X-Camus-Node-Secret</c> header with the configured node secret in
+    /// constant time. An unconfigured secret is refused outright — the peer routes fail closed rather
+    /// than accepting an empty header.
+    ///
+    /// <para>The comparison is constant-time for the same reason
+    /// <see cref="Core.Auth.TokenCodec.MacEquals"/> and <c>PasswordHasher.Verify</c> are: this value
+    /// authenticates a peer in place of a user credential, and an early-exit comparison over it is the
+    /// one place in the authentication path that leaks a per-byte timing signal. Exploiting that over a
+    /// network is impractical, but the codebase holds itself to a single rule here and this was the
+    /// exception.</para>
+    ///
+    /// <para>Lengths are compared first and returned on separately, so the fixed-time comparison never
+    /// runs over mismatched buffers — <see cref="CryptographicOperations.FixedTimeEquals"/> returns
+    /// immediately in that case, which is itself an observable difference.</para>
+    /// </summary>
+    private static bool NodeSecretMatches(HttpContext context, string configuredSecret)
+    {
+        if (string.IsNullOrEmpty(configuredSecret))
+            return false;
+
+        string presented = context.Request.Headers["X-Camus-Node-Secret"].ToString();
+        if (presented.Length == 0)
+            return false;
+
+        byte[] presentedBytes = Encoding.UTF8.GetBytes(presented);
+        byte[] configuredBytes = Encoding.UTF8.GetBytes(configuredSecret);
+
+        if (presentedBytes.Length != configuredBytes.Length)
+            return false;
+
+        return CryptographicOperations.FixedTimeEquals(presentedBytes, configuredBytes);
     }
 
     private static void EnsureSecureTransport(HttpContext context, CamusDBOptions options)

@@ -143,7 +143,7 @@ internal sealed class TestConfigVariableCatalog
     [Test]
     public void SecretsAreMaskedOnlyWhenTheyHoldSomething()
     {
-        const string secret = "s3cr3t-material";
+        const string secret = "s3cr3t-material-long-enough-for-the-floor";
 
         CamusDBOptions configured = CamusDBOptions.Default with
         {

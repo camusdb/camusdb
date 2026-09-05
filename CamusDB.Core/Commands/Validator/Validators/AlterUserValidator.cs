@@ -18,5 +18,11 @@ internal sealed class AlterUserValidator : ValidatorBase
     {
         ValidateIdentifier(ticket.UserName, "User");
         AuthClauseValidator.Validate(ticket.Plugin, ticket.Password);
+
+        // The REPLACE clause reaches the KDF just as the new password does, so it needs the same size
+        // bound. Without it an oversized value would be verified rather than rejected, which is the
+        // work the bound exists to refuse. The plugin is not re-checked: there is only one clause.
+        if (ticket.CurrentPassword is not null)
+            AuthClauseValidator.Validate(plugin: null, ticket.CurrentPassword);
     }
 }

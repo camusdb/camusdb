@@ -39,8 +39,13 @@ internal sealed class SQLExecutorUserCreator : SQLExecutorBaseCreator
         string userName = ast.leftAst!.yytext!;
         (string? plugin, string? password) = DecodeAuthClause(sqlTicket, ast);
 
+        // The optional REPLACE clause carries the password the account holds now. Absent on the two
+        // productions without it, in which case the statement-level gate has already decided whether
+        // this caller was allowed to omit it.
+        string? currentPassword = ast.extendedTwo is null ? null : DecodeSecret(sqlTicket, ast.extendedTwo);
+
         // The grammar only admits ALTER USER with a password clause, so both are always present.
-        return new AlterUserTicket(userName, plugin ?? DefaultPlugin, password ?? "");
+        return new AlterUserTicket(userName, plugin ?? DefaultPlugin, password ?? "", currentPassword);
     }
 
     internal DropUserTicket CreateDropUserTicket(NodeAst ast)
@@ -60,12 +65,22 @@ internal sealed class SQLExecutorUserCreator : SQLExecutorBaseCreator
 
         string plugin = (ast.extendedOne?.yytext ?? DefaultPlugin).ToLowerInvariant();
 
-        ColumnValue secret = EvalExpr(ast.rightAst, EmptyRow, sqlTicket.Parameters);
+        return (plugin, DecodeSecret(sqlTicket, ast.rightAst));
+    }
+
+    /// <summary>
+    /// Resolves one password node to its cleartext. The node is a string literal or a placeholder bound
+    /// from the request's parameters; anything else is rejected rather than coerced, because a password
+    /// silently turned into text from a number would hash to a value the user cannot reproduce.
+    /// </summary>
+    private static string DecodeSecret(ExecuteSQLTicket sqlTicket, NodeAst secretAst)
+    {
+        ColumnValue secret = EvalExpr(secretAst, EmptyRow, sqlTicket.Parameters);
         if (secret.Type != ColumnType.String)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Password must be a string value");
 
-        return (plugin, secret.StrValue ?? "");
+        return secret.StrValue ?? "";
     }
 }

@@ -4,13 +4,17 @@
     ViewData["Title"] = "Sign in";
     ViewData["ShowNav"] = false;
     Layout = "_DashboardLayout";
+
+    // The Content-Security-Policy allows inline script only with this per-request nonce.
+    // Read into a local first: nested quotes inside a Razor attribute do not parse.
+    string? cspNonce = ViewContext.HttpContext.Items["csp-nonce"] as string;
 }
 
 <div class="band signin-wrap">
     <div class="shell signin-card">
         <div class="card">
             <p class="eyebrow">CamusDB</p>
-            <h2 style="margin-bottom: 1.25rem;">Sign in to the dashboard</h2>
+            <h2 class="signin-heading">Sign in to the dashboard</h2>
 
             <form id="signin-form" autocomplete="on">
                 <label>
@@ -29,7 +33,7 @@
 </div>
 
 @section Scripts {
-<script>
+<script nonce="@cspNonce">
     // The password is posted and then forgotten. It is never written back into
     // the form, never put in the URL, and never stored.
     (function () {

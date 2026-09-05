@@ -267,7 +267,7 @@ internal sealed class TestShowGrantsTransports : BaseTest
         CamusDBOptions authOptions = Options with
         {
             AuthenticationEnabled = true,
-            AccessTokenServerKey = "test-key",
+            AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor",
             BootstrapSuperuser = "root",
             BootstrapSuperuserPassword = "root-pw",
         };
@@ -304,6 +304,102 @@ internal sealed class TestShowGrantsTransports : BaseTest
         Assert.AreEqual("ok", response.Status, response.Message);
         Assert.AreEqual(1, response.Total);
         Assert.AreEqual($"{db}.*", CellOf(response, 0, "object"));
+    }
+
+    /// <summary>
+    /// A non-superuser may read their own grants and nobody else's.
+    ///
+    /// <para>Left open, this statement hands any authenticated caller the whole privilege layout of
+    /// the server: which accounts exist, which are superusers, and exactly which databases and tables
+    /// each one can reach. That is the same reconnaissance material <c>SHOW VARIABLES</c>,
+    /// <c>SHOW ENGINE STATS</c> and <c>SHOW SLOW QUERIES</c> are each superuser-gated to withhold, and
+    /// no per-database grant scopes it down. <c>SHOW DATABASES</c> is not a precedent for leaving it
+    /// open — that output is filtered to what the caller can already see; this one is not filtered at
+    /// all.</para>
+    ///
+    /// <para>Driven through the transport rather than the executor, because that is the surface a
+    /// client reaches and the layer a previous bug in this exact statement hid behind.</para>
+    /// </summary>
+    [Test]
+    public async Task RestQueryEndpointRefusesAnotherUsersGrantsToANonSuperuser()
+    {
+        CamusDBOptions authOptions = Options with
+        {
+            AuthenticationEnabled = true,
+            AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor",
+            BootstrapSuperuser = "root",
+            BootstrapSuperuserPassword = "root-pw",
+        };
+
+        CommandExecutor authExecutor = CreateCommandExecutor(authOptions);
+        string db = "gd" + Guid.NewGuid().ToString("n")[..8];
+        string nosy = "n" + Guid.NewGuid().ToString("n")[..8];
+        string other = "o" + Guid.NewGuid().ToString("n")[..8];
+
+        await authExecutor.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
+        TrackDatabase(db, authExecutor);
+
+        await authExecutor.EnsureBootstrapSuperuserAsync(
+            authOptions.BootstrapSuperuser, authOptions.BootstrapSuperuserPassword);
+        string rootToken = (await authExecutor.LoginAsync("root", "root-pw")).Token;
+        Principal root = await authExecutor.ResolvePrincipalAsync(rootToken);
+
+        foreach (string account in new[] { nosy, other })
+        {
+            await authExecutor.ExecuteDDLSQL(new ExecuteSQLTicket(
+                txnState: null!, database: "", sql: $"CREATE USER {account} IDENTIFIED BY 'Pw123456789012'",
+                parameters: null, principal: root));
+            await authExecutor.ExecuteDDLSQL(new ExecuteSQLTicket(
+                txnState: null!, database: "", sql: $"GRANT SELECT ON {db}.* TO {account}",
+                parameters: null, principal: root));
+        }
+
+        string nosyToken = (await authExecutor.LoginAsync(nosy, "Pw123456789012")).Token;
+
+        async Task<ExecuteSQLQueryResponse> AsNosy(string sql)
+        {
+            ExecuteSQLController controller = new(
+                authExecutor, new HttpTransactionCoordinator(authExecutor),
+                new PreparedStatementRegistry(authOptions), Logger, authOptions)
+            {
+                ControllerContext = Context(new { sql }, bearer: nosyToken)
+            };
+
+            return (ExecuteSQLQueryResponse)(await controller.ExecuteSQLQuery()).Value!;
+        }
+
+        // Reading someone else's layout is refused.
+        ExecuteSQLQueryResponse denied = await AsNosy($"SHOW GRANTS FOR {other}");
+        Assert.AreEqual("failed", denied.Status);
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, denied.Code);
+
+        // And the refusal must not double as an account-existence oracle. Naming an account that does
+        // not exist has to fail the same way as naming one that does — otherwise the difference
+        // between the two answers enumerates the catalog, which is what the gate is for.
+        ExecuteSQLQueryResponse absent = await AsNosy("SHOW GRANTS FOR nosuchaccountanywhere");
+        Assert.AreEqual(denied.Code, absent.Code);
+        Assert.AreEqual(denied.Message, absent.Message);
+
+        // Their own grants still work, both spellings.
+        ExecuteSQLQueryResponse ownByName = await AsNosy($"SHOW GRANTS FOR {nosy}");
+        Assert.AreEqual("ok", ownByName.Status, ownByName.Message);
+        Assert.AreEqual(1, ownByName.Total);
+
+        ExecuteSQLQueryResponse ownBare = await AsNosy("SHOW GRANTS");
+        Assert.AreEqual("ok", ownBare.Status, ownBare.Message);
+        Assert.AreEqual(1, ownBare.Total);
+
+        // A superuser still reads anyone's.
+        ExecuteSQLController asRoot = new(
+            authExecutor, new HttpTransactionCoordinator(authExecutor),
+            new PreparedStatementRegistry(authOptions), Logger, authOptions)
+        {
+            ControllerContext = Context(new { sql = $"SHOW GRANTS FOR {other}" }, bearer: rootToken)
+        };
+
+        ExecuteSQLQueryResponse allowed = (ExecuteSQLQueryResponse)(await asRoot.ExecuteSQLQuery()).Value!;
+        Assert.AreEqual("ok", allowed.Status, allowed.Message);
+        Assert.AreEqual(1, allowed.Total);
     }
 
     // ─── The shared routing list ──────────────────────────────────────────────

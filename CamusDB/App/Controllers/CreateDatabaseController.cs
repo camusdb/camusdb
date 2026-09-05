@@ -56,7 +56,7 @@ public sealed class CreateDatabaseController : CommandsController
         {
             Console.WriteLine("{0}: {1}\n{2}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new CreateDatabaseResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CreateDatabaseResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

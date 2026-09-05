@@ -256,7 +256,7 @@ internal sealed class TestShowStatisticsTransports : BaseTest
         CamusDBOptions authOptions = Options with
         {
             AuthenticationEnabled = true,
-            AccessTokenServerKey = "test-key",
+            AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor",
             BootstrapSuperuser = "root",
             BootstrapSuperuserPassword = "root-pw",
         };

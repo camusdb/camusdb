@@ -136,7 +136,7 @@ public sealed class CreateTableController : CommandsController
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new CreateTableResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CreateTableResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

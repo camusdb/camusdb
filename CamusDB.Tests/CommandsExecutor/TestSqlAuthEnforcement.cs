@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using CamusDB.Core;
+using CamusDB.Core.Auth;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -40,7 +41,7 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
         AuthenticationEnabled = true,
-        AccessTokenServerKey = "test-server-key",
+        AccessTokenServerKey = "test-server-key-padded-to-meet-the-32-byte-secret-floor",
         BootstrapSuperuser = "root",
         BootstrapSuperuserPassword = "root-password",
     };
@@ -341,13 +342,197 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         await RunDdl(executor, "", "CREATE USER selfie IDENTIFIED BY 'old-pw'", root);
         Principal selfie = await LoginAsync(executor, "selfie", "old-pw");
 
-        // A non-superuser may change their OWN password.
-        await RunDdl(executor, "", "ALTER USER selfie IDENTIFIED BY 'new-pw'", selfie);
+        // Changing your own password requires presenting the current one. Without that rule a stolen
+        // token converts into a lasting takeover: the thief rotates the password and logs back in, and
+        // the credential-epoch bump that kills the stolen token does not help, because they set the
+        // replacement. This is the assertion that keeps the REPLACE clause mandatory.
+        CamusDBException noCurrent = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, "", "ALTER USER selfie IDENTIFIED BY 'new-pw'", selfie))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, noCurrent.Code);
 
-        // But not someone else's.
+        // A wrong current password fails too, and fails as an authentication failure rather than a
+        // privilege one — the caller is allowed to make this change, they just did not prove it.
+        CamusDBException wrongCurrent = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, "", "ALTER USER selfie IDENTIFIED BY 'new-pw' REPLACE 'not-the-password'", selfie))!;
+        Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, wrongCurrent.Code);
+
+        // With the real current password it goes through, and the new one is what works afterwards.
+        await RunDdl(executor, "", "ALTER USER selfie IDENTIFIED BY 'new-pw' REPLACE 'old-pw'", selfie);
+        await LoginAsync(executor, "selfie", "new-pw");
+
+        // Someone else's password is still refused, clause or no clause.
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await RunDdl(executor, "", "ALTER USER root IDENTIFIED BY 'hijack'", selfie))!;
         Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        CamusDBException withClause = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, "", "ALTER USER root IDENTIFIED BY 'hijack' REPLACE 'new-pw'", selfie))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, withClause.Code);
+    }
+
+    [Test]
+    public async Task Superuser_ResetsAnotherPasswordWithoutTheOldOne_ButNeedsItForTheirOwn()
+    {
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+        await RunDdl(executor, "", "CREATE USER forgetful IDENTIFIED BY 'lost-pw'", root);
+
+        // Account recovery: the operator is resetting this password precisely because nobody knows it,
+        // so demanding the old one would make recovery impossible. This path must stay open.
+        await RunDdl(executor, "", "ALTER USER forgetful IDENTIFIED BY 'reset-pw'", root);
+        await LoginAsync(executor, "forgetful", "reset-pw");
+
+        // The superuser's own password is a self-change like any other. Exempting it would leave the
+        // single most valuable account on the node as the one account a stolen token can take over.
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, "", $"ALTER USER {Options.BootstrapSuperuser} IDENTIFIED BY 'rotated'", root))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+    }
+
+    /// <summary>
+    /// One source naming many accounts must not be able to refuse logins for everybody else.
+    ///
+    /// <para>The limiter used to key only on (account, source) and fail closed for every caller once
+    /// that map filled. An account name is chosen by the request, so a caller varying it never reached
+    /// the per-account ceiling and instead inserted one entry per attempt — turning a modest request
+    /// rate into a node-wide login outage. The per-source ceiling is what stops it now, and the
+    /// assertion that matters is the last one: a different source still gets in.</para>
+    /// </summary>
+    [Test]
+    public async Task LoginFlood_WithVaryingAccountNames_DoesNotLockOutOtherSources()
+    {
+        // A tiny map, so the flood below reaches saturation in a handful of attempts rather than the
+        // hundred thousand a production node allows. Two engines are not needed: one configuration is
+        // under test, and the limiter lives on the engine this builds.
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser(
+            Options with { LoginRateLimitMaxEntries = 4, LoginMaxAttemptsPerSourcePerMinute = 200 });
+
+        await RunDdl(executor, "", "CREATE USER victim IDENTIFIED BY 'victim-pw-1234'", root);
+
+        // Every attempt names a distinct account from one source: the shape that used to fill the map.
+        for (int i = 0; i < 40; i++)
+        {
+            try
+            {
+                await executor.LoginAsync($"ghost{i}", "wrong", source: "10.0.0.9");
+            }
+            catch (CamusDBException)
+            {
+                // Expected: the account does not exist. The flood is the point, not the outcome.
+            }
+        }
+
+        // The victim logs in from somewhere else and must be unaffected. Before the fix this threw
+        // TooManyAuthAttempts with "Authentication is saturated".
+        LoginResult ok = await executor.LoginAsync("victim", "victim-pw-1234", source: "10.0.0.1");
+        Assert.IsNotEmpty(ok.Token);
+    }
+
+    /// <summary>
+    /// The per-source ceiling has to actually stop a flood, not merely avoid blaming bystanders for
+    /// it. A limiter that never refuses the attacker would trade one failure for another.
+    /// </summary>
+    [Test]
+    public async Task LoginFlood_FromOneSource_IsRefusedAtThePerSourceCeiling()
+    {
+        (_, CommandExecutor executor, _) = await SetupWithSuperuser(
+            Options with { LoginMaxAttemptsPerSourcePerMinute = 5 });
+
+        CamusDBException? refused = null;
+
+        for (int i = 0; i < 30 && refused is null; i++)
+        {
+            try
+            {
+                await executor.LoginAsync($"ghost{i}", "wrong", source: "10.0.0.9");
+            }
+            catch (CamusDBException e) when (e.Code == CamusDBErrorCodes.TooManyAuthAttempts)
+            {
+                refused = e;
+            }
+            catch (CamusDBException)
+            {
+                // An ordinary authentication failure; keep going until the ceiling answers.
+            }
+        }
+
+        Assert.IsNotNull(refused, "varying the account name walked past the per-source ceiling");
+    }
+
+    /// <summary>
+    /// Brute force against one account from one source must still be refused. The per-source ceiling
+    /// is set far above the per-account one so that a shared proxy address does not lock out its
+    /// users, which means the per-account ceiling is the only thing catching this.
+    /// </summary>
+    [Test]
+    public async Task RepeatedWrongPasswordsForOneAccount_HitThePerAccountCeiling()
+    {
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser(
+            Options with { LoginMaxAttemptsPerMinute = 3, LoginMaxAttemptsPerSourcePerMinute = 10_000 });
+
+        await RunDdl(executor, "", "CREATE USER target IDENTIFIED BY 'target-pw-1234'", root);
+
+        CamusDBException? refused = null;
+
+        for (int i = 0; i < 20 && refused is null; i++)
+        {
+            try
+            {
+                await executor.LoginAsync("target", "wrong", source: "10.0.0.7");
+            }
+            catch (CamusDBException e) when (e.Code == CamusDBErrorCodes.TooManyAuthAttempts)
+            {
+                refused = e;
+            }
+            catch (CamusDBException)
+            {
+                // Wrong password, as configured. Keep going.
+            }
+        }
+
+        Assert.IsNotNull(refused, "the per-account ceiling no longer refuses a brute-force attempt");
+    }
+
+    /// <summary>
+    /// Session records carry no storage TTL and are deleted only by an explicit logout or by dropping
+    /// the owning user. With a short token lifetime and re-login as the only refresh, a client that
+    /// reconnects on a timer leaves one dead key per reconnection, forever — and the drop-user path
+    /// scans that whole family, so an unrelated statement pays for the growth.
+    /// </summary>
+    [Test]
+    public async Task ExpiredSessions_AreReaped_AndLiveOnesAreNot()
+    {
+        // A short token lifetime, so the test can watch a session cross its expiry without waiting out
+        // a realistic one. Built into the engine rather than set afterwards: an executor captures its
+        // options at construction, so assigning the setting later would be a no-op that still passed.
+        // Two seconds rather than milliseconds because the setup below must log in before it lapses.
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser(
+            Options with { AccessTokenTtl = TimeSpan.FromSeconds(2) });
+
+        await RunDdl(executor, "", "CREATE USER sleeper IDENTIFIED BY 'sleeper-pw-12'", root);
+        await RunDdl(executor, "", "CREATE USER awake IDENTIFIED BY 'awake-pw-1234'", root);
+
+        LoginResult dying = await executor.LoginAsync("sleeper", "sleeper-pw-12");
+
+        await Task.Delay(2500);
+
+        // Past its expiry the token no longer authenticates, which is what makes deleting its record
+        // safe. Asserted rather than assumed, because the sweep's whole justification rests on it.
+        Assert.ThrowsAsync<CamusDBException>(async () => await executor.ResolvePrincipalAsync(dying.Token));
+
+        // Logged in after the wait, so this session is live while the sweep runs.
+        LoginResult live = await executor.LoginAsync("awake", "awake-pw-1234");
+
+        int reaped = await executor.ReapExpiredSessionsAsync();
+        Assert.GreaterOrEqual(reaped, 1, "the expired session was not removed");
+
+        // The live session survives. Without this the test would pass equally well against a sweep
+        // that deleted every session it found.
+        Principal stillValid = await executor.ResolvePrincipalAsync(live.Token);
+        Assert.AreEqual("awake", stillValid.UserName);
+
+        // Idempotent, and it stops when there is nothing left: every node runs this concurrently and
+        // none of them coordinates, so a second pass over the same records must be a quiet no-op.
+        Assert.AreEqual(0, await executor.ReapExpiredSessionsAsync());
     }
 
     [Test]

@@ -54,6 +54,11 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
 # https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
 # raft_certificate:        # path to PFX for Raft gRPC TLS in cluster mode
+# grpc_certificate:        # path to PFX for the client-facing gRPC port; falls back to
+#                          # raft_certificate, and the port is plaintext h2c when both are unset.
+#                          # Separate from raft_certificate because the two ports face different
+#                          # networks: the Raft port is peer-only, while this one faces clients
+#                          # whose trust store has to accept whatever it presents.
 
 # ── Operator dashboard ────────────────────────────────────────────────────────
 # A read-only page served on the HTTP port: node health, load, engine metrics,
@@ -77,6 +82,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   invisible to the server, so it would otherwise reject every forwarded request. Also settable as
 #   --require-tls-when-auth-enabled true|false, which overrides this value.
 # require_tls_when_auth_enabled: true
+#
+# login_max_attempts_per_source_per_minute (default 200): login attempts allowed from one source
+#   address per rolling minute, across every account it names. This is the ceiling that bounds a
+#   flood, because an account name is chosen by the request and a caller varying it never reaches
+#   the per-account ceiling. Keep it well above login_max_attempts_per_minute: several legitimate
+#   users can share one address behind a proxy or a NAT gateway.
+# login_max_attempts_per_source_per_minute: 200
 
 # Cluster mode example (uncomment and fill in)
 # mode: cluster
@@ -97,10 +109,19 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # Per-peer HTTP addresses (parallel to peers, same index order).
 # Required for heterogeneous HTTP ports or multiple nodes per host.
 # If omitted, the leader's host is reused with this node's http_port (uniform-port assumption).
+# An entry may carry its own scheme (https://10.0.0.1:5095), which overrides peer_tls_enabled for
+# that peer alone.
 # http_peers:
 #   - 192.168.1.10:5095
 #   - 192.168.1.11:5095
 #   - 192.168.1.12:5095
+#
+# peer_tls_enabled (default false): reach peers over HTTPS on their HTTP port. Two of the three
+#   node-to-node channels — schema-DDL forwarding and cluster-settings forwarding — send the shared
+#   node secret as a header, so while this is off anyone who can observe peer traffic reads it. Turn
+#   it on only once the peers actually serve HTTPS there. An exposed cluster running without it is
+#   reported at startup.
+# peer_tls_enabled: false
 #
 # join_existing: join a RUNNING cluster as a new node instead of bootstrapping one, with 'peers'
 # acting as the SEED list (one or more members of the running cluster). The node enters the
@@ -153,6 +174,14 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # idle — no statement issued — for longer than transaction_idle_timeout_ms.
 # transaction_idle_timeout_ms: 300000     # idle cutoff before rollback; <= 0 disables the reaper
 # transaction_reaper_interval_ms: 30000   # sweep interval; must be > 0
+
+# ── Session cleanup ───────────────────────────────────────────────────────────
+# Sessions have no storage TTL and are removed only by an explicit logout or by dropping the owning
+# user. Since a token is short-lived and re-login is the only refresh, a client that reconnects on a
+# timer leaves one dead record per reconnection. The cost is not only storage: dropping a user scans
+# that whole key family, so the growth slows an unrelated statement.
+# Set to 0 or less to switch the sweep off.
+# session_reaper_interval_ms: 300000
 
 # Release of an abandoned transaction's holdings. A rollback the storage node answers with "unknown
 # transaction" — no session, no retained outcome, no durable record — releases nothing, because the

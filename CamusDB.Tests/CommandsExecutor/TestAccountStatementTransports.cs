@@ -73,7 +73,7 @@ internal sealed class TestAccountStatementTransports : BaseTest
     /// engine hashed, which no status code can show.
     /// </summary>
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) =>
-        defaults with { AccessTokenServerKey = "test-key" };
+        defaults with { AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor" };
 
     [SetUp]
     public void SetUpTransports()

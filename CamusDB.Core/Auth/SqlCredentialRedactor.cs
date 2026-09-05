@@ -16,8 +16,9 @@ namespace CamusDB.Core.Auth;
 /// place that secret in application logs. Every transport must pass SQL through this before
 /// <c>LogExecutingSql</c>/request-body logging.
 ///
-/// <para>Only the literal after <c>BY</c> is replaced (with <c>'***'</c>); a parameterized password
-/// (<c>BY @p</c>) has no literal here and is left alone — the caller is responsible for never logging
+/// <para>The literal after <c>BY</c> is replaced (with <c>'***'</c>), and so is the one after a
+/// following <c>REPLACE</c> — the current password on a self-service change. A parameterized password
+/// (<c>BY @p</c>) has no literal here and is left alone: the caller is responsible for never logging
 /// the bound parameter values of a credential-bearing statement, which this class cannot see.</para>
 ///
 /// <para>This is a hand-written scan rather than a regular expression, and that is deliberate. It is a
@@ -72,6 +73,24 @@ public static class SqlCredentialRedactor
             result.Append(sql, copied, keywordEnd - copied).Append(Mask);
             copied = literalEnd;
             i = literalEnd;
+
+            // ALTER USER … IDENTIFIED BY <new> REPLACE <current> carries a second credential, and
+            // IDENTIFIED…BY does not precede it, so the scan above walks straight past it. It is the
+            // password the account holds right now — if anything, the more damaging of the two to log.
+            int afterReplace = SkipKeyword(sql, SkipWhitespace(sql, literalEnd), "REPLACE");
+
+            if (afterReplace < 0)
+                continue;
+
+            int currentStart = SkipWhitespace(sql, afterReplace);
+            int currentEnd = SkipLiteral(sql, currentStart);
+
+            if (currentEnd < 0)
+                continue;
+
+            result.Append(sql, copied, currentStart - copied).Append(Mask);
+            copied = currentEnd;
+            i = currentEnd;
         }
 
         if (result is null)

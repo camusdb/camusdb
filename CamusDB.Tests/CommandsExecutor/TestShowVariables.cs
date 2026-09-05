@@ -227,7 +227,7 @@ internal sealed class TestShowVariables : BaseTest
     [Test]
     public async Task ShowVariables_MasksSecretsButStillListsThem()
     {
-        const string secret = "correct-horse-battery-staple";
+        const string secret = "correct-horse-battery-staple-and-then-some";
 
         (string db, DatabaseDescriptor _, CommandExecutor executor) = await CreateDatabase(Options with
         {

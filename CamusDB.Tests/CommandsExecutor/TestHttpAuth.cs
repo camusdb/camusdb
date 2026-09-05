@@ -49,7 +49,7 @@ internal sealed class TestHttpAuth : BaseTest
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
     {
         AuthenticationEnabled = true,
-        AccessTokenServerKey = "test-key",
+        AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor",
         BootstrapSuperuser = "root",
         BootstrapSuperuserPassword = "root-pw",
     };
@@ -368,6 +368,80 @@ internal sealed class TestHttpAuth : BaseTest
 
         Assert.AreEqual(401, http.Response.StatusCode);
         Assert.IsFalse(nextCalled);
+    }
+
+    /// <summary>
+    /// A configured node secret is honoured, and a wrong one of the same length is refused.
+    ///
+    /// <para>Equal lengths are the point of the second case. The comparison is constant-time now, and
+    /// the cheap way to "fix" a timing leak — comparing lengths and returning early on a match, then
+    /// falling back to an early-exit character loop — still passes a test that only ever presents a
+    /// secret of a different length.</para>
+    /// </summary>
+    [Test]
+    public async Task InternalRoute_NodeSecret_AcceptedOnlyWhenItMatches()
+    {
+        (_, CommandExecutor ex) = await Setup();
+
+        const string secret = "node-secret-padded-to-meet-the-32-byte-floor";
+        CamusDBOptions withSecret = Options with { NodeSecret = secret };
+
+        bool nextCalled = false;
+        AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
+
+        DefaultHttpContext ok = MiddlewareContext("/internal/schema-ddl/create-table", bearer: null);
+        ok.Request.Headers["X-Camus-Node-Secret"] = secret;
+        await mw.Invoke(ok, ex, withSecret);
+
+        Assert.IsTrue(nextCalled, "a peer presenting the configured secret must reach the endpoint");
+
+        // Same length, different value.
+        string wrong = "node-secret-padded-to-meet-the-32-byte-FLOOR";
+        Assert.AreEqual(secret.Length, wrong.Length);
+
+        nextCalled = false;
+        DefaultHttpContext bad = MiddlewareContext("/internal/schema-ddl/create-table", bearer: null);
+        bad.Request.Headers["X-Camus-Node-Secret"] = wrong;
+        await mw.Invoke(bad, ex, withSecret);
+
+        Assert.AreEqual(401, bad.Response.StatusCode);
+        Assert.IsFalse(nextCalled);
+
+        // A missing header is refused too, rather than being read as an empty match.
+        nextCalled = false;
+        DefaultHttpContext absent = MiddlewareContext("/internal/schema-ddl/create-table", bearer: null);
+        await mw.Invoke(absent, ex, withSecret);
+
+        Assert.AreEqual(401, absent.Response.StatusCode);
+        Assert.IsFalse(nextCalled);
+    }
+
+    /// <summary>
+    /// The error page must be reachable without a credential.
+    ///
+    /// <para>It is what the exception handler re-executes when a request fails. Refused, that
+    /// re-execution answers a server fault with a 401 JSON body: the browser gets JSON instead of the
+    /// page, and the access log records an authentication failure in place of the original 500 —
+    /// pointing whoever is investigating at the wrong subsystem. Serving it anonymously is safe
+    /// because its whole content is a request id.</para>
+    /// </summary>
+    [Test]
+    public async Task ErrorPage_IsServedWithoutACredential()
+    {
+        (_, CommandExecutor ex) = await Setup();
+
+        bool nextCalled = false;
+        AuthenticationMiddleware mw = new(_ => { nextCalled = true; return Task.CompletedTask; });
+
+        DefaultHttpContext http = MiddlewareContext("/Error", bearer: null);
+        await mw.Invoke(http, ex, Options);
+
+        Assert.IsTrue(nextCalled, "the error page must render rather than be refused");
+        Assert.AreNotEqual(401, http.Response.StatusCode);
+
+        // And it must not be redirected to sign-in either: that would hide a server fault behind a
+        // login prompt, which is the other wrong answer for this page.
+        Assert.AreNotEqual(302, http.Response.StatusCode);
     }
 
     // The transport-wide middleware also fronts the gRPC endpoints, so the gRPC credential-exchange

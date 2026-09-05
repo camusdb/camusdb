@@ -1268,6 +1268,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         => userAdmin.EnsureBootstrapSuperuserAsync(bootstrapUser, bootstrapPassword);
 
     /// <summary>
+    /// Deletes session records whose absolute expiry has passed, and returns how many went. A no-op
+    /// returning zero when authentication is off or this engine has no shared node. Safe to call
+    /// concurrently from every node and safe to repeat — see <c>AuthCatalog.ReapExpiredSessionsAsync</c>.
+    /// </summary>
+    public Task<int> ReapExpiredSessionsAsync() => userAdmin.ReapExpiredSessionsAsync();
+
+    /// <summary>
     /// Creates a server-level user in the shared auth catalog. The cleartext password (if any) is hashed
     /// here and never persisted or logged; the ticket carries it no further. Server-level — returns no
     /// descriptor.

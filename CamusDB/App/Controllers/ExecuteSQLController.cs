@@ -307,9 +307,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (Exception e)
         {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new ExecuteSQLQueryResponse("failed", "CA0000", e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = 500 };
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e)) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = 500 };
         }
     }
 
@@ -541,8 +539,16 @@ public sealed class ExecuteSQLController : CommandsController
         await JsonSerializer.SerializeAsync(Response.Body, body, jsonOptions).ConfigureAwait(false);
     }
 
-    private static (string Code, string Message) ToErrorCodeMessage(Exception e)
-        => e is CamusDBException cdb ? (cdb.Code, cdb.Message) : ("CA0000", e.Message);
+    /// <summary>
+    /// Maps an exception to the code and message a streaming response reports.
+    ///
+    /// <para>A <see cref="CamusDBException"/> keeps its own code and text: those are the domain error
+    /// surface, and clients branch on them. Anything else was not shaped for a caller and could carry
+    /// internal detail, so it becomes the house code and a message naming only the request id — the
+    /// full exception goes to the log through <see cref="CommandsController.LogUnclassifiedFailure"/>.</para>
+    /// </summary>
+    private (string Code, string Message) ToErrorCodeMessage(Exception e)
+        => e is CamusDBException cdb ? (cdb.Code, cdb.Message) : (UnclassifiedErrorCode, LogUnclassifiedFailure(e));
 
     [HttpPost]
     [Route("/execute-sql-non-query")]
@@ -659,9 +665,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (Exception e)
         {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", "CA0000", e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = 500 };
+            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e)) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = 500 };
         }
     }
 
@@ -747,9 +751,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
         catch (Exception e)
         {
-            logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
-
-            return new JsonResult(new ExecuteDDLSQLResponse("failed", "CA0000", e.Message)) { StatusCode = 500 };
+            return new JsonResult(new ExecuteDDLSQLResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

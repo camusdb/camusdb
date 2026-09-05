@@ -2,8 +2,8 @@
     Layout for the operator dashboard and its sign-in page.
 
     It is separate from _Layout on purpose. That layout still serves the
-    scaffolded Error and Privacy pages and keeps their Bootstrap and jQuery
-    references; this one loads neither. Bootstrap carries its own visual
+    scaffolded Error page and keeps its Bootstrap and jQuery references; this
+    one loads neither. Bootstrap carries its own visual
     identity — its navbar and card fight the documentation site's — and CSS grid
     covers the whole layout, so the dashboard drops both dependencies rather
     than fighting them.
@@ -11,6 +11,10 @@
 @{
     bool authenticationEnabled = (ViewData["AuthenticationEnabled"] as bool?) ?? false;
     bool showNav = (ViewData["ShowNav"] as bool?) ?? true;
+
+    // The Content-Security-Policy allows inline script only with this per-request nonce.
+    // Read into a local first: nested quotes inside a Razor attribute do not parse.
+    string? cspNonce = Context.Items["csp-nonce"] as string;
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -20,7 +24,7 @@
     <title>@ViewData["Title"] · CamusDB</title>
     <link rel="icon" href="~/favicon.ico" />
     <link rel="stylesheet" href="~/css/camus-dashboard.css" asp-append-version="true" />
-    <script>
+    <script nonce="@cspNonce">
         // Stamp the theme before the first paint. Doing this from dashboard.js
         // would be too late: the page would render in the wrong theme and then
         // visibly swap. The try/catch matters because a private window can
