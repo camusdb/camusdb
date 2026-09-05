@@ -386,7 +386,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         principal: principal
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitOrReleaseAsync(r.Database, tx, innerCt).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
                 }
@@ -460,7 +460,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
                 HLCTimestamp commitToken = default;
                 if (newTransaction)
-                    commitToken = await transactions.CommitAsync(result.Database, txnState!).ConfigureAwait(false);
+                    commitToken = await transactions.CommitOrReleaseAsync(result.Database, txnState!).ConfigureAwait(false);
 
                 DdlReply reply = new() { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
                 if (!commitToken.IsNull())
@@ -913,7 +913,28 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             ParseLevelMode(request);
         NonQueryReply reply;
 
-        if (request.TxnHandle is { TxnIdPt: > 0 } handle)
+        // A database-scoped mutation — CREATE/ALTER/DROP USER, GRANT/REVOKE, and the database
+        // lifecycle statements — names its target in the SQL, writes only a shared server-level
+        // keyspace, and returns no descriptor. It takes neither a transaction nor a commit, the
+        // same rule the unary non-query path applies.
+        //
+        // The check precedes the transaction handle deliberately. One of these sent inside an
+        // explicit transaction must bypass it too: the statement does not write through the
+        // caller's transaction, so consuming it here would spend a transaction the statement never
+        // used and leave the caller's own work in an inconsistent state.
+        if (StatementScope.IsDatabaseScopedMutation(resolved.RootType))
+        {
+            ExecuteSQLTicket dbScopedTicket = new(
+                txnState: null!, database: resolved.Database, sql: resolved.Sql,
+                parameters: resolved.Parameters, principal: principal);
+
+            await executor.ExecuteNonSQLQuery(dbScopedTicket).ConfigureAwait(false);
+
+            // No commit ran, so there is no causal token to carry. Zero affected rows matches what
+            // the unary path reports for the same statements.
+            reply = new NonQueryReply { AffectedRows = 0 };
+        }
+        else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
         {
             // Explicit transaction — client owns commit/rollback.
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
@@ -936,7 +957,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     txnState: tx, database: resolved.Database, sql: resolved.Sql,
                     parameters: resolved.Parameters, principal: principal);
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                token = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                token = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;
                 batchWarning = r.Warning;
             }

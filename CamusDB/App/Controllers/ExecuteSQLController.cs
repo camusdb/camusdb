@@ -632,7 +632,7 @@ public sealed class ExecuteSQLController : CommandsController
                         principal: principal
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    causalToken2 = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken2 = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
                 }
@@ -724,7 +724,7 @@ public sealed class ExecuteSQLController : CommandsController
                 ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(ticket).ConfigureAwait(false);
 
                 if (newTransaction)
-                    await transactions.CommitAsync(result.Database, txnState!).ConfigureAwait(false);
+                    await transactions.CommitOrReleaseAsync(result.Database, txnState!).ConfigureAwait(false);
 
                 return new JsonResult(new ExecuteDDLSQLResponse("ok", result.ModifiedRows, result.Warning));
             }

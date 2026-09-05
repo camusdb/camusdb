@@ -111,21 +111,15 @@ internal sealed class ServerLevelStatementDispatcher
     }
 
     /// <summary>
-    /// Whether <paramref name="nodeType"/> is dispatched before any database is opened. Exposed so a
-    /// caller can reason about the routing without executing anything.
+    /// Whether <paramref name="nodeType"/> is dispatched before any database is opened, for a caller
+    /// that must reason about the routing without executing anything.
+    ///
+    /// <para>It forwards to <see cref="StatementScope.IsDatabaseScopedMutation"/> rather than
+    /// restating the list. The two must agree exactly — the transports skip the transaction on the
+    /// strength of that list, and the switch below is what decides whether a descriptor comes back —
+    /// and a second copy is how they come to disagree. Keeping one list is the whole point.</para>
     /// </summary>
-    internal static bool IsServerLevel(NodeType nodeType) => nodeType is
-        NodeType.CreateDatabase or NodeType.CreateDatabaseIfNotExists
-        or NodeType.CreateDatabaseBranch or NodeType.CreateDatabaseBranchIfNotExists
-        or NodeType.CreateDatabaseRelink
-        or NodeType.DropDatabase or NodeType.DropDatabaseIfExists
-        or NodeType.RenameDatabase
-        or NodeType.CommentOnDatabase
-        or NodeType.CreateUser or NodeType.CreateUserIfNotExists
-        or NodeType.AlterUser
-        or NodeType.DropUser or NodeType.DropUserIfExists
-        or NodeType.Grant or NodeType.Revoke
-        or NodeType.SetClusterSetting or NodeType.ResetClusterSetting;
+    internal static bool IsServerLevel(NodeType nodeType) => StatementScope.IsDatabaseScopedMutation(nodeType);
 
     /// <summary>
     /// Executes <paramref name="ast"/> when it is server-level, and reports

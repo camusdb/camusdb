@@ -185,7 +185,7 @@ internal sealed class DdlStatementDispatcher
             if (serverLevel.Database is not null)
                 return new ExecuteDDLSQLResult(serverLevel.Database, true);
 
-            return serverLevel.ReportsSuccess ? new ExecuteDDLSQLResult(null!, true) : default;
+            return serverLevel.ReportsSuccess ? new ExecuteDDLSQLResult(null, true) : default;
         }
 
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);

@@ -8,9 +8,19 @@
 
 namespace CamusDB.Core.CommandsExecutor.Models.Results;
 
+/// <summary>
+/// What one DDL statement did. <see cref="Database"/> is nullable for the reason spelled out on
+/// <see cref="ExecuteNonSQLResult"/>: a server-level statement is answered before any database is
+/// opened and reports no descriptor, and declaring the field non-nullable hid that null from the
+/// compiler at every commit site.
+/// </summary>
 public readonly struct ExecuteDDLSQLResult
 {
-    public DatabaseDescriptor Database { get; }
+    /// <summary>
+    /// The database the statement ran against, or null when it never opened one — user and grant
+    /// administration, <c>DROP</c>/<c>RENAME DATABASE</c>, and the cluster settings.
+    /// </summary>
+    public DatabaseDescriptor? Database { get; }
 
     public bool Success { get; }
 
@@ -32,7 +42,7 @@ public readonly struct ExecuteDDLSQLResult
     /// </summary>
     public string? Warning { get; }
 
-    public ExecuteDDLSQLResult(DatabaseDescriptor database, bool success, int modifiedRows = 0, string? warning = null)
+    public ExecuteDDLSQLResult(DatabaseDescriptor? database, bool success, int modifiedRows = 0, string? warning = null)
     {
         Database = database;
         Success = success;

@@ -298,17 +298,23 @@ public sealed class HttpTransactionCoordinator
     /// Commits the transaction against <paramref name="database"/>, or — when the statement produced
     /// no descriptor — releases the transaction it never used and reports no causal token.
     ///
-    /// <para>Every autocommit query path calls this instead of <see cref="CommitAsync(DatabaseDescriptor,KvTransaction,CancellationToken)"/>,
-    /// so a server-level statement that reaches the autocommit path cannot crash it. Such a statement
-    /// (<c>SHOW GRANTS</c>, <c>SHOW DATABASES</c> and the rest of
-    /// <see cref="CamusDB.Core.SQLParser.StatementScope.IsServerLevelQuery"/>) opens no database and
-    /// returns a null descriptor; the transport is supposed to keep it off this path entirely, and
-    /// this is the second line of defence for the day one is added to the executor and not to that
-    /// list. The rows are already produced by the time this runs, so degrading to a rollback returns
-    /// the correct answer instead of a <see cref="NullReferenceException"/>.</para>
+    /// <para>Every autocommit path calls this instead of <see cref="CommitAsync(DatabaseDescriptor,KvTransaction,CancellationToken)"/>
+    /// — query, no-rows and DDL alike — so a statement that opens no database cannot crash the one it
+    /// reaches. Two families do that: the server-level queries
+    /// (<see cref="CamusDB.Core.SQLParser.StatementScope.IsServerLevelQuery"/>, e.g. <c>SHOW GRANTS</c>)
+    /// and the database-scoped mutations
+    /// (<see cref="CamusDB.Core.SQLParser.StatementScope.IsDatabaseScopedMutation"/>, e.g.
+    /// <c>CREATE USER</c> and <c>GRANT</c>). Each transport is supposed to keep both off this path
+    /// entirely; this is the second line of defence for the day a statement is added to the executor
+    /// and to neither list. Both such gaps were live and both surfaced the same way — a
+    /// <see cref="NullReferenceException"/> reported to the caller <em>after</em> the statement had
+    /// already taken effect.</para>
     ///
-    /// <para>The rollback is the right release: the transaction is read-only and has written nothing,
-    /// and rolling it back drops any promoted identity and its shared range locks.</para>
+    /// <para>The rollback is the right release in both cases, and for the same reason: the statement
+    /// wrote nothing through this transaction. A server-level query is read-only, and a
+    /// database-scoped mutation writes the shared registry or auth keyspace through its own
+    /// machinery. So the work is already done and correct by the time this runs, and rolling the
+    /// unused transaction back merely drops any promoted identity and its shared range locks.</para>
     /// </summary>
     public async Task<HLCTimestamp> CommitOrReleaseAsync(
         DatabaseDescriptor? database, KvTransaction tx, CancellationToken cancellationToken = default)
