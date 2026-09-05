@@ -148,6 +148,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => inner.MergeRangesWithOutcomeAsync(cancellationToken);
         public virtual KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => inner.GetRangeMap(keySpace);
         public virtual Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => inner.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
+        public virtual Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) => inner.ReplicateKeyValueRangePageOnLeader(partitionId, page, cancellationToken);
         public virtual Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken) => inner.GetRangeTransactionStateLocal(partitionId, startKey, endKey, kinds, cursor, maxItems, cancellationToken);
         public virtual Task<bool> RemoveKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RemoveKeyRangeAsync(keySpace, cancellationToken);
         public virtual Task<int> TriggerAutoSplitAsync(CancellationToken ct = default) => inner.TriggerAutoSplitAsync(ct);
