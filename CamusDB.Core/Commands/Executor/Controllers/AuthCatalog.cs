@@ -165,6 +165,35 @@ public sealed class AuthCatalog
                 GetOrCreateGrantMap(Normalize(grant.User))[grant.Scope.ScopeKey()] = grant;
             }
         }
+
+        DropGrantsNamingARetiredUser();
+    }
+
+    /// <summary>
+    /// Removes every cached grant that names a user id other than the one the live record carries.
+    /// Such a grant belonged to an earlier account that held this name and outlived its own
+    /// <c>DROP USER</c>; adopting it would hand the current account privileges nobody granted it.
+    ///
+    /// <para>Runs as a pass after the scan rather than inside it, because a grant key sorts before
+    /// the user key it refers to, so the owning record is not yet known when the grant is read.</para>
+    ///
+    /// <para>A grant with no recorded id predates the binding and is kept — see
+    /// <see cref="GrantRecord.UserId"/>. A grant whose user has no record at all is also kept: the
+    /// user map is what decides whether an account exists, and it is rebuilt by this same scan.</para>
+    /// </summary>
+    private void DropGrantsNamingARetiredUser()
+    {
+        foreach ((string normalizedUser, ConcurrentDictionary<string, GrantRecord> map) in grantsByUser)
+        {
+            if (!usersByName.TryGetValue(normalizedUser, out UserRecord? live) || live.Id is null)
+                continue;
+
+            foreach ((string scopeKey, GrantRecord grant) in map)
+            {
+                if (grant.UserId is not null && !string.Equals(grant.UserId, live.Id, StringComparison.Ordinal))
+                    map.TryRemove(scopeKey, out _);
+            }
+        }
     }
 
     private ConcurrentDictionary<string, GrantRecord> GetOrCreateGrantMap(string normalizedUser) =>
@@ -283,6 +312,8 @@ public sealed class AuthCatalog
                     map.TryRemove(scopeKey, out _);
             }
         }
+
+        DropGrantsNamingARetiredUser();
 
         Volatile.Write(ref loadedGeneration, authoritativeGeneration);
     }
@@ -520,7 +551,9 @@ public sealed class AuthCatalog
                 }
                 else
                 {
-                    updatedGrant = new GrantRecord { User = normalized, Scope = scope, Privileges = newMask };
+                    // Bind the grant to the user record read under the lock above, not merely to the
+                    // name in the key, so a later account that takes this name cannot inherit it.
+                    updatedGrant = new GrantRecord { User = normalized, UserId = lockedUser.Id, Scope = scope, Privileges = newMask };
                     await SetKeyLockedAsync(tx, GrantKey(normalized, scopeKey),
                         MetaJsonSerializer.Serialize(updatedGrant, MetaJsonContext.Default.GrantRecord), ifAbsent: false).ConfigureAwait(false);
                 }
@@ -705,6 +738,40 @@ public sealed class AuthCatalog
     // -----------------------------------------------------------------------
     // KV helpers (mirror DatabaseRegistry's lock+set / lock+delete pattern)
     // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// <b>Test-only.</b> Writes a grant record straight to its key, bypassing <see cref="GrantAsync"/>.
+    /// It exists so a test can construct states the public API deliberately cannot produce: a grant
+    /// that outlived its owner's <c>DROP USER</c>, and one written before
+    /// <see cref="GrantRecord.UserId"/> existed. Production code must go through
+    /// <see cref="GrantAsync"/>, which reads the user record under its lock and derives the binding
+    /// from it rather than trusting a caller-supplied id.
+    /// </summary>
+    internal async Task WriteRawGrantForTestingAsync(GrantRecord grant)
+    {
+        ArgumentNullException.ThrowIfNull(grant);
+
+        string key = GrantKey(Normalize(grant.User), grant.Scope.ScopeKey());
+
+        await writeSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await RunInTransactionAsync(async tx =>
+            {
+                await LockAndReadAsync(tx, key).ConfigureAwait(false);
+                await SetKeyLockedAsync(
+                    tx, key,
+                    MetaJsonSerializer.Serialize(grant, MetaJsonContext.Default.GrantRecord),
+                    ifAbsent: false).ConfigureAwait(false);
+
+                await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
 
     private async Task RunInTransactionAsync(Func<KvTransaction, Task> body)
     {

@@ -178,18 +178,104 @@ public sealed class RowUpdater
     }
 
     /// <summary>
-    /// Returns true when any of the index's columns is absent from the row or holds a NULL value.
-    /// Such a row is exempt from a unique index (NULLs are distinct) and carries no index entry.
+    /// Walks a unique index's key columns once and reports, for the old and the new image of a row,
+    /// whether the row qualifies for an entry (no absent and no NULL indexed column — NULLs are
+    /// distinct, so such a row carries no unique entry) and whether the key values are identical.
+    /// <para>
+    /// This reads the indexed cells directly, so an update that leaves the index untouched — the
+    /// common case — never builds a <see cref="CompositeColumnValue"/> for either image.
+    /// </para>
+    /// <para>
+    /// The qualification pass completes before any value is compared, and the comparison runs only
+    /// when both images qualify — the same order the two composite keys imposed when they were built
+    /// first and compared afterwards. It walks the columns in order and stops at the first difference,
+    /// which is what <see cref="CompositeColumnValue.CompareTo"/> does over the same values, so a
+    /// later pair that would fail to compare is reached in exactly the same cases as before.
+    /// <paramref name="keyUnchanged"/> is only meaningful when both images qualify.
+    /// </para>
     /// </summary>
-    private static bool HasNullKeyColumn(Dictionary<string, ColumnValue> rowValues, string[] columnNames)
+    private static void CompareUniqueKeyColumns(
+        Dictionary<string, ColumnValue> oldRow,
+        Dictionary<string, ColumnValue> newRow,
+        string[] columnNames,
+        out bool oldHasKey,
+        out bool newHasKey,
+        out bool keyUnchanged)
     {
-        foreach (string name in columnNames)
+        bool oldQualifies = true;
+        bool newQualifies = true;
+
+        for (int i = 0; i < columnNames.Length; i++)
         {
-            if (!rowValues.TryGetValue(name, out ColumnValue? value) || value.Type == ColumnType.Null)
-                return true;
+            string name = columnNames[i];
+
+            if (!oldRow.TryGetValue(name, out ColumnValue? oldValue) || oldValue.Type == ColumnType.Null)
+                oldQualifies = false;
+
+            if (!newRow.TryGetValue(name, out ColumnValue? newValue) || newValue.Type == ColumnType.Null)
+                newQualifies = false;
         }
 
-        return false;
+        oldHasKey = oldQualifies;
+        newHasKey = newQualifies;
+        keyUnchanged = true;
+
+        if (!oldQualifies || !newQualifies)
+            return;
+
+        // Both images qualify, so every indexed column is present and non-NULL in both.
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            if (oldRow[columnNames[i]].CompareTo(newRow[columnNames[i]]) != 0)
+            {
+                keyUnchanged = false;
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Walks a non-unique index's key columns once and reports whether the old and the new image of a
+    /// row hold identical key values. The row id tie-breaker appended to a non-unique key is the same
+    /// value on both sides, so it can never change the outcome and is not compared here.
+    /// <para>
+    /// A key column absent from either row is an internal error, as it is when the composite key is
+    /// built. Both images are checked in full — the old one first, then the new one — before any value
+    /// is compared, so the failure names the same column, in the same order, that building the two
+    /// keys up front reported.
+    /// </para>
+    /// </summary>
+    private static bool MultiKeyColumnsUnchanged(
+        Dictionary<string, ColumnValue> oldRow,
+        Dictionary<string, ColumnValue> newRow,
+        string[] columnNames)
+    {
+        RequireKeyColumns(oldRow, columnNames);
+        RequireKeyColumns(newRow, columnNames);
+
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            if (oldRow[columnNames[i]].CompareTo(newRow[columnNames[i]]) != 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Throws when any of the index's key columns is absent from the row, with the same error and the
+    /// same message the composite-key builder raises for the first missing column.
+    /// </summary>
+    private static void RequireKeyColumns(Dictionary<string, ColumnValue> rowValues, string[] columnNames)
+    {
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            if (!rowValues.ContainsKey(columnNames[i]))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A null value was found for unique key field '" + columnNames[i] + "'"
+                );
+        }
     }
 
     /// <summary>
@@ -477,6 +563,10 @@ public sealed class RowUpdater
         List<KvTableStore.IndexDelete>? oldEntries = null;
         List<KvTableStore.IndexWrite>? newEntries = null;
 
+        // The row id tie-breaker appended to every non-unique key is the same value for every index of
+        // this row, and ColumnValue is immutable, so one instance is built on first use and shared.
+        ColumnValue? rowIdValue = null;
+
         for (int idx = 0; idx < writableIndexes.Count; idx++)
         {
             TableIndexSchema index = writableIndexes[idx];
@@ -494,11 +584,9 @@ public sealed class RowUpdater
                 // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
                 // unique index entry. So only delete the old entry if the old row had one, and only put
                 // the new entry if the new row qualifies (value->NULL removes it, NULL->value adds it).
-                bool oldHasKey = !HasNullKeyColumn(oldRow, index.Columns);
-                bool newHasKey = !HasNullKeyColumn(newRow, index.Columns);
-
-                CompositeColumnValue? oldKey = oldHasKey ? GetColumnValue(oldRow, index.Columns) : null;
-                CompositeColumnValue? newKey = newHasKey ? GetColumnValue(newRow, index.Columns) : null;
+                // NULL qualification and key equality come from one pass over the indexed columns, so an
+                // update that leaves this index alone builds no composite key at all.
+                CompareUniqueKeyColumns(oldRow, newRow, index.Columns, out bool oldHasKey, out bool newHasKey, out bool keyUnchanged);
 
                 // When the indexed columns are unchanged, skip the delete+insert cycle. On a root this
                 // avoids a needless round-trip; on a branch it is required for correctness: the delete
@@ -507,41 +595,45 @@ public sealed class RowUpdater
                 // in-place unique updates is not yet supported). The inherited index entry already
                 // points to the correct rowId, and the row fetch returns the branch-local value via
                 // the branch-aware read path.
-                if (oldHasKey && newHasKey && oldKey!.CompareTo(newKey!) == 0)
+                if (oldHasKey && newHasKey && keyUnchanged)
                 {
                     // Key identical. Only work to do is refreshing the covered payload: overwrite the
                     // existing entry value in place (same key, this row's rowId) — no delete, and Set
                     // rather than SetIfNotExists (which would no-op on the already-present key).
                     if (includeChanged)
-                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns), Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
                     continue;
                 }
 
                 if (oldHasKey)
-                    (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey!, rowId, Unique: true));
+                    (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldRow, index.Columns), rowId, Unique: true));
 
                 if (newHasKey)
-                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey!, Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
+                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns), Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
             }
             else if (index.Type == IndexType.Multi)
             {
-                ColumnValue rowIdValue = new(ColumnType.Id, rowId.ToString());
-
-                CompositeColumnValue oldKey = GetColumnValue(oldRow, index.Columns, rowIdValue);
-                CompositeColumnValue newKey = GetColumnValue(newRow, index.Columns, rowIdValue);
-
                 // Skip unchanged entries — same correctness requirement as the unique index case above.
-                if (oldKey.CompareTo(newKey) == 0)
+                // The comparison reads the indexed cells directly, so an untouched index builds neither
+                // composite key and does not even need the row id tie-breaker value.
+                if (MultiKeyColumnsUnchanged(oldRow, newRow, index.Columns))
                 {
                     // Key (incl. rowId tie-breaker) identical: overwrite the entry value in place to
                     // refresh the covered payload; no delete needed.
                     if (includeChanged)
-                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
+                    {
+                        rowIdValue ??= new(ColumnType.Id, rowId.ToString());
+
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
+                    }
+
                     continue;
                 }
 
-                (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, oldKey, rowId, Unique: false));
-                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, newKey, Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
+                rowIdValue ??= new(ColumnType.Id, rowId.ToString());
+
+                (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldRow, index.Columns, rowIdValue), rowId, Unique: false));
+                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
             }
         }
 

@@ -39,8 +39,10 @@ public class ResponseWriterBenchmarks
     [Params(1_000)]
     public int RowCount { get; set; }
 
-    // numeric: all boxable scalars (worst case for the old boxing graph); mixed: adds Id/Uuid/Bytes.
-    [Params("numeric", "mixed")]
+    // numeric: all boxable scalars (worst case for the old boxing graph); mixed: adds Id/Uuid/Bytes
+    // with a small payload; bytes: two large Bytes cells per row, where the base64 encoding of the
+    // cell — not the row graph — is what dominates.
+    [Params("numeric", "mixed", "bytes")]
     public string Shape { get; set; } = "numeric";
 
     private DerivedColumnSchema[] _schema = null!;
@@ -53,24 +55,46 @@ public class ResponseWriterBenchmarks
     {
         _options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-        _schema = Shape == "numeric"
-            ?
+        _schema = Shape switch
+        {
+            "numeric" =>
             [
                 new("a", ColumnType.Integer64), new("b", ColumnType.Integer64),
                 new("c", ColumnType.Float64),   new("d", ColumnType.Bool), new("e", ColumnType.Integer64),
-            ]
-            :
+            ],
+            "bytes" =>
+            [
+                new("id", ColumnType.Id), new("small", ColumnType.Bytes), new("large", ColumnType.Bytes),
+            ],
+            _ =>
             [
                 new("id", ColumnType.Id), new("n", ColumnType.Integer64),
                 new("s", ColumnType.String), new("u", ColumnType.Uuid), new("by", ColumnType.Bytes),
-            ];
+            ],
+        };
 
         byte[] payload = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        // 96 B stays inside the stack scratch; 4 KiB forces the pooled buffer.
+        byte[] smallPayload = new byte[96];
+        byte[] largePayload = new byte[4096];
+        for (int i = 0; i < largePayload.Length; i++)
+        {
+            largePayload[i] = (byte)((i * 31) & 0xFF);
+            if (i < smallPayload.Length)
+                smallPayload[i] = (byte)((i * 17) & 0xFF);
+        }
         _rows = new QueryResultRow[RowCount];
         for (int i = 0; i < RowCount; i++)
         {
             Dictionary<string, ColumnValue> dict = new(StringComparer.Ordinal);
-            if (Shape == "numeric")
+            if (Shape == "bytes")
+            {
+                dict["id"] = new ColumnValue(ColumnType.Id, new ObjectIdValue(i, i + 1, i + 2).ToString());
+                dict["small"] = new ColumnValue(smallPayload);
+                dict["large"] = new ColumnValue(largePayload);
+            }
+            else if (Shape == "numeric")
             {
                 dict["a"] = new ColumnValue(ColumnType.Integer64, (long)i);
                 dict["b"] = new ColumnValue(ColumnType.Integer64, (long)(i * 7));

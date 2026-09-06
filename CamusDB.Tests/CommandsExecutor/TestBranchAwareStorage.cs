@@ -1679,6 +1679,49 @@ internal sealed class TestBranchAwareStorage : BaseTest
     }
 
     /// <summary>
+    /// A bucket that reads as empty is not accepted as drained on the strength of one scan.
+    ///
+    /// <para>Reporting a bucket drained is what lets the drop clear its recovery markers, and once
+    /// those are gone nothing revisits the keyspace — so a scan that returned nothing because it
+    /// ended early, rather than because the bucket was empty, would leak the whole database silently
+    /// and permanently. The purge therefore requires consecutive empty scans, matching the confirming
+    /// round the keyspace-catalog collection already performs.</para>
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_KeyspacePurge_ConfirmsEmptinessWithRescans()
+    {
+        DatabaseDropper.EmptyPurgeScansForTesting = 0;
+        try
+        {
+            (string dbName, DatabaseDescriptor db, CommandExecutor executor) =
+                await CreateRootWithTable("CREATE TABLE t (id OBJECT_ID PRIMARY KEY, v STRING)");
+            await InsertRow(dbName, db, executor, "INSERT INTO t (id, v) VALUES (gen_id(), \"a\")");
+
+            string dbId = sharedRegistry!.Get(dbName)!.Id;
+            string tableId = db.Schema.Tables.Values.First().Id!;
+            IKahuna kahuna = TestNode!.Kahuna;
+
+            // FORCE: only an immediate drop runs the keyspace purge; a non-FORCE drop defers to the GC.
+            await executor.DropDatabase(new DropDatabaseTicket(dbName, ifExists: false, force: true));
+
+            // Still purges completely — the confirming rounds must not change the outcome.
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"),
+                "row overlay must still be fully purged");
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{dbId}/meta", $"{dbId}/"),
+                "meta namespace must still be fully purged");
+
+            // Accepting the first empty scan would record no confirming re-scans at all.
+            Assert.That(DatabaseDropper.EmptyPurgeScansForTesting, Is.GreaterThan(0),
+                "an empty scan must be confirmed by a re-scan before the bucket is reported drained");
+        }
+        finally
+        {
+            DatabaseDropper.EmptyPurgeScansForTesting = 0;
+        }
+    }
+
+    /// <summary>
     /// The DROP DATABASE keyspace-catalog collection re-scans (a confirming round) instead of reading
     /// the catalog once, so a catalog key transiently missed on one scan is caught by a later one and
     /// its table's overlay is still purged. This asserts the multi-round loop is active — with a single

@@ -615,69 +615,63 @@ internal sealed class QueryJoinExecutor
     /// <summary>
     /// Scans a table in join-key order by walking its secondary index from the first entry to
     /// the last. Used by <see cref="ExecuteMergeJoin"/> when the planner detected free ordering
-    /// on the right side (a <see cref="TableScanSource.ForcedIndex"/> node). One row-fetch is
-    /// issued per index entry; deleted or empty rows are skipped.
+    /// on the right side (a <see cref="TableScanSource.ForcedIndex"/> node). Row ids are collected
+    /// in index order and each page is fetched in one batch call (see <see cref="JoinLeafRowPage"/>);
+    /// deleted or empty rows are skipped.
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ScanBoundTableByIndex(
         BoundTableSource source,
         TableIndexSchema index,
         NodeAst? executionFilter,
-        QueryPlan plan)
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         TableDescriptor table = source.Table;
-        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
-        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
         QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = index.Type == IndexType.Unique;
-        RowEncoder.RowDecodeState rowDecodeState = new();
-        RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
+
+        using CancellationTokenSource? linked = LinkEnumeratorCancellation(plan, cancellationToken);
+        CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+
+        JoinLeafRowPage page = new(this, plan, source, executionFilter);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
-            from: null, to: null, unique: unique, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
+            from: null, to: null, unique: unique, cancellationToken: scanToken).ConfigureAwait(false))
         {
+            scanToken.ThrowIfCancellationRequested();
+
+            // Recorded before the fetch, per row id, exactly as the per-entry path did: a later update
+            // to a non-indexed projected column must invalidate this result even if the row is skipped.
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
+            page.Add(rowId);
 
-            if (dataOpt is null || dataOpt.Value.Length == 0)
+            if (!page.IsFull)
                 continue;
 
-            ReadOnlyMemory<byte> data = dataOpt.Value;
-            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                table.Schema,
-                txId,
-                rowId,
-                data,
-            _options,
-                required,
-                GetTableSchemaVersionForAlias(plan, source.Alias),
-                rowDecodeState).ConfigureAwait(false);
+            await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                yield return row;
+        }
 
-            if (executionFilter is not null)
-            {
-                qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
-                IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
-
-                if (!await queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
-                    continue;
-            }
-
-            yield return new QueryResultRow(rowId, row);
+        if (page.Count > 0)
+        {
+            await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                yield return row;
         }
     }
 
     /// <summary>
-    /// Executes a bounded index range scan for a join leaf node, fetching the primary row for
-    /// each matching index entry and applying the residual execution filter (if any).
-    /// Used when <see cref="JoinQueryPlanner"/> chose an index range scan for this leaf.
+    /// Executes a bounded index range scan for a join leaf node, fetching the primary rows one page
+    /// at a time (see <see cref="JoinLeafRowPage"/>) and applying the residual execution filter (if
+    /// any). Used when <see cref="JoinQueryPlanner"/> chose an index range scan for this leaf.
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ScanBoundTableByIndexRange(
         IndexRangeScanNode rangeNode,
@@ -686,19 +680,20 @@ internal sealed class QueryJoinExecutor
     {
         BoundTableSource source = rangeNode.BoundSource!;
         TableDescriptor table = source.Table;
-        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, rangeNode.Index);
-        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
         QueryDependencyCollector? deps = plan.DepCollector;
 
         bool unique = rangeNode.Index.Type == IndexType.Unique;
-        RowEncoder.RowDecodeState rowDecodeState = new();
-        RowLayout? qualifiedLayout = null;
 
         // Index range scan: the index bucket range covers membership phantoms; per-row point
         // deps cover updates to non-indexed projected columns.
         deps?.RecordRange(table.Store.IndexKeySpace(rangeNode.Index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
+
+        using CancellationTokenSource? linked = LinkEnumeratorCancellation(plan, cancellationToken);
+        CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+
+        JoinLeafRowPage page = new(this, plan, source, rangeNode.ExecutionFilter);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -708,44 +703,36 @@ internal sealed class QueryJoinExecutor
             to: rangeNode.ToBound,
             fromInclusive: rangeNode.FromInclusive,
             toInclusive: rangeNode.ToInclusive,
-            unique: unique, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
+            unique: unique, cancellationToken: scanToken).ConfigureAwait(false))
         {
+            scanToken.ThrowIfCancellationRequested();
+
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            ReadOnlyMemory<byte>? dataOpt = await table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
+            page.Add(rowId);
 
-            if (dataOpt is null || dataOpt.Value.Length == 0)
+            if (!page.IsFull)
                 continue;
 
-            ReadOnlyMemory<byte> data = dataOpt.Value;
-            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                table.Schema,
-                txId,
-                rowId,
-                data,
-            _options,
-                required,
-                GetTableSchemaVersionForAlias(plan, source.Alias),
-                rowDecodeState).ConfigureAwait(false);
+            await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                yield return row;
+        }
 
-            if (rangeNode.ExecutionFilter is not null)
-            {
-                qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
-                IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
-                if (!await queryFilterer.MeetWhereAsync(rangeNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
-                    continue;
-            }
-
-            yield return new QueryResultRow(rowId, row);
+        if (page.Count > 0)
+        {
+            await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                yield return row;
         }
     }
 
     /// <summary>
     /// Executes an IN-list index scan for a join leaf node.
     /// Unique indexes perform one <c>LookupUnique</c> per value; non-unique indexes perform one
-    /// equality range scan per value. Duplicate row IDs are suppressed across all values.
-    /// The residual <see cref="IndexInListScanNode.ExecutionFilter"/> (if any) is applied after
-    /// each row is fetched, using the alias-qualified row.
+    /// equality range scan per value. Duplicate row IDs are suppressed across all values, on the
+    /// index side, before a row id is buffered. The surviving ids are fetched one page at a time
+    /// (see <see cref="JoinLeafRowPage"/>) and the residual
+    /// <see cref="IndexInListScanNode.ExecutionFilter"/> (if any) is applied after each row is
+    /// decoded, using the alias-qualified row.
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ScanBoundTableByInList(
         IndexInListScanNode inListNode,
@@ -754,54 +741,46 @@ internal sealed class QueryJoinExecutor
     {
         BoundTableSource source = inListNode.BoundSource!;
         TableDescriptor table = source.Table;
-        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, inListNode.Index);
-        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, source.Alias);
         bool isUnique = inListNode.Index.Type == IndexType.Unique;
         HashSet<ObjectIdValue> seen = new();
         QueryDependencyCollector? deps = plan.DepCollector;
-        RowEncoder.RowDecodeState rowDecodeState = new();
-        RowLayout? qualifiedLayout = null;
 
         // IN-list scan: record the index bucket once (covers all per-value range probes) and schema.
         deps?.RecordRange(table.Store.IndexKeySpace(inListNode.Index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
+        using CancellationTokenSource? linked = LinkEnumeratorCancellation(plan, cancellationToken);
+        CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+
+        // One page spans the whole IN list: ids are appended in list order (and, per value, in index
+        // order), so a page can hold the tail of one value's matches and the head of the next. Order
+        // and the index-side `seen` dedup are unaffected — both happen before an id is buffered.
+        JoinLeafRowPage page = new(this, plan, source, inListNode.ExecutionFilter);
+
         foreach (ColumnValue value in inListNode.Values)
         {
+            scanToken.ThrowIfCancellationRequested();
+
             CompositeColumnValue lookupKey = new(new[] { value });
 
             if (isUnique)
             {
                 ObjectIdValue? rowId = await table.Store.LookupUnique(
-                    plan.Ticket.TxnState, inListNode.Index.KvId, lookupKey, plan.Ticket.CancellationToken).ConfigureAwait(false);
+                    plan.Ticket.TxnState, inListNode.Index.KvId, lookupKey, scanToken).ConfigureAwait(false);
 
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
                 deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-                ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId.Value, plan.Ticket.CancellationToken).ConfigureAwait(false);
-                if (data is null || data.Value.Length == 0)
+                page.Add(rowId.Value);
+
+                if (!page.IsFull)
                     continue;
 
-                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                    table.Schema, txId, rowId.Value, data.Value,
-            _options,
-                    required,
-                    GetTableSchemaVersionForAlias(plan, source.Alias),
-                    rowDecodeState).ConfigureAwait(false);
-
-                if (inListNode.ExecutionFilter is not null)
-                {
-                    qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
-                    IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
-                    if (!await queryFilterer.MeetWhereAsync(
-                            inListNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
-                        continue;
-                }
-
-                yield return new QueryResultRow(rowId.Value, row);
+                await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                    yield return row;
             }
             else
             {
@@ -815,37 +794,48 @@ internal sealed class QueryJoinExecutor
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
+                    maxRows: null, cancellationToken: scanToken).ConfigureAwait(false))
                 {
+                    scanToken.ThrowIfCancellationRequested();
+
                     if (!seen.Add(rowId))
                         continue;
 
                     deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
-                    if (data is null || data.Value.Length == 0)
+                    page.Add(rowId);
+
+                    if (!page.IsFull)
                         continue;
 
-                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                        table.Schema, txId, rowId, data.Value,
-            _options,
-                        required,
-                        GetTableSchemaVersionForAlias(plan, source.Alias),
-                        rowDecodeState).ConfigureAwait(false);
-
-                    if (inListNode.ExecutionFilter is not null)
-                    {
-                        qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
-                        IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
-                        if (!await queryFilterer.MeetWhereAsync(
-                                inListNode.ExecutionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
-                            continue;
-                    }
-
-                    yield return new QueryResultRow(rowId, row);
+                    await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                        yield return row;
                 }
             }
         }
+
+        if (page.Count > 0)
+        {
+            await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
+                yield return row;
+        }
+    }
+
+    /// <summary>
+    /// Links the token an <c>await foreach</c> consumer supplied through <c>WithCancellation</c> with
+    /// the ticket's own cancellation token, and returns <see langword="null"/> when there is nothing to
+    /// link — the consumer passed no token, or the same one the ticket already carries. A join leaf
+    /// must observe both: the ticket token cancels the whole statement, while the enumerator token
+    /// cancels just this enumeration.
+    /// </summary>
+    private static CancellationTokenSource? LinkEnumeratorCancellation(QueryPlan plan, CancellationToken cancellationToken)
+    {
+        CancellationToken ticketToken = plan.Ticket.CancellationToken;
+
+        if (!cancellationToken.CanBeCanceled || cancellationToken == ticketToken)
+            return null;
+
+        return CancellationTokenSource.CreateLinkedTokenSource(ticketToken, cancellationToken);
     }
 
     private static CompositeColumnValue? BuildInListScanUpperBound(
@@ -899,6 +889,113 @@ internal sealed class QueryJoinExecutor
         {
             if (await queryFilterer.MeetWhereAsync(where, row.Row, plan.Ticket, plan.Database).ConfigureAwait(false))
                 yield return row;
+        }
+    }
+
+    /// <summary>
+    /// Buffers the row ids a join leaf's index scan produces and resolves each full page with one
+    /// batch fetch, instead of one round trip per index entry.
+    /// <para>
+    /// Index order survives the paging: the page is filled in scan order and the batch result is read
+    /// positionally, so rows decode and yield in scan order, and a row the batch reports as absent is
+    /// skipped exactly as the per-entry fetch skipped it. Duplicate row ids in one page are fine —
+    /// each position resolves independently.
+    /// </para>
+    /// <para>
+    /// The fetch goes through <see cref="KvTableStore.GetRowsBatchLockedForMutation"/> and not the
+    /// plain batch read. A join leaf takes no range lock, so under Serializable read-write the shared
+    /// point lock the per-entry read acquired on every row key is the only protection the join has,
+    /// and that lock set must stay exactly what it was. Under every other isolation level and mode
+    /// that helper acquires nothing, so a page costs one round trip.
+    /// </para>
+    /// </summary>
+    private sealed class JoinLeafRowPage
+    {
+        private readonly QueryJoinExecutor executor;
+        private readonly QueryPlan plan;
+        private readonly BoundTableSource source;
+        private readonly NodeAst? executionFilter;
+        private readonly IReadOnlySet<string>? required;
+        private readonly int schemaVersion;
+        private readonly HLCTimestamp txId;
+        private readonly CamusDBOptions options;
+        private readonly RowEncoder.RowDecodeState decodeState = new();
+        private readonly List<ObjectIdValue> rowIds;
+        private readonly int pageSize;
+
+        private RowLayout? qualifiedLayout;
+
+        internal JoinLeafRowPage(QueryJoinExecutor executor, QueryPlan plan, BoundTableSource source, NodeAst? executionFilter)
+        {
+            this.executor = executor;
+            this.plan = plan;
+            this.source = source;
+            this.executionFilter = executionFilter;
+
+            // Pinned once for the whole scan, like every other reader of the published options record.
+            options = executor._options;
+            required = GetRequiredColumnsForAlias(plan, source.Alias);
+            schemaVersion = GetTableSchemaVersionForAlias(plan, source.Alias);
+            txId = plan.Ticket.TxnState.TransactionId;
+
+            // A non-positive configured size degrades to one row per fetch instead of an unbounded buffer.
+            pageSize = Math.Max(1, options.IndexScanFetchBatchSize);
+            rowIds = new List<ObjectIdValue>(pageSize);
+        }
+
+        internal int Count => rowIds.Count;
+
+        internal bool IsFull => rowIds.Count >= pageSize;
+
+        internal void Add(ObjectIdValue rowId) => rowIds.Add(rowId);
+
+        /// <summary>
+        /// Fetches the buffered page in one call, then yields the rows that survive the residual
+        /// filter, in page order. The buffer is emptied once the page is fully consumed.
+        /// </summary>
+        internal async IAsyncEnumerable<QueryResultRow> FlushAsync([EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            if (rowIds.Count == 0)
+                yield break;
+
+            TableDescriptor table = source.Table;
+
+            ReadOnlyMemory<byte>?[] batch = await table.Store.GetRowsBatchLockedForMutation(
+                plan.Ticket.TxnState, rowIds, cancellationToken).ConfigureAwait(false);
+
+            for (int i = 0; i < rowIds.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                ObjectIdValue rowId = rowIds[i];
+                ReadOnlyMemory<byte>? dataOpt = batch[i];
+
+                if (dataOpt is null || dataOpt.Value.Length == 0)
+                    continue;
+
+                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                    table.Schema,
+                    txId,
+                    rowId,
+                    dataOpt.Value,
+                    options,
+                    required,
+                    schemaVersion,
+                    decodeState).ConfigureAwait(false);
+
+                if (executionFilter is not null)
+                {
+                    qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                    IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
+
+                    if (!await executor.queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                        continue;
+                }
+
+                yield return new QueryResultRow(rowId, row);
+            }
+
+            rowIds.Clear();
         }
     }
 

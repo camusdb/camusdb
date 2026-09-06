@@ -156,30 +156,70 @@ internal sealed class PlanCache
     private static string MakeKey(string databaseId, string shapeId) =>
         string.Concat(databaseId, ":", shapeId);
 
+    /// <summary>
+    /// True when the cached dependency set still describes the current one. Order-insensitive: a
+    /// reordering of identical deps must not evict a usable entry.
+    /// <para>
+    /// Runs under <c>_lock</c> on every lookup, so the two common shapes avoid the dictionary
+    /// entirely — a single dependency (an unjoined query, by far the most frequent) is one direct
+    /// comparison, and lists that are already in the same order compare positionally. Only a genuine
+    /// reordering falls through to the dictionary. Every path compares the full descriptor: table
+    /// identity, schema version, index-set generation and analyze generation.
+    /// </para>
+    /// </summary>
     private static bool SchemaDepsMatch(
         IReadOnlyList<PlanCacheDep> cached,
         IReadOnlyList<PlanCacheDep> current)
     {
-        if (cached.Count != current.Count)
+        int count = cached.Count;
+
+        if (count != current.Count)
             return false;
 
-        // Use a dictionary so that a reordering of identical deps does not produce a
-        // spurious miss (safe direction: a miss causes a replan, never a stale hit).
-        Dictionary<string, PlanCacheDep> cachedMap = new(cached.Count, StringComparer.Ordinal);
-        foreach (PlanCacheDep dep in cached)
-            cachedMap[dep.TableId] = dep;
+        if (count == 0)
+            return true;
 
-        foreach (PlanCacheDep dep in current)
+        if (count == 1)
+            return DepMatches(cached[0], current[0]);
+
+        // Same order is the norm: both lists come from the same traversal of the same query shape.
+        bool sameOrder = true;
+
+        for (int i = 0; i < count; i++)
         {
-            if (!cachedMap.TryGetValue(dep.TableId, out PlanCacheDep cachedDep)
-                || cachedDep.SchemaVersion != dep.SchemaVersion
-                || cachedDep.IndexSetGeneration != dep.IndexSetGeneration
-                || cachedDep.AnalyzeGeneration != dep.AnalyzeGeneration)
+            if (!DepMatches(cached[i], current[i]))
+            {
+                sameOrder = false;
+                break;
+            }
+        }
+
+        if (sameOrder)
+            return true;
+
+        // Reordered (or genuinely different): fall back to matching by table identity. A duplicated
+        // table id keeps its last cached descriptor, exactly as before; duplicates of one table always
+        // carry the same descriptor, so which one wins cannot change the answer.
+        Dictionary<string, PlanCacheDep> cachedMap = new(count, StringComparer.Ordinal);
+
+        for (int i = 0; i < count; i++)
+            cachedMap[cached[i].TableId] = cached[i];
+
+        for (int i = 0; i < count; i++)
+        {
+            if (!cachedMap.TryGetValue(current[i].TableId, out PlanCacheDep cachedDep) || !DepMatches(cachedDep, current[i]))
                 return false;
         }
 
         return true;
     }
+
+    /// <summary>Full descriptor comparison for one dependency, table identity included.</summary>
+    private static bool DepMatches(in PlanCacheDep cached, in PlanCacheDep current) =>
+        cached.SchemaVersion == current.SchemaVersion
+        && cached.IndexSetGeneration == current.IndexSetGeneration
+        && cached.AnalyzeGeneration == current.AnalyzeGeneration
+        && string.Equals(cached.TableId, current.TableId, StringComparison.Ordinal);
 }
 
 /// <summary>

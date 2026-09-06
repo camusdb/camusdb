@@ -364,4 +364,129 @@ public sealed class TestCompactRowJsonWriter
         Assert.AreEqual(2, rowsEl[1][0].GetInt32());
         Assert.AreEqual("b", rowsEl[1][1].GetString());
     }
+
+    // ── Bytes cells are base64-encoded through scratch storage instead of an intermediate string.
+    //    The wire bytes must stay identical to the object-graph oracle at every payload length: the
+    //    stack path, the pooled path, and each of the three base64 padding cases. ──
+
+    private static readonly JsonSerializerOptions RelaxedOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    private static byte[] PatternBytes(int length)
+    {
+        byte[] payload = new byte[length];
+        for (int i = 0; i < length; i++)
+            payload[i] = (byte)((i * 31) & 0xFF);
+        return payload;
+    }
+
+    [Test]
+    public void Bytes_LengthSweep_DictAndSlotRows_Parity()
+    {
+        DerivedColumnSchema[] schema = [new("by", ColumnType.Bytes)];
+        RowLayout layout = new(schema.Select(c => c.Name));
+
+        // 0..8 covers empty and every padding case; 190..194 straddles the stack/pool boundary;
+        // the larger sizes force the pooled path, including a payload past the pool's bucket sizes.
+        int[] lengths = [0, 1, 2, 3, 4, 5, 6, 7, 8, 189, 190, 191, 192, 193, 194, 1024, 4096, 70000];
+
+        foreach (int length in lengths)
+        {
+            ColumnValue value = new(PatternBytes(length));
+
+            QueryResultRow dictRow = DictRow(schema, value);
+            QueryResultRow slotRow = SlotRowBacked(layout, schema, value);
+
+            string oracle = OldJson([dictRow], schema);
+
+            Assert.AreEqual(oracle, NewJson([dictRow], schema), $"dict-backed row, {length} bytes");
+            Assert.AreEqual(oracle, NewJson([slotRow], schema), $"slot-backed row, {length} bytes");
+        }
+    }
+
+    [Test]
+    public void Bytes_PlusAndSlashEscaping_MatchesOracle_UnderBothEncoders()
+    {
+        DerivedColumnSchema[] schema = [new("by", ColumnType.Bytes)];
+        RowLayout layout = new(schema.Select(c => c.Name));
+
+        // 0xFB 0xEF 0xBE encodes to "++++" and 0xFF 0xFF 0xFF to "////": the two base64 characters the
+        // default encoder escapes. Repeated past the stack threshold so the pooled path is covered too.
+        List<byte> payload = [];
+        while (payload.Count < 600)
+        {
+            payload.AddRange([0xFB, 0xEF, 0xBE]);
+            payload.AddRange([0xFF, 0xFF, 0xFF]);
+        }
+
+        ColumnValue value = new(payload.ToArray());
+        QueryResultRow dictRow = DictRow(schema, value);
+        QueryResultRow slotRow = SlotRowBacked(layout, schema, value);
+
+        string defaultOracle = JsonSerializer.Serialize(new List<object?[]> { CompactRowEncoder.EncodeRow(dictRow.Row, schema) }, Options);
+        Assert.AreEqual(defaultOracle, NewJson([dictRow], schema));
+        Assert.AreEqual(defaultOracle, NewJson([slotRow], schema));
+        StringAssert.Contains("\\u002B", defaultOracle);
+
+        string relaxedOracle = JsonSerializer.Serialize(new List<object?[]> { CompactRowEncoder.EncodeRow(dictRow.Row, schema) }, RelaxedOptions);
+        Assert.AreEqual(relaxedOracle, JsonSerializer.Serialize(new PositionalRowSet([dictRow], schema), RelaxedOptions));
+        Assert.AreEqual(relaxedOracle, JsonSerializer.Serialize(new PositionalRowSet([slotRow], schema), RelaxedOptions));
+        StringAssert.Contains("+", relaxedOracle);
+    }
+
+    [Test]
+    public void Bytes_NullVersusEmpty_StayDistinct()
+    {
+        DerivedColumnSchema[] schema = [new("by", ColumnType.Bytes)];
+
+        QueryResultRow nullRow = DictRow(schema, ColumnValue.Null);
+        QueryResultRow emptyRow = DictRow(schema, new ColumnValue(Array.Empty<byte>()));
+
+        Assert.AreEqual("[[null]]", NewJson([nullRow], schema));
+        Assert.AreEqual("[[\"\"]]", NewJson([emptyRow], schema));
+        AssertParity([nullRow], schema);
+        AssertParity([emptyRow], schema);
+    }
+
+    [Test]
+    public void Bytes_NestedInArray_Parity()
+    {
+        DerivedColumnSchema[] schema = [new("arr", ColumnType.Array)];
+        RowLayout layout = new(schema.Select(c => c.Name));
+
+        ColumnValue value = ColumnValue.FromArray(ColumnType.Bytes,
+        [
+            new ColumnValue(PatternBytes(3)),
+            ColumnValue.Null,
+            new ColumnValue(PatternBytes(700)),
+        ]);
+
+        QueryResultRow dictRow = DictRow(schema, value);
+        QueryResultRow slotRow = SlotRowBacked(layout, schema, value);
+
+        string oracle = OldJson([dictRow], schema);
+        Assert.AreEqual(oracle, NewJson([dictRow], schema));
+        Assert.AreEqual(oracle, NewJson([slotRow], schema));
+    }
+
+    [Test]
+    public void Bytes_ConcurrentSerialization_ProducesIdenticalOutput()
+    {
+        DerivedColumnSchema[] schema = [new("by", ColumnType.Bytes)];
+
+        List<QueryResultRow> rows = [];
+        for (int i = 0; i < 64; i++)
+            rows.Add(DictRow(schema, new ColumnValue(PatternBytes(64 + (i * 37)))));
+
+        string expected = NewJson(rows, schema);
+
+        string[] results = new string[32];
+        System.Threading.Tasks.Parallel.For(0, results.Length, i => results[i] = NewJson(rows, schema));
+
+        foreach (string result in results)
+            Assert.AreEqual(expected, result);
+    }
 }

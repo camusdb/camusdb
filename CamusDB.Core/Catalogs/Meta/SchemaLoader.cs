@@ -186,6 +186,9 @@ internal static class SchemaLoader
         IKahuna kahuna = database.Kahuna.Kahuna;
         string tableKeyPrefix = MetaKeys.TableKeyPrefix(database.Id);
 
+        string versionKey = MetaKeys.VersionKey(database.Id);
+        bool sawVersionKey = false;
+
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             tx.TransactionId,
             MetaKeys.MetaBucketPrefix(database.Id),
@@ -196,6 +199,9 @@ internal static class SchemaLoader
             KeyValueDurability.Persistent,
             CancellationToken.None).ConfigureAwait(false))
         {
+            if (string.Equals(key, versionKey, StringComparison.Ordinal))
+                sawVersionKey = true;
+
             if (!key.StartsWith(tableKeyPrefix, StringComparison.Ordinal) || entry.Value is null)
                 continue;
 
@@ -207,7 +213,35 @@ internal static class SchemaLoader
             tables[table.Name!] = table;
         }
 
+        RequireCompleteMetaScan(database, sawVersionKey, "tables");
+
         return tables;
+    }
+
+    /// <summary>
+    /// Fails a metadata scan that cannot have reached the end of the bucket.
+    ///
+    /// <para>The caller has already read <c>{dbId}/meta/version</c> with a point read that reported
+    /// success, so that key exists. It lives in the same bucket this scan walks, and it sorts after
+    /// every <c>table:</c> key, so a scan that reached the tables must also have yielded it. Not
+    /// seeing it means the scan ended early — and an early end is indistinguishable from an empty
+    /// range at the enumerable's surface, which is how a node once loaded a schema at a real version
+    /// holding no tables at all and then re-persisted that emptiness over the shared checkpoint.</para>
+    ///
+    /// <para>The check is one ordinal comparison per scanned key and needs nothing persisted. It is
+    /// complete for tables. Views sort after the version key, so a scan that dies partway through
+    /// them still passes this check; that gap needs the scan itself to report failure.</para>
+    /// </summary>
+    private static void RequireCompleteMetaScan(DatabaseDescriptor database, bool sawVersionKey, string what)
+    {
+        if (sawVersionKey)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Metadata scan for database '{database.Name}' ended before reaching the schema version key, " +
+            $"so the {what} it returned are incomplete. The schema was not loaded; retry the open."
+        );
     }
 
     /// <summary>
@@ -225,6 +259,9 @@ internal static class SchemaLoader
         IKahuna kahuna = database.Kahuna.Kahuna;
         string viewKeyPrefix = MetaKeys.ViewKeyPrefix(database.Id);
 
+        string versionKey = MetaKeys.VersionKey(database.Id);
+        bool sawVersionKey = false;
+
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             tx.TransactionId,
             MetaKeys.MetaBucketPrefix(database.Id),
@@ -235,6 +272,9 @@ internal static class SchemaLoader
             KeyValueDurability.Persistent,
             CancellationToken.None).ConfigureAwait(false))
         {
+            if (string.Equals(key, versionKey, StringComparison.Ordinal))
+                sawVersionKey = true;
+
             if (!key.StartsWith(viewKeyPrefix, StringComparison.Ordinal) || entry.Value is null)
                 continue;
 
@@ -247,6 +287,8 @@ internal static class SchemaLoader
 
             views[view.Name!] = view;
         }
+
+        RequireCompleteMetaScan(database, sawVersionKey, "views");
 
         return views;
     }

@@ -86,20 +86,23 @@ internal sealed class JoinQueryPlanner
 
         // Compute shape ID and schema deps early so the cache can be checked before
         // the potentially-expensive join-order enumeration / DP.
+        // Read the config flag once per plan: it is a mutable static, and reading it again at
+        // the Put below could observe a mid-plan flip (Put into a cache the lookup said was off).
+        bool planCacheEnabled = _cache is not null && _options.PlanCacheEnabled;
+
         string shapeId = QueryShapeComputer.Compute(bound.Query);
         IReadOnlyList<(string, int)> schemaDeps = CollectSchemaDeps(bound);
-        IReadOnlyList<PlanCacheDep> cacheDeps = CollectCacheDeps(database, bound);
+
+        // Plan-cache-only: nothing outside the cache reads these descriptors, so a deployment with the
+        // cache off walks the bound query once instead of twice. The shape id and schema deps stay
+        // unconditional — EXPLAIN renders both on every plan.
+        IReadOnlyList<PlanCacheDep>? cacheDeps = planCacheEnabled ? CollectCacheDeps(database, bound) : null;
 
         QuerySource orderedSource;
         bool fromCache = false;
 
-        // Read the config flag once per plan: it is a mutable static, and reading it again at
-        // the Put below could observe a mid-plan flip (Put into a cache the lookup said was off).
-        bool planCacheEnabled = _options.PlanCacheEnabled;
-
-        if (_cache is not null
-            && planCacheEnabled
-            && _cache.TryGet(database.Id, shapeId, cacheDeps, out PlanCacheEntry? cached)
+        if (planCacheEnabled
+            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached)
             && cached!.JoinAliasOrder is { } cachedAliasOrder)
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
@@ -138,9 +141,9 @@ internal sealed class JoinQueryPlanner
         // On a cache miss, store the optimized alias ordering (not the source AST) so that
         // subsequent queries with the same shape re-apply the order to their own source tree,
         // preserving their current ON-predicate literals.
-        if (!fromCache && _cache is not null && planCacheEnabled)
-            _cache.Put(database.Id, shapeId,
-                new PlanCacheEntry(cacheDeps, SingleTable: null,
+        if (!fromCache && planCacheEnabled)
+            _cache!.Put(database.Id, shapeId,
+                new PlanCacheEntry(cacheDeps!, SingleTable: null,
                     JoinAliasOrder: CollectAliasOrder(orderedSource)));
 
         return plan;

@@ -529,6 +529,12 @@ internal sealed class DatabaseDropper
     internal static long CatalogScanRoundsForTesting;
 
     /// <summary>
+    /// Test-only: counts the confirming re-scans a purge performs after a bucket first reads as
+    /// empty. A test reads it to prove one empty scan is not accepted as proof the bucket is drained.
+    /// </summary>
+    internal static long EmptyPurgeScansForTesting;
+
+    /// <summary>
     /// Deletes every key under <paramref name="keyPrefix"/> in <paramref name="bucket"/> in bounded
     /// batches of <see cref="CamusDBOptions.KeyspacePurgeBatchSize"/>: scan one batch, delete it,
     /// re-scan. Peak memory is one batch regardless of how large the overlay is — a <c>DROP DATABASE</c>
@@ -536,6 +542,11 @@ internal sealed class DatabaseDropper
     /// scans make no progress (all-empty or all-failed), which also absorbs a transient scan miss; a
     /// batch that deletes nothing (persistent delete errors) counts as no-progress so the loop can't
     /// spin. Each delete is an idempotent autocommit operation.
+    ///
+    /// <para>The all-empty streak is the one that matters for correctness. Reporting a bucket drained
+    /// is what lets the caller clear the recovery markers, and once they are gone nothing revisits the
+    /// keyspace — so a single scan that came back empty because it failed, rather than because the
+    /// bucket was empty, would leak the whole database silently and permanently.</para>
     /// </summary>
     private async Task<bool> PurgeBucketAsync(IKahuna kahuna, string id, string bucket, string keyPrefix, CancellationToken ct)
     {
@@ -543,6 +554,7 @@ internal sealed class DatabaseDropper
         if (batchSize < 1) batchSize = 1;
 
         int failStreak = 0;
+        int emptyStreak = 0;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -572,9 +584,30 @@ internal sealed class DatabaseDropper
                 return false; // scan failed → cannot prove the bucket is empty
             }
 
-            // Empty scan → the bucket is verified drained.
+            // An empty scan is evidence the bucket is drained, not proof of it: a scan that fails
+            // after its keys are gone and a scan that fails before reading any look identical from
+            // here — both simply end. Treating the first empty batch as "drained" let a failed scan
+            // clear the recovery markers, and with the markers gone nothing ever revisits the
+            // keyspace. Require MaxPurgeScanRounds consecutive empty scans instead, which is what
+            // this method's summary has always claimed and what the catalog scan in Phase A already
+            // does.
+            //
+            // No back-off between the confirming rounds, unlike the delete-failure path below. This
+            // method runs once per row bucket AND once per index bucket, so a database with a few
+            // tables purges dozens of buckets and any per-round sleep is paid dozens of times over
+            // for a drop that is behaving perfectly. Re-issuing the scan is the retry that matters;
+            // a page that is merely lagging is already retried with back-off inside the scan itself,
+            // and the scan round trip is its own natural spacing.
             if (batch.Count == 0)
-                return true;
+            {
+                if (++emptyStreak >= MaxPurgeScanRounds)
+                    return true;
+
+                EmptyPurgeScansForTesting++;
+                continue;
+            }
+
+            emptyStreak = 0;
 
             PurgeBatchesForTesting++;
 

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using System.Text.Json;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -124,14 +125,10 @@ public static class CompactRowJsonWriter
                 break;
 
             case ColumnType.Bytes:
-                // Base64 as a STRING value (not WriteBase64StringValue): a plain string routes through
-                // the writer's JSON encoder exactly as the previous object-graph path did — the default
-                // web encoder escapes a base64 '+' to the + escape. WriteBase64StringValue emits the
-                // base64 alphabet raw, which would silently change the wire bytes. This keeps it identical.
                 if (value.BytesValue is null)
                     writer.WriteNullValue();
                 else
-                    writer.WriteStringValue(Convert.ToBase64String(value.BytesValue));
+                    WriteBase64String(writer, value.BytesValue);
                 break;
 
             case ColumnType.Uuid:
@@ -151,6 +148,75 @@ public static class CompactRowJsonWriter
         }
     }
 
+    /// <summary>
+    /// Maximum base64 character count encoded into a stack buffer. 256 chars (512 bytes of stack)
+    /// covers every payload up to 192 bytes, which is the common case for a Bytes cell.
+    /// </summary>
+    private const int Base64StackScratchChars = 256;
+
+    /// <summary>
+    /// Writes a byte payload as a base64 JSON string, encoding into short-lived scratch storage
+    /// instead of allocating an intermediate <see cref="string"/> per cell — a stack buffer for a
+    /// small payload, a pooled buffer (returned in a <c>finally</c>) for a large one. The scratch is
+    /// owned by this call and never escapes it, so concurrent responses cannot share it.
+    /// <para>
+    /// The span overload of <see cref="Utf8JsonWriter.WriteStringValue(ReadOnlySpan{char})"/> is
+    /// deliberate: like the <see cref="string"/> overload it routes the base64 text through the
+    /// writer's JSON encoder, so the default web encoder escapes a base64 <c>'+'</c> exactly as the
+    /// original object-graph path did. <c>Utf8JsonWriter.WriteBase64StringValue</c> must not be used
+    /// here — it emits the base64 alphabet raw and would silently change the wire bytes.
+    /// </para>
+    /// </summary>
+    private static void WriteBase64String(Utf8JsonWriter writer, ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
+        {
+            writer.WriteStringValue(ReadOnlySpan<char>.Empty);
+            return;
+        }
+
+        // Computed in 64 bits: the char count of a payload larger than about 1.6 GB does not fit in an
+        // int. Such a payload cannot be encoded into a span at all, so it falls back to the string form,
+        // which reports the failure the same way the previous code did.
+        long charCount = (((long)bytes.Length + 2) / 3) * 4;
+
+        if (charCount > int.MaxValue)
+        {
+            writer.WriteStringValue(Convert.ToBase64String(bytes));
+            return;
+        }
+
+        if (charCount <= Base64StackScratchChars)
+        {
+            // Sized to the payload, not to the cap: the stack buffer is zero-initialized, so asking
+            // for the maximum would clear bytes this cell never writes. The cap still bounds it.
+            Span<char> scratch = stackalloc char[(int)charCount];
+
+            if (Convert.TryToBase64Chars(bytes, scratch, out int stackWritten))
+            {
+                writer.WriteStringValue(scratch[..stackWritten]);
+                return;
+            }
+
+            writer.WriteStringValue(Convert.ToBase64String(bytes));
+            return;
+        }
+
+        char[] rented = ArrayPool<char>.Shared.Rent((int)charCount);
+
+        try
+        {
+            if (Convert.TryToBase64Chars(bytes, rented, out int written))
+                writer.WriteStringValue(rented.AsSpan(0, written));
+            else
+                writer.WriteStringValue(Convert.ToBase64String(bytes));
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(rented);
+        }
+    }
+
     private static void WriteArray(Utf8JsonWriter writer, ColumnValue array)
     {
         writer.WriteStartArray();
@@ -166,8 +232,8 @@ public static class CompactRowJsonWriter
     /// Writes a single <see cref="ValueSlot"/> as its compact-raw JSON token, allocating no
     /// <see cref="ColumnValue"/> for the cell. Token-for-token identical to
     /// <see cref="WriteValue(Utf8JsonWriter, ColumnValue?)"/> over <see cref="ValueSlot.ToColumnValue"/>'s
-    /// result — every case below must stay in lockstep with that method (including the Bytes base64
-    /// escaping note there).
+    /// result — every case below must stay in lockstep with that method, including the shared
+    /// <see cref="WriteBase64String"/> path for a Bytes cell and its escaping contract.
     /// </summary>
     internal static void WriteSlot(Utf8JsonWriter writer, in ValueSlot slot)
     {
@@ -201,10 +267,8 @@ public static class CompactRowJsonWriter
                 break;
 
             case ColumnType.Bytes:
-                // Same escaping contract as WriteValue: base64 as a plain STRING value so the writer's
-                // JSON encoder escapes '+' exactly as the object-graph path did.
                 if (slot.AsBytes is { } bytes)
-                    writer.WriteStringValue(Convert.ToBase64String(bytes));
+                    WriteBase64String(writer, bytes);
                 else
                     writer.WriteNullValue();
                 break;

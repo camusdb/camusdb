@@ -340,15 +340,23 @@ public sealed class QueryPlanner
             ? QueryShapeComputer.Compute(ticket.SelectQuery)
             : null;
 
+        // Read the config flag once per plan: it is mutable at runtime, and reading it again at the
+        // Put below could observe a mid-plan flip (a Put into a cache the lookup said was off).
+        bool planCacheEnabled = _cache is not null && _options.PlanCacheEnabled;
+
+        // The plan-cache dependency descriptors feed nothing but the plan cache, so a deployment with
+        // the cache off builds neither the list nor a descriptor per table. The shape id and the schema
+        // deps above are NOT gated: the query result cache builds its fingerprint from them
+        // (QueryExecutor.QueryWithCache) and EXPLAIN renders them, both independently of this flag.
         List<(string, int)> schemaDeps = [(table.Id, table.Schema.Version)];
-        List<PlanCacheDep> cacheDeps = [MakeCacheDep(database, table)];
+        List<PlanCacheDep>? cacheDeps = planCacheEnabled ? [MakeCacheDep(database, table)] : null;
 
         if (ticket.SemiJoinSpecs is { Count: > 0 })
         {
             foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
             {
                 schemaDeps.Add((spec.InnerTable.Id, spec.InnerTable.Schema.Version));
-                cacheDeps.Add(MakeCacheDep(database, spec.InnerTable));
+                cacheDeps?.Add(MakeCacheDep(database, spec.InnerTable));
             }
         }
 
@@ -362,9 +370,8 @@ public sealed class QueryPlanner
         NodeAst? absorbedInListConjunct;
 
         if (shapeId is not null
-            && _cache is not null
-            && _options.PlanCacheEnabled
-            && _cache.TryGet(database.Id, shapeId, cacheDeps, out PlanCacheEntry? cached)
+            && planCacheEnabled
+            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached)
             && cached!.SingleTable is { } cachedDecision)
         {
             (scanNode, scanStep, absorbedInListConjunct) =
@@ -625,13 +632,13 @@ public sealed class QueryPlanner
         // On a cache miss, store the access-path decision so the next identical-shape query
         // can skip the expensive cost enumeration.  In-list scans are excluded: they have no
         // QueryPlanStep (the step slot is null) and their choice is IN-list-value-count-dependent.
-        if (!fromCache && _cache is not null && _options.PlanCacheEnabled
+        if (!fromCache && planCacheEnabled
             && shapeId is not null
             && plan.Steps is [{ } s0, ..]
             && s0.Type != QueryPlanStepType.InListScanFromIndex)
         {
-            _cache.Put(database.Id, shapeId,
-                new PlanCacheEntry(cacheDeps,
+            _cache!.Put(database.Id, shapeId,
+                new PlanCacheEntry(cacheDeps!,
                     SingleTable: new SingleTableDecision(s0.Index?.Name),
                     JoinAliasOrder: null));
         }

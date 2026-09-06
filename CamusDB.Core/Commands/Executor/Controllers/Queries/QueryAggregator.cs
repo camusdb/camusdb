@@ -152,18 +152,28 @@ internal sealed class QueryAggregator
     }
 
     /// <summary>
-    /// Spill-aware GROUP BY aggregation. Buffers rows until the buffer count reaches
-    /// <see cref="context.Options.SpillEffectiveThreshold"/>. If the threshold is never reached
-    /// the buffered rows are aggregated in memory. Otherwise all buffered rows plus the
-    /// remaining input are written to <see cref="context.Options.SpillMergeFanIn"/> partition
-    /// files by <see cref="GroupPartitionIndex"/>, and each partition file is aggregated by
-    /// <see cref="AggregatePartitionAsync"/>. The <see cref="SpillScope"/> is disposed in a
-    /// <c>finally</c> block so spill files are cleaned up on completion, cancellation, and
-    /// exception.
+    /// Spill-aware GROUP BY aggregation. Rows fold into accumulators as they arrive, and spilling
+    /// starts only when the number of <b>distinct groups</b> reaches
+    /// <see cref="context.Options.SpillEffectiveThreshold"/> — the same rule
+    /// <see cref="AggregatePartitionAsync"/> applies to a partition. A million rows that collapse into
+    /// three groups therefore hold three accumulators and write nothing, instead of buffering the raw
+    /// rows and writing every one of them to a partition file.
     ///
-    /// If a first-level partition still holds more than <see cref="context.Options.SpillEffectiveThreshold"/>
-    /// distinct groups, <see cref="AggregatePartitionAsync"/> recursively re-partitions it with a
-    /// fresh hash seed until the partition fits in memory or the recursion depth cap is reached.
+    /// <para><b>Overflow carries state forward rather than discarding it.</b> When the group count
+    /// crosses the threshold, the rows seen so far already live inside their accumulators and exist
+    /// nowhere else, so they cannot be re-read. Each accumulator is instead handed to the partition its
+    /// group key hashes to, and only the <em>remaining</em> input is written to the
+    /// <see cref="context.Options.SpillMergeFanIn"/> partition files. Because the hash is deterministic,
+    /// every later row of a carried group lands in that same partition and folds into the same
+    /// accumulator, so each group is accumulated exactly once, in input order — no partial-state merge
+    /// exists and floating-point accumulation order is unchanged.</para>
+    ///
+    /// <para>The <see cref="SpillScope"/> is disposed in a <c>finally</c> block so spill files are
+    /// cleaned up on completion, cancellation, and exception.</para>
+    ///
+    /// <para><b>Bounded by group count, not bytes.</b> Peak state is one accumulator per distinct group
+    /// up to the threshold, which is strictly less than the raw rows the previous shape held for the
+    /// same threshold; a wide group key is not separately budgeted, matching the recursive level.</para>
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> AggregateGroupedWithPossibleSpill(
         IReadOnlyList<NodeAst> groupBy,
@@ -177,59 +187,65 @@ internal sealed class QueryAggregator
         int threshold = context.Options.SpillEffectiveThreshold;
         int K = context.Options.SpillMergeFanIn;
 
-        List<QueryResultRow> buffer = new();
         SpillScope? scope = null;
         FileStream[]? writers = null;
         string[]? paths = null;
+        List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[]? carried = null;
 
         try
         {
-            GroupKeyBuilder writeBuilder = new();
-            ColumnValue[] writeScratch = new ColumnValue[groupBy.Count];
+            GroupKeyBuilder builder = new();
+            ColumnValue[] scratch = new ColumnValue[groupBy.Count];
+            Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+            var lookup = groups.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+
             await foreach (QueryResultRow row in dataCursor.WithCancellation(ct).ConfigureAwait(false))
             {
-                if (scope is null)
+                if (scope is not null)
                 {
-                    buffer.Add(row);
-                    if (buffer.Count >= threshold)
-                    {
-                        context.Probe?.NoteSpill();
-                        scope = SpillFileManager.CreateScope(context.SpillDirectory);
-                        paths   = new string[K];
-                        writers = new FileStream[K];
-                        for (int i = 0; i < K; i++)
-                            paths[i] = scope.OpenWriter(out writers[i]);
+                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, builder, scratch);
+                    continue;
+                }
 
-                        foreach (QueryResultRow buffered in buffer)
-                            WriteToGroupPartition(buffered, groupBy, ticket, K, writers, writeBuilder, writeScratch);
-                        buffer.Clear();
-                    }
-                }
-                else
+                ReadOnlySpan<ColumnValue> key = builder.BuildInto(groupBy, row.Row, ticket, scratch);
+
+                if (lookup.TryGetValue(key, out GroupAccumulator? accumulator))
                 {
-                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, writeBuilder, writeScratch);
+                    accumulator.AddRow(row.Row, ticket);
+                    continue;
                 }
+
+                // A new distinct group: the threshold is checked before it is admitted, so the group
+                // count never exceeds the cap — the same admission rule the partition level applies.
+                if (groups.Count < threshold)
+                {
+                    accumulator = new GroupAccumulator(projections);
+                    lookup[key] = accumulator;
+                    accumulator.AddRow(row.Row, ticket);
+                    continue;
+                }
+
+                context.Probe?.NoteSpill();
+                scope = SpillFileManager.CreateScope(context.SpillDirectory);
+                paths = new string[K];
+                writers = new FileStream[K];
+                for (int i = 0; i < K; i++)
+                    paths[i] = scope.OpenWriter(out writers[i]);
+
+                // The accumulated groups hold rows that exist nowhere else, so they are handed to the
+                // partition their key hashes to instead of being dropped. Every later row of such a
+                // group hashes to that same partition and folds into this same accumulator.
+                carried = PartitionAccumulators(groups, K, seed: 0);
+                groups.Clear();
+
+                WriteToGroupPartition(row, groupBy, ticket, K, writers, builder, scratch);
             }
 
             if (scope is null)
             {
-                // All rows fit in the buffer — aggregate in-memory.
-                GroupKeyBuilder memBuilder = new();
-                Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
-                var memLookup = groups.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
-                ColumnValue[] memScratch = new ColumnValue[groupBy.Count];
-                foreach (QueryResultRow row in buffer)
-                {
-                    ReadOnlySpan<ColumnValue> key = memBuilder.BuildInto(groupBy, row.Row, ticket, memScratch);
-                    if (!memLookup.TryGetValue(key, out GroupAccumulator? acc))
-                    {
-                        acc = new GroupAccumulator(projections);
-                        memLookup[key] = acc;
-                    }
-                    acc.AddRow(row.Row, ticket);
-                }
-                foreach (GroupAccumulator acc in groups.Values)
-                    yield return acc.ToResultRow(ticket);
+                // Never spilled: every group fits, so the accumulators are the answer.
+                foreach (GroupAccumulator accumulator in groups.Values)
+                    yield return accumulator.ToResultRow(ticket);
             }
             else
             {
@@ -242,7 +258,7 @@ internal sealed class QueryAggregator
                 for (int i = 0; i < K; i++)
                 {
                     await foreach (QueryResultRow row in AggregatePartitionAsync(
-                        paths![i], projections, groupBy, ticket, scope!, depth: 0, seed: 0, stats, context, ct).ConfigureAwait(false))
+                        paths![i], carried![i], projections, groupBy, ticket, scope!, depth: 0, seed: 0, stats, context, ct).ConfigureAwait(false))
                         yield return row;
                 }
             }
@@ -252,6 +268,29 @@ internal sealed class QueryAggregator
             if (scope is not null)
                 await scope.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Routes each in-flight accumulator to the partition bucket its group key hashes to, under
+    /// <paramref name="seed"/>. Used whenever a level starts spilling: the accumulators already hold
+    /// rows that are no longer available anywhere, so they travel with the partition that will receive
+    /// the rest of their group.
+    /// </summary>
+    private static List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[] PartitionAccumulators(
+        Dictionary<CompositeColumnValue, GroupAccumulator> groups,
+        int K,
+        int seed)
+    {
+        List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[] buckets =
+            new List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[K];
+
+        for (int i = 0; i < K; i++)
+            buckets[i] = [];
+
+        foreach (KeyValuePair<CompositeColumnValue, GroupAccumulator> group in groups)
+            buckets[GroupPartitionIndex(group.Key, K, seed)].Add(group);
+
+        return buckets;
     }
 
     /// <summary>
@@ -309,23 +348,30 @@ internal sealed class QueryAggregator
     private const int MaxGroupByRecursionDepth = 3;
 
     /// <summary>
-    /// Reads all rows from a single partition spill file and aggregates them in-memory.
-    /// Because <see cref="GroupPartitionIndex"/> is deterministic, all rows sharing a group key
-    /// are guaranteed to be in the same partition, so the result is correct independently of
-    /// which level produced this partition file.
+    /// Aggregates one partition: the accumulators carried in from the level that produced this
+    /// partition, plus every row in its spill file. Because <see cref="GroupPartitionIndex"/> is
+    /// deterministic, all rows sharing a group key are in this one partition, so its result is the
+    /// final result for those groups regardless of which level produced the file.
     ///
-    /// When the number of distinct groups in this partition would exceed
-    /// <see cref="context.Options.SpillEffectiveThreshold"/> and <paramref name="depth"/> is
-    /// below <see cref="MaxGroupByRecursionDepth"/>, the partition is re-read and split into
-    /// <see cref="context.Options.SpillMergeFanIn"/> sub-partitions using <paramref name="seed"/>+1
-    /// so that group keys that collided at this level land in different sub-partitions. Each
-    /// sub-partition is then aggregated recursively. Beyond the depth cap the remaining rows
-    /// are aggregated in-memory regardless of count: the hash function cannot separate truly
-    /// identical keys, and the in-memory dictionary is bounded by the number of distinct group
-    /// values, not the raw row count.
+    /// <para>
+    /// <paramref name="carriedGroups"/> are accumulators that already folded the rows their groups saw
+    /// before spilling began. They are seeded into the group table first, so a file row with the same
+    /// key continues the same accumulator rather than starting a second one.
+    /// </para>
+    ///
+    /// <para><b>Overflow works exactly as it does at level 0.</b> When admitting a new group would push
+    /// the group count past <see cref="context.Options.SpillEffectiveThreshold"/> and
+    /// <paramref name="depth"/> is below <see cref="MaxGroupByRecursionDepth"/>, this level starts its
+    /// own spill: the accumulators built so far are routed to sub-partitions under
+    /// <paramref name="seed"/>+1 (so keys that collided here are separated), and only the rows from
+    /// this point onward are written to those sub-partitions. The file is never re-read and no row is
+    /// folded twice. Beyond the depth cap the remaining rows aggregate in memory regardless of count:
+    /// the hash cannot separate truly identical keys, so the table is bounded by distinct keys, not by
+    /// raw rows.</para>
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> AggregatePartitionAsync(
         string path,
+        IReadOnlyList<KeyValuePair<CompositeColumnValue, GroupAccumulator>> carriedGroups,
         List<AnalyzedProjection> projections,
         IReadOnlyList<NodeAst> groupBy,
         QueryTicket ticket,
@@ -338,72 +384,86 @@ internal sealed class QueryAggregator
     {
         int threshold = context.Options.SpillEffectiveThreshold;
 
-        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
-        if (reader is null) yield break;
-
-        GroupKeyBuilder partitionBuilder = new();
         Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
+
+        for (int i = 0; i < carriedGroups.Count; i++)
+            groups[carriedGroups[i].Key] = carriedGroups[i].Value;
+
+        SpillRunReader? reader = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
+
+        if (reader is null)
+        {
+            // No file for this partition: only the carried accumulators contribute.
+            foreach (GroupAccumulator carried in groups.Values)
+                yield return carried.ToResultRow(ticket);
+
+            yield break;
+        }
+
         var partitionLookup = groups.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+        GroupKeyBuilder partitionBuilder = new();
         ColumnValue[] partitionScratch = new ColumnValue[groupBy.Count];
-        bool overflow = false;
+
+        int K = Math.Max(2, context.Options.SpillMergeFanIn);
+        int newSeed = seed + 1;
+
+        string[]? subPaths = null;
+        FileStream[]? subWriters = null;
+        List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[]? subCarried = null;
 
         await using (reader)
         {
             do
             {
                 QueryResultRow row = reader.Current;
-                ReadOnlySpan<ColumnValue> key = partitionBuilder.BuildInto(groupBy, row.Row, ticket, partitionScratch);
-                if (!partitionLookup.TryGetValue(key, out GroupAccumulator? acc))
+
+                if (subWriters is not null)
                 {
-                    // A new distinct group: check threshold before adding. Beyond the recursion
-                    // depth cap we accept unbounded growth here because the dictionary is bounded
-                    // by truly distinct keys, not raw row count.
-                    if (depth < MaxGroupByRecursionDepth && groups.Count >= threshold)
-                    {
-                        overflow = true;
-                        break;
-                    }
-                    acc = new GroupAccumulator(projections);
-                    partitionLookup[key] = acc;
+                    WriteToGroupPartition(row, groupBy, ticket, K, subWriters, partitionBuilder, partitionScratch, newSeed);
+                    continue;
                 }
-                acc.AddRow(row.Row, ticket);
+
+                ReadOnlySpan<ColumnValue> key = partitionBuilder.BuildInto(groupBy, row.Row, ticket, partitionScratch);
+
+                if (partitionLookup.TryGetValue(key, out GroupAccumulator? accumulator))
+                {
+                    accumulator.AddRow(row.Row, ticket);
+                    continue;
+                }
+
+                if (depth >= MaxGroupByRecursionDepth || groups.Count < threshold)
+                {
+                    accumulator = new GroupAccumulator(projections);
+                    partitionLookup[key] = accumulator;
+                    accumulator.AddRow(row.Row, ticket);
+                    continue;
+                }
+
+                // Overflow: this partition still holds more distinct groups than the threshold. Split
+                // the remaining input into sub-partitions under a fresh seed, and send the accumulators
+                // built so far to the sub-partition their key now hashes to.
+                if (stats is not null)
+                    stats.GroupByPartitionRecursionCount++;
+
+                subPaths = new string[K];
+                subWriters = new FileStream[K];
+                for (int i = 0; i < K; i++)
+                    subPaths[i] = scope.OpenWriter(out subWriters[i]);
+
+                subCarried = PartitionAccumulators(groups, K, newSeed);
+                groups.Clear();
+
+                WriteToGroupPartition(row, groupBy, ticket, K, subWriters, partitionBuilder, partitionScratch, newSeed);
             }
             while (await reader.AdvanceAsync(ct).ConfigureAwait(false));
         }
 
-        if (!overflow)
+        if (subWriters is null)
         {
-            foreach (GroupAccumulator acc in groups.Values)
-                yield return acc.ToResultRow(ticket);
+            foreach (GroupAccumulator accumulator in groups.Values)
+                yield return accumulator.ToResultRow(ticket);
+
             yield break;
-        }
-
-        // Overflow: the partition still holds more distinct groups than the threshold.
-        // Re-read the file and split into K sub-partitions with a new seed so colliding
-        // group keys at this level redistribute across different sub-partitions.
-        if (stats is not null)
-            stats.GroupByPartitionRecursionCount++;
-
-        int K = Math.Max(2, context.Options.SpillMergeFanIn);
-        int newSeed = seed + 1;
-        string[] subPaths = new string[K];
-        FileStream[] subWriters = new FileStream[K];
-        for (int i = 0; i < K; i++)
-            subPaths[i] = scope.OpenWriter(out subWriters[i]);
-
-        SpillRunReader? rdr2 = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
-        if (rdr2 is not null)
-        {
-            GroupKeyBuilder rePartitionBuilder = new();
-            ColumnValue[] rePartitionScratch = new ColumnValue[groupBy.Count];
-            await using (rdr2)
-            {
-                do
-                {
-                    WriteToGroupPartition(rdr2.Current, groupBy, ticket, K, subWriters, rePartitionBuilder, rePartitionScratch, newSeed);
-                }
-                while (await rdr2.AdvanceAsync(ct).ConfigureAwait(false));
-            }
         }
 
         for (int i = 0; i < K; i++)
@@ -415,7 +475,7 @@ internal sealed class QueryAggregator
         for (int i = 0; i < K; i++)
         {
             await foreach (QueryResultRow row in AggregatePartitionAsync(
-                subPaths[i], projections, groupBy, ticket, scope, depth + 1, newSeed, stats, context, ct).ConfigureAwait(false))
+                subPaths![i], subCarried![i], projections, groupBy, ticket, scope, depth + 1, newSeed, stats, context, ct).ConfigureAwait(false))
                 yield return row;
         }
     }

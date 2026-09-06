@@ -770,10 +770,12 @@ public sealed class KvTableStore
     /// Serializable and promoted read-only transactions — mirrors the single-key path in
     /// <see cref="GetRow"/>).
     ///
-    /// Branch ancestry: when the store has ancestor levels (database branching), ids that are
-    /// absent or tombstoned at level-0 are walked through the ancestry chain individually, the
-    /// same way <see cref="GetRow"/> does. This keeps correctness identical to the per-row path
-    /// at the cost of one extra call per missing id — a rare case on branch reads.
+    /// Branch ancestry: when the store has ancestor levels (database branching), the ids that miss
+    /// at level-0 are carried forward as input positions and resolved one bounded batch per ancestry
+    /// level (see <see cref="ResolveRowsFromAncestorsAsync"/>), not one round trip per id per level.
+    /// A page from a branch index scan is full of inherited rows by construction, so this is the
+    /// common shape on a branch, not a rare one. Nearest-wins and tombstone suppression are identical
+    /// to the per-row walk in <see cref="GetRow"/>.
     ///
     /// This is a read-only operation: no locks are acquired, and no keys are tracked as
     /// modified. Serializable read-write callers that need shared point locks must use
@@ -793,44 +795,204 @@ public sealed class KvTableStore
             return [];
 
         // Build the Kahuna key list in input order.
-        List<(string key, long revision, KeyValueDurability durability)> keys = new(rowIds.Count);
+        string[] keys = new string[rowIds.Count];
         for (int i = 0; i < rowIds.Count; i++)
-            keys.Add((BuildRowKey(rowIds[i]), -1, KeyValueDurability.Persistent));
+            keys[i] = BuildRowKey(rowIds[i]);
 
-        // LocateAndTryGetManyValues fans keys out across leader nodes and returns results in
-        // leader-group order, not input order. Build a key→result map and look up by key, not
-        // by position, to avoid output[i] receiving another row's bytes in cluster mode.
-        //
-        // MustRetry/WaitingForReplication mean a partition is not yet ready; mirror ProbeRaw's
-        // retry loop by retrying only the affected subset with exponential back-off, up to
-        // MaxKahunaRetries. A persistent non-terminal response throws TransactionMustRetry so
-        // the caller can restart the whole operation from BeginAsync — the same contract as the
-        // single-key path.
+        // Register the batch read for read-set folding on the optimistic / TrackAndValidate path; empty
+        // coordinatorKey leaves it unregistered (pessimistic / snapshot).
+        BranchKvValue[] level0 = await ProbeManyRaw(
+            tx.TransactionId,
+            tx.ReadTimestamp,
+            keys,
+            tx.FoldReads ? tx.CoordinatorKey : "",
+            "get_rows_batch",
+            cancellationToken).ConfigureAwait(false);
+
+        ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];
+
+        // Input positions still unanswered after level 0. Kept as positions, not ids, so a repeated id
+        // resolves once per position and the output stays aligned with the input.
+        List<int>? unresolved = null;
+
+        for (int i = 0; i < rowIds.Count; i++)
+        {
+            BranchKvValue decoded = level0[i];
+
+            if (decoded.Kind == BranchKvKind.Tombstone)
+            {
+                output[i] = null;
+                continue;
+            }
+
+            if (decoded.HasPayload)
+            {
+                // Cast the value branch to the nullable type explicitly. Without it, the bare `null`
+                // literal binds to byte[] via ReadOnlyMemory's implicit array conversion, making the
+                // whole conditional a non-nullable (empty) ReadOnlyMemory<byte> — so a miss would
+                // surface as an empty present value instead of null.
+                output[i] = (ReadOnlyMemory<byte>?)decoded.Payload;
+                continue;
+            }
+
+            if (ancestorStores.Length == 0)
+            {
+                output[i] = null;
+                continue;
+            }
+
+            (unresolved ??= []).Add(i);
+        }
+
+        if (unresolved is not null)
+            await ResolveRowsFromAncestorsAsync(rowIds, unresolved, output, cancellationToken).ConfigureAwait(false);
+
+        return output;
+    }
+
+    /// <summary>
+    /// Resolves the input positions a level-0 batch read left unanswered by walking the branch
+    /// ancestry, one bounded batch per level instead of one round trip per row per level.
+    ///
+    /// <para>
+    /// A page produced by a branch index scan is full of inherited rows by construction — the scan
+    /// merges the ancestors' index levels, so an entry for a row that was never written into the branch
+    /// namespace misses level 0 every time. Probing those one at a time cost <c>page × depth</c>
+    /// serial round trips.
+    /// </para>
+    ///
+    /// <para><b>Ordering is part of the contract.</b> Levels are visited nearest parent first, and a
+    /// position that a level answers — with a value <em>or</em> with a tombstone — is removed before
+    /// the next level runs. That is what makes a level-k tombstone suppress a level-k+1 value, exactly
+    /// as the per-row walk did by breaking out of its loop. Each level's batch is built and issued on
+    /// the store that owns that level's keyspace, at <see cref="HLCTimestamp.Zero"/> (the transaction
+    /// identity) and that level's fork timestamp (the read timestamp) — never the child transaction's
+    /// own timestamp — and stays unregistered, so no ancestor read folds into the read set.
+    /// </para>
+    /// </summary>
+    private async Task ResolveRowsFromAncestorsAsync(
+        IReadOnlyList<ObjectIdValue> rowIds,
+        List<int> unresolvedPositions,
+        ReadOnlyMemory<byte>?[] output,
+        CancellationToken cancellationToken)
+    {
+        List<int> pending = unresolvedPositions;
+
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            string[] ancestorKeys = new string[pending.Count];
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                // Each ancestor owns its own key namespace, so the key must be built on that store.
+                ancestorKeys[i] = ancestorStore.BuildRowKey(rowIds[pending[i]]);
+                BranchMetrics.RecordAncestorProbe();
+            }
+
+            BranchKvValue[] probed = await ancestorStore.ProbeManyRaw(
+                HLCTimestamp.Zero,
+                forkTimestamp,
+                ancestorKeys,
+                coordinatorKey: "",
+                "ancestor_rows_batch",
+                cancellationToken).ConfigureAwait(false);
+
+            List<int>? next = null;
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                int position = pending[i];
+                BranchKvValue decoded = probed[i];
+
+                if (decoded.Kind == BranchKvKind.Tombstone)
+                {
+                    // Deleted at this level: resolution stops here permanently, so the position is not
+                    // carried forward and a value at an older level can never resurrect the row.
+                    output[position] = null;
+                    continue;
+                }
+
+                if (decoded.HasPayload)
+                {
+                    output[position] = (ReadOnlyMemory<byte>?)decoded.Payload;
+                    continue;
+                }
+
+                (next ??= []).Add(position);
+            }
+
+            if (next is null)
+                return;
+
+            pending = next;
+        }
+
+        // Absent at every level: the output slot keeps its null, stated explicitly.
+        for (int i = 0; i < pending.Count; i++)
+            output[pending[i]] = null;
+    }
+
+    /// <summary>
+    /// Batch counterpart of <see cref="ProbeRaw"/>: probes every key at one transaction identity and
+    /// one read timestamp, and returns one decoded <see cref="BranchKvValue"/> per input position.
+    /// A key Kahuna does not hold decodes to <see cref="BranchKvValue.Miss"/>, the same signal the
+    /// single-key probe returns, so a caller treats it as "not at this level, keep walking".
+    ///
+    /// <para>
+    /// <c>LocateAndTryGetManyValues</c> fans keys out across leader nodes and returns results in
+    /// leader-group order, not input order, so results are matched by key and then projected back
+    /// positionally. A repeated key therefore resolves once and answers every position that holds it.
+    /// </para>
+    ///
+    /// <para>
+    /// MustRetry / WaitingForReplication mean a partition is not yet ready: only the affected subset is
+    /// retried, with exponential back-off, up to <see cref="MaxKahunaRetries"/>. Any other non-confirmed
+    /// response, and an exhausted retry budget, throw <see cref="CamusDBErrorCodes.TransactionMustRetry"/>
+    /// rather than decoding as an absence — turning an unknown into a definitive "not there" is the
+    /// documented way a write gets silently dropped.
+    /// </para>
+    ///
+    /// <para>
+    /// A non-empty <paramref name="coordinatorKey"/> registers the read for commit-time validation. One
+    /// operation id is bound to the pending declaration: it is reused while the pending set is unchanged
+    /// (an ack-loss resend of the identical batch, which the coordinator can only replay idempotently
+    /// under the same id) and a fresh id is minted only when the set shrinks. Unregistered reads — every
+    /// ancestor snapshot probe — carry the default id, so the identity is immaterial there.
+    /// </para>
+    /// </summary>
+    private async Task<BranchKvValue[]> ProbeManyRaw(
+        HLCTimestamp txId,
+        HLCTimestamp readTimestamp,
+        IReadOnlyList<string> keys,
+        string coordinatorKey,
+        string retryDiagnosticLabel,
+        CancellationToken cancellationToken)
+    {
+        if (keys.Count == 0)
+            return [];
+
+        List<(string key, long revision, KeyValueDurability durability)> requested = new(keys.Count);
+        for (int i = 0; i < keys.Count; i++)
+            requested.Add((keys[i], -1, KeyValueDurability.Persistent));
+
         Dictionary<string, (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry)> byKey =
             new(keys.Count, StringComparer.Ordinal);
 
-        List<(string key, long revision, KeyValueDurability durability)> pending = keys;
+        List<(string key, long revision, KeyValueDurability durability)> pending = requested;
         int retries = 0;
 
-        // Register the batch read for read-set folding on the optimistic / TrackAndValidate path; empty
-        // coordinatorKey leaves it unregistered (pessimistic / snapshot). One operation id is bound to the
-        // pending read declaration: it is REUSED while the pending set is unchanged (an ack-loss resend of
-        // the identical batch, which the coordinator can only replay idempotently under the same id) and a
-        // fresh id is minted only when the set shrinks (confirmed reads removed). Unregistered reads carry
-        // the default id (no folding), so the identity is immaterial there.
-        string readCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
-        TransactionOperationId readOperationId = readCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
         while (pending.Count > 0)
         {
             List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
                 await kahuna.LocateAndTryGetManyValues(
-                    tx.TransactionId, 
-                    tx.ReadTimestamp, 
-                    pending, 
-                    cancellationToken, 
-                    readCoordinatorKey, 
-                    readOperationId
+                    txId,
+                    readTimestamp,
+                    pending,
+                    cancellationToken,
+                    coordinatorKey,
+                    operationId
                 ).ConfigureAwait(false);
 
             List<(string key, long revision, KeyValueDurability durability)>? nextPending = null;
@@ -866,67 +1028,29 @@ public sealed class KvTableStore
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
                     $"Batch read was not ready after {MaxKahunaRetries} retries — retry the operation from BeginAsync");
 
-            ServerDiagnostics.AddKvRetryWait("get_rows_batch");
+            ServerDiagnostics.AddKvRetryWait(retryDiagnosticLabel);
             await Task.Delay(RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
 
             // Shrinking set (some reads confirmed) → new, smaller declaration under a fresh id on the
             // registered path. Unchanged set (every key transient) → identical resend of a lost ack →
             // keep the same id so the coordinator replays the read observation idempotently.
-            if (readCoordinatorKey.Length != 0 && nextPending.Count != pending.Count)
-                readOperationId = TransactionOperationId.NewRandom();
+            if (coordinatorKey.Length != 0 && nextPending.Count != pending.Count)
+                operationId = TransactionOperationId.NewRandom();
+
             pending = nextPending;
         }
 
-        ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];
+        BranchKvValue[] decoded = new BranchKvValue[keys.Count];
 
-        for (int i = 0; i < rowIds.Count; i++)
+        for (int i = 0; i < keys.Count; i++)
         {
-            string rowKey = keys[i].key;
-
-            BranchKvValue decoded = BranchKvValue.Miss;
-
-            if (byKey.TryGetValue(rowKey, out (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) res)
-                && res is { responseType: KeyValueResponseType.Get, entry: not null })
-            {
-                decoded = BranchKvCodec.Decode(res.entry.Value);
-            }
-
-            if (decoded.Kind == BranchKvKind.Tombstone)
-            {
-                output[i] = null;
-                continue;
-            }
-
-            if (decoded.HasPayload)
-            {
-                output[i] = decoded.Payload;
-                continue;
-            }
-
-            // Miss at level-0: walk ancestry levels individually (uncommon on branch databases).
-            if (ancestorStores.Length > 0)
-            {
-                foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
-                {
-                    BranchMetrics.RecordAncestorProbe();
-                    string ancestorKey = ancestorStore.BuildRowKey(rowIds[i]);
-                    decoded = await ancestorStore.ProbeRaw(HLCTimestamp.Zero, forkTimestamp, ancestorKey, cancellationToken).ConfigureAwait(false);
-                    if (decoded.Kind == BranchKvKind.Tombstone) 
-                        break;
-                    
-                    if (decoded.HasPayload) 
-                        break;
-                }
-            }
-
-            // Cast the value branch to the nullable type explicitly. Without it, the bare `null`
-            // literal binds to byte[] via ReadOnlyMemory's implicit array conversion, making the whole
-            // conditional a non-nullable (empty) ReadOnlyMemory<byte> — so a miss would surface as an
-            // empty present value instead of null.
-            output[i] = decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null;
+            decoded[i] = byKey.TryGetValue(keys[i], out (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) res)
+                         && res is { responseType: KeyValueResponseType.Get, entry: not null }
+                ? BranchKvCodec.Decode(res.entry.Value)
+                : BranchKvValue.Miss;
         }
 
-        return output;
+        return decoded;
     }
 
     /// <summary>
@@ -955,6 +1079,13 @@ public sealed class KvTableStore
     /// trip. The subsequent exclusive batch write (<see cref="DeleteRowsBatch"/> /
     /// <see cref="UpdateRowsBatch"/>) then upgrades/covers these same keys, exactly as the per-row
     /// <see cref="GetRow"/> path already did.
+    /// </para>
+    ///
+    /// <para>
+    /// A read-only caller that has no range lock to fall back on uses this method too, for the same
+    /// reason: a join leaf scan holds no range lock at all, so the per-row shared point locks are its
+    /// only Serializable protection and batching the reads must not drop them. The name records where
+    /// the requirement first arose, not an exclusive caller.
     /// </para>
     /// </summary>
     public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(
@@ -1952,6 +2083,26 @@ public sealed class KvTableStore
             List<KahunaSetKeyValueRequestItem> batchItems = [];
             Dictionary<string, bool> batchByKey = new();
 
+            // Every unique entry of the batch is resolved first, in one level-0 probe plus one probe
+            // per ancestry level, so the write loop below never waits on a per-entry round trip. The
+            // locks are all held at this point, which is what the resolution requires.
+            List<BranchUniqueFlagRequest> flagRequests = [];
+
+            foreach (RowWrite row in rows)
+            {
+                IReadOnlyList<IndexWrite>? uniqueCandidates = row.IndexEntries;
+                for (int e = 0; uniqueCandidates is not null && e < uniqueCandidates.Count; e++)
+                {
+                    IndexWrite ix = uniqueCandidates[e];
+
+                    if (ix.Unique && !ix.Overwrite)
+                        flagRequests.Add(new BranchUniqueFlagRequest(ix.IndexId, ix.Key, BuildUniqueIndexKey(ix.IndexId, ix.Key), row.RowId));
+                }
+            }
+
+            Dictionary<string, KeyValueFlags> uniqueFlags =
+                await ResolveBranchUniqueFlagsBatchAsync(tx, flagRequests, cancellationToken).ConfigureAwait(false);
+
             foreach (RowWrite row in rows)
             {
                 string rowKey = BuildRowKey(row.RowId);
@@ -1977,8 +2128,7 @@ public sealed class KvTableStore
                     }
                     else
                     {
-                        KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
-                            tx, ix.IndexId, ix.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
+                        KeyValueFlags flags = uniqueFlags[kvKey];
 
                         (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "unique index entry write", kvKey,
                             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
@@ -2353,6 +2503,25 @@ public sealed class KvTableStore
             List<KahunaSetKeyValueRequestItem> batchItems = [];
             Dictionary<string, bool> batchByKey = new();
 
+            // Same shape as the batch insert path: resolve every unique entry's write flags up front,
+            // one probe per ancestry level for the whole batch, with all locks already held.
+            List<BranchUniqueFlagRequest> flagRequests = [];
+
+            foreach (RowUpdate row in rows)
+            {
+                IReadOnlyList<IndexWrite>? uniqueCandidates = row.NewIndexEntries;
+                for (int e = 0; uniqueCandidates is not null && e < uniqueCandidates.Count; e++)
+                {
+                    IndexWrite newIx = uniqueCandidates[e];
+
+                    if (newIx.Unique && !newIx.Overwrite)
+                        flagRequests.Add(new BranchUniqueFlagRequest(newIx.IndexId, newIx.Key, BuildUniqueIndexKey(newIx.IndexId, newIx.Key), row.RowId));
+                }
+            }
+
+            Dictionary<string, KeyValueFlags> uniqueFlags =
+                await ResolveBranchUniqueFlagsBatchAsync(tx, flagRequests, cancellationToken).ConfigureAwait(false);
+
             foreach (RowUpdate row in rows)
             {
                 string rowKey = BuildRowKey(row.RowId);
@@ -2389,8 +2558,7 @@ public sealed class KvTableStore
                     }
                     else
                     {
-                        KeyValueFlags flags = await ResolveBranchUniqueFlagsAsync(
-                            tx, newIx.IndexId, newIx.Key, kvKey, row.RowId, cancellationToken).ConfigureAwait(false);
+                        KeyValueFlags flags = uniqueFlags[kvKey];
 
                         (KeyValueResponseType type, _, _) = await RetryOnMustRetryRegistered(tx, "unique index entry write", kvKey,
                             (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
@@ -3218,6 +3386,169 @@ public sealed class KvTableStore
     // -----------------------------------------------------------------------
     // Branch lineage helpers (used by the branch-aware read paths above)
     // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// One unique-index entry a branch batch write needs write flags for. <see cref="Key"/> is the
+    /// decoded composite key, kept because each ancestry level builds the probe key in its own
+    /// keyspace; <see cref="KvKey"/> is that key encoded for this (level-0) store.
+    /// </summary>
+    private readonly record struct BranchUniqueFlagRequest(
+        string IndexId,
+        CompositeColumnValue Key,
+        string KvKey,
+        ObjectIdValue RowId);
+
+    /// <summary>
+    /// Batch form of <see cref="ResolveBranchUniqueFlagsAsync"/>: resolves the write flags for every
+    /// unique index entry of a branch batch write with one level-0 probe and one probe per ancestry
+    /// level, instead of one probe per entry per level. Returns the flags keyed by the level-0 KV key.
+    ///
+    /// <para>
+    /// The per-entry decisions are unchanged — level-0 tombstone → <see cref="KeyValueFlags.Set"/>,
+    /// level-0 live value for this same row → <see cref="KeyValueFlags.Set"/>, live value for another
+    /// row → <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, and otherwise a nearest-first
+    /// ancestry walk that stops at the first tombstone or value and ends in
+    /// <see cref="KeyValueFlags.SetIfNotExists"/> as the concurrent-insert fence.
+    /// </para>
+    ///
+    /// <para><b>Call this after every lock of the batch is held</b>, for the same reason the per-entry
+    /// resolver documents: Kahuna builds the transaction's MVCC snapshot on first access, so a
+    /// post-lock probe reflects the state a competing writer left behind rather than a pre-contention
+    /// one. Both batch writers reject a repeated new unique key before reaching here, so every request
+    /// carries a distinct <see cref="BranchUniqueFlagRequest.KvKey"/> and no entry can be shadowed by
+    /// another entry of the same batch.</para>
+    ///
+    /// <para>A conflict is recorded per position and raised only after every position is resolved, so
+    /// the reported duplicate is the first one in write order — the entry the sequential resolver would
+    /// have failed on.</para>
+    /// </summary>
+    private async Task<Dictionary<string, KeyValueFlags>> ResolveBranchUniqueFlagsBatchAsync(
+        KvTransaction tx,
+        List<BranchUniqueFlagRequest> requests,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<string, KeyValueFlags> resolved = new(requests.Count, StringComparer.Ordinal);
+
+        if (requests.Count == 0)
+            return resolved;
+
+        string[] level0Keys = new string[requests.Count];
+        for (int i = 0; i < requests.Count; i++)
+            level0Keys[i] = requests[i].KvKey;
+
+        BranchKvValue[] level0 = await ProbeManyRaw(
+            tx.TransactionId,
+            HLCTimestamp.Zero,
+            level0Keys,
+            coordinatorKey: "",
+            "branch_unique_flags",
+            cancellationToken).ConfigureAwait(false);
+
+        // Index id of the conflicting entry, per request position; null when the position resolved.
+        string?[] conflicts = new string?[requests.Count];
+        List<int> pending = [];
+
+        for (int i = 0; i < requests.Count; i++)
+        {
+            BranchUniqueFlagRequest request = requests[i];
+            BranchKvValue existing = level0[i];
+
+            if (existing.Kind == BranchKvKind.Tombstone)
+            {
+                // Slot was explicitly cleared in this branch; replace the tombstone with the new value.
+                resolved[request.KvKey] = KeyValueFlags.Set;
+                continue;
+            }
+
+            if (existing.Kind == BranchKvKind.Value && existing.HasPayload)
+            {
+                // Live value at level-0: an idempotent same-row write is allowed, another row is a conflict.
+                if (Encoding.UTF8.GetString(existing.Payload.Span) != request.RowId.ToString())
+                    conflicts[i] = request.IndexId;
+                else
+                    resolved[request.KvKey] = KeyValueFlags.Set;
+
+                continue;
+            }
+
+            if (ancestorStores.Length == 0)
+            {
+                resolved[request.KvKey] = KeyValueFlags.SetIfNotExists;
+                continue;
+            }
+
+            pending.Add(i);
+        }
+
+        foreach ((KvTableStore ancestorStore, HLCTimestamp forkTimestamp) in ancestorStores)
+        {
+            if (pending.Count == 0)
+                break;
+
+            string[] ancestorKeys = new string[pending.Count];
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                BranchUniqueFlagRequest request = requests[pending[i]];
+                ancestorKeys[i] = ancestorStore.BuildUniqueIndexKey(request.IndexId, request.Key);
+                BranchMetrics.RecordAncestorProbe();
+            }
+
+            BranchKvValue[] probed = await ancestorStore.ProbeManyRaw(
+                HLCTimestamp.Zero,
+                forkTimestamp,
+                ancestorKeys,
+                coordinatorKey: "",
+                "branch_unique_flags_ancestor",
+                cancellationToken).ConfigureAwait(false);
+
+            List<int> next = [];
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                int position = pending[i];
+                BranchUniqueFlagRequest request = requests[position];
+                BranchKvValue ancestor = probed[i];
+
+                if (ancestor.Kind == BranchKvKind.Tombstone)
+                {
+                    // An ancestor branch cleared this slot: treat as available and stop the walk.
+                    resolved[request.KvKey] = KeyValueFlags.SetIfNotExists;
+                    continue;
+                }
+
+                if (ancestor.Kind == BranchKvKind.Value && ancestor.HasPayload)
+                {
+                    // A live ancestor entry for another row is a conflict; for this same row the branch
+                    // simply shadows its own inherited entry. Either way the walk stops here.
+                    if (Encoding.UTF8.GetString(ancestor.Payload.Span) != request.RowId.ToString())
+                        conflicts[position] = request.IndexId;
+                    else
+                        resolved[request.KvKey] = KeyValueFlags.SetIfNotExists;
+
+                    continue;
+                }
+
+                next.Add(position);
+            }
+
+            pending = next;
+        }
+
+        // Absent from level-0 and every ancestor: SetIfNotExists is the concurrent-insert fence.
+        for (int i = 0; i < pending.Count; i++)
+            resolved[requests[pending[i]].KvKey] = KeyValueFlags.SetIfNotExists;
+
+        for (int i = 0; i < requests.Count; i++)
+        {
+            if (conflicts[i] is string conflictingIndexId)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.DuplicateUniqueKeyValue,
+                    $"Duplicate entry for key '{DuplicateKeyLabel(conflictingIndexId)}'");
+        }
+
+        return resolved;
+    }
 
     /// <summary>
     /// Resolves the <see cref="KeyValueFlags"/> to use when writing a unique index entry on a
