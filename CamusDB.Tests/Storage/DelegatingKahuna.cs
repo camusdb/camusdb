@@ -18,6 +18,7 @@ using Kommander.WAL;
 using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
 using Kahuna.Shared.Communication.Rest;
@@ -109,6 +110,8 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<bool> ImportCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts) => inner.ImportCompletionReceiptsReplicated(partitionId, receipts);
         public virtual Task<bool> ForgetCompletionReceiptsReplicated(int partitionId, IReadOnlyCollection<CompletionReceiptRecord> receipts) => inner.ForgetCompletionReceiptsReplicated(partitionId, receipts);
         public virtual Task<bool> DurableOperationLocal(int partitionId, int kind, string logType, byte[] payload, CancellationToken cancellationToken) => inner.DurableOperationLocal(partitionId, kind, logType, payload, cancellationToken);
+        public virtual Task<DurableBundleWireReply?> DurableBundleLocal(int partitionId, IReadOnlyList<(string LogType, byte[] Payload)> entries, bool terminal, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => inner.DurableBundleLocal(partitionId, entries, terminal, fenceKey, fenceGeneration, cancellationToken);
+        public virtual Task<DurableDecisionWireReply?> DurableDecisionLocal(int partitionId, byte[] decisionDelta, HLCTimestamp transactionId, long epoch, string? fenceKey, long fenceGeneration, CancellationToken cancellationToken) => inner.DurableDecisionLocal(partitionId, decisionDelta, transactionId, epoch, fenceKey, fenceGeneration, cancellationToken);
         public virtual Task<byte[]?> LookupTransactionRecordLocal(int partitionId, HLCTimestamp transactionId, long epoch, string anchorKey, CancellationToken cancellationToken) => inner.LookupTransactionRecordLocal(partitionId, transactionId, epoch, anchorKey, cancellationToken);
         public virtual Task<(bool Serviced, IReadOnlyList<KeyValueStagedBaseVerdictEntry> Verdicts)> GetStagedBaseVerdictsLocal(int partitionId, HLCTimestamp transactionId, long epoch, IReadOnlyList<string> keys, int waitMs, CancellationToken cancellationToken) => inner.GetStagedBaseVerdictsLocal(partitionId, transactionId, epoch, keys, waitMs, cancellationToken);
         public virtual Task<(KeyValueResponseType, string)> TryReleaseExclusiveLock(HLCTimestamp transactionId, string key, KeyValueDurability durability) => inner.TryReleaseExclusiveLock(transactionId, key, durability);
@@ -147,6 +150,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<KahunaSplitRangeResponse> SplitRangeAtKeyWithOutcomeAsync(string keySpace, string splitKey, CancellationToken cancellationToken = default) => inner.SplitRangeAtKeyWithOutcomeAsync(keySpace, splitKey, cancellationToken);
         public virtual Task<KahunaMergeRangesResponse> MergeRangesWithOutcomeAsync(CancellationToken cancellationToken = default) => inner.MergeRangesWithOutcomeAsync(cancellationToken);
         public virtual KahunaRangeMapResponse GetRangeMap(string? keySpace = null) => inner.GetRangeMap(keySpace);
+        public virtual Task<KahunaRoutingMetadataResponse> GetRoutingMetadata(string? keySpace = null) => inner.GetRoutingMetadata(keySpace);
         public virtual Task<bool> ReplicateKeyValueRangePageLocal(int partitionId, byte[] page, CancellationToken cancellationToken) => inner.ReplicateKeyValueRangePageLocal(partitionId, page, cancellationToken);
         public virtual Task<bool> ReplicateKeyValueRangePageOnLeader(int partitionId, byte[] page, CancellationToken cancellationToken) => inner.ReplicateKeyValueRangePageOnLeader(partitionId, page, cancellationToken);
         public virtual Task<(bool Ok, List<CompletionReceiptRecord> Receipts, byte[] TransactionRecords, byte[] PreparedIntents, bool HasMore, string? NextCursor)> GetRangeTransactionStateLocal(int partitionId, string? startKey, string? endKey, KeyValueRangeStateKinds kinds, string? cursor, int maxItems, CancellationToken cancellationToken) => inner.GetRangeTransactionStateLocal(partitionId, startKey, endKey, kinds, cursor, maxItems, cancellationToken);
