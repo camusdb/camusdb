@@ -45,6 +45,27 @@ public sealed class EngineSettingsEndpointTests
     }
 
     [Test]
+    public void ReportsTheOnePhaseGateAndTheFenceHorizonItIsJudgedWith()
+    {
+        // The one-phase apply-time gate must hold the same value on every node of a group, and the fence
+        // horizon bounds the ledger it judges against. A run manifest that omits either cannot say which
+        // commit path the numbers came from, which is the whole point of this endpoint.
+        IReadOnlyDictionary<string, string> settings = Settings(Options());
+
+        Assert.That(settings["OnePhaseApplyTimeValidation"], Is.EqualTo("false"));
+        Assert.That(settings["StagedBaseFenceRetentionMs"], Is.EqualTo("600000"));
+
+        EmbeddedKahunaOptions enabled = Options();
+        enabled.OnePhaseApplyTimeValidation = true;
+        enabled.StagedBaseFenceRetentionMs = 900_000;
+
+        IReadOnlyDictionary<string, string> reported = Settings(enabled);
+
+        Assert.That(reported["OnePhaseApplyTimeValidation"], Is.EqualTo("true"));
+        Assert.That(reported["StagedBaseFenceRetentionMs"], Is.EqualTo("900000"));
+    }
+
+    [Test]
     public void ReportsTheValueTheEngineActuallyReceived()
     {
         EmbeddedKahunaOptions options = Options();

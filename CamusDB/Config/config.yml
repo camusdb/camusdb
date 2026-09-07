@@ -428,6 +428,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   start_election_timeout_increment_ms: 100
 #   end_election_timeout_increment_ms: 200
 #   heartbeat_interval_ms: 500
+#   recent_heartbeat_ms: 25            # de-dup window: a peer contacted within it is skipped for the
+#                                      # next heartbeat. MUST be < heartbeat_interval_ms, or every
+#                                      # timer-driven heartbeat is suppressed and the node refuses to
+#                                      # start. Unset, it tracks a quarter of the cadence, so lowering
+#                                      # heartbeat_interval_ms alone stays valid; set it only to
+#                                      # override that relation
 #   voting_timeout_ms: 1500
 #   max_entries_per_actor: 50000        # size-based eviction: cap on in-memory entries per actor.
 #                                       # Unset => sized from RAM (see "memory-proportional defaults" below)
@@ -548,6 +554,21 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #                                        # that means every attempt is refused. Clamped to 15000
 #   range_merge_min_size: 10             # key count below which two neighbours merge back; 0 disables auto-merge
 #   enable_load_reports: false           # gossip load signals WITHOUT enabling the leader balancer
+#
+#   # One-phase durable commit for read-modify-write transactions. Off by default. When on, an eligible
+#   # transaction (one participant partition, anchor on it, an on-partition read set) commits in one
+#   # Raft round instead of two, and every replica judges its read dependencies at apply time against
+#   # the partition's committed-head ledger. THREE RULES, all enforced by Kahuna: give every node of the
+#   # group the same value for BOTH keys below; never enable it across mixed Kahuna versions (an old
+#   # node skips the check and commits where a new node refuses, forking the state machine); and start
+#   # the cluster once with it off, or a node whose prepared-intent snapshot predates the ledger fails
+#   # to start. See docs/configuration.md.
+#   one_phase_apply_time_validation: false
+#   staged_base_fence_retention_ms: 600000  # horizon the staged-base fence (and the ledger the gate
+#                                        # judges against) remembers a key's last committed head for.
+#                                        # Must comfortably exceed the longest transaction lifetime:
+#                                        # a transaction that began before it is refused. Must be
+#                                        # identical on every node while the gate is on
 
 # ── Diagnostics (opt-in) ──────────────────────────────────────────────────────
 # Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:

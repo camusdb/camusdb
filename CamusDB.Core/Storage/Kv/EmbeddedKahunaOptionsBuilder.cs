@@ -255,6 +255,9 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.HeartbeatIntervalMs is int heartbeat)
             baseline.HeartbeatInterval = TimeSpan.FromMilliseconds(heartbeat);
 
+        if (kahuna.RecentHeartbeatMs is int recentHeartbeat)
+            baseline.RecentHeartbeat = TimeSpan.FromMilliseconds(recentHeartbeat);
+
         if (kahuna.VotingTimeoutMs is int voting)
             baseline.VotingTimeout = TimeSpan.FromMilliseconds(voting);
 
@@ -342,6 +345,17 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.TransactionOutcomeRetentionMax is int outcomeRetentionMax)
             baseline.TransactionOutcomeRetentionMax = outcomeRetentionMax;
+
+        // The one-phase apply-time gate and the fence horizon it judges against. Both are stated by the
+        // operator or not at all: CamusDB keeps Kahuna's defaults (gate off, 600 s horizon) rather than a
+        // baseline of its own, because the gate is a per-group property — every node of the cluster must
+        // carry the same pair, and a CamusDB-side default would decide that for a cluster whose other
+        // nodes may be running an older Kahuna that does not apply the check.
+        if (kahuna.OnePhaseApplyTimeValidation is bool onePhaseApplyTime)
+            baseline.OnePhaseApplyTimeValidation = onePhaseApplyTime;
+
+        if (kahuna.StagedBaseFenceRetentionMs is int stagedBaseFenceRetention)
+            baseline.StagedBaseFenceRetentionMs = stagedBaseFenceRetention;
 
         // Per-page scan retry budget. Kahuna's default already sits below the shipped client command
         // deadline (5 s vs 10 s) so the named failure is observable; a deployment that raises its client

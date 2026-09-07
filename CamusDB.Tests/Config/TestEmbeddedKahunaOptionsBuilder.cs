@@ -125,6 +125,84 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void RecentHeartbeat_StaysBelowTheCadenceOnEveryBaseline()
+    {
+        // Kahuna 1.6.3 derives the de-dup window from the cadence (a quarter of it) while it is unset,
+        // so no baseline states it. Before that, both defaults were 100 ms and Kommander refused to
+        // construct the node — this asserts the relation the baselines depend on, not a literal.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions sqlite =
+            EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/hb-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+        EmbeddedKahunaOptions rocks =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hb-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        foreach (EmbeddedKahunaOptions built in new[] { cluster, sqlite, rocks })
+            Assert.That(built.RecentHeartbeat, Is.LessThan(built.HeartbeatInterval));
+    }
+
+    [Test]
+    public void RecentHeartbeatMs_OverridesTheDerivedWindow()
+    {
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { HeartbeatIntervalMs = 200, RecentHeartbeatMs = 40 },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.HeartbeatInterval, Is.EqualTo(TimeSpan.FromMilliseconds(200)));
+        Assert.That(built.RecentHeartbeat, Is.EqualTo(TimeSpan.FromMilliseconds(40)));
+    }
+
+    [Test]
+    public void OnePhaseApplyTimeValidation_DefaultsOffOnBothBaselines()
+    {
+        // The gate is a per-group property: every node of a cluster must carry the same value, and an
+        // older Kahuna in the group would not apply the check at all. CamusDB therefore states no
+        // baseline of its own and leaves Kahuna's default (off, 600 s fence horizon) in place.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/one-phase-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(cluster.OnePhaseApplyTimeValidation, Is.False);
+        Assert.That(standalone.OnePhaseApplyTimeValidation, Is.False);
+        Assert.That(cluster.StagedBaseFenceRetentionMs, Is.EqualTo(600_000));
+        Assert.That(standalone.StagedBaseFenceRetentionMs, Is.EqualTo(600_000));
+    }
+
+    [Test]
+    public void OnePhaseApplyTimeValidation_OverridesBothBaselines()
+    {
+        // Both keys travel together: the fence horizon bounds the committed-head ledger the gate judges
+        // against, so a run that turns the gate on states the horizon it is judged with.
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig
+            {
+                OnePhaseApplyTimeValidation = true,
+                StagedBaseFenceRetentionMs = 900_000,
+            },
+        };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/one-phase-db",
+            config.Kahuna,
+            CamusDBOptions.Default);
+
+        Assert.That(cluster.OnePhaseApplyTimeValidation, Is.True);
+        Assert.That(cluster.StagedBaseFenceRetentionMs, Is.EqualTo(900_000));
+        Assert.That(standalone.OnePhaseApplyTimeValidation, Is.True);
+        Assert.That(standalone.StagedBaseFenceRetentionMs, Is.EqualTo(900_000));
+    }
+
+    [Test]
     public void KahunaStorageRocksdb_OverridesStandaloneBaseline()
     {
         KahunaOptionsConfig kahuna = new() { Storage = "rocksdb" };
@@ -203,6 +281,26 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
             () => new KahunaOptionsConfig { CacheEntryTtlMs = 0 }.Validate())!;
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
         Assert.That(ex.Message, Does.Contain("cache_entry_ttl_ms"));
+    }
+
+    [Test]
+    public void WindowAtOrAboveTheCadence_IsRejectedByName()
+    {
+        // Kommander refuses this pair when the node is constructed — a RaftException at startup — so the
+        // effective pair is checked at config load and the operator is told which two keys disagree.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new KahunaOptionsConfig { RecentHeartbeatMs = 100 }.Validate())!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("recent_heartbeat_ms"));
+        Assert.That(ex.Message, Does.Contain("heartbeat_interval_ms"));
+    }
+
+    [Test]
+    public void LoweringOnlyTheCadence_IsAccepted_BecauseTheWindowIsDerived()
+    {
+        // The one-sided override that used to fail: the window tracks the cadence while it is unset.
+        Assert.DoesNotThrow(() => new KahunaOptionsConfig { HeartbeatIntervalMs = 10 }.Validate());
     }
 
     // ── RocksDB shared memory ────────────────────────────────────────────────

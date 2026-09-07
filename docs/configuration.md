@@ -105,6 +105,33 @@ older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed toget
 
 Storage backends: `memory`, `sqlite`, `rocksdb`.
 
+### One-phase apply-time validation
+
+`kahuna.one_phase_apply_time_validation` (default **off**) lets a read-modify-write or read-carrying
+transaction commit in **one** durable round instead of two: the bundled commit carries its
+on-partition read dependencies, and every replica judges them at apply time, in log order, against the
+partition's replicated committed-head ledger. With it off, those transactions pay one extra Raft
+proposal plus the replica-fence exchange per commit. Eligibility is decided by the transaction, not by
+the flag: only one participant partition, the anchor on that partition, and a read set the gate can
+decide there. A cross-partition transaction stays on two-phase commit either way.
+
+`kahuna.staged_base_fence_retention_ms` (default 600,000) is the horizon the fence — and the ledger the
+gate judges against — remembers a key's last transactionally committed head for. It must comfortably
+exceed the longest transaction lifetime the deployment allows: a transaction that began before the
+horizon is refused, because pruned memory is indistinguishable from "no commit happened".
+
+Three operating rules, all of them enforced by Kahuna rather than by CamusDB:
+
+- **Same value on every node of the group** — for both keys. The gate is a property of the replicated
+  command, and nodes with different horizons would judge the same bundled commit differently.
+- **Never enable it across mixed Kahuna versions.** A node too old to know the check skips it and
+  commits where a current node refuses, which forks the state machine. Enable it only once the last old
+  node is gone.
+- **Start once with it off.** A node that starts with it on over a prepared-intent snapshot written
+  before the ledger existed fails at startup, and refuses to install a partition snapshot exported
+  without a ledger. Run with it off so the next checkpoint rewrites every partition's snapshot with its
+  ledger, then enable it.
+
 ### Memory profile
 
 `memory_profile` (`--memory-profile`) selects *how* the four cache-sizing knobs below are defaulted.
@@ -182,5 +209,7 @@ one per CPU) to get the total.
 | Unknown `kahuna` key | `InvalidConfig` |
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |
+| `kahuna.staged_base_fence_retention_ms` ≤ 0 | `InvalidConfig` |
+| effective `kahuna.recent_heartbeat_ms` ≥ effective `kahuna.heartbeat_interval_ms` (the window is a quarter of the cadence while unset) | `InvalidConfig` |
 
 See `CamusDB/Config/config.yml` for inline documentation of every field.

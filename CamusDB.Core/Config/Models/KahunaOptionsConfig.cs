@@ -46,6 +46,7 @@ public sealed class KahunaOptionsConfig
         "start_election_timeout_increment_ms",
         "end_election_timeout_increment_ms",
         "heartbeat_interval_ms",
+        "recent_heartbeat_ms",
         "voting_timeout_ms",
         "max_entries_per_actor",
         "max_bytes_per_actor",
@@ -83,6 +84,8 @@ public sealed class KahunaOptionsConfig
         "range_move_settle_timeout_ms",
         "transaction_outcome_retention_ttl_ms",
         "transaction_outcome_retention_max",
+        "one_phase_apply_time_validation",
+        "staged_base_fence_retention_ms",
         "scan_page_retry_budget_ms",
         "range_merge_min_size",
         "enable_load_reports",
@@ -245,6 +248,19 @@ public sealed class KahunaOptionsConfig
     public int? EndElectionTimeoutIncrementMs { get; set; }
 
     public int? HeartbeatIntervalMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds Kommander treats a peer as recently contacted, skipping the next heartbeat to it.
+    /// Must stay strictly <b>below</b> <see cref="HeartbeatIntervalMs"/>: a window at or above the
+    /// cadence skips every timer-driven heartbeat, and with it the only follower catch-up path when no
+    /// other traffic flows. Kommander refuses that pair when the node is constructed, so CamusDB checks
+    /// the effective pair at config load and names the offending keys instead.
+    ///
+    /// <para>Left unset, Kahuna derives it from the cadence at a quarter of it — 25 ms at the embedded
+    /// 100 ms default — so lowering <see cref="HeartbeatIntervalMs"/> alone stays valid. Set this only
+    /// to override that relation. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RecentHeartbeat"/>.</para>
+    /// </summary>
+    public int? RecentHeartbeatMs { get; set; }
 
     public int? VotingTimeoutMs { get; set; }
 
@@ -516,6 +532,49 @@ public sealed class KahunaOptionsConfig
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.TransactionOutcomeRetentionMax"/>.
     /// </summary>
     public int? TransactionOutcomeRetentionMax { get; set; }
+
+    /// <summary>
+    /// Lets a read-modify-write or read-carrying durable transaction commit in <b>one</b> durable round in a
+    /// multi-process Raft group: the bundled commit carries its on-partition read dependencies and every
+    /// replica judges them at apply time, in log order, against the partition's replicated committed-head
+    /// ledger. Off (Kahuna's own default), those transactions run the two-phase flow — one more Raft
+    /// proposal and the replica-fence exchange per commit. Only a transaction with a single participant
+    /// partition, its anchor on that partition, and a read set the gate can decide on that partition is
+    /// eligible; a cross-partition transaction stays on 2PC whatever this says.
+    ///
+    /// <para><b>The setting is per group, not per node.</b> Three rules, all of them from Kahuna's own
+    /// guard rails:</para>
+    /// <list type="bullet">
+    /// <item><description>Give every node of the cluster the same value — and the same
+    /// <see cref="StagedBaseFenceRetentionMs"/>, which bounds the ledger the gate judges against.</description></item>
+    /// <item><description>Never enable it across mixed Kahuna versions: a node too old to know the check
+    /// skips it and commits where a current node refuses, which forks the state machine. Enable it only
+    /// after the last old node is gone.</description></item>
+    /// <item><description>A node that starts with it on over a prepared-intent snapshot written before the
+    /// ledger existed <b>fails to start</b>. Start the cluster once with it off so the next checkpoint
+    /// rewrites every partition's snapshot with its ledger, then enable it.</description></item>
+    /// </list>
+    ///
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.OnePhaseApplyTimeValidation"/>.
+    /// </summary>
+    public bool? OnePhaseApplyTimeValidation { get; set; }
+
+    /// <summary>
+    /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed
+    /// head — the lost-update guard for a validated-base prepare. Because pruned memory is
+    /// indistinguishable from "no commit happened", the fence also refuses any validated-base prepare from
+    /// a transaction that began before this horizon, so the value must comfortably exceed the longest
+    /// transaction lifetime the deployment allows or long transactions abort spuriously. Memory cost is one
+    /// small entry per transactionally written key inside the horizon.
+    ///
+    /// <para>The same horizon bounds the committed-head ledger that the one-phase gate judges against, so
+    /// it must be <b>identical on every node</b> while <see cref="OnePhaseApplyTimeValidation"/> is on:
+    /// nodes with different horizons would judge the same bundled commit differently.</para>
+    ///
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.StagedBaseFenceRetentionMs"/>; unset keeps Kahuna's
+    /// default of 600,000 ms.
+    /// </summary>
+    public int? StagedBaseFenceRetentionMs { get; set; }
 
     /// <summary>
     /// Milliseconds one Kahuna range-scan page may keep answering transient before the scan fails
@@ -828,6 +887,20 @@ public sealed class KahunaOptionsConfig
         if (HeartbeatIntervalMs is <= 0)
             throw InvalidConfig($"'kahuna.heartbeat_interval_ms' must be > 0, got {HeartbeatIntervalMs}");
 
+        if (RecentHeartbeatMs is <= 0)
+            throw InvalidConfig($"'kahuna.recent_heartbeat_ms' must be > 0, got {RecentHeartbeatMs}");
+
+        // Check the EFFECTIVE pair, not just the provided keys. An explicit window against an unset
+        // cadence (or the reverse) is the case that gets this wrong, and Kommander refuses the pair when
+        // the node is constructed — a startup RaftException instead of a named configuration error.
+        int effectiveHeartbeat = HeartbeatIntervalMs ?? DefaultHeartbeatIntervalMs;
+        int effectiveRecentHeartbeat = RecentHeartbeatMs ?? effectiveHeartbeat / DefaultRecentHeartbeatDivisor;
+        if (effectiveRecentHeartbeat >= effectiveHeartbeat)
+            throw InvalidConfig(
+                $"effective 'kahuna.recent_heartbeat_ms' ({effectiveRecentHeartbeat}) must be < " +
+                $"'kahuna.heartbeat_interval_ms' ({effectiveHeartbeat}); a de-dup window at or above the " +
+                "heartbeat cadence suppresses every timer-driven heartbeat");
+
         if (VotingTimeoutMs is <= 0)
             throw InvalidConfig($"'kahuna.voting_timeout_ms' must be > 0, got {VotingTimeoutMs}");
 
@@ -967,6 +1040,13 @@ public sealed class KahunaOptionsConfig
             throw InvalidConfig(
                 $"'kahuna.transaction_outcome_retention_max' must be >= 0, got {TransactionOutcomeRetentionMax}");
 
+        // The fence horizon is also the ledger horizon the one-phase apply-time gate judges against, and
+        // both read this one value. Zero or negative is not "no fence" — it is a horizon every live
+        // transaction already began before, which turns every validated-base prepare into a conflict abort.
+        if (StagedBaseFenceRetentionMs is <= 0)
+            throw InvalidConfig(
+                $"'kahuna.staged_base_fence_retention_ms' must be > 0, got {StagedBaseFenceRetentionMs}");
+
         // Must be positive: a non-positive budget would restore the unbounded silent scan retry loop this
         // setting exists to rule out.
         if (ScanPageRetryBudgetMs is <= 0)
@@ -1062,6 +1142,12 @@ public sealed class KahunaOptionsConfig
     // cross-check above reflects what the node will actually run with when a key is left unset.
     private const int DefaultPitrWindowSeconds = 3600;
     private const int DefaultBaseSnapshotIntervalSeconds = 1800;
+
+    // Kahuna's EmbeddedKahunaOptions heartbeat cadence, and the divisor it derives the de-dup window
+    // with while that window is unset (a quarter of the cadence). Both are needed to cross-check a pair
+    // where only one of the two keys was written down.
+    private const int DefaultHeartbeatIntervalMs = 100;
+    private const int DefaultRecentHeartbeatDivisor = 4;
 
     // Kahuna's own RangeSplitMinRangeSize default, used to cross-check a threshold supplied without it.
     private const int DefaultRangeSplitMinRangeSize = 10;
