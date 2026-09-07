@@ -427,7 +427,7 @@ Unknown database name → database-not-found error.
 |---------|---------------|
 | Ancestry model | `DatabaseRegistryEntry`, `DatabaseBranchAncestor`, `DatabaseRegistry` |
 | Branch-aware reads/writes | `KvTableStore` (`ancestorStores[]`), `BranchKvCodec`, `TableOpener` |
-| Union uniqueness | `KvTableStore.ResolveBranchUniqueFlagsAsync`, `RowUpdater`, `RowInserter` |
+| Union uniqueness | `KvBranchReader.ResolveBranchUniqueFlagsAsync`, `RowUpdater`, `RowInserter` |
 | Create / drop / rename | `CommandExecutor` (`CreateBranchDatabaseAsync`, `DropDatabase`), `DatabaseDropper` |
 | Metadata copy | `CatalogsManager.CopyMetaForBranchAsync` |
 | Durability | `SnapshotHoldRenewer`, `EmbeddedKahuna.AmILeaderForKeyAsync`, `IKahuna` snapshot-floor API |

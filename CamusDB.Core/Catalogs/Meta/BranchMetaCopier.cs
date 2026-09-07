@@ -83,7 +83,7 @@ internal static class BranchMetaCopier
         // Scan source metadata as-of forkT: any schema change committed after forkT is invisible,
         // so the branch gets exactly the schema the row/index snapshot at forkT reflects.
         // Uses HLCTimestamp.Zero as the transaction id (no live tx) and forkT as the read timestamp,
-        // matching the ancestor-read pattern in KvTableStore.ScanRowsRawAsync.
+        // matching the ancestor-read pattern in KvBranchReader.ScanRowsRawAsync.
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             HLCTimestamp.Zero,
             sourceBucket,

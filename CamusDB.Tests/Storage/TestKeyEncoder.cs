@@ -1219,7 +1219,7 @@ public class TestKeyEncoder
     [Test]
     public void AllEncodedCharsBelowIndexKeySentinel()
     {
-        const char Sentinel = '￿'; // must match KvTableStore.IndexKeySentinel
+        const char Sentinel = '￿'; // must match KvStoreConstants.IndexKeySentinel
 
         // ---- fixed representative values per type ----
         List<CompositeColumnValue> samples =
