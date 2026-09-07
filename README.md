@@ -332,6 +332,15 @@ EVICT CACHE ALL;               -- drop every result-cache entry for the current 
 
 See [docs/query-result-cache.md](docs/query-result-cache.md) for a full operator/developer reference: the hint syntax and response metadata, the read/publish path, dependency capture and same-node invalidation, the commit-safe publish gate, TTL and strict validation, fingerprinting, the `query_result_cache_*` config knobs, and known limitations.
 
+### Upgrading across a storage revision
+
+CamusDB pins its on-disk layout to a storage revision. A release that changes the layout opens a
+new revision directory, starts empty, and logs a warning when it finds the previous revision on
+disk; it does not read or convert the old data in place. Move the data with a logical dump and
+reimport: dump every database with the previous release and `camus-dump`, upgrade, then load the
+dump with `camus-cli`. See [docs/logical-dump-and-reimport.md](docs/logical-dump-and-reimport.md)
+for the procedure, what a dump does and does not carry, and how to roll back.
+
 Configuration
 -------------
 

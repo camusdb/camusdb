@@ -60,8 +60,8 @@ different queries never share a fingerprint (§8).
   updates and deletes that a later range scan could miss.
 - **schema deps** — `(tableId, schemaVersion)` pairs the plan and row decoder relied on.
 
-**Keyspace bucket** — the coarse unit of invalidation. A row bucket is `{dbId}:{tableId}:r`; an
-index bucket is `{dbId}:{tableId}:i:{indexId}`. A modified KV key is mapped back to its bucket to
+**Keyspace bucket** — the coarse unit of invalidation. A row bucket is `{dbId}:{tableId}|r`; an
+index bucket is `{dbId}:{tableId}|i:{indexId}`. A modified KV key is mapped back to its bucket to
 find affected entries. Buckets are deliberately coarse so the invalidation index stays small.
 
 **Publish gate** — the small concurrency primitive that makes commit-vs-publish safe: a

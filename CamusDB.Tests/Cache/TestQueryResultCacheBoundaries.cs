@@ -109,7 +109,7 @@ public class TestQueryResultCacheBoundaries
     {
         using var cts = new CancellationTokenSource();
         RecordingCache cache = new();
-        var token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
+        var token = cache.PublishGate.SnapshotGenerations(["db1:t1|r"]);
         var result = MakePendingResult();
 
         var runner = new CachedQueryRunner(cache, result, token, CamusDBOptions.Default, cts.Token);
@@ -136,7 +136,7 @@ public class TestQueryResultCacheBoundaries
         // Simulate a caller that breaks out of the loop after the first row
         // (e.g. an operator error or a LIMIT that stops the outer foreach early).
         RecordingCache cache = new();
-        var token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
+        var token = cache.PublishGate.SnapshotGenerations(["db1:t1|r"]);
         var result = MakePendingResult("fp2");
 
         var runner = new CachedQueryRunner(cache, result, token, CamusDBOptions.Default);
@@ -162,7 +162,7 @@ public class TestQueryResultCacheBoundaries
         // RecordingCache returns Miss (distinct from Bypass) on a successful publish, so this
         // asserts real publication rather than the ambiguous Bypass a null cache would give.
         RecordingCache cache = new();
-        var token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
+        var token = cache.PublishGate.SnapshotGenerations(["db1:t1|r"]);
         var result = MakePendingResult("fp3");
 
         var runner = new CachedQueryRunner(cache, result, token, CamusDBOptions.Default);
@@ -183,7 +183,7 @@ public class TestQueryResultCacheBoundaries
         // The generation fence inside TryPublishUnderGeneration must reject the publish even
         // though the drain finished — proving the runner does not blindly store on completion.
         RecordingCache cache = new();
-        string[] ks = ["db1:t1:r"];
+        string[] ks = ["db1:t1|r"];
         var token = cache.PublishGate.SnapshotGenerations(ks); // gen=0
         var result = MakePendingResult("fp4");
 
@@ -211,7 +211,7 @@ public class TestQueryResultCacheBoundaries
         // Verify it always returns null on probe and Bypass on publish attempt,
         // even if incorrectly called after a cancellation.
         NullQueryResultCache cache = new();
-        CacheGenerationToken token = cache.PublishGate.SnapshotGenerations(["db1:t1:r"]);
+        CacheGenerationToken token = cache.PublishGate.SnapshotGenerations(["db1:t1|r"]);
 
         CachedQueryResult? hit = await cache.TryGetAsync("db1", "my-cache", "fingerprint-x");
         Assert.That(hit, Is.Null, "Null cache must always miss");
@@ -244,7 +244,7 @@ public class TestQueryResultCacheBoundaries
     public void CommittedWriteDuringMiss_AtomicPublish_Rejected()
     {
         CachePublishGate gate = new();
-        var keyspaces = new[] { "db1:t1:r" };
+        var keyspaces = new[] { "db1:t1|r" };
 
         CacheGenerationToken tokenBeforeWrite = gate.SnapshotGenerations(keyspaces);
 
@@ -284,7 +284,7 @@ public class TestQueryResultCacheBoundaries
         // a subsequent TryPublishUnderGeneration with the gen=0 token always fails —
         // regardless of when in the call sequence the check happens.
         CachePublishGate gate = new();
-        var ks = new[] { "db9:t9:r" };
+        var ks = new[] { "db9:t9|r" };
 
         CacheGenerationToken staleToken = gate.SnapshotGenerations(ks); // gen=0
         gate.MarkWriteInFlight(ks);
@@ -303,7 +303,7 @@ public class TestQueryResultCacheBoundaries
     {
         // Confirms the happy path: a token with no intervening commit allows the store action.
         CachePublishGate gate = new();
-        var ks = new[] { "db7:t7:r" };
+        var ks = new[] { "db7:t7|r" };
 
         CacheGenerationToken freshToken = gate.SnapshotGenerations(ks); // gen=0, no writes
 
@@ -320,7 +320,7 @@ public class TestQueryResultCacheBoundaries
         // Proves CommitWrite invokes the invalidation callback (simulating cache eviction)
         // before returning — verifying the atomicity contract between eviction and generation bump.
         CachePublishGate gate = new();
-        var ks = new[] { "db8:t8:r" };
+        var ks = new[] { "db8:t8|r" };
 
         bool invalidateCalled = false;
         gate.MarkWriteInFlight(ks);
@@ -334,7 +334,7 @@ public class TestQueryResultCacheBoundaries
     public void RolledBackWrite_DoesNotBumpGeneration_ButClearsInFlight()
     {
         CachePublishGate gate = new();
-        var keyspaces = new[] { "db2:t2:r" };
+        var keyspaces = new[] { "db2:t2|r" };
 
         CacheGenerationToken tokenBefore = gate.SnapshotGenerations(keyspaces);
 
@@ -357,7 +357,7 @@ public class TestQueryResultCacheBoundaries
     public void MultipleCommits_AccumulateGenerations()
     {
         CachePublishGate gate = new();
-        var ks = new[] { "db3:t3:r" };
+        var ks = new[] { "db3:t3|r" };
 
         CacheGenerationToken t0 = gate.SnapshotGenerations(ks); // gen=0
         gate.MarkWriteInFlight(ks);
@@ -383,8 +383,8 @@ public class TestQueryResultCacheBoundaries
     public void DisjointKeyspaces_DoNotAffectEachOther()
     {
         CachePublishGate gate = new();
-        var ksA = new[] { "db4:t4:r" };
-        var ksB = new[] { "db4:t5:r" };
+        var ksA = new[] { "db4:t4|r" };
+        var ksB = new[] { "db4:t5|r" };
 
         CacheGenerationToken tokenA = gate.SnapshotGenerations(ksA);
 
@@ -402,8 +402,8 @@ public class TestQueryResultCacheBoundaries
     public void InFlightCheck_MissesDisjointKeyspaces()
     {
         CachePublishGate gate = new();
-        var ksA = new[] { "db5:t6:r" };
-        var ksB = new[] { "db5:t7:r" };
+        var ksA = new[] { "db5:t6|r" };
+        var ksB = new[] { "db5:t7|r" };
 
         gate.MarkWriteInFlight(ksA);
 
@@ -417,7 +417,7 @@ public class TestQueryResultCacheBoundaries
     public void ConcurrentWritesOnSameKeyspace_BothMustClear()
     {
         CachePublishGate gate = new();
-        var ks = new[] { "db6:t8:r" };
+        var ks = new[] { "db6:t8|r" };
 
         gate.MarkWriteInFlight(ks);
         gate.MarkWriteInFlight(ks);

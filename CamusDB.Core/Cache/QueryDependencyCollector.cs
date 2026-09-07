@@ -20,7 +20,7 @@ namespace CamusDB.Core.Cache;
 /// <list type="bullet">
 ///   <item><description>
 ///     Table-scan paths record the entire row-bucket keyspace as a range dep
-///     (<c>{dbId}:{tableId}:r</c>) plus individual row point deps for each row fetched, up to
+///     (<c>{dbId}:{tableId}|r</c>) plus individual row point deps for each row fetched, up to
 ///     <see cref="CamusDBOptions.QueryResultCacheMaxPointDeps"/>. When the point-dep cap is
 ///     reached, further point deps are silently dropped and <see cref="PointDepsTruncated"/> is
 ///     set. The range dep remains for non-strict entries (it provides conservative coverage for
@@ -30,7 +30,7 @@ namespace CamusDB.Core.Cache;
 ///     the deletion without the individual point dep.
 ///   </description></item>
 ///   <item><description>
-///     Index-scan paths record the index bucket keyspace (<c>{dbId}:{tableId}:i:{indexId}</c>)
+///     Index-scan paths record the index bucket keyspace (<c>{dbId}:{tableId}|i:{indexId}</c>)
 ///     as a range dep plus each fetched row's point dep. Both must be present: the index range
 ///     catches phantom inserts / membership changes; the row point catches updates to projected
 ///     non-indexed columns.
@@ -94,7 +94,7 @@ internal sealed class QueryDependencyCollector
     /// <summary>
     /// Records a keyspace range as a dependency (table row bucket or index bucket).
     /// The bucket string must use the real KvTableStore format:
-    /// <c>{dbId}:{tableId}:r</c> for rows, <c>{dbId}:{tableId}:i:{indexId}</c> for indexes.
+    /// <c>{dbId}:{tableId}|r</c> for rows, <c>{dbId}:{tableId}|i:{indexId}</c> for indexes.
     ///
     /// <para>Unlike the point-dep cap, a range-dep overflow cannot be silently truncated: dropping
     /// a range dep means any write into that keyspace would go undetected, violating the
@@ -122,7 +122,7 @@ internal sealed class QueryDependencyCollector
     }
 
     /// <summary>
-    /// Records a concrete row point key (<c>{dbId}:{tableId}:r/{rowIdHex24}</c>).
+    /// Records a concrete row point key (<c>{dbId}:{tableId}|r/{rowIdHex24}</c>).
     /// If the point-dep cap is reached the call is a no-op; the previously recorded range dep
     /// (which must already have been added via <see cref="RecordRange"/>) provides conservative
     /// coverage.

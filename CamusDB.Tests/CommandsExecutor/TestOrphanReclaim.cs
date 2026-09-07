@@ -98,7 +98,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
 
         Assert.GreaterOrEqual(reclaimed, 1, "GC must reclaim the expired database orphan");
         Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "orphan record must be gone after reclaim");
-        Assert.AreEqual(0, await CountKeysAsync($"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"), "row data must be physically purged");
+        Assert.AreEqual(0, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "row data must be physically purged");
         Assert.AreEqual(0, await CountKeysAsync($"{dbId}/meta", $"{dbId}/"), "meta namespace must be physically purged");
     }
 
@@ -139,7 +139,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
 
         Assert.AreEqual(0, reclaimed, "unexpired orphan must not be reclaimed");
         Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId));
-        Assert.AreEqual(3, await CountKeysAsync($"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"), "row data must remain");
+        Assert.AreEqual(3, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "row data must remain");
     }
 
     [Test]
@@ -180,7 +180,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         await executor.RunOrphanReclaimForTestsAsync();
 
         Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "stale orphan record for a live database must be cleaned");
-        Assert.AreEqual(4, await CountKeysAsync($"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"), "live database data must NOT be purged");
+        Assert.AreEqual(4, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "live database data must NOT be purged");
     }
 
     // -----------------------------------------------------------------------
@@ -201,7 +201,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
 
         Assert.GreaterOrEqual(reclaimed, 1, "GC must reclaim the expired table orphan");
-        Assert.AreEqual(0, await CountKeysAsync($"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"), "table row data must be physically purged");
+        Assert.AreEqual(0, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "table row data must be physically purged");
     }
 
     [Test]
@@ -234,7 +234,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
             HLCTimestamp.Zero, $"{dbId}/meta/orphan:{tableId}", -1, HLCTimestamp.Zero,
             KeyValueDurability.Persistent, CancellationToken.None);
         Assert.AreNotEqual(KeyValueResponseType.Get, type, "stale orphan record for a live table must be cleaned");
-        Assert.AreEqual(4, await CountKeysAsync($"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"), "live table data must NOT be purged");
+        Assert.AreEqual(4, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "live table data must NOT be purged");
     }
 
     // -----------------------------------------------------------------------
@@ -266,7 +266,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         Task<int> gcTask = executor.RunOrphanReclaimForTestsAsync();
         await Task.WhenAll(relinkTask, gcTask);
 
-        int rowCount = await CountKeysAsync($"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/");
+        int rowCount = await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/");
         Assert.IsNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "the orphan record is resolved either way");
 
         if (relinkTask.Result is not null)

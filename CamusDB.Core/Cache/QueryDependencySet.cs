@@ -15,8 +15,8 @@ namespace CamusDB.Core.Cache;
 /// <list type="bullet">
 ///   <item><description>
 ///     <b>RangeDeps</b>: keyspace bucket strings scanned for membership (e.g.
-///     <c>"{dbId}:{tableId}:r"</c> for a full table scan or
-///     <c>"{dbId}:{tableId}:i:{indexId}"</c> for an index range scan). A write to
+///     <c>"{dbId}:{tableId}|r"</c> for a full table scan or
+///     <c>"{dbId}:{tableId}|i:{indexId}"</c> for an index range scan). A write to
 ///     any key in the bucket invalidates this entry, catching phantoms and inserts.
 ///   </description></item>
 ///   <item><description>
@@ -47,8 +47,8 @@ public sealed class QueryDependencySet
 
     /// <summary>
     /// Keyspace bucket strings scanned for membership. Each string is a table-bucket
-    /// prefix of the form <c>"{dbId}:{tableId}:r"</c> or
-    /// <c>"{dbId}:{tableId}:i:{indexId}"</c>. A committed write to any key whose prefix
+    /// prefix of the form <c>"{dbId}:{tableId}|r"</c> or
+    /// <c>"{dbId}:{tableId}|i:{indexId}"</c>. A committed write to any key whose prefix
     /// matches one of these strings invalidates this entry.
     /// </summary>
     public IReadOnlyList<string> RangeDeps { get; }

@@ -115,8 +115,8 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, string tableId) =
             await SetupTableWithRows(25);
 
-        string rowBucket = $"{database.Id}:{tableId}:r";
-        string rowPrefix = $"{database.Id}:{tableId}:r/";
+        string rowBucket = $"{database.Id}:{tableId}|r";
+        string rowPrefix = $"{database.Id}:{tableId}|r/";
 
         Assert.AreEqual(25, await CountKeysAsync(rowBucket, rowPrefix), "rows must exist before drop");
 
@@ -143,8 +143,8 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, string tableId) =
             await SetupTableWithRows(25);
 
-        string rowBucket = $"{database.Id}:{tableId}:r";
-        string rowPrefix = $"{database.Id}:{tableId}:r/";
+        string rowBucket = $"{database.Id}:{tableId}|r";
+        string rowPrefix = $"{database.Id}:{tableId}|r/";
 
         Assert.True(await executor.DropTable(new DropTableTicket(dbname, "robots", ifExists: false, force: true)));
 
@@ -160,8 +160,8 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, string tableId) =
             await SetupTableWithRows(3);
 
-        string rowBucket = $"{database.Id}:{tableId}:r";
-        string rowPrefix = $"{database.Id}:{tableId}:r/";
+        string rowBucket = $"{database.Id}:{tableId}|r";
+        string rowPrefix = $"{database.Id}:{tableId}|r/";
 
         KvTransaction tx = await database.Transactions.BeginAsync();
         await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname, "DROP TABLE robots FORCE", null));
@@ -183,8 +183,8 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
             await SetupTableWithRows(10);
         string dbId = database.Id;
 
-        string rowBucket = $"{dbId}:{tableId}:r";
-        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string rowBucket = $"{dbId}:{tableId}|r";
+        string rowPrefix = $"{dbId}:{tableId}|r/";
         string metaBucket = $"{dbId}/meta";
         string metaPrefix = $"{dbId}/meta";
 
@@ -213,8 +213,8 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
             await SetupTableWithRows(10);
         string dbId = database.Id;
 
-        string rowBucket = $"{dbId}:{tableId}:r";
-        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string rowBucket = $"{dbId}:{tableId}|r";
+        string rowPrefix = $"{dbId}:{tableId}|r/";
         string metaBucket = $"{dbId}/meta";
         string metaPrefix = $"{dbId}/meta";
 

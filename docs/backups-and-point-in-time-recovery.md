@@ -126,7 +126,11 @@ restored image:
 2. **Stop the CamusDB server.**
 3. **Start a fresh server with `data_dir = dataRoot`.** No manual file moves are needed — the node's
    storage (`{dataRoot}/kv/{revision}`) and WAL (`{dataRoot}/wal`) resolve directly to the restored
-   image. Keep the same `kahuna.storage`/revision settings the backup was taken with.
+   image. Keep the same `kahuna.storage`/revision settings the backup was taken with. A backup
+   is bound to the storage revision it was taken under: a server on a newer revision opens a
+   different directory and does not read it. To carry a backup across revisions, restore it with
+   the CamusDB version that took it and then dump it logically — see
+   [logical-dump-and-reimport.md](logical-dump-and-reimport.md).
 4. **(Cluster only)** the restored node holds data as of the restore point; it is admitted to
    membership and caught up by normal Raft replication. Whole-cluster disaster recovery restores every
    node to one coordinated point and brings the cluster back up.

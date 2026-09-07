@@ -142,7 +142,7 @@ internal sealed class TestKeyspaceCatalogPurge : BaseTest
 
         // Inject an orphan row under the dropped table's keyspace, simulating an overlay entry the
         // live-schema purge cannot reach (the table id is gone from the in-memory schema).
-        string rowBucket = $"{dbId}:{tableId}:r";
+        string rowBucket = $"{dbId}:{tableId}|r";
         string orphanKey = $"{rowBucket}/{ObjectIdGenerator.Generate()}";
         await AutocommitSet(kahuna, orphanKey, BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes("orphan")));
 
@@ -184,7 +184,7 @@ internal sealed class TestKeyspaceCatalogPurge : BaseTest
         )));
 
         // Inject an orphan under the dropped index's keyspace.
-        string indexBucket = $"{dbId}:{tableId}:i:{nameIdxId}";
+        string indexBucket = $"{dbId}:{tableId}|i:{nameIdxId}";
         string orphanKey = $"{indexBucket}/orphankey";
         await AutocommitSet(kahuna, orphanKey, BranchKvCodec.EncodeValue(Encoding.UTF8.GetBytes(ObjectIdGenerator.Generate().ToString())));
 

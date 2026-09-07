@@ -15,20 +15,32 @@ namespace CamusDB.Core.Storage.Kv;
 /// <summary>
 /// Composes every KV key one table occupies, and holds the per-index metadata the composition needs.
 ///
-/// <para>Key layout (all keys share the leading <c>{dbId}:{tableId}</c> segment so databases are
-/// isolated in the shared keyspace and every key of one table routes together):</para>
+/// <para>Key layout. Every key of one table starts with the <c>{dbId}:{tableId}</c> segment, so
+/// databases are isolated in the shared keyspace. The <c>'|'</c> that follows it is Kahuna's
+/// placement-group separator, and the last <c>'/'</c> is Kahuna's key-space separator:</para>
 ///
 /// <code>
-///   Primary rows:      {dbId}:{tableId}:r/{rowIdHex24}                         -> serialized row bytes
-///   Unique index:      {dbId}:{tableId}:i:{indexId}/{encodedKey}               -> rowIdHex24 (UTF-8)
-///   Non-unique index:  {dbId}:{tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   -> rowIdHex24 (UTF-8)
+///   Primary rows:      {dbId}:{tableId}|r/{rowIdHex24}                         -> serialized row bytes
+///   Unique index:      {dbId}:{tableId}|i:{indexId}/{encodedKey}               -> rowIdHex24 (UTF-8)
+///   Non-unique index:  {dbId}:{tableId}|i:{indexId}/{encodedKey}{rowIdHex24}   -> rowIdHex24 (UTF-8)
 /// </code>
 ///
+/// <para>Kahuna scans, locks and range-registers a <b>key space</b>: the prefix before the last
+/// <c>'/'</c> (<c>{dbId}:{tableId}|r</c>, <c>{dbId}:{tableId}|i:{indexId}</c>). Under hash routing
+/// it places a key space by its <b>placement group</b>: the prefix before the first <c>'|'</c>, which
+/// is <c>{dbId}:{tableId}</c> for every key space of one table. The rows and every index of a table
+/// therefore land on the same partition, so a transaction that reads an index entry and writes the
+/// row it points to stays on one partition and can take Kahuna's one-phase commit path. Without the
+/// group separator each key space would hash independently, and almost every indexed point read on a
+/// multi-partition cluster would land off the row's partition.</para>
+///
 /// <para>The rowId is appended to a non-unique key without a separator, so the last <c>'/'</c> of a
-/// full key is always the one after <c>{indexId}</c>. Under hash routing the bucket prefix a scan
-/// uses and the key a point write uses must hash to the same partition, and that equality is what
-/// the missing separator preserves. Do not add a slash to a key or a bucket prefix without
-/// re-deriving both sides of it — see <see cref="KvTableStore"/> for the full routing argument.</para>
+/// full key is always the one after <c>{indexId}</c>. The bucket prefix a scan uses and the key a
+/// point write uses must resolve to the same key space, and that equality is what the missing
+/// separator preserves. Do not add a slash to a key or a bucket prefix, and do not move the
+/// <c>'|'</c>, without re-deriving both sides of it — see <see cref="KvTableStore"/> for the full
+/// routing argument. Changing this layout is an on-disk format change; see
+/// <c>docs/logical-dump-and-reimport.md</c>.</para>
 ///
 /// <para>One instance addresses one <c>(database, table)</c> pair. A branch database's lineage holds
 /// one builder per ancestor level, because an ancestor owns its own key namespace and a probe of an
@@ -41,7 +53,19 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 internal sealed class KvKeyBuilder
 {
-    // Caches "{dbId}:{tableId}:i:{indexId}" per index so the bucket prefix is interpolated once
+    /// <summary>
+    /// Kahuna's placement-group separator. The prefix before the first <c>'|'</c> of a key space is
+    /// hashed for placement, so every key space of one table names the group <c>{dbId}:{tableId}</c>.
+    /// </summary>
+    internal const char GroupSeparator = '|';
+
+    /// <summary><c>|r</c> — the suffix that turns a table prefix into its row key space.</summary>
+    internal const string RowSpaceSuffix = "|r";
+
+    /// <summary><c>|i:</c> — the infix between a table prefix and an index id in an index key space.</summary>
+    internal const string IndexSpaceInfix = "|i:";
+
+    // Caches "{dbId}:{tableId}|i:{indexId}" per index so the bucket prefix is interpolated once
     // instead of on every lock/scan. The index-id set is small and bounded by the table's schema.
     private readonly ConcurrentDictionary<string, string> indexBucketPrefixCache = new();
 
@@ -68,14 +92,20 @@ internal sealed class KvKeyBuilder
     /// <summary>User-facing table name, carried purely for diagnostics. Never part of a KV key.</summary>
     internal string TableName { get; }
 
-    /// <summary><c>{dbId}:{tableId}</c> — the segment every row and index key of this table starts with.</summary>
+    /// <summary>
+    /// <c>{dbId}:{tableId}</c> — the segment every row and index key of this table starts with, and
+    /// the placement group Kahuna hashes for every key space of this table.
+    /// </summary>
     internal string TableKeyPrefix { get; }
 
-    /// <summary><c>{dbId}:{tableId}:r</c> — the bucket prefix (no trailing slash) for row scans and row range locks.</summary>
+    /// <summary><c>{dbId}:{tableId}|r</c> — the bucket prefix (no trailing slash) for row scans and row range locks.</summary>
     internal string RowBucketPrefix { get; }
 
-    /// <summary><c>{dbId}:{tableId}:r/</c> — prepended to a row-id hex to form a full row key.</summary>
+    /// <summary><c>{dbId}:{tableId}|r/</c> — prepended to a row-id hex to form a full row key.</summary>
     internal string RowKeyPrefix { get; }
+
+    /// <summary><c>{dbId}:{tableId}|i:</c> — prepended to an index id to form an index key space.</summary>
+    internal string IndexSpacePrefix { get; }
 
     internal KvKeyBuilder(string dbId, string dbName, string tableId, string tableName)
     {
@@ -84,9 +114,25 @@ internal sealed class KvKeyBuilder
         TableId = tableId;
         TableName = tableName;
         TableKeyPrefix = $"{dbId}:{tableId}";
-        RowBucketPrefix = $"{dbId}:{tableId}:r";
-        RowKeyPrefix = $"{dbId}:{tableId}:r/";
+        RowBucketPrefix = RowSpaceOf(dbId, tableId);
+        RowKeyPrefix = RowBucketPrefix + "/";
+        IndexSpacePrefix = TableKeyPrefix + IndexSpaceInfix;
     }
+
+    /// <summary>
+    /// <c>{dbId}:{tableId}|r</c> — the row key space of a table, for callers that address a table
+    /// without opening it (the whole-database purge, orphan reclaim, tests). Identical to
+    /// <see cref="RowBucketPrefix"/> on an instance for the same pair.
+    /// </summary>
+    internal static string RowSpaceOf(string dbId, string tableId) => string.Concat(dbId, ":", tableId, RowSpaceSuffix);
+
+    /// <summary>
+    /// <c>{dbId}:{tableId}|i:{indexId}</c> — the key space of one index, for callers that address a
+    /// table without opening it. Identical to <see cref="BuildIndexBucketPrefix"/> on an instance for
+    /// the same pair.
+    /// </summary>
+    internal static string IndexSpaceOf(string dbId, string tableId, string indexId)
+        => string.Concat(dbId, ":", tableId, IndexSpaceInfix, indexId);
 
     /// <summary>
     /// Registers the human-readable display name for an index KvId so that duplicate-key errors show
@@ -125,7 +171,7 @@ internal sealed class KvKeyBuilder
     internal string DisplayNameOf(string indexId)
         => indexIdToDisplayName.TryGetValue(indexId, out string? name) ? name : indexId;
 
-    // Composes "{dbId}:{tableId}:r/{rowIdHex24}" directly into the new string's buffer — one
+    // Composes "{dbId}:{tableId}|r/{rowIdHex24}" directly into the new string's buffer — one
     // allocation, no separate rowId.ToString() temporary. The length is small and bounded
     // (compact db/table ids + 24 hex), so this is allocation-minimal on the per-row hot path.
     internal string BuildRowKey(ObjectIdValue rowId)
@@ -135,17 +181,17 @@ internal sealed class KvKeyBuilder
             ObjectId.WriteHex(span[state.RowKeyPrefix.Length..], state.rowId.a, state.rowId.b, state.rowId.c);
         });
 
-    // Returns "{dbId}:{tableId}:i:{indexId}" — the bucket prefix (no trailing slash) used for
-    // LocateAndScanRange so that SimpleHash("{dbId}:{tableId}:i:{indexId}") matches the routing
-    // hash of keys "{dbId}:{tableId}:i:{indexId}/{...}". Cached per index id (see field).
+    // Returns "{dbId}:{tableId}|i:{indexId}" — the bucket prefix (no trailing slash) used for
+    // LocateAndScanRange. It is the key space of every key "{dbId}:{tableId}|i:{indexId}/{...}", so
+    // a scan and a point write resolve to the same partition. Cached per index id (see field).
     internal string BuildIndexBucketPrefix(string indexId)
         => indexBucketPrefixCache.TryGetValue(indexId, out string? cached)
             ? cached
-            : indexBucketPrefixCache.GetOrAdd(indexId, static (id, prefix) => $"{prefix}:i:{id}", TableKeyPrefix);
+            : indexBucketPrefixCache.GetOrAdd(indexId, static (id, prefix) => prefix + id, IndexSpacePrefix);
 
     // Composes "{bucket}/{encodedKey}" straight into the final string's buffer — one allocation, no
     // intermediate KeyEncoder.Encode(...) string interpolated into a second string. `bucket` is the
-    // cached "{dbId}:{tableId}:i:{indexId}" prefix (== "{TableKeyPrefix}:i:{indexId}").
+    // cached "{dbId}:{tableId}|i:{indexId}" prefix (== "{IndexSpacePrefix}{indexId}").
     internal string BuildUniqueIndexKey(string indexId, CompositeColumnValue key)
     {
         string bucket = BuildIndexBucketPrefix(indexId);
@@ -202,14 +248,13 @@ internal sealed class KvKeyBuilder
         return string.IsNullOrEmpty(TableName) ? display : $"{TableName}.{display}";
     }
 
-    // Extracts the index name from a full KV key ("{dbId}:{tableId}:i:{indexId}/{...}").
+    // Extracts the index name from a full KV key ("{dbId}:{tableId}|i:{indexId}/{...}").
     // Falls back to the raw key on unexpected formats.
     internal string IndexNameFromKvKey(string kvKey)
     {
-        string prefix = $"{TableKeyPrefix}:i:";
-        if (!kvKey.StartsWith(prefix, StringComparison.Ordinal))
+        if (!kvKey.StartsWith(IndexSpacePrefix, StringComparison.Ordinal))
             return kvKey;
-        string tail = kvKey[prefix.Length..];
+        string tail = kvKey[IndexSpacePrefix.Length..];
         int slash = tail.IndexOf('/');
         string indexId = slash >= 0 ? tail[..slash] : tail;
         return DuplicateKeyLabel(indexId);

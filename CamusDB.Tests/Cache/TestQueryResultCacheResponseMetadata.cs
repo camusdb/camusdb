@@ -223,9 +223,9 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         await CreateOrdersTable(dbname, database, executor);
         await InsertOrder(dbname, database, executor, "f", 60);
 
-        // Build the row keyspace string the same way KvTableStore does: "{dbId}:{tableId}:r"
+        // Build the row keyspace string the same way KvTableStore does: "{dbId}:{tableId}|r"
         string tableId = database.Schema.Tables["orders"].Id!;
-        string rowKeySpace = $"{database.Id}:{tableId}:r";
+        string rowKeySpace = $"{database.Id}:{tableId}|r";
 
         // Mark the keyspace as in-flight — simulates a write transaction in CommitAsync.
         Cache.PublishGate.MarkWriteInFlight([rowKeySpace]);
@@ -314,7 +314,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     public async Task EvictedBeforePublish_GenerationFence_ReasonIsInFlightWrite()
     {
         using var gate_cache = new QueryResultCache(Options, sweepIntervalMs: -1);
-        string ks = "db1:tbl1:r";
+        string ks = "db1:tbl1|r";
         CacheGenerationToken staleToken = gate_cache.PublishGate.SnapshotGenerations([ks]);  // gen=0
         gate_cache.PublishGate.CommitWrite([ks]);  // gen→1 — stales the snapshot token
 
@@ -363,7 +363,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         const string cacheName = "sr_basic";
         string fingerprint = ComputeStrictFingerprint(database, cacheName);
         string tableId = database.Schema.Tables["orders"].Id!;
-        string rowKeySpace = $"{database.Id}:{tableId}:r";
+        string rowKeySpace = $"{database.Id}:{tableId}|r";
 
         // Inject a strict entry at CachedAt=Zero with a RangeDep over the real row keyspace.
         // The strict validator scans the range, finds rows with LastModified > Zero,
@@ -405,7 +405,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
         const string cacheName = "sr_ovrsz";
         string fingerprint = ComputeStrictFingerprint(database, cacheName);
         string tableId2 = database.Schema.Tables["orders"].Id!;
-        string rowKeySpace2 = $"{database.Id}:{tableId2}:r";
+        string rowKeySpace2 = $"{database.Id}:{tableId2}|r";
 
         Cache.InjectEntryForTest(
             new CachedQueryResult(

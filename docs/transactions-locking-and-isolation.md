@@ -73,19 +73,22 @@ Every row and index entry is a key/value pair. The key encodes which table, what
 which row:
 
 ```
-Primary rows        {tableId}:r/{rowId}                → the serialized row bytes
-Unique index        {tableId}:i:{indexId}/{value}      → the rowId it points to
-Non-unique index    {tableId}:i:{indexId}/{value}{rowId}
-Schema / catalog    {db}/meta/...                      → table definitions, etc.
+Primary rows        {dbId}:{tableId}|r/{rowId}                → the serialized row bytes
+Unique index        {dbId}:{tableId}|i:{indexId}/{value}      → the rowId it points to
+Non-unique index    {dbId}:{tableId}|i:{indexId}/{value}{rowId}
+Schema / catalog    {dbId}/meta/...                           → table definitions, etc.
 ```
 
-The part of the key *before the last `/`* is its **key space** (e.g. `{tableId}:r`). Key spaces matter
-for routing and range locks (§6, §8).
+The part of the key *before the last `/`* is its **key space** (e.g. `{dbId}:{tableId}|r`). Key
+spaces matter for routing and range locks (§6, §8). The part of a key space *before its first `|`*
+is its **placement group** (`{dbId}:{tableId}`): under hash routing Kahuna hashes the group, so a
+table's rows and all of its indexes share one partition.
 
 **Routing — how a key finds its partition.** Kahuna offers two strategies:
 
-- **Hash routing (the default).** The key space is hashed to a partition. Simple and even, but
-  contiguous keys land on *different* partitions, so you can't lock "all rows between A and B" cheaply.
+- **Hash routing (the default).** The key space's placement group is hashed to a partition, so a
+  table and its indexes stay together. Simple and even across tables, but a table's keys are
+  indivisible: one partition holds all of them, and a hot table cannot be spread.
 - **Key-range routing (opt-in, off by default).** Contiguous keys are kept together in one range, so a
   scan over `[A, B)` touches one place and can be locked as a range. Enabled per key space, and only
   has an effect when the cluster has at least two partitions. Toggled with the
@@ -318,7 +321,7 @@ folding and validation work.
 MVCC is the reason reads stay fast. Imagine three versions of one key over time:
 
 ```
-key "robots:r/42"
+key "db:robots|r/42"
 
    v1 (committed @ t=10)   speed=80      ← a read at t=12 sees this
    v2 (committed @ t=20)   speed=120     ← a read at t=25 sees this

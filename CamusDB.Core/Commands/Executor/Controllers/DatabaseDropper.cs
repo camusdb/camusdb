@@ -190,8 +190,8 @@ internal sealed class DatabaseDropper
         // Purged namespaces (scan bucket → stored key prefix):
         //   {id}/meta                    → {id}/                           — meta keys (system, version, schemas, history, coordinator jobs)
         //   {id}:                        → {id}:                           — statistics keys ({id}:stats:{tableId})
-        //   {id}:{tableId}:r             → {id}:{tableId}:r/               — row data for every table
-        //   {id}:{tableId}:i:{indexId}   → {id}:{tableId}:i:{indexId}/     — index data for every index
+        //   {id}:{tableId}|r             → {id}:{tableId}|r/               — row data for every table
+        //   {id}:{tableId}|i:{indexId}   → {id}:{tableId}|i:{indexId}/     — index data for every index
         //
         //   Schema-log entries in the Raft WAL are append-only and cannot be removed.
         //
@@ -327,10 +327,10 @@ internal sealed class DatabaseDropper
         foreach ((string tableId, List<string> indexIds) in catalogByTableId)
         {
             coveredTableIds.Add(tableId);
-            rowIndexPrefixes.Add(($"{id}:{tableId}:r", $"{id}:{tableId}:r/"));
+            rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.RowSpaceOf(id, tableId)));
             exactKeys.Add($"{id}:stats:{tableId}");
             foreach (string indexId in indexIds)
-                rowIndexPrefixes.Add(($"{id}:{tableId}:i:{indexId}", $"{id}:{tableId}:i:{indexId}/"));
+                rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.IndexSpaceOf(id, tableId, indexId)));
         }
 
         // Safety net: live tables not yet in the catalog (unavailable on a headless resume).
@@ -340,12 +340,12 @@ internal sealed class DatabaseDropper
             {
                 if (table.Id is null || coveredTableIds.Contains(table.Id))
                     continue;
-                rowIndexPrefixes.Add(($"{id}:{table.Id}:r", $"{id}:{table.Id}:r/"));
+                rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.RowSpaceOf(id, table.Id)));
                 exactKeys.Add($"{id}:stats:{table.Id}");
                 if (table.Indexes is not null)
                     foreach (TableIndexSchema index in table.Indexes)
                         if (!string.IsNullOrEmpty(index.KvId))
-                            rowIndexPrefixes.Add(($"{id}:{table.Id}:i:{index.KvId}", $"{id}:{table.Id}:i:{index.KvId}/"));
+                            rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.IndexSpaceOf(id, table.Id, index.KvId)));
             }
         }
 
@@ -441,9 +441,9 @@ internal sealed class DatabaseDropper
         // record is NOT touched here; it is the recovery marker and is deleted only if everything else
         // is confirmed gone, so an incomplete purge leaves the record for a later sweep to finish.
         bool complete = catalogRead;
-        complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{dataId}:r", $"{dbId}:{dataId}:r/", ct).ConfigureAwait(false);
+        complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.RowSpaceOf(dbId, dataId), ct).ConfigureAwait(false);
         foreach (string indexId in indexIds)
-            complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{dataId}:i:{indexId}", $"{dbId}:{dataId}:i:{indexId}/", ct).ConfigureAwait(false);
+            complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.IndexSpaceOf(dbId, dataId, indexId), ct).ConfigureAwait(false);
 
         foreach (string key in new[]
         {
@@ -503,13 +503,10 @@ internal sealed class DatabaseDropper
         }
 
         bool complete = catalogRead;
-        complete &= await PurgeBucketAsync(kahuna, dbId, $"{dbId}:{retiredStorageId}:r", $"{dbId}:{retiredStorageId}:r/", ct).ConfigureAwait(false);
+        complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.RowSpaceOf(dbId, retiredStorageId), ct).ConfigureAwait(false);
 
         foreach (string indexId in indexIds)
-            complete &= await PurgeBucketAsync(
-                kahuna, dbId,
-                $"{dbId}:{retiredStorageId}:i:{indexId}",
-                $"{dbId}:{retiredStorageId}:i:{indexId}/", ct).ConfigureAwait(false);
+            complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.IndexSpaceOf(dbId, retiredStorageId, indexId), ct).ConfigureAwait(false);
 
         complete &= await DeleteExactVerifiedAsync(kahuna, catalogKey, ct).ConfigureAwait(false);
 
@@ -533,6 +530,21 @@ internal sealed class DatabaseDropper
     /// empty. A test reads it to prove one empty scan is not accepted as proof the bucket is drained.
     /// </summary>
     internal static long EmptyPurgeScansForTesting;
+
+    /// <summary>
+    /// Pairs a row or index key space with the stored-key prefix its members carry: the key space
+    /// is what a scan addresses, and the prefix (the key space plus the <c>'/'</c> key-space
+    /// separator) is what every stored key of that space starts with. Composed here, next to the
+    /// purge, so the two halves cannot drift apart.
+    /// </summary>
+    private static (string bucket, string keyPrefix) BucketOf(string keySpace) => (keySpace, keySpace + "/");
+
+    /// <summary>Purges one row or index key space; see <see cref="PurgeBucketAsync"/> for the contract.</summary>
+    private Task<bool> PurgeSpaceAsync(IKahuna kahuna, string id, string keySpace, CancellationToken ct)
+    {
+        (string bucket, string keyPrefix) = BucketOf(keySpace);
+        return PurgeBucketAsync(kahuna, id, bucket, keyPrefix, ct);
+    }
 
     /// <summary>
     /// Deletes every key under <paramref name="keyPrefix"/> in <paramref name="bucket"/> in bounded

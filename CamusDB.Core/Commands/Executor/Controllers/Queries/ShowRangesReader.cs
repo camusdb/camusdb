@@ -131,7 +131,7 @@ internal sealed class ShowRangesReader
     /// Resolves the row id behind a <c>FOR ROW</c> clause on a <b>table</b>, by point-reading the
     /// primary index entry the values name.
     ///
-    /// <para>This read exists because a CamusDB row key is <c>{dbId}:{tableId}:r/{rowIdHex24}</c> —
+    /// <para>This read exists because a CamusDB row key is <c>{dbId}:{tableId}|r/{rowIdHex24}</c> —
     /// ordered by the stored row id, not by the primary key — so the span holding the row with
     /// primary key 1500 simply is not derivable from 1500. Other systems can compute a table row key
     /// from its primary key; here, pretending to would return a confidently wrong range.</para>

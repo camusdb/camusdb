@@ -516,7 +516,7 @@ internal sealed class KvBatchWriter
 
     /// <summary>
     /// Deletes every KV entry belonging to the named index. Used by DROP INDEX to reclaim
-    /// the <c>{dbId}:{tableId}:i:{indexName}/…</c> space. All deletes run under <paramref name="tx"/>
+    /// the <c>{dbId}:{tableId}|i:{indexName}/…</c> space. All deletes run under <paramref name="tx"/>
     /// so they are atomic with the schema-removal that follows in the same transaction.
     /// Returns the number of entries deleted.
     /// </summary>
@@ -551,7 +551,7 @@ internal sealed class KvBatchWriter
 
     /// <summary>
     /// Physically deletes every KV entry in this database's row overlay for this table
-    /// (<c>{dbId}:{tableId}:r/…</c>). Used by <c>DROP TABLE</c> on a branch database to reclaim
+    /// (<c>{dbId}:{tableId}|r/…</c>). Used by <c>DROP TABLE</c> on a branch database to reclaim
     /// branch-local row entries without scanning or tombstoning inherited ancestor rows — those
     /// become unreachable through the schema once the table is dropped from the branch, so no
     /// tombstone is required. Returns the number of entries deleted.

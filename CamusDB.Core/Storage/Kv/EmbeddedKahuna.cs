@@ -9,6 +9,7 @@
 using Kahuna;
 using CamusDB.Core.Config.Models;
 using Kahuna.Shared.Communication.Rest;
+using Kahuna.Shared.Routing;
 using Kommander;
 using Kommander.Communication;
 using Kommander.Communication.Grpc;
@@ -54,6 +55,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     private ISchemaAckSender? schemaAckSender;
 
     private readonly EmbeddedKahunaNode node;
+
+    // Null when the host supplied no logger factory (tests, the sandbox); every use is guarded.
+    private readonly ILogger? logger;
 
     // True when this instance was constructed with an explicit IInterNodeCommunication (cluster mode).
     // False for standalone embedded nodes that use phantom EmbeddedRaftCommunication.Witnesses — those
@@ -171,9 +175,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// before re-resolving.</para>
     ///
     /// <para>Hash-routed key spaces resolve to exactly one partition, computed with the same
-    /// hash Kahuna's data router uses: <c>1 + InversePrefixedHash(prefix + "/", '/',
-    /// InitialPartitions)</c>. <c>IRaft.GetPrefixPartitionKey</c> is a different hash over a
-    /// different partition map and must never be used for data keys.</para>
+    /// placement rule Kahuna's data router uses: <c>1 + HashPlacement.BucketOfKeySpace(prefix,
+    /// InitialPartitions)</c>, which hashes the key space's placement group. <c>IRaft.GetPrefixPartitionKey</c>
+    /// is a different hash over a different partition map and must never be used for data keys.</para>
     /// </summary>
     public TablePlacement GetPlacement(string keySpace)
     {
@@ -269,10 +273,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         else
         {
             // Hash routing — or a key-range space with no seeded descriptors, which the router
-            // also serves through the hash path. One partition owns the whole bucket. The
-            // trailing slash matters: the data router hashes the key-space slice before the
-            // LAST '/', so appending one reproduces what routing does for keys in this bucket.
-            int partitionId = 1 + (int)HashUtils.InversePrefixedHash(keySpace + "/", '/', Raft.Configuration.InitialPartitions);
+            // also serves through the hash path. One partition owns the whole bucket. The data
+            // router hashes the key space's placement group (its prefix before the first '|'), so
+            // a table's row space and index spaces resolve here to the same partition they are
+            // written to. Partition 0 is the system partition; the pool starts at 1.
+            int partitionId = 1 + HashPlacement.BucketOfKeySpace(keySpace, Raft.Configuration.InitialPartitions);
             spans = [BuildSpan(localEndpoint, startKey: null, endKey: null, partitionId, generation: 0L)];
         }
 
@@ -397,6 +402,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         Options = options;
+        logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
         WireWalRestoreBuffer();
@@ -416,6 +422,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         Options = options;
+        logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
         WireWalRestoreBuffer();
@@ -484,6 +491,8 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        WarnIfPreviousStorageRevisionPresent();
+
         try
         {
             await node.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -495,6 +504,35 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         }
 
         startedSignal.TrySetResult();
+    }
+
+    /// <summary>
+    /// Logs a warning when the data directory still holds a store or WAL from the storage
+    /// revision that the grouped key layout replaced. That directory is not opened: a node on the
+    /// current revision starts from an empty store, which an operator who expected the old data
+    /// would otherwise see as silent loss. The old directory is left alone so the previous CamusDB
+    /// version can still dump it — see <c>docs/logical-dump-and-reimport.md</c>.
+    /// </summary>
+    private void WarnIfPreviousStorageRevisionPresent()
+    {
+        if (logger is null || !logger.IsEnabled(LogLevel.Warning))
+            return;
+
+        if (!string.Equals(Options.StorageRevision, EmbeddedKahunaOptionsBuilder.CurrentStorageRevision, StringComparison.Ordinal))
+            return;
+
+        foreach (string? root in new[] { Options.StoragePath, Options.WalPath })
+        {
+            if (string.IsNullOrEmpty(root))
+                continue;
+
+            string previous = System.IO.Path.Combine(root, EmbeddedKahunaOptionsBuilder.PreviousStorageRevision);
+            if (System.IO.Directory.Exists(previous))
+                logger.LogWarning(
+                    "Found storage revision {Previous} at {Path}; this version opens revision {Current} and starts empty. " +
+                    "Data crosses revisions by logical dump and reimport only (docs/logical-dump-and-reimport.md).",
+                    EmbeddedKahunaOptionsBuilder.PreviousStorageRevision, previous, EmbeddedKahunaOptionsBuilder.CurrentStorageRevision);
+        }
     }
 
     /// <summary>
@@ -1717,10 +1755,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         NodeName = "camusdb-embedded",
         Storage = "rocksdb",
         StoragePath = System.IO.Path.Combine(dataPath, "kv"),
-        StorageRevision = "v1",
+        StorageRevision = EmbeddedKahunaOptionsBuilder.CurrentStorageRevision,
         WalStorage = "rocksdb",
         WalPath = System.IO.Path.Combine(dataPath, "wal"),
-        WalRevision = "v1",
+        WalRevision = EmbeddedKahunaOptionsBuilder.CurrentStorageRevision,
         InitialPartitions = 1
     };
 
@@ -1729,10 +1767,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         NodeName = "camusdb-embedded",
         Storage = "sqlite",
         StoragePath = System.IO.Path.Combine(dataPath, "kv"),
-        StorageRevision = "v1",
+        StorageRevision = EmbeddedKahunaOptionsBuilder.CurrentStorageRevision,
         WalStorage = "sqlite",
         WalPath = System.IO.Path.Combine(dataPath, "wal"),
-        WalRevision = "v1",
+        WalRevision = EmbeddedKahunaOptionsBuilder.CurrentStorageRevision,
         InitialPartitions = 1
     };
 }

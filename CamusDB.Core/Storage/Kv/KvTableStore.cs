@@ -31,13 +31,14 @@ namespace CamusDB.Core.Storage.Kv;
 ///   <item><see cref="KahunaRetryPolicy"/> and <see cref="KvConflictMessageBuilder"/> — retry rules and conflict diagnostics.</item>
 /// </list>
 ///
-/// <para>Key layout (all keys share the leading <c>{dbId}:{tableId}</c> segment so databases are
-/// isolated in the shared keyspace and every key of one table routes together):</para>
+/// <para>Key layout. Every key of one table starts with <c>{dbId}:{tableId}</c>, so databases are
+/// isolated in the shared keyspace. The <c>'|'</c> after it is Kahuna's placement-group separator and
+/// the last <c>'/'</c> is Kahuna's key-space separator:</para>
 ///
 /// <code>
-///   Primary rows:      {dbId}:{tableId}:r/{rowIdHex24}                         -> serialized row bytes
-///   Unique index:      {dbId}:{tableId}:i:{indexId}/{encodedKey}               -> rowIdHex24 (UTF-8)
-///   Non-unique index:  {dbId}:{tableId}:i:{indexId}/{encodedKey}{rowIdHex24}   -> rowIdHex24 (UTF-8)
+///   Primary rows:      {dbId}:{tableId}|r/{rowIdHex24}                         -> serialized row bytes
+///   Unique index:      {dbId}:{tableId}|i:{indexId}/{encodedKey}               -> rowIdHex24 (UTF-8)
+///   Non-unique index:  {dbId}:{tableId}|i:{indexId}/{encodedKey}{rowIdHex24}   -> rowIdHex24 (UTF-8)
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
 /// </code>
 ///
@@ -45,20 +46,30 @@ namespace CamusDB.Core.Storage.Kv;
 /// from a per-store persistent monotonic sequence (<c>_system/tableseq</c>) via
 /// <see cref="CamusDB.Core.CommandsExecutor.Controllers.DatabaseRegistry.AllocateTableIdAsync"/>.
 /// The id is typically 1–4 characters (e.g. <c>"1"</c>, <c>"A0"</c>) and contains none of the key
-/// separators (<c>/</c>, <c>:</c>, <c>~</c>). Tables created before this change keep their original
+/// separators (<c>/</c>, <c>:</c>, <c>|</c>, <c>~</c>). Tables created before this change keep their original
 /// 24-character lowercase-hex ObjectId (e.g. <c>"6849f3a1c2e7d50b4f8a91d3"</c>); the two forms
 /// coexist safely because their lengths and character sets never overlap.</para>
 ///
-/// <para><b>Hash-routing constraint (the default mode).</b> Under hash routing a key space must hash
-/// to exactly one partition whether it is reached by a scan or by a point write, or a scan would miss
-/// rows a write placed elsewhere:
-/// <c>LocateAndScanRange</c> routes via <c>SimpleHash(prefix)</c> while individual TrySet/Delete route
-/// via <c>InversePrefixedStaticHash(key, '/') = SimpleHash(key[..lastSlash])</c>.
-/// For rows: bucket prefix <c>{dbId}:{tableId}:r</c> hashes the same as every row key's prefix.
-/// For indexes: bucket prefix <c>{dbId}:{tableId}:i:{indexId}</c> matches writes whose key is
-/// <c>{dbId}:{tableId}:i:{indexId}/{...}</c> (the last slash sits before the suffix). Non-unique keys
-/// append the rowId with no extra slash, so the hash agrees for both unique and non-unique.
-/// Do not add slashes to a key or a bucket prefix without re-deriving both sides of that equality.</para>
+/// <para><b>Hash-routing constraint (the default mode).</b> Kahuna addresses a <em>key space</em> —
+/// the prefix before the last <c>'/'</c> — for scans, locks and range registration, and under hash
+/// routing it places a key space by its <em>placement group</em>, the prefix before the first
+/// <c>'|'</c>. A key space must resolve to exactly one partition whether it is reached by a scan
+/// (<c>LocateAndScanRange(prefix)</c>) or by a point write (<c>TrySet(key)</c>), or a scan would miss
+/// rows a write placed elsewhere. For rows the bucket prefix <c>{dbId}:{tableId}|r</c> is the key
+/// space of every row key. For indexes the bucket prefix <c>{dbId}:{tableId}|i:{indexId}</c> is the key
+/// space of every key <c>{dbId}:{tableId}|i:{indexId}/{...}</c>, because the last slash sits before
+/// the suffix and non-unique keys append the rowId with no extra slash. Do not add slashes to a key
+/// or a bucket prefix without re-deriving both sides of that equality.</para>
+///
+/// <para><b>Why the group separator is there.</b> The rows and every index of a table name the same
+/// placement group, <c>{dbId}:{tableId}</c>, so they hash to the same partition. A point update that
+/// reads a unique-index entry and then writes the row therefore reads and writes on one partition,
+/// which is the condition for Kahuna's one-phase commit path; without the group the two key spaces
+/// hash independently and almost every indexed read on a multi-partition cluster is off-partition.
+/// The cost is concentration: a table and all its indexes share one partition's leader. This is an
+/// on-disk layout, so changing it is a storage-revision change (see
+/// <see cref="EmbeddedKahunaOptionsBuilder.CurrentStorageRevision"/>) migrated by logical dump and
+/// reimport only.</para>
 ///
 /// <para><b>This is a property of hash routing only, not a layout invariant.</b> When
 /// <see cref="CamusDBOptions.KeyRangeShardingEnabled"/> is on, this store's row space — and every
@@ -67,7 +78,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// confined to a single partition. Correctness there comes from the range map rather than from the
 /// hash agreement above: reads resolve every intersecting range descriptor and merge the results in
 /// key order, and writes that arrive while a range boundary is moving are refused with
-/// <c>MustRetry</c> and retried by <see cref="KahunaRetryPolicy"/>. Nothing in the key layout changes.</para>
+/// <c>MustRetry</c> and retried by <see cref="KahunaRetryPolicy"/>. Kahuna still seeds a key-range
+/// space's first range by its placement group, so a table's spaces start together there too.
+/// Nothing in the key layout changes.</para>
 ///
 /// <para>All write methods take a <see cref="KvTransaction"/> so they can accumulate acquired locks
 /// and modified keys for the 2-phase commit.</para>
@@ -168,21 +181,21 @@ public sealed partial class KvTableStore
     internal KvBranchReader BranchReader => branch;
 
     /// <summary>
-    /// The Kahuna key space for this table's rows (<c>{dbId}:{tableId}:r</c>) — the prefix before the last
+    /// The Kahuna key space for this table's rows (<c>{dbId}:{tableId}|r</c>) — the prefix before the last
     /// <c>'/'</c> of every row key. This is the exact string to pass to
     /// <see cref="IKahuna.RegisterKeyRange"/> when opting the row space into key-range routing.
     /// </summary>
     public string RowKeySpace => keys.RowBucketPrefix;
 
     /// <summary>
-    /// The Kahuna key space for a secondary index (<c>{dbId}:{tableId}:i:{indexId}</c>). Pass to
+    /// The Kahuna key space for a secondary index (<c>{dbId}:{tableId}|i:{indexId}</c>). Pass to
     /// <see cref="IKahuna.RegisterKeyRange"/> when opting an index into key-range routing. All
     /// column types are order-safe for range routing (String included, via its ordered ASCII encoding).
     /// </summary>
     public string IndexKeySpace(string indexId) => keys.BuildIndexBucketPrefix(indexId);
 
     /// <summary>
-    /// Returns the full KV key for the given row: <c>{dbId}:{tableId}:r/{rowIdHex24}</c>.
+    /// Returns the full KV key for the given row: <c>{dbId}:{tableId}|r/{rowIdHex24}</c>.
     /// Used by the dependency collector to record per-row point dependencies without exposing
     /// the internal key-prefix fields.
     /// </summary>

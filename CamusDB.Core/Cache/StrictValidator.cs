@@ -105,7 +105,7 @@ internal static class StrictValidator
         }
 
         // ── Range deps ─────────────────────────────────────────────────────────
-        // Each range dep is a bucket prefix (e.g. "{dbId}:{tableId}:r") identifying a
+        // Each range dep is a bucket prefix (e.g. "{dbId}:{tableId}|r") identifying a
         // keyspace scanned for membership. If any key in the range has
         // LastModified > CachedAt, a phantom insert occurred — the cached row set is
         // missing at least one row that would now match.

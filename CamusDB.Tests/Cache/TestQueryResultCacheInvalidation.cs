@@ -43,10 +43,10 @@ public sealed class TestQueryResultCacheInvalidation
             CachedAt: default(HLCTimestamp), Status: QueryCacheStatus.Miss);
 
     private static (string key, KeyValueDurability durability) RowKey(string dbId, string tableId, string rowId) =>
-        ($"{dbId}:{tableId}:r/{rowId}", KeyValueDurability.Persistent);
+        ($"{dbId}:{tableId}|r/{rowId}", KeyValueDurability.Persistent);
 
     private static (string key, KeyValueDurability durability) IndexKey(string dbId, string tableId, string indexId, string encodedKey) =>
-        ($"{dbId}:{tableId}:i:{indexId}/{encodedKey}", KeyValueDurability.Persistent);
+        ($"{dbId}:{tableId}|i:{indexId}/{encodedKey}", KeyValueDurability.Persistent);
 
     private static (string key, KeyValueDurability durability) SchemaKey(string dbId) =>
         ($"{dbId}/meta/schema", KeyValueDurability.Persistent);
@@ -79,7 +79,7 @@ public sealed class TestQueryResultCacheInvalidation
     public void PublishGate_InFlightKeyspace_SetsHasInFlightAndCommitMakesTokenStale()
     {
         var gate = new CachePublishGate();
-        var keyspaces = new[] { "db1:tbl1:r" };
+        var keyspaces = new[] { "db1:tbl1|r" };
 
         // Snapshot before the write starts
         CacheGenerationToken preWriteToken = gate.SnapshotGenerations(keyspaces);
@@ -119,7 +119,7 @@ public sealed class TestQueryResultCacheInvalidation
     public void PublishGate_AbortWrite_ClearsInFlightWithoutBumpingGeneration()
     {
         var gate = new CachePublishGate();
-        var keyspaces = new[] { "db1:tbl2:r" };
+        var keyspaces = new[] { "db1:tbl2|r" };
 
         CacheGenerationToken token = gate.SnapshotGenerations(keyspaces);
         gate.MarkWriteInFlight(keyspaces);
@@ -139,7 +139,7 @@ public sealed class TestQueryResultCacheInvalidation
     public async Task InvalidateByModifiedKeys_RowWrite_EvictsRangeDepEntry()
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
-        string bucket = "db1:tbl1:r";
+        string bucket = "db1:tbl1|r";
         string fp = await PublishEntry(cache, "db1", "fp-range", [bucket]);
 
         // Simulate a row insert in the same bucket
@@ -153,7 +153,7 @@ public sealed class TestQueryResultCacheInvalidation
     public async Task InvalidateByModifiedKeys_IndexWrite_EvictsIndexRangeDepEntry()
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
-        string indexBucket = "db1:tbl1:i:idx001";
+        string indexBucket = "db1:tbl1|i:idx001";
         string fp = await PublishEntry(cache, "db1", "fp-index-range", [indexBucket]);
 
         cache.InvalidateByModifiedKeys([(IndexKey("db1", "tbl1", "idx001", "encoded-key-abc"))]);
@@ -166,7 +166,7 @@ public sealed class TestQueryResultCacheInvalidation
     public async Task InvalidateByModifiedKeys_DifferentTable_PreservesEntry()
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
-        string bucket = "db1:tbl1:r";
+        string bucket = "db1:tbl1|r";
         string fp = await PublishEntry(cache, "db1", "fp-tbl1", [bucket]);
 
         // Write to a different table
@@ -180,7 +180,7 @@ public sealed class TestQueryResultCacheInvalidation
     public async Task InvalidateByModifiedKeys_SchemaMetaKey_DoesNotEvictRangeEntry()
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
-        string bucket = "db1:tbl1:r";
+        string bucket = "db1:tbl1|r";
         string fp = await PublishEntry(cache, "db1", "fp-range", [bucket]);
 
         // Schema key does not match the row bucket pattern
@@ -271,7 +271,7 @@ public sealed class TestQueryResultCacheInvalidation
     public void CommitWrite_PassesKeyspacesToInvalidationCallback()
     {
         var gate = new CachePublishGate();
-        var keyspaces = new[] { "db1:tbl1:r", "db1:tbl1:i:idx001" };
+        var keyspaces = new[] { "db1:tbl1|r", "db1:tbl1|i:idx001" };
         gate.MarkWriteInFlight(keyspaces);
 
         IReadOnlyCollection<string>? received = null;
@@ -290,7 +290,7 @@ public sealed class TestQueryResultCacheInvalidation
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        string bucket = "db1:tbl1:r";
+        string bucket = "db1:tbl1|r";
         string fp = await PublishEntry(cache, "db1", "fp-e2e", [bucket]);
 
         // Simulate the KvTransactionsManager commit protocol:
@@ -312,7 +312,7 @@ public sealed class TestQueryResultCacheInvalidation
     {
         using var cache = new QueryResultCache(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        string bucket = "db1:tbl1:r";
+        string bucket = "db1:tbl1|r";
         string fp = await PublishEntry(cache, "db1", "fp-abort", [bucket]);
 
         var keyspaces = new List<string> { bucket };

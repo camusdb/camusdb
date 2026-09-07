@@ -27,8 +27,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// schema-history keys (which the drop leaves untouched) are reattached under the preserved
 /// <see cref="TableId"/>.</para>
 ///
-/// <para><b>Retained-data invariant:</b> while this record exists, every <c>{dbId}:{TableId}:r/...</c>
-/// row key and <c>{dbId}:{TableId}:i:{indexId}/...</c> index key remains physically present. Deleting
+/// <para><b>Retained-data invariant:</b> while this record exists, every <c>{dbId}:{TableId}|r/...</c>
+/// row key and <c>{dbId}:{TableId}|i:{indexId}/...</c> index key remains physically present. Deleting
 /// this record and purging that data must happen together (record deleted last) so reclamation is
 /// idempotent. Only tables in root databases are orphaned; tables in branch databases keep the
 /// immediate drop path.</para>

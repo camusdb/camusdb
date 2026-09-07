@@ -88,7 +88,7 @@ public sealed class TestKvAsOfDeletedRepro
             TestContext.Progress.WriteLine($"scan-at-snapshot: rows={seen.Count} [{string.Join(",", seen)}]");
 
             // Raw Kahuna probes over the row bucket, latest vs snapshot.
-            string bucket = "testdb:t1:r";
+            string bucket = "testdb:t1|r";
             List<string> rawLatest = [];
             await foreach ((string k, _) in node.Kahuna.LocateAndScanRange(
                 HLCTimestamp.Zero, bucket, null, true, null, true, 100,

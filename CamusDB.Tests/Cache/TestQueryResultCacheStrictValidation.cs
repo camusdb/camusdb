@@ -185,7 +185,7 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
 
         // Range dep pointing to the real orders row keyspace.
         var deps = new QueryDependencySet(
-            rangeDeps: [$"{database.Id}:{ordersSchema.Id}:r"],
+            rangeDeps: [$"{database.Id}:{ordersSchema.Id}|r"],
             pointDeps: [],
             schemaDeps: []);
 
@@ -220,7 +220,7 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
         Assert.That(fetchedRows, Has.Count.EqualTo(1));
 
         TableSchema ordersSchema = database.Schema.Tables["orders"];
-        string rowPointKey = $"{database.Id}:{ordersSchema.Id}:r/{fetchedRows[0].RowId}";
+        string rowPointKey = $"{database.Id}:{ordersSchema.Id}|r/{fetchedRows[0].RowId}";
 
         var staleResult = MakeStrictResult("pt_stale", database.Id, fetchedRows, "test-fp-point-stale");
 
@@ -262,7 +262,7 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
         Assert.That(fetchedRows, Has.Count.EqualTo(1));
 
         TableSchema ordersSchema = database.Schema.Tables["orders"];
-        string rowPointKey = $"{database.Id}:{ordersSchema.Id}:r/{fetchedRows[0].RowId}";
+        string rowPointKey = $"{database.Id}:{ordersSchema.Id}|r/{fetchedRows[0].RowId}";
 
         // Delete the row so its KV key no longer exists in Kahuna.
         KvTransaction txDel = await database.Transactions.BeginAsync();

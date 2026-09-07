@@ -16,7 +16,7 @@ namespace CamusDB.Core.Cache;
 ///
 /// <para><b>Keyspace granularity — table-bucket, not row-key.</b>
 /// Every keyspace string passed to this gate must be a coarse table-bucket identifier
-/// such as <c>"{dbId}:{tableId}:r"</c> or <c>"{dbId}:{tableId}:i:{indexId}"</c>.
+/// such as <c>"{dbId}:{tableId}|r"</c> or <c>"{dbId}:{tableId}|i:{indexId}"</c>.
 /// The gate's two dictionaries (<c>_generations</c> and <c>_inFlight</c>) grow
 /// monotonically and are never reclaimed. Their size is bounded only when the set of
 /// distinct keyspace strings is bounded — which holds at table-bucket granularity (one
@@ -120,7 +120,7 @@ public sealed class CachePublishGate
     /// "Required read-path call ordering" section for the full ordering rationale.</para>
     ///
     /// <para><b>Keyspace granularity:</b> pass table-bucket strings only
-    /// (e.g. <c>"{dbId}:{tableId}:r"</c>). Per-row or per-entry keys will cause unbounded
+    /// (e.g. <c>"{dbId}:{tableId}|r"</c>). Per-row or per-entry keys will cause unbounded
     /// dictionary growth. See the class-level "Keyspace granularity" note.</para>
     ///
     /// <para>Pass the returned token to <see cref="TryPublishUnderGeneration"/> when the query

@@ -649,7 +649,7 @@ public sealed class TestKvTableStoreRetry
         byte[] rowData = [7, 8, 9];
 
         // Unique index entry — this is the key that gets SET on the first (partial) call and must
-        // therefore NOT be resent. Fixed composite value so its KV key reliably contains ":i:".
+        // therefore NOT be resent. Fixed composite value so its KV key reliably contains "|i:".
         CompositeColumnValue indexKey = new([new ColumnValue(ColumnType.Integer64, 42L)]);
         const string IndexId = "idx_unique_test";
 
@@ -660,12 +660,12 @@ public sealed class TestKvTableStoreRetry
             IndexEntries = [new KvTableStore.IndexWrite(IndexId, indexKey, Unique: true)],
         };
 
-        // Fault predicate: the first call faults the NON-index keys (the row key "{tableId}:r/…")
+        // Fault predicate: the first call faults the NON-index keys (the row key "{tableId}|r/…")
         // and SETs the unique index key. The retry must resend only the row key; if it also resent
         // the already-Set unique index key, that key would come back NotSet → DuplicateUniqueKeyValue.
         // (The unique key MUST be the already-Set one — re-Setting a non-unique row is a harmless
         // overwrite, so faulting the index key instead would not exercise this guard.)
-        stub.SetManyPartialFaultPredicate = key => !key.Contains(":i:", StringComparison.Ordinal);
+        stub.SetManyPartialFaultPredicate = key => !key.Contains("|i:", StringComparison.Ordinal);
 
         KvTransaction tx = await BeginTransaction(stub, "rt_partial_w");
         // Should complete without throwing DuplicateUniqueKeyValue.
@@ -759,7 +759,7 @@ public sealed class TestKvTableStoreRetry
 
         // First call SETs the unique index key and faults only the row key; the retry carries just the
         // row key (a smaller batch), which must trigger a fresh operation id.
-        stub.SetManyPartialFaultPredicate = key => !key.Contains(":i:", StringComparison.Ordinal);
+        stub.SetManyPartialFaultPredicate = key => !key.Contains("|i:", StringComparison.Ordinal);
 
         KvTransaction tx = await BeginTransaction(stub, "shrink_set_w");
         await store.WriteRowsBatch(tx, [row]);

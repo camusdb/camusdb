@@ -51,8 +51,8 @@ internal sealed class TestTruncateCheckpointReplay : BaseTest
     private async Task<int> CountKeysAsync(DatabaseDescriptor db, string storageId)
     {
         int count = 0;
-        string bucket = $"{db.Id}:{storageId}:r";
-        string prefix = $"{db.Id}:{storageId}:r/";
+        string bucket = $"{db.Id}:{storageId}|r";
+        string prefix = $"{db.Id}:{storageId}|r/";
 
         await foreach ((string key, ReadOnlyKeyValueEntry _) in db.Kahuna.Kahuna.LocateAndScanRange(
             HLCTimestamp.Zero, bucket, null, true, null, true, 1000,

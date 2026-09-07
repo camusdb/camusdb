@@ -160,7 +160,7 @@ internal sealed class KvConflictMessageBuilder
         if (key.StartsWith(keys.RowKeyPrefix, StringComparison.Ordinal))
             return $"row {key[keys.RowKeyPrefix.Length..]}";
 
-        string indexPrefix = $"{keys.TableKeyPrefix}:i:";
+        string indexPrefix = keys.IndexSpacePrefix;
         if (key.StartsWith(indexPrefix, StringComparison.Ordinal))
         {
             int slash = key.IndexOf('/', indexPrefix.Length);
@@ -183,7 +183,7 @@ internal sealed class KvConflictMessageBuilder
         if (string.Equals(bucketPrefix, keys.RowBucketPrefix, StringComparison.Ordinal))
             return "rows";
 
-        string indexPrefix = $"{keys.TableKeyPrefix}:i:";
+        string indexPrefix = keys.IndexSpacePrefix;
         if (bucketPrefix.StartsWith(indexPrefix, StringComparison.Ordinal))
             return $"index {keys.DisplayNameOf(bucketPrefix[indexPrefix.Length..])}";
 

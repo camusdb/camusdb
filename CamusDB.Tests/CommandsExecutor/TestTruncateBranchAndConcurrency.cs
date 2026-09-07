@@ -125,7 +125,7 @@ internal sealed class TestTruncateBranchAndConcurrency : SharedNodeBaseTest
         Assert.AreEqual(4, (await RunSelect(rootName, executor, "SELECT name FROM robots")).Count,
             "truncating a branch must not touch its ancestor");
 
-        Assert.AreEqual(4, await CountKeysAsync($"{root.Id}:{tableId}:r", $"{root.Id}:{tableId}:r/"),
+        Assert.AreEqual(4, await CountKeysAsync($"{root.Id}:{tableId}|r", $"{root.Id}:{tableId}|r/"),
             "the ancestor's row keys must still be present");
     }
 
@@ -142,7 +142,7 @@ internal sealed class TestTruncateBranchAndConcurrency : SharedNodeBaseTest
         await executor.TruncateTable(new TruncateTableTicket(branchName, "robots"));
 
         // The overlay belongs to the retired generation, so it is retained rather than purged.
-        Assert.AreEqual(1, await CountKeysAsync($"{branch.Id}:{tableId}:r", $"{branch.Id}:{tableId}:r/"),
+        Assert.AreEqual(1, await CountKeysAsync($"{branch.Id}:{tableId}|r", $"{branch.Id}:{tableId}|r/"),
             "the branch overlay is recoverable contents, not garbage");
 
         List<OrphanTableRecord> orphans = await new CatalogsManager(logger).LoadTableOrphansAsync(branch);
@@ -193,10 +193,10 @@ internal sealed class TestTruncateBranchAndConcurrency : SharedNodeBaseTest
         await Task.Delay(50);
         await executor.RunOrphanReclaimForTestsAsync();
 
-        Assert.AreEqual(0, await CountKeysAsync($"{branch.Id}:{tableId}:r", $"{branch.Id}:{tableId}:r/"),
+        Assert.AreEqual(0, await CountKeysAsync($"{branch.Id}:{tableId}|r", $"{branch.Id}:{tableId}|r/"),
             "the branch's retired overlay is reclaimed");
 
-        Assert.AreEqual(5, await CountKeysAsync($"{root.Id}:{tableId}:r", $"{root.Id}:{tableId}:r/"),
+        Assert.AreEqual(5, await CountKeysAsync($"{root.Id}:{tableId}|r", $"{root.Id}:{tableId}|r/"),
             "purge is scoped to the branch database id: no ancestor key may be deleted");
 
         Assert.AreEqual(5, (await RunSelect(rootName, executor, "SELECT name FROM robots")).Count);
@@ -241,7 +241,7 @@ internal sealed class TestTruncateBranchAndConcurrency : SharedNodeBaseTest
         await RunNonQuery(dbName, db, executor,
             "INSERT INTO robots (id, name, year) VALUES (gen_id(), \"after\", 2060)");
 
-        Assert.AreEqual(1, await CountKeysAsync($"{db.Id}:{newStorageId}:r", $"{db.Id}:{newStorageId}:r/"),
+        Assert.AreEqual(1, await CountKeysAsync($"{db.Id}:{newStorageId}|r", $"{db.Id}:{newStorageId}|r/"),
             "the row must land in the new key-space");
 
         List<QueryResultRow> rows = await RunSelect(dbName, executor, "SELECT name FROM robots");

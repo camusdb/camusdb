@@ -1057,8 +1057,8 @@ public sealed class KvTransactionsManager : IDisposable
 
     /// <summary>
     /// Extracts the unique keyspace bucket strings from a set of modified KV keys.
-    /// Row keys (<c>{dbId}:{tableId}:r/{rowId}</c>) map to <c>{dbId}:{tableId}:r</c>;
-    /// index keys (<c>{dbId}:{tableId}:i:{indexId}/...</c>) map to <c>{dbId}:{tableId}:i:{indexId}</c>.
+    /// Row keys (<c>{dbId}:{tableId}|r/{rowId}</c>) map to <c>{dbId}:{tableId}|r</c>;
+    /// index keys (<c>{dbId}:{tableId}|i:{indexId}/...</c>) map to <c>{dbId}:{tableId}|i:{indexId}</c>.
     /// Keys that do not match either pattern (e.g. schema meta keys) are skipped — they are
     /// invalidated by explicit <c>InvalidateByTableId</c> calls from DDL paths instead.
     /// Delegates to <see cref="QueryResultCache.ExtractKeyspaceBucket"/> so the bucket derivation

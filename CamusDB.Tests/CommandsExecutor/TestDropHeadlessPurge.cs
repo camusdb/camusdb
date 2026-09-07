@@ -86,8 +86,8 @@ public sealed class TestDropHeadlessPurge : BaseTest
     {
         (string dbId, string tableId, DatabaseDescriptor db) = await CreateDbWithRows();
 
-        string rowBucket = $"{dbId}:{tableId}:r";
-        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string rowBucket = $"{dbId}:{tableId}|r";
+        string rowPrefix = $"{dbId}:{tableId}|r/";
         Assert.That(await CountKeysUnderAsync(db, rowBucket, rowPrefix), Is.EqualTo(3), "sanity: rows were written");
 
         // A dropper whose descriptor cache does not contain the id → the absent path.
@@ -106,8 +106,8 @@ public sealed class TestDropHeadlessPurge : BaseTest
     {
         (string dbId, string tableId, DatabaseDescriptor db) = await CreateDbWithRows();
 
-        string rowBucket = $"{dbId}:{tableId}:r";
-        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string rowBucket = $"{dbId}:{tableId}|r";
+        string rowPrefix = $"{dbId}:{tableId}|r/";
         Assert.That(await CountKeysUnderAsync(db, rowBucket, rowPrefix), Is.EqualTo(3), "sanity: rows were written");
 
         // Seed the dropper's cache with a lazy that faults on await (simulates a failed LoadDatabase).
@@ -134,8 +134,8 @@ public sealed class TestDropHeadlessPurge : BaseTest
     {
         (string dbId, string tableId, DatabaseDescriptor db) = await CreateDbWithRows();
 
-        string rowBucket = $"{dbId}:{tableId}:r";
-        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string rowBucket = $"{dbId}:{tableId}|r";
+        string rowPrefix = $"{dbId}:{tableId}|r/";
         Assert.That(await CountKeysUnderAsync(db, rowBucket, rowPrefix), Is.EqualTo(3), "sanity: rows were written");
 
         // Simulate an in-flight operation that outlives the drain window by holding a use-reference.

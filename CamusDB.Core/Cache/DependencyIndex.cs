@@ -19,7 +19,7 @@ namespace CamusDB.Core.Cache;
 ///
 /// <para><b>Keyspace bucket convention — must match <c>QueryResultCache.ExtractKeyspaceBucket</c>:</b>
 /// range deps must be table-bucket strings without a trailing slash. The exact formats are:
-/// <c>"{dbId}:{tableId}:r"</c> for row ranges, <c>"{dbId}:{tableId}:i:{indexId}"</c> for index
+/// <c>"{dbId}:{tableId}|r"</c> for row ranges, <c>"{dbId}:{tableId}|i:{indexId}"</c> for index
 /// ranges (note the colon before indexId, matching the real <c>KvTableStore</c> key format).
 /// Point deps are full KV keys. Schema deps are <c>"{databaseId}:{tableId}"</c> composite keys
 /// for easy lookup by databaseId prefix.</para>

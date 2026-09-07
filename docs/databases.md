@@ -30,7 +30,7 @@ The name is a display-only label. It is stored in the registry (`_system/dbregis
 Consequences:
 
 - The id directory (`{DataDirectory}/{id}/`) is never renamed or moved by any CamusDB operation.
-- In cluster mode, all four key-space prefixes (`{id}/`, `{id}:`, `{tableId}:r/`, `{tableId}:i:{indexId}/`) are stable across renames.
+- In cluster mode, all four key-space prefixes (`{id}/`, `{id}:`, `{id}:{tableId}|r/`, `{id}:{tableId}|i:{indexId}/`) are stable across renames.
 - Two databases on the same cluster node have distinct id prefixes and never share key space, even if their tables have the same name.
 
 ## Rename

@@ -262,7 +262,7 @@ internal static class SchemaMetaStore
 
         // Always write the catalog entry even when the index list is empty. The catalog is
         // keyed by tableId, so its presence alone tells DROP DATABASE to purge the row bucket
-        // {dbId}:{tableId}:r for tables that were dropped before the database was dropped,
+        // {dbId}:{tableId}|r for tables that were dropped before the database was dropped,
         // regardless of whether the table had any indexes.
         byte[] catalogBytes = MetaJsonSerializer.Serialize(allIndexIds.ToArray(), MetaJsonContext.Default.StringArray);
         await MetaKeyWriter.WriteMetaKey(kahuna, tx, catalogKey, catalogBytes).ConfigureAwait(false);

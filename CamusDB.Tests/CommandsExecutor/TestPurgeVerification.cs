@@ -93,7 +93,7 @@ internal sealed class TestPurgeVerification : SharedNodeBaseTest
 
         DatabaseDropper dropper = new(new DatabaseDescriptors(), logger, Options);
         // Fail deletes of the table's row keys → the row bucket never drains → purge is incomplete.
-        IKahuna faulty = new FailDeleteKahuna(SharedKahuna, $"{dbId}:{tableId}:r/");
+        IKahuna faulty = new FailDeleteKahuna(SharedKahuna, $"{dbId}:{tableId}|r/");
 
         bool completed = await dropper.PurgeTableKeyspaceAsync(faulty, dbId, tableId);
 

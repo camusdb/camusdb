@@ -738,10 +738,10 @@ rather than rebuilding from row zero. Two ordering/accounting details make this 
 
 ### 7.4 Positional row encoding & why renames are free (`RowEncoder`)
 
-Rows are stored as `byte[]` values keyed `{tableId}:r/{rowId}`. The wire format is
+Rows are stored as `byte[]` values keyed `{dbId}:{tableId}|r/{rowId}`. The wire format is
 **positional**: a 4-byte schema-version header, the rowId, then one slot per column **in
 schema order** — no column names in the bytes. Index entries are keyed
-`{tableId}:i:{indexId}/...`.
+`{dbId}:{tableId}|i:{indexId}/...`.
 
 Therefore:
 - **Renaming a column/table/index** changes only metadata. No row or index bytes move.

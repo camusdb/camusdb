@@ -19,7 +19,7 @@ Hash routing remains the default. Key-range routing is enabled per deployment wi
 | | Hash routing (default) | Key-range routing |
 |---|---|---|
 | Placement of a table's rows | One partition, fixed at startup | One or more ranges, each on a partition |
-| Placement of a secondary index | One partition | Its own ranges, independent of the table's |
+| Placement of a secondary index | The same partition as the table's rows | Its own ranges, independent of the table's; the first range is seeded on the rows' partition |
 | Range locks | Cover the whole space | Clipped per range — disjoint scans do not conflict |
 | Scans | One partition answers | Every intersecting range answers; results merged in key order |
 | Splitting | Not applicable | A range can be divided, on demand or on a size threshold |

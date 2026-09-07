@@ -368,7 +368,7 @@ internal sealed class KvBranchReader
     // Yields every index entry within optional encoded bounds from this store's namespace at the
     // given snapshot.  txId is the live transaction id for level-0 reads (HLCTimestamp.Zero for
     // ancestor snapshots).  fromEncoded/toEncoded are the raw encoded key strings (no prefix) so
-    // this store builds its own start/end keys in its own keyspace ({dbId}:{tableId}:i:{indexId}/…).
+    // this store builds its own start/end keys in its own keyspace ({dbId}:{tableId}|i:{indexId}/…).
     internal async IAsyncEnumerable<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)> ScanIndexRawAsync(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,

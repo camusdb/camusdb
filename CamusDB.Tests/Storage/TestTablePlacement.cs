@@ -36,7 +36,7 @@ public sealed class TestTablePlacement : BaseTest
     [Test]
     public void RemoteLeaderFraction_AllLocal_IsZero()
     {
-        TablePlacement placement = new("5:1:r", isKeyRange: false, [Span(true), Span(true)], 0);
+        TablePlacement placement = new("5:1|r", isKeyRange: false, [Span(true), Span(true)], 0);
 
         Assert.AreEqual(0.0, placement.RemoteLeaderFraction);
         Assert.IsTrue(placement.AllLeadersLocal);
@@ -45,7 +45,7 @@ public sealed class TestTablePlacement : BaseTest
     [Test]
     public void RemoteLeaderFraction_HalfRemote_IsHalf()
     {
-        TablePlacement placement = new("5:1:r", isKeyRange: true, [Span(true), Span(false)], 0);
+        TablePlacement placement = new("5:1|r", isKeyRange: true, [Span(true), Span(false)], 0);
 
         Assert.AreEqual(0.5, placement.RemoteLeaderFraction);
         Assert.IsFalse(placement.AllLeadersLocal);
@@ -56,7 +56,7 @@ public sealed class TestTablePlacement : BaseTest
     {
         // A span whose leader hint is unknown must be charged as remote — the cost model
         // may over-estimate shipping but never under-estimate it.
-        TablePlacement placement = new("5:1:r", isKeyRange: true,
+        TablePlacement placement = new("5:1|r", isKeyRange: true,
             [Span(leaderIsLocal: false, leader: null)], 0);
 
         Assert.AreEqual(1.0, placement.RemoteLeaderFraction);
@@ -69,7 +69,7 @@ public sealed class TestTablePlacement : BaseTest
 
         Assert.IsFalse(node.IsClusterMode, "BaseTest boots a standalone node");
 
-        TablePlacement placement = node.GetPlacement("5:1:r");
+        TablePlacement placement = node.GetPlacement("5:1|r");
 
         Assert.AreEqual(1, placement.Spans.Count, "Standalone placement is one unbounded span");
         Assert.IsTrue(placement.Spans[0].LeaderIsLocal);
@@ -80,11 +80,11 @@ public sealed class TestTablePlacement : BaseTest
         Assert.IsFalse(placement.IsKeyRange);
 
         // Standalone placements never go stale, so the same instance is served again.
-        Assert.AreSame(placement, node.GetPlacement("5:1:r"));
+        Assert.AreSame(placement, node.GetPlacement("5:1|r"));
 
         // Invalidation drops the entry; the rebuilt one is equivalent but a fresh instance.
-        node.InvalidatePlacement("5:1:r");
-        TablePlacement rebuilt = node.GetPlacement("5:1:r");
+        node.InvalidatePlacement("5:1|r");
+        TablePlacement rebuilt = node.GetPlacement("5:1|r");
         Assert.AreNotSame(placement, rebuilt);
         Assert.AreEqual(1, rebuilt.Spans.Count);
         Assert.IsTrue(rebuilt.Spans[0].LeaderIsLocal);

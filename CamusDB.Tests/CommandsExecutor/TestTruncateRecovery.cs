@@ -103,8 +103,8 @@ internal sealed class TestTruncateRecovery : SharedNodeBaseTest
         (string dbName, DatabaseDescriptor db, CommandExecutor executor, string tableId) =
             await SetupRobots(6, options);
 
-        string retiredRowBucket = $"{db.Id}:{tableId}:r";
-        string retiredRowPrefix = $"{db.Id}:{tableId}:r/";
+        string retiredRowBucket = $"{db.Id}:{tableId}|r";
+        string retiredRowPrefix = $"{db.Id}:{tableId}|r/";
 
         await executor.TruncateTable(new TruncateTableTicket(dbName, "robots"));
 
@@ -147,7 +147,7 @@ internal sealed class TestTruncateRecovery : SharedNodeBaseTest
 
         await executor.RunOrphanReclaimForTestsAsync();
 
-        Assert.AreEqual(4, await CountKeysAsync($"{db.Id}:{tableId}:r", $"{db.Id}:{tableId}:r/"),
+        Assert.AreEqual(4, await CountKeysAsync($"{db.Id}:{tableId}|r", $"{db.Id}:{tableId}|r/"),
             "retention has not elapsed, so the retired rows must still be recoverable");
 
         Assert.AreEqual(1, (await new CatalogsManager(logger).LoadTableOrphansAsync(db)).Count);
@@ -241,7 +241,7 @@ internal sealed class TestTruncateRecovery : SharedNodeBaseTest
         Assert.IsEmpty(await new CatalogsManager(logger).LoadTableOrphansAsync(db),
             "a record whose target is live on that very storage is stale, so it is removed");
 
-        Assert.AreEqual(4, await CountKeysAsync($"{db.Id}:{tableId}:r", $"{db.Id}:{tableId}:r/"),
+        Assert.AreEqual(4, await CountKeysAsync($"{db.Id}:{tableId}|r", $"{db.Id}:{tableId}|r/"),
             "the recovered relation's rows must survive: the record was stale, the data was not");
 
         Assert.AreEqual(4, (await RunSelect(dbName, executor, "SELECT name FROM robots_before")).Count);

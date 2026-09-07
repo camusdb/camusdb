@@ -191,8 +191,8 @@ internal sealed class TestTruncateTable : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, CatalogsManager catalogs, string tableId) =
             await SetupTableWithRows(40);
 
-        string rowBucket = $"{database.Id}:{tableId}:r";
-        string rowPrefix = $"{database.Id}:{tableId}:r/";
+        string rowBucket = $"{database.Id}:{tableId}|r";
+        string rowPrefix = $"{database.Id}:{tableId}|r/";
 
         Assert.AreEqual(40, await CountKeysAsync(rowBucket, rowPrefix));
 
@@ -310,8 +310,8 @@ internal sealed class TestTruncateTable : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, _, string tableId) =
             await SetupTableWithRows(60);
 
-        string rowBucket = $"{database.Id}:{tableId}:r";
-        string rowPrefix = $"{database.Id}:{tableId}:r/";
+        string rowBucket = $"{database.Id}:{tableId}|r";
+        string rowPrefix = $"{database.Id}:{tableId}|r/";
 
         await executor.TruncateTable(new TruncateTableTicket(dbname, "robots"));
 

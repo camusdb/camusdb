@@ -37,7 +37,7 @@ what you read is the order routing uses.
 | Column | Type | Meaning |
 |--------|------|---------|
 | `relation` | string | `users` for a table, `users@by_email` for an index. |
-| `key_space` | string | The Kahuna bucket prefix, e.g. `3f2a…:7:r` or `3f2a…:7:i:2`. |
+| `key_space` | string | The Kahuna bucket prefix, e.g. `3f2a…:7|r` or `3f2a…:7|i:2`. |
 | `routing` | string | `key_range` or `hash` — **as this node routes it**. |
 | `span` | int64 | 1-based position within this key space. Not a stable range identity. |
 | `start_key` | string | Decoded lower bound. NULL = unbounded. |
@@ -78,7 +78,7 @@ More values than key columns, or a value that will not convert to its key column
 error — both would otherwise locate some plausible-looking wrong span.
 
 **On a table** it is not computable, and this is where CamusDB genuinely differs from CockroachDB. A
-CamusDB row key is `{dbId}:{tableId}:r/{rowIdHex24}` — ordered by the row id the engine minted for
+CamusDB row key is `{dbId}:{tableId}|r/{rowIdHex24}` — ordered by the row id the engine minted for
 the row, **not** by its primary key. So the range holding the row with primary key `1500` cannot be
 derived from `1500`. The statement therefore encodes the values against the primary index, point-reads
 that entry to obtain the row id, and locates the span holding that row's key.

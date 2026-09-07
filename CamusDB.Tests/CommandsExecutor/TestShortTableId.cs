@@ -188,11 +188,11 @@ internal sealed class TestShortTableId : BaseTest
         CatalogsManager catalogs = new(logger);
         string tableId = catalogs.GetTableSchema(db, "shrink").Id!;
 
-        // The row bucket prefix is "{dbId}:{tableId}:r".
+        // The row bucket prefix is "{dbId}:{tableId}|r".
         // With a short base-62 tableId (e.g. "1") this is much shorter than with a 24-hex ObjectId.
-        // A 24-hex ObjectId prefix would be "{dbId}:{24-hex-chars}:r" = at least 28 more chars.
-        string shortPrefix = $"{db.Id}:{tableId}:r";
-        string objectIdEquivalent = $"{db.Id}:{ObjectIdGenerator.Generate()}:r";
+        // A 24-hex ObjectId prefix would be "{dbId}:{24-hex-chars}|r" = at least 28 more chars.
+        string shortPrefix = $"{db.Id}:{tableId}|r";
+        string objectIdEquivalent = $"{db.Id}:{ObjectIdGenerator.Generate()}|r";
 
         Assert.Less(shortPrefix.Length, objectIdEquivalent.Length,
             $"Short-id prefix '{shortPrefix}' must be shorter than ObjectId prefix '{objectIdEquivalent}'");

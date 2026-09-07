@@ -565,7 +565,7 @@ public sealed class TestQueryResultCacheCommitGate
     public async Task GenerationFence_BlocksPublishAfterWrite()
     {
         using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
-        string keyspace = "db:table1:r";
+        string keyspace = "db:table1|r";
 
         // Snapshot generations before query starts
         CacheGenerationToken token = cache.PublishGate.SnapshotGenerations([keyspace]);
@@ -609,8 +609,8 @@ public sealed class TestQueryResultCacheCommitGate
     // ExtractKeyspaceBucket — real KV key formats
     //
     // Real formats (KvTableStore):
-    //   Row:   {dbId}:{tableId}:r/{rowIdHex24}
-    //   Index: {dbId}:{tableId}:i:{indexId}/{encodedKey}
+    //   Row:   {dbId}:{tableId}|r/{rowIdHex24}
+    //   Index: {dbId}:{tableId}|i:{indexId}/{encodedKey}
     //
     // The index format has a colon (not a slash) between :i and the indexId.
     // This is tested directly via InvalidateByModifiedKeys, which calls the
@@ -633,12 +633,12 @@ public sealed class TestQueryResultCacheCommitGate
         await cache.TryPublishAsync(MakeResult("db1", "c", fp), token);
         Assert.That(cache.EntryCount, Is.EqualTo(1));
 
-        // A row key in the real format: {dbId}:{tableId}:r/{rowIdHex24}
+        // A row key in the real format: {dbId}:{tableId}|r/{rowIdHex24}
         cache.InvalidateByModifiedKeys([
-            ("db1:tbl1:r/aabbccddeeff001122334455", KeyValueDurability.Persistent),
+            ("db1:tbl1|r/aabbccddeeff001122334455", KeyValueDurability.Persistent),
         ]);
 
-        // The entry carries Empty deps so the dep index has no range entry for db1:tbl1:r —
+        // The entry carries Empty deps so the dep index has no range entry for db1:tbl1|r —
         // the entry must survive (this tests that the path does not crash or corrupt state).
         Assert.That(cache.EntryCount, Is.EqualTo(1),
             "Entry with empty deps must not be invalidated by a row key (no range dep registered)");
@@ -655,9 +655,9 @@ public sealed class TestQueryResultCacheCommitGate
         // constructed dep. Since QueryDependencySet is public we can build a non-empty dep set.
         using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
-        // Real row key: "mydb:orders:r/000000000000000000000001"
-        // Expected bucket: "mydb:orders:r"
-        string rowKey = "mydb:orders:r/000000000000000000000001";
+        // Real row key: "mydb:orders|r/000000000000000000000001"
+        // Expected bucket: "mydb:orders|r"
+        string rowKey = "mydb:orders|r/000000000000000000000001";
 
         // The cache exposes no private method directly; we verify through the dep-index path
         // by exercising that a dep-registered entry gets invalidated when the matching key
@@ -675,12 +675,12 @@ public sealed class TestQueryResultCacheCommitGate
     [Test]
     public void KeyspaceBucket_IndexKey_ExtractedCorrectly()
     {
-        // Real index key format: "{dbId}:{tableId}:i:{indexId}/{encodedKey}"
-        // Example: "mydb:orders:i:idx-name/0031003200330034"
-        // Expected bucket: "mydb:orders:i:idx-name"
+        // Real index key format: "{dbId}:{tableId}|i:{indexId}/{encodedKey}"
+        // Example: "mydb:orders|i:idx-name/0031003200330034"
+        // Expected bucket: "mydb:orders|i:idx-name"
         using var cache = new QueryResultCache(CacheOptions, sweepIntervalMs: -1);
 
-        string indexKey = "mydb:orders:i:idx-name/0031003200330034";
+        string indexKey = "mydb:orders|i:idx-name/0031003200330034";
 
         // Must not throw or corrupt state; the dep-matching assertion is covered by the
         // invalidation integration tests that drive eviction through a committed write.
@@ -713,16 +713,16 @@ public sealed class TestQueryResultCacheCommitGate
     {
         // Direct assertions on the mapping — the DoesNotThrow tests above only prove no crash.
         // Row key → row bucket (slash is not part of the bucket).
-        Assert.That(QueryResultCache.ExtractKeyspaceBucket("mydb:orders:r/0031003200330034"),
-            Is.EqualTo("mydb:orders:r"));
+        Assert.That(QueryResultCache.ExtractKeyspaceBucket("mydb:orders|r/0031003200330034"),
+            Is.EqualTo("mydb:orders|r"));
 
         // Index key → index bucket including the indexId, up to (not including) the first slash.
-        Assert.That(QueryResultCache.ExtractKeyspaceBucket("mydb:orders:i:idx-name/0031003200330034"),
-            Is.EqualTo("mydb:orders:i:idx-name"));
+        Assert.That(QueryResultCache.ExtractKeyspaceBucket("mydb:orders|i:idx-name/0031003200330034"),
+            Is.EqualTo("mydb:orders|i:idx-name"));
 
         // Non-unique index key (encodedKey immediately followed by rowId, no extra slash).
-        Assert.That(QueryResultCache.ExtractKeyspaceBucket("mydb:orders:i:idx2/abc0031"),
-            Is.EqualTo("mydb:orders:i:idx2"));
+        Assert.That(QueryResultCache.ExtractKeyspaceBucket("mydb:orders|i:idx2/abc0031"),
+            Is.EqualTo("mydb:orders|i:idx2"));
 
         // Old (never-written) slash-after-:i format must NOT be mis-parsed into a bucket.
         Assert.That(QueryResultCache.ExtractKeyspaceBucket("db:tbl:i/idx/key"),

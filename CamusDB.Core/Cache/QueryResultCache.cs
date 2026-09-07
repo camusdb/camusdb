@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Storage.Kv;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
@@ -350,8 +351,8 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
             foreach ((string key, _) in modifiedKeys)
             {
                 // Derive the keyspace bucket prefix from the full KV key.
-                // Key format: "{dbId}:{tableId}:r/{rowId}" or "{dbId}:{tableId}:i:{indexId}/..."
-                // Bucket prefix: everything up to and including ":r" or ":i:{indexId}"
+                // Key format: "{dbId}:{tableId}|r/{rowId}" or "{dbId}:{tableId}|i:{indexId}/..."
+                // Bucket prefix: everything up to and including "|r" or "|i:{indexId}"
                 string keyspace = ExtractKeyspaceBucket(key);
                 if (keyspace.Length > 0)
                 {
@@ -572,11 +573,16 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     ///
     /// <para>Real KV key formats (from <c>KvTableStore</c>):</para>
     /// <list type="bullet">
-    ///   <item><description>Row:   <c>{dbId}:{tableId}:r/{rowIdHex24}</c>
-    ///     → bucket <c>{dbId}:{tableId}:r</c></description></item>
-    ///   <item><description>Index: <c>{dbId}:{tableId}:i:{indexId}/{encodedKey}</c>
-    ///     → bucket <c>{dbId}:{tableId}:i:{indexId}</c></description></item>
+    ///   <item><description>Row:   <c>{dbId}:{tableId}|r/{rowIdHex24}</c>
+    ///     → bucket <c>{dbId}:{tableId}|r</c></description></item>
+    ///   <item><description>Index: <c>{dbId}:{tableId}|i:{indexId}/{encodedKey}</c>
+    ///     → bucket <c>{dbId}:{tableId}|i:{indexId}</c></description></item>
     /// </list>
+    ///
+    /// <para>The <c>'|'</c> is the anchor: it is Kahuna's placement-group separator, it appears in
+    /// no other CamusDB key family (meta keys, statistics keys and the system registry carry none),
+    /// and the database and table ids before it never contain one. The character after it names the
+    /// segment kind, and the bucket ends before the first <c>'/'</c> that follows.</para>
     ///
     /// <para>Returns an empty string if the key does not match either pattern.</para>
     ///
@@ -585,33 +591,26 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// </summary>
     internal static string ExtractKeyspaceBucket(string key)
     {
-        // First colon separates dbId from tableId.
-        int first = key.IndexOf(':');
-        if (first < 0) return "";
+        int group = key.IndexOf(KvKeyBuilder.GroupSeparator);
+        if (group < 0 || group + 1 >= key.Length)
+            return "";
 
-        // Second colon separates tableId from the segment type (:r or :i).
-        int second = key.IndexOf(':', first + 1);
-        if (second < 0) return "";
-
-        // The character after the second colon is the segment type.
-        if (second + 2 >= key.Length) return "";
-
-        char segment = key[second + 1];
+        char segment = key[group + 1];
 
         if (segment == 'r')
         {
-            // Row key: "{dbId}:{tableId}:r/{rowIdHex24}"
-            // Bucket is everything up to and including ":r" (the slash is NOT part of the bucket).
-            int slashPos = key.IndexOf('/', second + 2);
-            return slashPos >= 0 ? key[..slashPos] : key[..(second + 2)];
+            // Row key: "{dbId}:{tableId}|r/{rowIdHex24}"
+            // Bucket is everything up to and including "|r" (the slash is NOT part of the bucket).
+            int slashPos = key.IndexOf('/', group + 2);
+            return slashPos >= 0 ? key[..slashPos] : key[..(group + 2)];
         }
 
         if (segment == 'i')
         {
-            // Index key: "{dbId}:{tableId}:i:{indexId}/{encodedKey}"
-            // There is a colon (not a slash) immediately after ":i", then the indexId, then "/".
-            // Bucket = "{dbId}:{tableId}:i:{indexId}" — up to but not including the first "/".
-            int colonAfterI = second + 2;   // points at ':' before indexId
+            // Index key: "{dbId}:{tableId}|i:{indexId}/{encodedKey}"
+            // There is a colon immediately after "|i", then the indexId, then "/".
+            // Bucket = "{dbId}:{tableId}|i:{indexId}" — up to but not including the first "/".
+            int colonAfterI = group + 2;   // points at ':' before indexId
             if (colonAfterI >= key.Length || key[colonAfterI] != ':') return "";
 
             int slashAfterIndexId = key.IndexOf('/', colonAfterI + 1);

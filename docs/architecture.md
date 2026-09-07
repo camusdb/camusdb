@@ -98,11 +98,18 @@ can use key-range routing with an order-safe encoding so that range scans stay o
 | `_system/dbregistry/…`               | Database name → id registry                                     |
 | `{dbId}/meta/…`                      | Per-database schema: version, table definitions, coordinator jobs |
 | `{dbId}:stats:{tableId}`             | Row-count statistics for one table                              |
-| `{dbId}:{tableId}:r/{rowId}`         | Row data                                                        |
-| `{dbId}:{tableId}:i:{indexId}/{key}` | Secondary index entries                                         |
+| `{dbId}:{tableId}|r/{rowId}`         | Row data                                                        |
+| `{dbId}:{tableId}|i:{indexId}/{key}` | Secondary index entries                                         |
 
 `dbId` is a compact opaque identifier allocated at CREATE DATABASE time and never reused
 (rename-safe: the key prefix is stable across renames). `tableId` follows the same scheme.
+
+The `|` after `{dbId}:{tableId}` is Kahuna's placement-group separator. Under hash routing Kahuna
+places a key space by the prefix before its first `|`, so a table's rows and every one of its
+indexes land on the same partition. A transaction that reads an index entry and writes the row it
+points to then stays on one partition, which is the condition for Kahuna's one-phase commit path.
+The layout is on disk; it changed with storage revision `v2`, and data crosses revisions only by
+logical dump and reimport (see [logical-dump-and-reimport.md](logical-dump-and-reimport.md)).
 
 ### Transaction layer
 

@@ -180,7 +180,7 @@ internal sealed class TableOpener
         // path via SchemaReplicator.InvalidateAppliedTableDescriptor (which also evicts on
         // AddIndex/DropIndex/SetElementState(Index), so index DDL rebuilds rangedIndexIds too). A
         // recreated table with the same name gets a NEW ObjectId, so RegisterKeyRangeAsync is called with a
-        // brand-new key space ({newId}:r) — completely disjoint from the old one ({oldId}:r). The old
+        // brand-new key space ({dbId}:{newId}|r) — completely disjoint from the old one ({dbId}:{oldId}|r). The old
         // space's descriptors are left in the replicated range map; they are never written to and pose
         // no correctness risk (bounded leak). Reclaiming them is possible — Kahuna exposes
         // RemoveKeyRangeAsync — but only where the key space is genuinely being destroyed, because

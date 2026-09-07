@@ -356,7 +356,7 @@ internal sealed class KvRowAccessor
                 if (decoded.Kind == BranchKvKind.Tombstone || !decoded.HasPayload)
                     continue;
 
-                // Key format: "{dbId}:{tableId}:r/{hex24}" — the hex suffix starts after the prefix.
+                // Key format: "{dbId}:{tableId}|r/{hex24}" — the hex suffix starts after the prefix.
                 // Every key the scan returns already lies within the bounds; they are enforced once,
                 // by the store, and deliberately not re-checked here.
                 ObjectIdValue rowId = ObjectId.ToValue(key.AsSpan(prefixLen));

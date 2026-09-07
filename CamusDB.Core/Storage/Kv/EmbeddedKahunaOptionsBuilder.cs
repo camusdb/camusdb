@@ -19,6 +19,25 @@ namespace CamusDB.Core.Storage.Kv;
 public static class EmbeddedKahunaOptionsBuilder
 {
     /// <summary>
+    /// The on-disk revision every CamusDB baseline pins for both the key-value store and the Raft
+    /// WAL. Kahuna opens <c>{StoragePath}/{revision}</c> and <c>{WalPath}/{revision}</c>, so a new
+    /// revision starts from an empty store and an empty log while the previous revision's
+    /// directories stay on disk untouched.
+    ///
+    /// <para><c>v2</c> is the grouped key layout (<c>{dbId}:{tableId}|r/…</c> and
+    /// <c>{dbId}:{tableId}|i:{indexId}/…</c>, see <see cref="KvKeyBuilder"/>). <c>v1</c> data
+    /// used <c>:r</c> / <c>:i:</c> and is not readable through the current key builder; the WAL is
+    /// bumped with it because a replay of <c>v1</c> log entries into a <c>v2</c> store would plant
+    /// unreachable keys. Data crosses revisions by logical dump and reimport only — see
+    /// <c>docs/logical-dump-and-reimport.md</c>. A <c>kahuna.storage_revision</c> config value
+    /// overrides this for the store, and is not a supported way to read <c>v1</c> data.</para>
+    /// </summary>
+    public const string CurrentStorageRevision = "v2";
+
+    /// <summary>The revision the grouped key layout replaced; named so startup can warn when its directory is still present.</summary>
+    public const string PreviousStorageRevision = "v1";
+
+    /// <summary>
     /// Baseline cluster options. Uses RocksDB for both KV and WAL — the same default backend as the
     /// standalone baseline (<see cref="StandaloneRocksDbBaseline"/>), so both modes are RocksDB unless
     /// a <c>kahuna:</c> config block overrides the backend. Keeps the cluster-specific election timeouts
@@ -47,10 +66,10 @@ public static class EmbeddedKahunaOptionsBuilder
             InitialPartitions = config.InitialPartitions,
             Storage = "rocksdb",
             StoragePath = Path.Combine(dataDir, "kv"),
-            StorageRevision = "v1",
+            StorageRevision = CurrentStorageRevision,
             WalStorage = "rocksdb",
             WalPath = Path.Combine(dataDir, "wal"),
-            WalRevision = "v1",
+            WalRevision = CurrentStorageRevision,
             RaftWalSingleFsyncCommit = true,
             StartElectionTimeout = 2000,
             EndElectionTimeout = 4000,
@@ -84,10 +103,10 @@ public static class EmbeddedKahunaOptionsBuilder
             NodeName = "camusdb-embedded",
             Storage = "sqlite",
             StoragePath = Path.Combine(dataPath, "kv"),
-            StorageRevision = "v1",
+            StorageRevision = CurrentStorageRevision,
             WalStorage = "sqlite",
             WalPath = Path.Combine(dataPath, "wal"),
-            WalRevision = "v1",
+            WalRevision = CurrentStorageRevision,
             InitialPartitions = 1,
             RaftWalSingleFsyncCommit = true,
             // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
@@ -127,10 +146,10 @@ public static class EmbeddedKahunaOptionsBuilder
             NodeName = "camusdb-embedded",
             Storage = "rocksdb",
             StoragePath = Path.Combine(dataPath, "kv"),
-            StorageRevision = "v1",
+            StorageRevision = CurrentStorageRevision,
             WalStorage = "rocksdb",
             WalPath = Path.Combine(dataPath, "wal"),
-            WalRevision = "v1",
+            WalRevision = CurrentStorageRevision,
             InitialPartitions = 1,
             RaftWalSingleFsyncCommit = true,
             // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone

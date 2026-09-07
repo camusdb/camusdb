@@ -1030,7 +1030,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         IKahuna kahuna = branch.Kahuna.Kahuna;
         string branchDbId = branch.Id;
 
-        string rowBucket = $"{branchDbId}:{tableId}:r";
+        string rowBucket = $"{branchDbId}:{tableId}|r";
         string rowKeyPrefix = rowBucket + "/";
 
         // Sanity: the branch overlay has exactly 1 physical row entry before the drop.
@@ -1597,8 +1597,8 @@ internal sealed class TestBranchAwareStorage : BaseTest
         string tableId = db.Schema.Tables.Values.First().Id!;
         IKahuna kahuna = TestNode!.Kahuna;
 
-        string rowBucket = $"{dbId}:{tableId}:r";
-        string rowPrefix = $"{dbId}:{tableId}:r/";
+        string rowBucket = $"{dbId}:{tableId}|r";
+        string rowPrefix = $"{dbId}:{tableId}|r/";
         string metaBucket = $"{dbId}/meta";
         string metaPrefix = $"{dbId}/";
 
@@ -1653,8 +1653,8 @@ internal sealed class TestBranchAwareStorage : BaseTest
             string dbId = sharedRegistry!.Get(dbName)!.Id;
             string tableId = db.Schema.Tables.Values.First().Id!;
             IKahuna kahuna = TestNode!.Kahuna;
-            string rowBucket = $"{dbId}:{tableId}:r";
-            string rowPrefix = $"{dbId}:{tableId}:r/";
+            string rowBucket = $"{dbId}:{tableId}|r";
+            string rowPrefix = $"{dbId}:{tableId}|r/";
 
             Assert.AreEqual(5, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "sanity: five rows present");
 
@@ -1706,7 +1706,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
             await executor.DropDatabase(new DropDatabaseTicket(dbName, ifExists: false, force: true));
 
             // Still purges completely — the confirming rounds must not change the outcome.
-            Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{dbId}:{tableId}:r", $"{dbId}:{tableId}:r/"),
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"),
                 "row overlay must still be fully purged");
             Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{dbId}/meta", $"{dbId}/"),
                 "meta namespace must still be fully purged");

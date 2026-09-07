@@ -96,6 +96,13 @@ WAL backends, transaction timeouts and admission control, worker/IO-thread count
 heartbeat timings, the cache and eviction knobs described below, RocksDB shared memory, and backup /
 PITR settings. A rejected key's error message lists every accepted one.
 
+`storage_revision` names the directory Kahuna opens under `{data_dir}/kv`. The CamusDB baseline
+pins it, together with the WAL revision, to the revision of the current key layout (`v2`). Do not
+set it to an older revision to reach older data: the key layout of that data is not readable by the
+current version, and every table would appear empty. A server that finds an older revision's
+directory logs a warning at start and leaves it untouched; move the data with a logical dump and
+reimport, see [logical-dump-and-reimport.md](logical-dump-and-reimport.md).
+
 Entry eviction is governed by two mechanisms: **size-based** caps (`max_entries_per_actor`,
 `max_bytes_per_actor`) that bound how much an actor holds in memory, and a **time-based**
 collection sweep (`collection_interval_ms`) that evicts up to `cache_entries_to_remove` entries

@@ -47,8 +47,8 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
     /// <see cref="DatabaseDropper.PurgeClusterKeyspaceAsync"/>.
     ///
     /// The scan bucket (prefix argument to LocateAndScanRange) must be the "bucket prefix"
-    /// — the part before the last '/' of actual stored keys — e.g. "{tableId}:r" not
-    /// "{tableId}:r/", consistent with how KvTableStore.ScanRows uses rowBucketPrefix.
+    /// — the part before the last '/' of actual stored keys — e.g. "{tableId}|r" not
+    /// "{tableId}|r/", consistent with how KvTableStore.ScanRows uses rowBucketPrefix.
     /// </summary>
     private async Task<List<string>> ScanKeysAsync(IKahuna kahuna, string bucketPrefix, string keyPrefix)
     {
@@ -71,8 +71,8 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
     /// After DROP DATABASE in cluster mode:
     ///   - {id}/ meta keys must be gone
     ///   - {id}: stats keys must be gone
-    ///   - {tableId}:r/ row keys must be gone
-    ///   - {tableId}:i:{indexId}/ index keys must be gone
+    ///   - {tableId}|r/ row keys must be gone
+    ///   - {tableId}|i:{indexId}/ index keys must be gone
     ///   - the registry entry must be removed so the name can be reused with a fresh id
     /// </summary>
     [Test]
@@ -126,8 +126,8 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
         List<string> metaBefore = await ScanKeysAsync(sharedKahuna, $"{firstId}/meta", $"{firstId}/");
         Assert.IsNotEmpty(metaBefore, $"Expected {firstId}/ meta keys before drop");
 
-        // After Task 4 row keys are "{dbId}:{tableId}:r/{rowId}".
-        string rowBucket = $"{firstId}:{tableId}:r";
+        // Row keys are "{dbId}:{tableId}|r/{rowId}".
+        string rowBucket = $"{firstId}:{tableId}|r";
         List<string> rowsBefore = await ScanKeysAsync(sharedKahuna, rowBucket, $"{rowBucket}/");
         Assert.IsNotEmpty(rowsBefore, $"Expected {rowBucket}/ row keys before drop");
 
@@ -153,7 +153,7 @@ internal sealed class TestDatabaseDropperCluster : SharedNodeBaseTest
         // ---- assert index keys gone (if an index id was found) ----
         if (indexId is not null)
         {
-            string indexBucket = $"{firstId}:{tableId}:i:{indexId}";
+            string indexBucket = $"{firstId}:{tableId}|i:{indexId}";
             List<string> indexAfter = await ScanKeysAsync(sharedKahuna, indexBucket, $"{indexBucket}/");
             Assert.IsEmpty(indexAfter, $"Expected all {indexBucket}/ index keys to be purged after drop; found: {string.Join(", ", indexAfter)}");
         }

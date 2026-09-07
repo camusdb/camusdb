@@ -78,12 +78,13 @@ keeps the revision current at a timestamp readable, defeating revision reclamati
 ## 2. Keyspace invariants
 
 All logical data for a database is under its id. These prefixes are load-bearing — do not
-casually add or remove slashes (they double as Kahuna routing buckets):
+casually add or remove slashes or move the `|` (the last `/` ends a Kahuna key space, and the first
+`|` ends the placement group that hash routing places):
 
 ```text
-row                  {dbId}:{tableId}:r/{rowIdHex24}
-unique index         {dbId}:{tableId}:i:{indexId}/{encodedKey}
-non-unique index     {dbId}:{tableId}:i:{indexId}/{encodedKey}{rowIdHex24}
+row                  {dbId}:{tableId}|r/{rowIdHex24}
+unique index         {dbId}:{tableId}|i:{indexId}/{encodedKey}
+non-unique index     {dbId}:{tableId}|i:{indexId}/{encodedKey}{rowIdHex24}
 statistics           {dbId}:stats:{tableId}
 
 schema meta bucket   {dbId}/meta

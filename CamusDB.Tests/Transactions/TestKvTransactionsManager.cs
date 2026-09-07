@@ -510,7 +510,7 @@ public sealed class TestKvTransactionsManager
         await node.WaitForLeaderAsync("anchor-a/warmup", CancellationToken.None);
         await using EmbeddedKahuna __ = node;
 
-        const string anchor = "testdb:1:r/00000000000000000000dead";
+        const string anchor = "testdb:1|r/00000000000000000000dead";
         // MustRetry (with the anchor) for the whole first finalize loop, then Committed on resume.
         AnchorCommitFaultKahuna faultKahuna = new(node.Kahuna, mustRetryCount: PersistentMustRetryInjections, anchor);
         KvTransactionsManager mgr = new(faultKahuna, NoFinalizeRetries);
@@ -575,7 +575,7 @@ public sealed class TestKvTransactionsManager
 
         using QueryResultCache cache = new(CamusDBOptions.Default, sweepIntervalMs: -1);
 
-        const string keyspace = "testdb:1:r";
+        const string keyspace = "testdb:1|r";
         TransactionWorkingSet serverSet = new()
         {
             ModifiedKeys =
