@@ -10,16 +10,8 @@
         <InvariantGlobalization>true</InvariantGlobalization>
     </PropertyGroup>
 
-    <!-- External ADO.NET client (not the in-repo CamusDB.Grpc.Client). It exposes parameterized
-         commands and per-transaction isolation/mode/locking knobs over the multiplexed gRPC
-         BatchExecute transport (Protocol=grpc).
-
-         Temporarily a project reference to the local camusdb-dotnet checkout instead of the NuGet
-         package: the learned-routing knobs (RoutingMode/RoutingNodes) exist only there until a
-         driver version carrying them is published. Restore the PackageReference on that release:
-         <PackageReference Include="CamusDB.Client" Version="0.12.0" /> -->
     <ItemGroup>
-        <ProjectReference Include="..\..\camusdb-dotnet\CamusDB.Client\CamusDB.Client.csproj" />
+        <ProjectReference Include="CamusDB.Client" Version="0.12.0" />
         <PackageReference Include="CommandLineParser" Version="2.9.1" />
     </ItemGroup>
 
