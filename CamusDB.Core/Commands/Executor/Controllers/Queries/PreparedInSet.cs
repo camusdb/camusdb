@@ -25,11 +25,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// NULL semantics: NULL is never a member of any IN list (SQL three-valued logic).
 /// NULL values in the source list are dropped when the set is built; a NULL lhs returns false.
 ///
-/// Cross-type semantics: <c>x IN (a, b, c)</c> is defined as <c>x = a OR x = b OR x = c</c>, so a
-/// cross-type element (e.g. <c>5 IN (1, 'foo')</c>) is a non-match for that element rather than a
-/// hard error. This matches the AST reference path (<see cref="SubqueryValueListAst.ContainsValue"/>),
-/// which skips cross-type candidates too, so prepared and reference paths stay byte-identical. IN
-/// lists are not type-checked at bind time, so mixed-type lists are reachable and must not throw.
+/// Cross-type semantics: <c>x IN (a, b, c)</c> is defined as <c>x = a OR x = b OR x = c</c>, so each
+/// element uses the equality <c>=</c> uses (<see cref="MixedNumericComparison.EqualsForMembership"/>):
+/// a mixed numeric pair widens to double, so <c>1 IN (1.0)</c> is true, and any other cross-type
+/// element (e.g. <c>5 IN (1, 'foo')</c>) is a non-match rather than a hard error. This matches the
+/// AST reference path (<see cref="SubqueryValueListAst.ContainsValue"/>), so prepared and reference
+/// paths stay identical — and it matches the index IN-list seek, which rewrites list items into the
+/// column's type. IN lists are not type-checked at bind time, so mixed-type lists are reachable and
+/// must not throw.
 /// </summary>
 public sealed class PreparedInSet
 {
@@ -55,7 +58,30 @@ public sealed class PreparedInSet
         }
 
         if (_values.Length > HashThreshold)
-            _set = new HashSet<ColumnValue>(_values, SqlColumnValueComparer.Instance);
+            _set = new HashSet<ColumnValue>(_values, MembershipComparer.Instance);
+    }
+
+    /// <summary>
+    /// Hash comparer with the membership equality above. Numeric values hash by their widened
+    /// double regardless of type, so an Integer64 probe lands in the bucket of an equal Float64
+    /// member; every other type hashes as <see cref="SqlColumnValueComparer"/> does.
+    /// </summary>
+    private sealed class MembershipComparer : IEqualityComparer<ColumnValue>
+    {
+        public static readonly MembershipComparer Instance = new();
+
+        public bool Equals(ColumnValue? x, ColumnValue? y)
+        {
+            if (x is null || y is null)
+                return x is null && y is null;
+
+            return MixedNumericComparison.EqualsForMembership(x, y);
+        }
+
+        public int GetHashCode(ColumnValue obj) =>
+            MixedNumericComparison.IsNumeric(obj.Type)
+                ? MixedNumericComparison.ToDouble(obj).GetHashCode()
+                : SqlColumnValueComparer.Instance.GetHashCode(obj);
     }
 
     /// <summary>
@@ -72,15 +98,8 @@ public sealed class PreparedInSet
 
         foreach (ColumnValue v in _values)
         {
-            try
-            {
-                if (lhs.CompareTo(v) == 0)
-                    return true;
-            }
-            catch (ArgumentException)
-            {
-                // Cross-type comparison: no match, continue.
-            }
+            if (MixedNumericComparison.EqualsForMembership(lhs, v))
+                return true;
         }
         return false;
     }

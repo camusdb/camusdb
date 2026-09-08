@@ -32,7 +32,7 @@ public sealed class TestPlanCacheDependencyMatching
         => new(tableId, schemaVersion, indexGen, analyzeGen);
 
     private static PlanCacheEntry Entry(params PlanCacheDep[] deps)
-        => new(deps, SingleTable: new SingleTableDecision("year_idx"), JoinAliasOrder: null);
+        => new(deps, SingleTable: new SingleTableDecision("year_idx", ScanDecisionKind.PredicateScan), JoinAliasOrder: null);
 
     private static PlanCache Cache() => new(maxEntries: 8);
 

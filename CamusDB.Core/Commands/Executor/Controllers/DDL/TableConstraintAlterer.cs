@@ -326,6 +326,8 @@ internal sealed class TableConstraintAlterer
                 CamusDBErrorCodes.InvalidInput,
                 $"Column '{columnName}' does not exist on table '{table.Name}'");
 
+        PrimaryKeyNotNullRule.RejectDropNotNullOnPrimaryKey(table, columnName);
+
         if (isClusterMode)
         {
             await catalogs.ReplicateSetColumnNotNullAsync(

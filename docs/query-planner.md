@@ -345,6 +345,30 @@ yields two comparisons that `IndexScanSelector` fuses into one range scan. `Buil
 reconstructs an AND-tree from the *unabsorbed* comparisons;
 `IndexScanBoundAnalysis.IsComparisonAbsorbedByScan` decides which are made redundant by the scan bounds.
 
+**Constants are rewritten into the column's type before any selector sees them**
+(`CoerceConstantsForColumns`). The row evaluator compares a mixed Integer64/Float64 pair by widening both
+to double (`MixedNumericComparison`, the one shared rule), but an index key is typed: `KeyEncoder` encodes
+the two types differently and `ColumnValue.CompareTo` rejects the pair. An unconverted `1.0` on an INT
+column would therefore build a lookup key that addresses no entry, and `a < 1.5` would hand the scan a
+bound it cannot compare. `NumericBoundNormalizer` moves each literal into the column's domain, exactly:
+
+| Column | Literal | Rewrite |
+|--------|---------|---------|
+| Integer64 | integral Float64 (`1.0`) | same operator, `1` |
+| Integer64 | fractional, `=` / `!=` (`a = 1.5`) | no integer equals it: the comparison stops driving index selection and stays in the residual filter, never rounded |
+| Integer64 | fractional, `<` / `<=` (`a < 1.5`) | `a <= 1` |
+| Integer64 | fractional, `>` / `>=` (`a > 1.5`) | `a >= 2` |
+| Integer64 | NaN, ±Infinity, outside the `long` range | residual only |
+| Float64 | Integer64 (`f = 1`) | `f = 1.0` (the evaluator widens the same way, even beyond 2^53) |
+| Float32 | any numeric | converted only if the value survives a `float` round trip; otherwise residual |
+| any | `IN (…)` items | each item converted; an item with no exact equivalent (`1.5` on INT) is dropped, because only equality applies to a list item |
+
+The same pass parses a bare string literal on a Uuid/Id column into that type. Every planner entry that
+feeds a table's predicates to a selector applies it — the single-table planner, the join-leaf builder,
+the join-leaf costing, and the cardinality estimator — and `IndexScanSelector` drops any comparison whose
+constant still mismatches its column, so a caller that skips the pass loses the index shortcut, never the
+right rows.
+
 ### 4c. IndexScanSelector
 
 **File:** `Controllers/Queries/IndexScanSelector.cs`. `TrySelectScan` scores every index and picks the
@@ -378,6 +402,36 @@ fell back to a full table scan.)
 leading columns equal the ORDER BY columns (ascending only) and returns an unbounded range scan;
 `ScanSatisfiesOrderBy` confirms so the planner omits `SortNode`. Descending order is not satisfiable by
 the ascending index encoding and forces a real `SortNode`.
+
+**Unique indexes are not complete row sets.** A unique index carries **no entry** for a row with a NULL in
+*any* of its key columns (NULLs are distinct, so such rows are exempt from the constraint and never
+written). A scan over a *prefix* of `UNIQUE (a, b)` therefore returns only the rows whose `b` is non-NULL,
+yet the row `(a = 1, b = NULL)` satisfies `WHERE a = 1`. No residual filter can repair that: the row never
+enters the pipeline. The rule, implemented once in `IndexScanSelector.UniqueIndexHoldsEveryQualifyingRow`,
+is that **a unique index may serve a query only if every key column the query does not constrain with an
+`=`, `<`, `<=`, `>` or `>=` comparison is declared NOT NULL**. A constrained column needs no proof — a NULL
+there fails the predicate anyway — so a full-key lookup is always allowed and `a = 2 AND b > 0` keeps its
+prefix-plus-range scan even when `b` is nullable. `!=` does not count as a constraint. When the rule fails
+the index is simply not a candidate; the planner falls through to another index or the table scan. Five
+sites apply it: the shared predicate matcher (`TryMatchPredicateIndex`, which serves heuristic selection,
+cost enumeration, plan-cache replay and join leaves), the ORDER BY scan, the streaming DISTINCT/GROUP BY
+index (`TryFindStreamingDistinctIndex`), the correlated `EXISTS` prefix seek, and the merge join's
+free-ordering index scan. A non-unique index stores every row (NULL keys carry the row-id suffix) and is
+never rejected by this rule. A `PRIMARY KEY` is stored as an ordinary unique index, so every primary-key
+column is made NOT NULL at `CREATE TABLE` whether or not it was written, and `DROP NOT NULL` on a
+primary-key column is refused; otherwise a composite key would lose its prefix scans and seeks under
+this rule. Tables created before that behavior keep their declared nullability, and a composite key
+whose columns are still nullable is treated like any other incomplete unique index.
+
+**NULL keys and range bounds.** A comparison with a NULL operand is UNKNOWN, never true, so a
+`WHERE b < 10` must not return a row whose `b` is NULL. A non-unique index *does* store that row, with
+NULL ordered first, and a scan with an open lower side starts at those entries while the planner has
+already dropped the absorbed conjunct from the residual filter. The index accessor therefore skips any
+key with a NULL in a bound-covered column (`KvIndexAccessor.HasNullInBoundColumns`): a bound on a column
+comes from a comparison on it, and no comparison admits NULL. The evaluator side of the same rule lives
+in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every predicate walker
+(WHERE, its synchronous twin, HAVING) shares, so UNKNOWN propagates through `NOT`, `AND`, `OR` and
+`CASE` identically on the table-scan and index paths.
 
 ### 4d. Join planner — `JoinQueryPlanner`
 
@@ -606,7 +660,7 @@ are missing, so the optimizer is strictly additive.
 | **Cost-based access-path selection** | `IndexScanSelector.EnumerateViableSteps` + `QueryPlanner.PickCheapestIndexOrFullScan` | Flag `cost_based_access_path_enabled`: enumerate *every* viable index for the predicate plus the full-scan baseline, cost each, pick the cheapest — subsuming the rule-scored "first viable index" pick and the veto above. |
 | **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Falls back to the heuristic for outer joins or >12 tables. |
 | **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
-| **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. |
+| **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, and the index holds every row (any non-unique index; a unique index only when *all* of its key columns are NOT NULL), scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. The same condition gates streaming `GROUP BY`. |
 | **Value-list `IN` → index seeks** | `PredicateAnalyzer` + `QueryPlanner` + `IndexInListScanNode` | Turn `x IN (v1, v2, …)` on an indexed column into one index seek per value (point lookup for a unique index, equality range for a non-unique one), unioned and row-id-deduped, instead of a full scan + residual membership filter. Cost-gated, and cost-compared against a competing range scan so a selective unique `IN` wins. Falls back to a residual filter when the column is unindexed or the list is too large. |
 | **UPDATE/DELETE locate partial decode** | `RowUpdater` / `RowDeleter` + `RequiredColumnAnalyzer.ComputeForLocate` | The row-locating scan for `UPDATE`/`DELETE` decodes only the columns the `WHERE` (and SET expressions) reference, not the whole row. The write phase still does one full decode per matched row to re-encode it and maintain indexes. |
 
@@ -806,6 +860,17 @@ When enabled, the cache stores the *optimization decision* — which index or jo
 keyed by `QueryShapeId`, a SHA-256 fingerprint of the query structure with literal values stripped out.
 On a hit, the planner re-binds the current query's predicates into the cached structural choice and skips
 cost enumeration.
+
+**What a single-table entry holds.** The index name plus how it was used (`ScanDecisionKind`): a
+*predicate scan* (lookup or bounded range — the bounds are re-derived from the current query's literals
+on every hit, so no literal is ever stored), an *ORDER BY index scan* (unbounded), a *full index scan*
+(the streaming `DISTINCT`/`GROUP BY` override or a user-forced index), or a table scan. The kind matters
+because a predicate-free decision has nothing to re-bind: replaying it through the predicate matcher
+would find no comparisons, report a failed replay, and re-select on every hit. Those kinds are rebuilt
+directly after re-checking that the index is still readable and, for a unique index, still holds every
+row. A hit whose decision cannot be rebuilt falls back to a full replan and replaces the entry; the cache
+counts these in `ReplayFailures` beside `Hits` and `Misses`, because a hit is counted at lookup time and
+`Hits` alone cannot distinguish a cache that serves plans from one that only pays lookup plus replan.
 
 **Plan-stability tradeoff.** Because the cache key ignores literal values, the access-path decision is
 shared across all queries of the same shape regardless of the filter value:

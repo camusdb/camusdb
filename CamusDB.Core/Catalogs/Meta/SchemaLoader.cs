@@ -123,19 +123,23 @@ internal static class SchemaLoader
     }
 
     /// <summary>
-    /// Reads a complete, mutually consistent copy of the database's persisted schema — version,
-    /// tables, views and system blob — in one transaction, without touching the descriptor.
-    /// <see cref="LoadMetaAsync"/> installs the result on a fresh descriptor;
-    /// <see cref="SchemaFreshnessReconciler"/> installs it on a live one, under the schema lock,
-    /// only when the persisted version is ahead of memory.
+    /// Reads the database's persisted schema — version, tables, views and system blob — without
+    /// touching the descriptor. <see cref="LoadMetaAsync"/> installs the result on a fresh
+    /// descriptor; <see cref="SchemaFreshnessReconciler"/> installs it on a live one, under the
+    /// schema lock, only when the persisted version is ahead of memory.
+    /// <para>The reads use the zero-identity transaction (latest committed value per key), not a
+    /// server session. A session buys nothing here — this path writes nothing and reads no
+    /// uncommitted state of its own — and it costs correctness: a transactional read snapshots
+    /// every key it touches, and if any of those keys is committed again before the meta-bucket
+    /// scan reaches it (a concurrent DDL bumping the version key it just read), Kahuna answers the
+    /// page with <c>Aborted</c> and the whole load fails. The per-key read-committed view is the
+    /// same either way; the version fence in the caller handles a load that straddles a schema
+    /// change.</para>
     /// </summary>
     internal static async Task<SchemaSnapshot> LoadSnapshotAsync(DatabaseDescriptor database)
     {
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
+        KvTransaction tx = KvTransaction.CreateReadOnly();
 
-        try
         {
             IKahuna kahuna = database.Kahuna.Kahuna;
             SchemaSnapshot snapshot = new();
@@ -173,10 +177,6 @@ internal static class SchemaLoader
                 snapshot.System = MetaJsonSerializer.DeserializeCompat(systemEntry.Value, MetaJsonContext.Default.SystemSchema);
 
             return snapshot;
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
 

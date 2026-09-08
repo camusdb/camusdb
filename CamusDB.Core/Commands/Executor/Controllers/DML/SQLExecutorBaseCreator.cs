@@ -81,6 +81,81 @@ internal abstract class SQLExecutorBaseCreator
     /// between the two paths, keeping a single shared implementation body.
     /// </summary>
     /// <summary>
+    /// Evaluates one comparison operator with SQL three-valued logic: a NULL operand makes the
+    /// result UNKNOWN (a Null-typed value), never true or false. Without this guard the operator
+    /// would fall through to <see cref="CompareValues"/>, whose NULL rule is an <em>ordering</em>
+    /// rule (NULL sorts first), so <c>NULL &lt; 10</c> and <c>NULL != 10</c> evaluated to true and a
+    /// <c>WHERE b &lt; 10</c> returned the NULL rows. The WHERE filter treats UNKNOWN as "row
+    /// excluded"; <c>NOT</c>, <c>AND</c>, <c>OR</c> and <c>CASE</c> propagate it. CHECK constraints
+    /// (<see cref="CheckEvaluator"/>) apply the same rule on their own path.
+    /// </summary>
+    internal static ColumnValue EvalComparison(NodeType op, ColumnValue left, ColumnValue right)
+    {
+        if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        int cmp = CompareValues(left, right);
+
+        return op switch
+        {
+            NodeType.ExprEquals => ColumnValue.FromBool(cmp == 0),
+            NodeType.ExprNotEquals => ColumnValue.FromBool(cmp != 0),
+            NodeType.ExprLessThan => ColumnValue.FromBool(cmp < 0),
+            NodeType.ExprGreaterThan => ColumnValue.FromBool(cmp > 0),
+            NodeType.ExprLessEqualsThan => ColumnValue.FromBool(cmp <= 0),
+            NodeType.ExprGreaterEqualsThan => ColumnValue.FromBool(cmp >= 0),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Not a comparison operator: {op}"),
+        };
+    }
+
+    /// <summary>
+    /// Three-valued AND: false if either side is false, UNKNOWN if either side is UNKNOWN, else true.
+    /// Shared with <see cref="Queries.QueryFilterer"/> so the async predicate walker and this
+    /// evaluator never disagree on a NULL operand. A non-boolean, non-NULL operand is a user error.
+    /// </summary>
+    internal static ColumnValue EvalAnd(ColumnValue left, ColumnValue right)
+    {
+        RequireBooleanOrNull(left, right, "AND");
+
+        if (left.Type == ColumnType.Bool && !left.BoolValue)
+            return ColumnValue.False;
+
+        if (right.Type == ColumnType.Bool && !right.BoolValue)
+            return ColumnValue.False;
+
+        if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        return ColumnValue.True;
+    }
+
+    /// <summary>
+    /// Three-valued OR: true if either side is true, UNKNOWN if either side is UNKNOWN, else false.
+    /// See <see cref="EvalAnd"/>.
+    /// </summary>
+    internal static ColumnValue EvalOr(ColumnValue left, ColumnValue right)
+    {
+        RequireBooleanOrNull(left, right, "OR");
+
+        if (left.Type == ColumnType.Bool && left.BoolValue)
+            return ColumnValue.True;
+
+        if (right.Type == ColumnType.Bool && right.BoolValue)
+            return ColumnValue.True;
+
+        if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        return ColumnValue.False;
+    }
+
+    private static void RequireBooleanOrNull(ColumnValue left, ColumnValue right, string op)
+    {
+        if (left.Type is not (ColumnType.Bool or ColumnType.Null) || right.Type is not (ColumnType.Bool or ColumnType.Null))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator {op} for argument types: {left.Type}, {right.Type}");
+    }
+
+    /// <summary>
     /// Orders two values for a filter/predicate comparison, reconciling a bare string literal against
     /// a <see cref="ColumnType.Uuid"/> or <see cref="ColumnType.Id"/> operand by parsing/normalizing
     /// the string to that type. This lets <c>WHERE uuid_col = '…'</c> / <c>WHERE id = '…'</c> (and
@@ -91,13 +166,10 @@ internal abstract class SQLExecutorBaseCreator
     {
         // Mixed integer/float operands (e.g. `price > 0` where price is Float64 and 0 is an integer
         // literal) compare numerically by widening both to double; ColumnValue.CompareTo rejects the
-        // cross-type comparison.
-        if (left.Type != right.Type && IsNumeric(left.Type) && IsNumeric(right.Type))
-        {
-            double l = left.Type == ColumnType.Integer64 ? left.LongValue : left.FloatValue;
-            double r = right.Type == ColumnType.Integer64 ? right.LongValue : right.FloatValue;
-            return l.CompareTo(r);
-        }
+        // cross-type comparison. One shared rule, so IN membership, CHECK constraints and the
+        // planner's index bounds all agree with this comparison.
+        if (MixedNumericComparison.TryCompare(left, right, out int numericCmp))
+            return numericCmp;
 
         // Coercion is best-effort. If a String operand is not a valid Uuid/Id it can equal no such
         // value, so return a deterministic non-zero ordering rather than throwing — and never call
@@ -122,8 +194,7 @@ internal abstract class SQLExecutorBaseCreator
         return left.CompareTo(right);
     }
 
-    private static bool IsNumeric(ColumnType type) =>
-        type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
+    private static bool IsNumeric(ColumnType type) => MixedNumericComparison.IsNumeric(type);
 
     /// <summary>
     /// Attempts the byte-native equality fast path for an <c>=</c>/<c>&lt;&gt;</c> node of the shape
@@ -404,7 +475,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) == 0);
+                    return EvalComparison(NodeType.ExprEquals, leftValue, rightValue);
                 }
 
             case NodeType.ExprNotEquals:
@@ -415,7 +486,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) != 0);
+                    return EvalComparison(NodeType.ExprNotEquals, leftValue, rightValue);
                 }
 
             case NodeType.ExprLessThan:
@@ -423,7 +494,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) < 0);
+                    return EvalComparison(NodeType.ExprLessThan, leftValue, rightValue);
                 }
 
             case NodeType.ExprGreaterThan:
@@ -431,7 +502,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) > 0);
+                    return EvalComparison(NodeType.ExprGreaterThan, leftValue, rightValue);
                 }
 
             case NodeType.ExprLessEqualsThan:
@@ -439,7 +510,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) <= 0);
+                    return EvalComparison(NodeType.ExprLessEqualsThan, leftValue, rightValue);
                 }
 
             case NodeType.ExprGreaterEqualsThan:
@@ -447,7 +518,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    return ColumnValue.FromBool(CompareValues(leftValue, rightValue) >= 0);
+                    return EvalComparison(NodeType.ExprGreaterEqualsThan, leftValue, rightValue);
                 }
 
             case NodeType.ExprBetween:
@@ -468,10 +539,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return ColumnValue.FromBool(leftValue.BoolValue || rightValue.BoolValue);
+                    return EvalOr(leftValue, rightValue);
                 }
 
             case NodeType.ExprAnd:
@@ -479,10 +547,7 @@ internal abstract class SQLExecutorBaseCreator
                     ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
                     ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
-                    if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return ColumnValue.FromBool(leftValue.BoolValue && rightValue.BoolValue);
+                    return EvalAnd(leftValue, rightValue);
                 }
 
             case NodeType.ExprNot:

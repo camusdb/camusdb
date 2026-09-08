@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
@@ -49,22 +50,19 @@ internal static class QueryHavingEvaluator
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
 
             case NodeType.ExprEquals:
-                return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) == 0);
-
             case NodeType.ExprNotEquals:
-                return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) != 0);
-
             case NodeType.ExprLessThan:
-                return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) < 0);
-
             case NodeType.ExprGreaterThan:
-                return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) > 0);
-
             case NodeType.ExprLessEqualsThan:
-                return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) <= 0);
-
             case NodeType.ExprGreaterEqualsThan:
-                return Compare(row, ticket, parameters, expression, static (left, right) => left.CompareTo(right) >= 0);
+            {
+                // Same comparison rule as WHERE: a NULL aggregate (MAX over an empty or all-NULL
+                // group) makes the result UNKNOWN, and a mixed Integer64/Float64 pair (AVG against an
+                // integer literal) widens instead of throwing on the cross-type compare.
+                ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
+                ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
+                return SQLExecutorBaseCreator.EvalComparison(expression.nodeType, leftValue, rightValue);
+            }
 
             case NodeType.ExprBetween:
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
@@ -73,30 +71,14 @@ internal static class QueryHavingEvaluator
             {
                 ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
                 ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
-
-                if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
-                {
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"No matching signature for operator OR for argument types: {leftValue.Type}, {rightValue.Type}");
-                }
-
-                return ColumnValue.FromBool(leftValue.BoolValue || rightValue.BoolValue);
+                return SQLExecutorBaseCreator.EvalOr(leftValue, rightValue);
             }
 
             case NodeType.ExprAnd:
             {
                 ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
                 ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
-
-                if (leftValue.Type != ColumnType.Bool || rightValue.Type != ColumnType.Bool)
-                {
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"No matching signature for operator AND for argument types: {leftValue.Type}, {rightValue.Type}");
-                }
-
-                return ColumnValue.FromBool(leftValue.BoolValue && rightValue.BoolValue);
+                return SQLExecutorBaseCreator.EvalAnd(leftValue, rightValue);
             }
 
             case NodeType.ExprNot:
@@ -128,18 +110,6 @@ internal static class QueryHavingEvaluator
             default:
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
         }
-    }
-
-    private static ColumnValue Compare(
-        IReadOnlyDictionary<string, ColumnValue> row,
-        QueryTicket ticket,
-        Dictionary<string, ColumnValue>? parameters,
-        NodeAst expression,
-        Func<ColumnValue, ColumnValue, bool> compare)
-    {
-        ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
-        ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
-        return ColumnValue.FromBool(compare(leftValue, rightValue));
     }
 
     private static ColumnValue LookupRowValue(IReadOnlyDictionary<string, ColumnValue> row, string key)

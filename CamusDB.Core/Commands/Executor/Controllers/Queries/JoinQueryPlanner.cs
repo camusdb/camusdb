@@ -506,6 +506,13 @@ internal sealed class JoinQueryPlanner
             if (index.Columns.Length < bareKeyColumns.Count)
                 continue;
 
+            // The merge join walks the chosen index from start to end as the join input. A unique
+            // index omits every row with a NULL in any key column — a NULL join key never matches,
+            // but a NULL in a trailing non-key column drops a row that would have joined — so it
+            // may serve only when every column is NOT NULL. A non-unique index holds every row.
+            if (index.Type == IndexType.Unique && !IndexScanSelector.AllColumnsNotNull(table, index))
+                continue;
+
             bool match = true;
 
             for (int i = 0; i < bareKeyColumns.Count; i++)
@@ -807,9 +814,14 @@ internal sealed class JoinQueryPlanner
         StatisticsManager stats)
     {
         PredicateAnalysis raw = PredicateAnalyzer.Analyze(scanFilter, null);
-        
+
         // Strip "alias." prefix so bare index column names match (e.g. "o.status" → "status").
         PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, boundSource.Alias);
+
+        // Same constant coercion the single-table planner applies: a literal typed differently
+        // from the indexed column (1.0 on INT, '…' on Uuid) would build a key that addresses no
+        // entry, and the join leaf would silently lose rows the table scan returns.
+        analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, boundSource.Table);
 
         if (analysis.IndexableComparisons.Count == 0 && analysis.InListComparisons.Count == 0)
             return null;

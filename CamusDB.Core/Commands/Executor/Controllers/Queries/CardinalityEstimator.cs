@@ -49,6 +49,9 @@ internal static class CardinalityEstimator
         // unresolved; TryGetBound returns null and range operators fall back to FallbackSelectivity.
         // Acceptable for cost estimation: over-estimated selectivity is conservative (safe).
         PredicateAnalysis analysis = PredicateAnalyzer.Analyze(predicate, parameters: null);
+        // Estimate over constants in the column's own type, so a Float64 literal on an Integer64
+        // column is compared against the histogram in the histogram's domain.
+        analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, table);
 
         if (analysis.IndexableComparisons.Count == 0 && analysis.InListComparisons.Count == 0)
             return FallbackSelectivity;

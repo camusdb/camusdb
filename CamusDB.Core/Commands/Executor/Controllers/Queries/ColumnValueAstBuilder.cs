@@ -37,7 +37,7 @@ internal static class ColumnValueAstBuilder
                 extendedThree: null,
                 extendedFour: null,
                 extendedFive: null,
-                yytext: value.FloatValue.ToString()),
+                yytext: value.FloatValue.ToString("R", System.Globalization.CultureInfo.InvariantCulture)),
             ColumnType.Bool => value.BoolValue ? NodeAst.True : NodeAst.False,
             ColumnType.String => new NodeAst(
                 NodeType.String,

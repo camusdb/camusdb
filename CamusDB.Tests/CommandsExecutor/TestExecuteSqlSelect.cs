@@ -2816,13 +2816,16 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
             tableName: "blocked_robots",
+            // robots_id is a plain nullable column: a NULL in the subquery's result is the point of
+            // these cases, and a primary-key column is always NOT NULL.
             columns: new ColumnInfo[]
             {
+                new("id", ColumnType.Id),
                 new("robots_id", ColumnType.Id),
             },
             constraints: new ConstraintInfo[]
             {
-                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
             },
             ifNotExists: false));
 
@@ -2832,8 +2835,8 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             "blocked_robots",
             values: new()
             {
-                new() { { "robots_id", new(ColumnType.Id, objectsId[0]) } },
-                new() { { "robots_id", new(ColumnType.Id, objectsId[1]) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "robots_id", new(ColumnType.Id, objectsId[0]) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "robots_id", new(ColumnType.Id, objectsId[1]) } },
             }));
 
         ExecuteSQLTicket ticket = new(
@@ -2861,13 +2864,16 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
             tableName: "blocked_robots",
+            // robots_id is a plain nullable column: a NULL in the subquery's result is the point of
+            // these cases, and a primary-key column is always NOT NULL.
             columns: new ColumnInfo[]
             {
+                new("id", ColumnType.Id),
                 new("robots_id", ColumnType.Id),
             },
             constraints: new ConstraintInfo[]
             {
-                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
             },
             ifNotExists: false));
 
@@ -2895,13 +2901,16 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
             tableName: "blocked_robots",
+            // robots_id is a plain nullable column: a NULL in the subquery's result is the point of
+            // these cases, and a primary-key column is always NOT NULL.
             columns: new ColumnInfo[]
             {
+                new("id", ColumnType.Id),
                 new("robots_id", ColumnType.Id),
             },
             constraints: new ConstraintInfo[]
             {
-                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
             },
             ifNotExists: false));
 
@@ -2911,8 +2920,8 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             "blocked_robots",
             values: new()
             {
-                new() { { "robots_id", new(ColumnType.Id, objectsId[0]) } },
-                new() { { "robots_id", new(ColumnType.Null, 0) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "robots_id", new(ColumnType.Id, objectsId[0]) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "robots_id", new(ColumnType.Null, 0) } },
             }));
 
         ExecuteSQLTicket ticket = new(
@@ -2939,13 +2948,16 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
         await executor.CreateTable(new CreateTableTicket(
             databaseName: dbname,
             tableName: "blocked_robots",
+            // robots_id is a plain nullable column: a NULL in the subquery's result is the point of
+            // these cases, and a primary-key column is always NOT NULL.
             columns: new ColumnInfo[]
             {
+                new("id", ColumnType.Id),
                 new("robots_id", ColumnType.Id),
             },
             constraints: new ConstraintInfo[]
             {
-                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("robots_id", OrderType.Ascending) }),
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
             },
             ifNotExists: false));
 
@@ -2955,8 +2967,8 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             "blocked_robots",
             values: new()
             {
-                new() { { "robots_id", new(ColumnType.Id, objectsId[0]) } },
-                new() { { "robots_id", new(ColumnType.Null, 0) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "robots_id", new(ColumnType.Id, objectsId[0]) } },
+                new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "robots_id", new(ColumnType.Null, 0) } },
             }));
 
         ExecuteSQLTicket ticket = new(

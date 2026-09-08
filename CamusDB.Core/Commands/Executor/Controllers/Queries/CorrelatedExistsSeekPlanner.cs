@@ -74,6 +74,14 @@ internal static class CorrelatedExistsSeekPlanner
 
             bool unique = index.Type == IndexType.Unique;
 
+            // A unique index has no entry for a row with a NULL in any key column. A seek over a
+            // prefix of it would then miss an inner row that satisfies every bound conjunct but
+            // carries a NULL in an unbound trailing column, and EXISTS would answer false for an
+            // outer row that has a match. Such an index is usable only when the schema proves the
+            // unbound columns NOT NULL; a full-key binding needs no proof.
+            if (unique && !IndexScanSelector.UniqueIndexHoldsEveryQualifyingRow(innerTable, index, byColumn: null, bindings.Count))
+                continue;
+
             // Longer pinned prefix first (a tighter seek); on a tie prefer a unique index, which
             // cannot hold more than one row per full key.
             if (bindings.Count < bestPrefixLength)

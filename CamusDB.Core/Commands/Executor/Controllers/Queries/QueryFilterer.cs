@@ -10,6 +10,7 @@ using System.Runtime.CompilerServices;
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -146,22 +147,23 @@ internal sealed class QueryFilterer
 
             case NodeType.ExprAnd:
             {
+                // Three-valued, exactly as the async twin: false short-circuits, UNKNOWN propagates.
                 ColumnValue leftValue = EvaluatePredicate(expr.leftAst!, row, ticket);
 
-                if (!ToPredicateResult(leftValue))
+                if (leftValue.Type == ColumnType.Bool && !leftValue.BoolValue)
                     return ColumnValue.False;
 
-                return EvaluatePredicate(expr.rightAst!, row, ticket);
+                return SQLExecutorBaseCreator.EvalAnd(leftValue, EvaluatePredicate(expr.rightAst!, row, ticket));
             }
 
             case NodeType.ExprOr:
             {
                 ColumnValue leftValue = EvaluatePredicate(expr.leftAst!, row, ticket);
 
-                if (ToPredicateResult(leftValue))
+                if (leftValue.Type == ColumnType.Bool && leftValue.BoolValue)
                     return ColumnValue.True;
 
-                return EvaluatePredicate(expr.rightAst!, row, ticket);
+                return SQLExecutorBaseCreator.EvalOr(leftValue, EvaluatePredicate(expr.rightAst!, row, ticket));
             }
 
             case NodeType.ExprNot:
@@ -219,10 +221,11 @@ internal sealed class QueryFilterer
     {
         ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
 
-        if (!ToPredicateResult(leftValue))
+        if (leftValue.Type == ColumnType.Bool && !leftValue.BoolValue)
             return ColumnValue.False;
 
-        return await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
+        ColumnValue rightValue = await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
+        return SQLExecutorBaseCreator.EvalAnd(leftValue, rightValue);
     }
 
     private async ValueTask<ColumnValue> EvaluateHavingOrAsync(
@@ -232,10 +235,11 @@ internal sealed class QueryFilterer
     {
         ColumnValue leftValue = QueryHavingEvaluator.Evaluate(expr.leftAst!, row, ticket, ticket.Parameters);
 
-        if (ToPredicateResult(leftValue))
+        if (leftValue.Type == ColumnType.Bool && leftValue.BoolValue)
             return ColumnValue.True;
 
-        return await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
+        ColumnValue rightValue = await EvaluateHavingAsync(expr.rightAst!, row, ticket).ConfigureAwait(false);
+        return SQLExecutorBaseCreator.EvalOr(leftValue, rightValue);
     }
 
     private async ValueTask<ColumnValue> EvaluatePredicateAsync(
@@ -280,22 +284,29 @@ internal sealed class QueryFilterer
 
             case NodeType.ExprAnd:
             {
+                // Three-valued, matching SQLExecutorBaseCreator.EvalAnd: a false side decides without visiting the
+                // other (short-circuit keeps a correlated EXISTS on the right unexecuted), otherwise an
+                // UNKNOWN side makes the conjunction UNKNOWN so NOT (NULL AND TRUE) stays UNKNOWN.
                 ColumnValue leftValue = await EvaluatePredicateAsync(expr.leftAst!, row, ticket, database).ConfigureAwait(false);
 
-                if (!ToPredicateResult(leftValue))
+                if (leftValue.Type == ColumnType.Bool && !leftValue.BoolValue)
                     return ColumnValue.False;
 
-                return await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
+                ColumnValue rightValue = await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
+
+                return SQLExecutorBaseCreator.EvalAnd(leftValue, rightValue);
             }
 
             case NodeType.ExprOr:
             {
                 ColumnValue leftValue = await EvaluatePredicateAsync(expr.leftAst!, row, ticket, database).ConfigureAwait(false);
 
-                if (ToPredicateResult(leftValue))
+                if (leftValue.Type == ColumnType.Bool && leftValue.BoolValue)
                     return ColumnValue.True;
 
-                return await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
+                ColumnValue rightValue = await EvaluatePredicateAsync(expr.rightAst!, row, ticket, database).ConfigureAwait(false);
+
+                return SQLExecutorBaseCreator.EvalOr(leftValue, rightValue);
             }
 
             case NodeType.ExprNot:

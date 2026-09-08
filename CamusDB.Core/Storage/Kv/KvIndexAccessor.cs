@@ -339,6 +339,8 @@ internal sealed class KvIndexAccessor
                 //     length-tiebreaking compare leaked/!dropped later prefix values.
                 // This in-range check is load-bearing: when the planner absorbs the predicate into
                 // the scan it is not re-applied by the executor.
+                if (HasNullInBoundColumns(decodedKey, from, to))
+                    continue;
                 if (from is not null)
                 {
                     int cmp = ComparePrefix(decodedKey, from);
@@ -437,8 +439,8 @@ internal sealed class KvIndexAccessor
                             {
                                 CompositeColumnValue decodedKey = KeyEncoder.Decode(encKey, keyTypes, directions);
 
-                                bool inRange = true;
-                                if (from is not null)
+                                bool inRange = !HasNullInBoundColumns(decodedKey, from, to);
+                                if (inRange && from is not null)
                                 {
                                     int cmp = ComparePrefix(decodedKey, from);
                                     if (fromInclusive ? cmp < 0 : cmp <= 0) inRange = false;
@@ -650,6 +652,29 @@ internal sealed class KvIndexAccessor
         => ObjectId.ToValue(payload.Length > BranchKvCodec.IndexRowIdPayloadLength
             ? payload[..BranchKvCodec.IndexRowIdPayloadLength]
             : payload);
+
+    /// <summary>
+    /// A bound on the first <c>n</c> key columns comes from an equality or range comparison on each
+    /// of them, and no comparison is satisfied by NULL. A non-unique index stores rows with NULL
+    /// keys, and NULL orders first, so a scan with an open lower side (<c>b &lt; 10</c> alone) starts
+    /// at those entries and <see cref="ComparePrefix"/> — an ordering compare, NULL first — would
+    /// place them inside the upper bound. The planner drops the absorbed conjunct from the residual
+    /// filter, so nothing downstream would exclude them: this check must. A key with a NULL in any
+    /// bound-covered column is never in range.
+    /// </summary>
+    private static bool HasNullInBoundColumns(CompositeColumnValue key, CompositeColumnValue? from, CompositeColumnValue? to)
+    {
+        int boundLength = Math.Max(from?.Values.Length ?? 0, to?.Values.Length ?? 0);
+        int n = Math.Min(boundLength, key.Values.Length);
+
+        for (int i = 0; i < n; i++)
+        {
+            if (key.Values[i].Type == ColumnType.Null)
+                return true;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Compares <paramref name="key"/> against <paramref name="bound"/> over the bound's columns

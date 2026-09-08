@@ -166,23 +166,52 @@ public class TestPreparedInSet : SharedNodeBaseTest
     // ── cross-type: lhs type does not match list type ─────────────────────────
 
     [Test]
-    public void CrossType_IntLhsFloatList_NoMatch()
+    public void CrossType_IntLhsFloatList_WidensLikeEquality()
     {
-        // Cross-type is a non-match (not an error) on both paths: the prepared set catches the
-        // CompareTo throw and the AST reference path now skips cross-type candidates identically.
+        // x IN (a, b) is x = a OR x = b, and `=` widens a mixed numeric pair to double, so
+        // 1 IN (1.0, 2.0) is true and 3 IN (1.0, 2.0) is false — on both paths.
         ColumnValue[] values = [Flt(1.0), Flt(2.0)];
         PreparedInSet set = new(values);
-        Assert.IsFalse(set.Contains(Int(1)));
+        Assert.IsTrue(set.Contains(Int(1)));
+        Assert.IsFalse(set.Contains(Int(3)));
         Assert.AreEqual(AstContains(Int(1), values), set.Contains(Int(1)));
+        Assert.AreEqual(AstContains(Int(3), values), set.Contains(Int(3)));
     }
 
     [Test]
-    public void CrossType_FloatLhsIntList_NoMatch()
+    public void CrossType_FloatLhsIntList_WidensLikeEquality()
     {
         ColumnValue[] values = [Int(1), Int(2)];
         PreparedInSet set = new(values);
-        Assert.IsFalse(set.Contains(Flt(1.0)));
+        Assert.IsTrue(set.Contains(Flt(1.0)));
+        Assert.IsFalse(set.Contains(Flt(1.5)));
         Assert.AreEqual(AstContains(Flt(1.0), values), set.Contains(Flt(1.0)));
+        Assert.AreEqual(AstContains(Flt(1.5), values), set.Contains(Flt(1.5)));
+    }
+
+    [Test]
+    public void CrossType_FractionalFloatInIntList_NoMatch()
+    {
+        // 1.5 equals no integer; the widened comparison says so, no rounding is involved.
+        ColumnValue[] values = [Int(1), Int(2)];
+        PreparedInSet set = new(values);
+        Assert.IsFalse(set.Contains(Flt(1.5)));
+    }
+
+    [Test]
+    public void CrossType_LargeList_HashPathWidensToo()
+    {
+        // Past the hash threshold the set is a HashSet; an Integer64 probe must land in the bucket
+        // of an equal Float64 member, so the hash must be type-agnostic across numeric types.
+        ColumnValue[] values = new ColumnValue[20];
+        for (int i = 0; i < values.Length; i++)
+            values[i] = Flt(i);
+        PreparedInSet set = new(values);
+
+        Assert.IsTrue(set.Contains(Int(7)));
+        Assert.IsFalse(set.Contains(Int(25)));
+        Assert.IsFalse(set.Contains(Flt(7.5)));
+        Assert.AreEqual(AstContains(Int(7), values), set.Contains(Int(7)));
     }
 
     [Test]

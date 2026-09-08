@@ -42,10 +42,22 @@ internal sealed class PlanCache
     private long _hits;
     private long _misses;
     private long _evictions;
+    private long _replayFailures;
 
     public long Hits    => _hits;
     public long Misses  => _misses;
     public long Evictions => _evictions;
+
+    /// <summary>
+    /// Hits whose cached decision could not be rebuilt and fell back to a full replan. A hit is
+    /// counted at lookup time, before replay, so <see cref="Hits"/> alone cannot tell a cache that
+    /// serves plans from one that only pays lookup plus replan on every query; a test or an
+    /// operator must read this counter alongside it.
+    /// </summary>
+    public long ReplayFailures => _replayFailures;
+
+    /// <summary>Records one failed replay. Called by the planner when a hit falls back to <c>BuildScanNode</c>.</summary>
+    public void RecordReplayFailure() => Interlocked.Increment(ref _replayFailures);
 
     /// <summary>Current number of cached plans; for tests and diagnostics.</summary>
     public int Count { get { lock (_lock) return _map.Count; } }
@@ -259,15 +271,37 @@ internal sealed record PlanCacheEntry(
 /// <summary>
 /// Cached access-path decision for a single-table query.
 ///
-/// Policy: <strong>chosen-index replay</strong>.
-/// Only <see cref="IndexName"/> is stored — null means full primary-row scan.
-/// The scan type (range, lookup, full) is intentionally <em>not</em> cached; instead
-/// <see cref="IndexScanSelector.TrySelectScanForForcedIndex"/> re-derives it from the
-/// current query's predicates on each cache hit.  This lets a forced-index or order-only
-/// scan on the first query replay as a more selective range scan on a subsequent query that
-/// has matching predicates — without ever producing wrong results.
-///
-/// Literal values (lookup keys, range bounds) are never stored; they are always re-bound
-/// from the current query at replay time.
+/// Policy: <strong>chosen-index replay</strong>. <see cref="IndexName"/> names the index (null
+/// means the primary-row scan) and <see cref="Kind"/> says how it was used, because the replay
+/// differs per kind:
+/// <list type="bullet">
+///   <item><see cref="ScanDecisionKind.PredicateScan"/>: the bounds are re-derived from the
+///   current query's predicates by <see cref="IndexScanSelector.TrySelectScanForForcedIndex"/>.
+///   Literal values are never stored, so a later query of the same shape gets its own keys.</item>
+///   <item><see cref="ScanDecisionKind.OrderByIndexScan"/> and
+///   <see cref="ScanDecisionKind.FullIndexScan"/>: the query has no predicate the index can
+///   absorb (ORDER BY elision, the streaming DISTINCT/GROUP BY override, a user-forced index),
+///   so the unbounded step is rebuilt directly after re-checking that the index is still
+///   readable and, for a unique index, still holds every row. Re-running the predicate matcher
+///   here would find no comparisons, report a failed replay, and re-select on every hit.</item>
+/// </list>
+/// The dependency fingerprint (schema version, index-set generation) invalidates the entry on
+/// any DDL that could change which kind applies.
 /// </summary>
-internal sealed record SingleTableDecision(string? IndexName);
+internal sealed record SingleTableDecision(string? IndexName, ScanDecisionKind Kind);
+
+/// <summary>How a cached single-table decision used its index. See <see cref="SingleTableDecision"/>.</summary>
+internal enum ScanDecisionKind
+{
+    /// <summary>Primary-row scan; no index.</summary>
+    TableScan,
+
+    /// <summary>A lookup or bounded range scan whose bounds come from the query's predicates.</summary>
+    PredicateScan,
+
+    /// <summary>An unbounded index scan chosen to satisfy ORDER BY.</summary>
+    OrderByIndexScan,
+
+    /// <summary>An end-to-end index scan: the streaming DISTINCT/GROUP BY override or a user-forced index.</summary>
+    FullIndexScan,
+}

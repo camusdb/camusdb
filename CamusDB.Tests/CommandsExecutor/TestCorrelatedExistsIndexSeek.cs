@@ -97,7 +97,7 @@ public sealed class TestCorrelatedExistsIndexSeek : SharedNodeBaseTest
         await ExecDdl(database, executor, dbname,
             "CREATE TABLE items (id oid primary key, owner string(64) not null, name string(64) not null)");
         await ExecDdl(database, executor, dbname,
-            "CREATE TABLE item_values (item_id oid, tag string(64), num int64, PRIMARY KEY (item_id, tag))");
+            "CREATE TABLE item_values (item_id oid not null, tag string(64) not null, num int64, PRIMARY KEY (item_id, tag))");
 
         await ExecNonQuery(database, executor, dbname,
             $"INSERT INTO items (id, owner, name) VALUES "
@@ -157,6 +157,30 @@ public sealed class TestCorrelatedExistsIndexSeek : SharedNodeBaseTest
 
         Assert.IsNotNull(plan);
         Assert.AreEqual(2, plan!.PrefixBindings.Count, "item_id and tag are both pinned; num stays residual");
+    }
+
+    [Test]
+    public async Task Planner_DeclinesPrefixSeek_WhenUniqueIndexHasNullableUnboundColumn()
+    {
+        // A unique index has no entry for a row with a NULL in any key column. With tag nullable,
+        // a row (item_id = A, tag = NULL) satisfies `v.item_id = i.id` but is absent from the index,
+        // so a prefix seek would answer EXISTS = false for an outer row that has a match. A
+        // secondary unique index is used because primary-key columns are always NOT NULL.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecDdl(database, executor, dbname,
+            "CREATE TABLE loose (id oid primary key, item_id oid not null, tag string(64), num int64)");
+        await ExecDdl(database, executor, dbname,
+            "CREATE UNIQUE INDEX loose_item_tag ON loose (item_id, tag)");
+        // Index DDL evicts the cached descriptor; open the table so the planner sees the new index.
+        TableDescriptor loose = await executor.OpenTable(new OpenTableTicket(dbname, "loose"));
+
+        CorrelatedExistsSeekPlan? prefix = PlanFor(loose, "SELECT * FROM loose v WHERE v.item_id = i.id", "v");
+        Assert.IsNull(prefix, "a prefix seek over a unique index with a nullable unbound column must be declined");
+
+        // Binding every key column needs no proof: a NULL tag fails `v.tag = @tag` anyway.
+        CorrelatedExistsSeekPlan? full = PlanFor(loose, "SELECT * FROM loose v WHERE v.item_id = i.id AND v.tag = @tag", "v");
+        Assert.IsNotNull(full, "a full-key seek stays available");
+        Assert.AreEqual(2, full!.PrefixBindings.Count);
     }
 
     [Test]

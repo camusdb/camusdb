@@ -53,6 +53,10 @@ internal sealed class TableCreator
         if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
             return false;
 
+        // Every primary-key column is NOT NULL, written or not: the key is a unique index, and a
+        // unique index cannot hold a row with a NULL key column (see PrimaryKeyNotNullRule).
+        Controllers.DDL.PrimaryKeyNotNullRule.ApplyToCreateTable(ticket);
+
         int maxTables = options.MaxTablesPerDatabase;
         if (maxTables > 0 && database.Schema.Tables.Count >= maxTables)
             throw new CamusDBException(

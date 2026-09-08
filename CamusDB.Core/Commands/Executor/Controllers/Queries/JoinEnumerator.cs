@@ -187,6 +187,9 @@ internal static class JoinEnumerator
         {
             PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, null);
             PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, alias);
+            // Cost the leaf over the same coerced constants the builder will select with, so the
+            // DP never costs an index shape the builder then refuses.
+            analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, table);
 
             if (analysis.IndexableComparisons.Count > 0 || analysis.InListComparisons.Count > 0)
             {

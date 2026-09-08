@@ -429,7 +429,7 @@ public class TestPlanDistributedProperties
     [Test]
     public void Distribution_UniqueLookup_IsAlwaysGathered()
     {
-        QueryPlan plan = Plan(Sharded(), "SELECT * FROM robots WHERE id = 'abc'");
+        QueryPlan plan = Plan(Sharded(), $"SELECT * FROM robots WHERE id = '{QueryPlannerTestContext.SampleRowId}'");
         IndexLookupNode? lookup = AllNodes(plan).OfType<IndexLookupNode>().FirstOrDefault();
         Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
         Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,
@@ -624,7 +624,7 @@ public class TestPlanDistributedProperties
         // Sharding on with 3 partition(s) — the configuration this case is about.
         CamusDBOptions sharded = Sharded(3);
 
-        QueryPlan lookupPlan = Plan(sharded, "SELECT * FROM robots WHERE id = 'abc'");
+        QueryPlan lookupPlan = Plan(sharded, $"SELECT * FROM robots WHERE id = '{QueryPlannerTestContext.SampleRowId}'");
         IndexLookupNode? lookup = AllNodes(lookupPlan).OfType<IndexLookupNode>().FirstOrDefault();
         Assert.IsNotNull(lookup, "Expected IndexLookupNode for PK equality");
         Assert.AreEqual(DataDistributionKind.Gathered, lookup!.Distribution?.Kind,

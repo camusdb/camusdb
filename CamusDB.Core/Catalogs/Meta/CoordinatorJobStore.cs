@@ -105,39 +105,41 @@ internal static class CoordinatorJobStore
             await MetaKeyWriter.DeleteMetaKey(kahuna, tx, key).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Lists the persisted coordinator jobs of <paramref name="database"/> (leader resume after a
+    /// leadership change, and the branch-creation fence that refuses to fork while a job is in
+    /// flight). Reads with the zero-identity transaction — latest committed value per key — and no
+    /// server session. A session would add nothing (nothing is written, no own uncommitted state is
+    /// read) and it made this load fail intermittently: a transactional scan snapshots each key it
+    /// visits, and page 0 of the meta bucket can stop at a key that holds a live write intent from
+    /// a concurrent schema change, answer <c>WaitingForReplication</c>, and be retried; by then the
+    /// intent has committed, the key's revision has moved past the snapshot recorded on the first
+    /// attempt, and Kahuna answers the retried page with <c>Aborted</c>, which fails the whole
+    /// scan. Without a session there is no snapshot to be stale against.
+    /// </summary>
     internal static async Task<List<PersistedCoordinatorJob>> LoadCoordinatorJobsAsync(DatabaseDescriptor database)
     {
         List<PersistedCoordinatorJob> jobs = [];
         IKahuna kahuna = database.Kahuna.Kahuna;
         string keyPrefix = MetaKeys.CoordinatorKeyPrefix(database.Id);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero,
+            MetaKeys.MetaBucketPrefix(database.Id),
+            null, true,
+            null, true,
+            128,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None).ConfigureAwait(false))
         {
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                tx.TransactionId,
-                MetaKeys.MetaBucketPrefix(database.Id),
-                null, true,
-                null, true,
-                128,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None).ConfigureAwait(false))
-            {
-                if (!key.StartsWith(keyPrefix, StringComparison.Ordinal) || entry.Value is null)
-                    continue;
+            if (!key.StartsWith(keyPrefix, StringComparison.Ordinal) || entry.Value is null)
+                continue;
 
-                PersistedCoordinatorJob job = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.PersistedCoordinatorJob);
-                jobs.Add(job);
-            }
+            PersistedCoordinatorJob job = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.PersistedCoordinatorJob);
+            jobs.Add(job);
+        }
 
-            return jobs;
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
+        return jobs;
     }
 }

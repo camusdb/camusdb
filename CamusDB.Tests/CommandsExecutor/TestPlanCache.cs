@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
@@ -15,7 +16,12 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 
@@ -527,5 +533,149 @@ public sealed class TestPlanCache : BaseTest
             "ANALYZE must invalidate cached access-path decisions.");
         Assert.AreEqual(hitsBefore + 2, executor.PlanCache.Hits,
             "The re-planned decision must be re-cached and hit afterwards.");
+    }
+
+    // ─── Predicate-free decisions replay without re-selection ─────────────────
+
+    /// <summary>
+    /// Plans one SQL shape twice through a planner wired to the executor's own cache and
+    /// statistics, and returns both rendered plans. EXPLAIN cannot serve here: it builds a
+    /// planner of its own with no cache, so it always shows a cold plan.
+    /// </summary>
+    private async Task<(string[] Cold, string[] Warm)> PlanTwice(
+        CommandExecutor executor, DatabaseDescriptor database, string dbname, string tableName, string sql)
+    {
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        TableDescriptor table = await db.TableDescriptors[tableName];
+        QueryPlanner planner = new(executor.Statistics, executor.PlanCache, Options);
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        try
+        {
+            string[] Plan()
+            {
+                NodeAst ast = SQLParserProcessor.Parse(sql);
+                SelectQuery query = new SelectQueryCreator().CreateSelectQuery(ast);
+                ExecuteSQLTicket executeTicket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
+                QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(query, executeTicket);
+                QueryPlan plan = planner.GetPlan(db, table, ticket);
+                return PlanRenderer.WalkNodes(plan.Root!, plan)
+                    .Select(n => n.Detail.Length == 0 ? n.Name : $"{n.Name}({n.Detail})")
+                    .ToArray();
+            }
+
+            return (Plan(), Plan());
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(txn);
+        }
+    }
+
+    /// <summary>
+    /// The first plan is the cold miss that stores the decision; the second is a hit whose plan
+    /// is the replayed one. A hit that fails replay re-selects and re-stores, which
+    /// <see cref="PlanCache.Hits"/> alone cannot see, so the assertion also reads
+    /// <see cref="PlanCache.ReplayFailures"/> and compares the two plans.
+    /// </summary>
+    private async Task AssertWarmRunReplays(
+        CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql, params string[] expectedPlanFragments)
+    {
+        long hitsBefore = executor.PlanCache.Hits;
+        long failuresBefore = executor.PlanCache.ReplayFailures;
+
+        (string[] cold, string[] warm) = await PlanTwice(executor, database, dbname, "products", sql);
+
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits, $"The second plan of `{sql}` must be a cache hit.");
+        Assert.AreEqual(failuresBefore, executor.PlanCache.ReplayFailures,
+            $"The hit for `{sql}` must replay the cached decision, not re-select it.");
+        CollectionAssert.AreEqual(cold, warm, $"The replayed plan for `{sql}` must equal the cold plan.");
+
+        foreach (string fragment in expectedPlanFragments)
+            Assert.IsTrue(Array.Exists(warm, n => n.Contains(fragment, StringComparison.Ordinal)),
+                $"Expected `{fragment}` in the replayed plan for `{sql}`; got: {string.Join(", ", warm)}");
+    }
+
+    [Test]
+    public async Task OrderByIndexScan_WarmHitReplaysWithoutReselection()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        await AssertWarmRunReplays(executor, database, dbname,
+            "SELECT id, category FROM products ORDER BY category",
+            "index-range-scan", "products_cat");
+    }
+
+    [Test]
+    public async Task StreamingDistinct_WarmHitReplaysWithoutReselection()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        await AssertWarmRunReplays(executor, database, dbname,
+            "SELECT DISTINCT category FROM products",
+            "forced-index=products_cat", "streaming: true");
+    }
+
+    [Test]
+    public async Task StreamingGroupBy_WarmHitReplaysWithoutReselection()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        await AssertWarmRunReplays(executor, database, dbname,
+            "SELECT category, count(*) AS n FROM products GROUP BY category",
+            "forced-index=products_cat", "streaming: true");
+    }
+
+    [Test]
+    public async Task UserForcedIndexWithoutPredicate_WarmHitReplaysWithoutReselection()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        await AssertWarmRunReplays(executor, database, dbname,
+            "SELECT id, price FROM products@{FORCE_INDEX=products_cat}",
+            "forced-index=products_cat");
+    }
+
+    [Test]
+    public async Task OrderByIndexScan_WarmHitReturnsTheSameRows()
+    {
+        // The plan comparison above proves the shape; this proves the rows the replayed unbounded
+        // scan returns through the real query path, so a replay that built the wrong bounds could
+        // not hide behind a plan render.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+        const string sql = "SELECT price FROM products ORDER BY category";
+
+        string cold = await IndexDifferentialProbe.QueryRendered(executor, database, dbname, sql);
+        long hitsBefore = executor.PlanCache.Hits;
+        long failuresBefore = executor.PlanCache.ReplayFailures;
+        string warm = await IndexDifferentialProbe.QueryRendered(executor, database, dbname, sql);
+
+        Assert.AreEqual("price=29;price=499;price=999", cold);
+        Assert.AreEqual(cold, warm);
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits);
+        Assert.AreEqual(failuresBefore, executor.PlanCache.ReplayFailures);
+    }
+
+    [Test]
+    public async Task DropIndex_AfterPredicateFreeDecision_IsAMissNotAReplayFailure()
+    {
+        // Index DDL bumps the table's index-set generation, so the dependency fingerprint no
+        // longer matches: the lookup is a miss and the entry is replaced. The replay path is never
+        // reached, so it must not be blamed.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+        const string sql = "SELECT id, category FROM products ORDER BY category";
+
+        await PlanTwice(executor, database, dbname, "products", sql);
+        await IndexDifferentialProbe.ExecDDL(executor, database, dbname, "ALTER TABLE products DROP INDEX products_cat");
+
+        long missesBefore = executor.PlanCache.Misses;
+        long failuresBefore = executor.PlanCache.ReplayFailures;
+
+        (string[] afterDrop, _) = await PlanTwice(executor, database, dbname, "products", sql);
+
+        Assert.AreEqual(missesBefore + 1, executor.PlanCache.Misses, "DROP INDEX must invalidate the cached decision.");
+        Assert.AreEqual(failuresBefore, executor.PlanCache.ReplayFailures);
+        Assert.IsFalse(Array.Exists(afterDrop, n => n.Contains("products_cat", StringComparison.Ordinal)),
+            $"The dropped index must not appear in the plan; got: {string.Join(", ", afterDrop)}");
     }
 }

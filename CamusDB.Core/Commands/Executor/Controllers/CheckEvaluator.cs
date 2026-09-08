@@ -287,20 +287,8 @@ internal static class CheckEvaluator
     /// Returns false (leaving the caller's other coercion/compare logic in charge) unless both
     /// operands are numeric and at least one is floating point.
     /// </summary>
-    private static bool TryCompareNumeric(ColumnValue left, ColumnValue right, out int result)
-    {
-        result = 0;
-        if (!IsNumeric(left.Type) || !IsNumeric(right.Type))
-            return false;
-        if (left.Type == right.Type)
-            return false; // same type — let CompareTo handle it (exact integer/float semantics)
+    private static bool TryCompareNumeric(ColumnValue left, ColumnValue right, out int result) =>
+        MixedNumericComparison.TryCompare(left, right, out result);
 
-        double l = left.Type == ColumnType.Integer64 ? left.LongValue : left.FloatValue;
-        double r = right.Type == ColumnType.Integer64 ? right.LongValue : right.FloatValue;
-        result = l.CompareTo(r);
-        return true;
-    }
-
-    private static bool IsNumeric(ColumnType type) =>
-        type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
+    private static bool IsNumeric(ColumnType type) => MixedNumericComparison.IsNumeric(type);
 }

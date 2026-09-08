@@ -377,6 +377,9 @@ public sealed class QueryPlanner
             (scanNode, scanStep, absorbedInListConjunct) =
                 BuildScanNodeFromCachedDecision(database, table, ticket, analysis, cachedDecision, out bool replayFailed);
 
+            if (replayFailed)
+                _cache.RecordReplayFailure();
+
             // A failed replay (cached index no longer usable) fell back to a full replan; keep
             // fromCache=false so the fresh decision REPLACES the stale entry below. Leaving it
             // true would skip the Put while every lookup keeps hitting (and LRU-promoting) the
@@ -412,8 +415,11 @@ public sealed class QueryPlanner
         // reducing memory from O(distinct-count) to O(1).
         // Override the scan with a full ordered index scan when no predicate-driven scan was
         // chosen (scanStep == null). Only override when scanStep is null so predicate-driven
-        // scans are not disrupted; correctness of ExecutionFilter is unaffected since a
-        // FullScanFromIndex step consumes no predicates, same as a null/table-scan step.
+        // scans are not disrupted. ExecutionFilter is unaffected (a FullScanFromIndex step consumes
+        // no predicates, same as a null/table-scan step), but the override is only safe when the
+        // forced index holds every row: a unique index omits rows with a NULL in any key column,
+        // so TryFindStreamingDistinctIndex accepts a unique candidate only when all of its columns
+        // are NOT NULL. The DISTINCT-column check below is not sufficient on its own.
         bool isStreamingDistinct = false;
         IReadOnlyList<QueryOrderBy>? streamingDistinctOrdering = null;
         if (ticket.IsDistinct && ticket.GroupBy is not { Count: > 0 })
@@ -450,8 +456,10 @@ public sealed class QueryPlanner
         //      GROUP BY columns — force a full ordered index scan the same way streaming DISTINCT does.
         //
         // Only applies to the plan-based path; the join path (QueryPostScanPipeline) always
-        // uses the hash path. Nullable columns are excluded because index scans omit NULL rows,
-        // which would silently drop the NULL group.
+        // uses the hash path. Nullable GROUP BY columns are excluded because a unique index omits
+        // NULL rows, which would silently drop the NULL group; and the forced index itself must
+        // hold every row (TryFindStreamingDistinctIndex rejects a unique index with any nullable
+        // key column), or a group loses the rows whose trailing key is NULL and undercounts.
         // Must run before `root = scanNode` so that scan-node overrides propagate into the plan tree.
         bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
         bool isStreamingGroupBy = false;
@@ -639,7 +647,7 @@ public sealed class QueryPlanner
         {
             _cache!.Put(database.Id, shapeId,
                 new PlanCacheEntry(cacheDeps!,
-                    SingleTable: new SingleTableDecision(s0.Index?.Name),
+                    SingleTable: new SingleTableDecision(s0.Index?.Name, ClassifyDecision(s0)),
                     JoinAliasOrder: null));
         }
 
@@ -793,12 +801,42 @@ public sealed class QueryPlanner
     {
         replayFailed = false;
 
-        if (decision.IndexName is null)
+        if (decision.IndexName is null || decision.Kind == ScanDecisionKind.TableScan)
         {
             return (
                 WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table),
                 new QueryPlanStep(QueryPlanStepType.FullScanFromTableIndex),
                 null);
+        }
+
+        if (decision.Kind is ScanDecisionKind.OrderByIndexScan or ScanDecisionKind.FullIndexScan)
+        {
+            // A predicate-free decision has nothing to re-bind. Rebuild the unbounded step after
+            // the same checks the cold path made: the index must still be readable, and a unique
+            // index must still hold every row (it omits rows with a NULL key column). Running the
+            // predicate matcher here would find no comparisons and fail every replay.
+            if (table.Indexes.TryGetValue(decision.IndexName, out TableIndexSchema? unboundedIndex)
+                && SchemaElementStateRules.IsReadableIndex(table.Schema, unboundedIndex)
+                && (unboundedIndex.Type != IndexType.Unique || IndexScanSelector.AllColumnsNotNull(table, unboundedIndex)))
+            {
+                if (decision.Kind == ScanDecisionKind.OrderByIndexScan)
+                {
+                    QueryPlanStep orderByStep = new(
+                        QueryPlanStepType.RangeScanFromIndex,
+                        unboundedIndex,
+                        fromBound: null,
+                        fromInclusive: true,
+                        toBound: null,
+                        toInclusive: true);
+                    return (WithDistribution(ToScanNode(orderByStep), table), orderByStep, null);
+                }
+
+                QueryPlanStep fullStep = new(QueryPlanStepType.FullScanFromIndex, unboundedIndex);
+                return (WithDistribution(new TableScanNode(TableScanSource.ForcedIndex, unboundedIndex), table), fullStep, null);
+            }
+
+            replayFailed = true;
+            return BuildScanNode(database, table, ticket, analysis);
         }
 
         QueryPlanStep? step = IndexScanSelector.TrySelectScanForForcedIndex(table, analysis, decision.IndexName);
@@ -812,6 +850,20 @@ public sealed class QueryPlanner
 
         return (WithDistribution(ToScanNode(step.Value), table), step, null);
     }
+
+    /// <summary>
+    /// Names how the first linear step used its index, so the cache entry can be replayed the
+    /// same way. An unbounded range scan is the ORDER BY choice; a full index scan is the
+    /// streaming override or a user-forced index; anything with a lookup key or a bound came
+    /// from the predicates.
+    /// </summary>
+    private static ScanDecisionKind ClassifyDecision(QueryPlanStep step) => step.Type switch
+    {
+        QueryPlanStepType.FullScanFromTableIndex => ScanDecisionKind.TableScan,
+        QueryPlanStepType.FullScanFromIndex => ScanDecisionKind.FullIndexScan,
+        QueryPlanStepType.RangeScanFromIndex when step.FromBound is null && step.ToBound is null => ScanDecisionKind.OrderByIndexScan,
+        _ => step.Index is null ? ScanDecisionKind.TableScan : ScanDecisionKind.PredicateScan,
+    };
 
     /// <summary>
     /// Builds one table's plan-cache dependency fingerprint: schema version plus the index-set

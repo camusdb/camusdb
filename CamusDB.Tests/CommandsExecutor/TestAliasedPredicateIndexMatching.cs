@@ -39,8 +39,11 @@ public class TestAliasedPredicateIndexMatching : SharedNodeBaseTest
             tableName: "wallets",
             columns: new ColumnInfo[]
             {
-                new("usersId",    ColumnType.Id),
-                new("currencyId", ColumnType.Id),
+                // Both primary-key columns are declared NOT NULL: the PK is a unique index, and a
+                // unique index holds no entry for a row with a NULL key column, so a prefix scan over
+                // it is only complete (and only chosen) when the trailing column cannot be NULL.
+                new("usersId",    ColumnType.Id, notNull: true),
+                new("currencyId", ColumnType.Id, notNull: true),
                 new("amount",     ColumnType.Integer64),
             },
             constraints: new ConstraintInfo[]

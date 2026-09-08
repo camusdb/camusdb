@@ -27,7 +27,7 @@ internal static class IndexScanSelector
         PredicateAnalysis analysis,
         IReadOnlyList<QueryOrderBy>? orderBy = null)
     {
-        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(analysis);
+        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(table, analysis);
 
         QueryPlanStep? bestStep = null;
         int bestScore = -1;
@@ -69,7 +69,7 @@ internal static class IndexScanSelector
         TableDescriptor table,
         PredicateAnalysis analysis)
     {
-        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(analysis);
+        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(table, analysis);
         if (byColumn.Count == 0)
             return [];
 
@@ -102,19 +102,30 @@ internal static class IndexScanSelector
         if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
             return null;
 
-        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(analysis);
+        Dictionary<string, List<AnalyzedComparison>> byColumn = BuildColumnMap(table, analysis);
         if (byColumn.Count == 0)
             return null;
 
         return TryMatchPredicateIndex(table, index, byColumn, out QueryPlanStep step, out _) ? step : null;
     }
 
-    private static Dictionary<string, List<AnalyzedComparison>> BuildColumnMap(PredicateAnalysis analysis)
+    /// <summary>
+    /// Groups the indexable comparisons by column, keeping only those whose constant already has
+    /// the column's type. <see cref="PredicateAnalyzer.CoerceConstantsForColumns"/> is expected to
+    /// have rewritten every constant before this point; a comparison that still mismatches cannot
+    /// address an index key (the key encoding and the comparer are per-type), so it is left out here
+    /// and stays with the residual filter, where the evaluator decides. This is the last line of
+    /// defense: a caller that forgets the coercion loses the index shortcut, never the right rows.
+    /// </summary>
+    private static Dictionary<string, List<AnalyzedComparison>> BuildColumnMap(TableDescriptor table, PredicateAnalysis analysis)
     {
         Dictionary<string, List<AnalyzedComparison>> byColumn = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (AnalyzedComparison comparison in analysis.IndexableComparisons)
         {
+            if (!ConstantMatchesColumnType(table, comparison))
+                continue;
+
             if (!byColumn.TryGetValue(comparison.ColumnName, out List<AnalyzedComparison>? list))
                 byColumn[comparison.ColumnName] = list = new();
 
@@ -124,6 +135,29 @@ internal static class IndexScanSelector
         return byColumn;
     }
 
+    private static bool ConstantMatchesColumnType(TableDescriptor table, AnalyzedComparison comparison)
+    {
+        TableColumnSchema? column = table.Schema.Columns?.Find(
+            c => string.Equals(c.Name, comparison.ColumnName, StringComparison.OrdinalIgnoreCase));
+
+        // An unknown column cannot match any index column below, so there is nothing to reject.
+        return column is null || column.Type == comparison.Constant.Type;
+    }
+
+    /// <summary>
+    /// Matches one index against the query's column comparisons and builds the best step that
+    /// index can serve: a full-key unique lookup, an equality prefix plus a range on the next
+    /// column, or an equality prefix alone. This is the single matcher behind heuristic selection
+    /// (<see cref="TrySelectScan"/>), cost enumeration (<see cref="EnumerateViableSteps"/>),
+    /// plan-cache replay (<see cref="TrySelectScanForForcedIndex"/>) and join leaves, so a rule
+    /// placed here holds everywhere.
+    /// <para>One such rule is completeness for unique indexes: a unique index has no entry for a
+    /// row with NULL in any key column, so a scan over a prefix of it returns only the rows whose
+    /// unconstrained columns are non-NULL. <see cref="UniqueIndexHoldsEveryQualifyingRow"/> rejects
+    /// the index for that query unless the schema proves those columns NOT NULL. A residual filter
+    /// cannot repair this — the missing row never enters the pipeline — so the index is not a
+    /// candidate at all, and the planner falls through to another index or the table scan.</para>
+    /// </summary>
     private static bool TryMatchPredicateIndex(
         TableDescriptor table,
         TableIndexSchema index,
@@ -210,6 +244,11 @@ internal static class IndexScanSelector
                 out CompositeColumnValue? toBound,
                 out bool toInclusive))
         {
+            // The equality prefix and the range column are constrained; every column after them
+            // must be provably non-NULL for a unique index to hold every qualifying row.
+            if (!UniqueIndexHoldsEveryQualifyingRow(table, index, byColumn, equalityPrefixLength + 1))
+                return false;
+
             if (equalityPrefixLength > 0)
             {
                 if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
@@ -270,6 +309,9 @@ internal static class IndexScanSelector
 
         if (equalityPrefixLength > 0)
         {
+            if (!UniqueIndexHoldsEveryQualifyingRow(table, index, byColumn, equalityPrefixLength))
+                return false;
+
             ColumnValue[] prefixValues = new ColumnValue[equalityPrefixLength];
             Array.Copy(equalityValues, prefixValues, equalityPrefixLength);
             CompositeColumnValue prefixBound = new(prefixValues);
@@ -359,14 +401,44 @@ internal static class IndexScanSelector
 
     /// <summary>
     /// Returns true when every column of the index is declared NOT NULL. A unique index whose columns
-    /// are all NOT NULL can never omit a row, so it remains eligible for an unbounded ordered scan.
-    /// Internal: <see cref="QueryPlanner"/> applies the same guard to user-forced full-index scans.
+    /// are all NOT NULL can never omit a row, so it remains eligible for a scan that reads it as the
+    /// complete row set: the unbounded ORDER BY scan, the user-forced full-index scan in
+    /// <see cref="QueryPlanner"/>, and the predicate-free scans that streaming DISTINCT/GROUP BY,
+    /// the correlated EXISTS seek and the merge join build. This is the "no constrained columns"
+    /// case of <see cref="UniqueIndexHoldsEveryQualifyingRow"/>.
     /// </summary>
     internal static bool AllColumnsNotNull(TableDescriptor table, TableIndexSchema index)
+        => UniqueIndexHoldsEveryQualifyingRow(table, index, byColumn: null, constrainedPrefixLength: 0, forceUniqueRule: true);
+
+    /// <summary>
+    /// The completeness rule for unique indexes. A unique index carries no entry for a row with a
+    /// NULL in <b>any</b> key column, so a scan over its first <paramref name="constrainedPrefixLength"/>
+    /// columns silently omits every row whose later key columns hold NULL — and such a row can
+    /// still satisfy the query (<c>(a=1, b=NULL)</c> satisfies <c>a = 1</c>). The index may serve
+    /// the query only if each key column beyond the constrained prefix is either constrained by
+    /// an equality or range comparison in <paramref name="byColumn"/> (a NULL there fails the
+    /// predicate, so the omitted row was never a qualifying row) or declared NOT NULL in the
+    /// schema. A non-unique index stores every row and always passes. A <c>!=</c> comparison
+    /// does not count as a constraint: under three-valued logic a NULL fails it, but the index
+    /// never absorbs it, so the schema must carry the proof.
+    /// </summary>
+    internal static bool UniqueIndexHoldsEveryQualifyingRow(
+        TableDescriptor table,
+        TableIndexSchema index,
+        Dictionary<string, List<AnalyzedComparison>>? byColumn,
+        int constrainedPrefixLength,
+        bool forceUniqueRule = false)
     {
-        foreach (string columnName in index.Columns)
+        if (index.Type != IndexType.Unique && !forceUniqueRule)
+            return true;
+
+        string[] columns = index.Columns;
+        for (int i = constrainedPrefixLength; i < columns.Length; i++)
         {
-            TableColumnSchema? schema = table.Schema.Columns!.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+            if (byColumn is not null && HasAbsorbableComparison(byColumn, columns[i]))
+                continue;
+
+            TableColumnSchema? schema = table.Schema.Columns!.Find(c => string.Equals(c.Name, columns[i], StringComparison.OrdinalIgnoreCase));
             if (schema is null || !schema.NotNull)
                 return false;
         }
@@ -374,11 +446,32 @@ internal static class IndexScanSelector
         return true;
     }
 
+    private static bool HasAbsorbableComparison(Dictionary<string, List<AnalyzedComparison>> byColumn, string column)
+    {
+        if (!byColumn.TryGetValue(column, out List<AnalyzedComparison>? comparisons))
+            return false;
+
+        foreach (AnalyzedComparison comparison in comparisons)
+        {
+            if (comparison.Operator is "=" or "<" or "<=" or ">" or ">=")
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Finds a readable index whose first <c>distinctColumns.Count</c> columns are exactly the set of
-    /// DISTINCT key columns. Such an index guarantees that equal rows are adjacent in the scan,
-    /// enabling streaming deduplication without a hash set.
+    /// DISTINCT (or GROUP BY) key columns. Such an index guarantees that equal rows are adjacent in
+    /// the scan, enabling streaming deduplication or aggregation without a hash table.
     /// Returns the first matching index, or null if none qualifies.
+    /// <para>The caller replaces the primary-row scan with an end-to-end scan of this index, so the
+    /// index must hold <b>every</b> row. A non-unique index does (NULL keys are stored with the row
+    /// id suffix). A unique index omits any row with a NULL in any of its key columns — including
+    /// columns after the DISTINCT prefix — so it qualifies only when
+    /// <see cref="AllColumnsNotNull"/> holds. The caller's own NOT NULL check on the DISTINCT
+    /// columns is not enough: <c>SELECT DISTINCT a</c> over <c>UNIQUE (a, b)</c> with a nullable
+    /// <c>b</c> would lose every <c>a</c> whose only rows carry a NULL <c>b</c>.</para>
     /// </summary>
     internal static TableIndexSchema? TryFindStreamingDistinctIndex(
         TableDescriptor table,
@@ -392,6 +485,9 @@ internal static class IndexScanSelector
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
             if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                continue;
+
+            if (index.Type == IndexType.Unique && !AllColumnsNotNull(table, index))
                 continue;
 
             if (index.Columns.Length < distinctColumns.Count)

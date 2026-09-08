@@ -346,26 +346,64 @@ public static class PredicateAnalyzer
     }
 
     /// <summary>
-    /// Parses bare string literals compared to a <see cref="ColumnType.Uuid"/> or
-    /// <see cref="ColumnType.Id"/> column into like-typed constants, using the table schema. Applied
-    /// once before access-path selection so the index selector, the bound-absorption check, and the
-    /// execution filter all compare like-typed values — a raw String constant on a Uuid/Id column
-    /// would otherwise build a non-matching index key (both types now encode natively, not via the
-    /// String path). Other column types keep their existing behavior.
+    /// Rewrites every indexable constant into the type of the column it is compared to, using the
+    /// table schema, so the index selector, the bound-absorption check, and the execution filter all
+    /// see like-typed values. Two rewrites apply:
+    /// <list type="bullet">
+    ///   <item>A bare String literal on a <see cref="ColumnType.Uuid"/> or <see cref="ColumnType.Id"/>
+    ///   column is parsed into that type (both encode natively, not via the String path).</item>
+    ///   <item>A numeric literal whose type differs from a numeric column is moved into the column's
+    ///   domain by <see cref="NumericBoundNormalizer"/>. The evaluator widens a mixed comparison to
+    ///   double, but an index key does not, so an unconverted Float64 literal on an Integer64 column
+    ///   builds a key that addresses no entry or a bound the scan cannot compare.</item>
+    /// </list>
+    /// A comparison with no exact rewrite (a fractional equality on an integer column, NaN, a value
+    /// outside the <c>long</c> range) stops driving index selection: it leaves
+    /// <see cref="PredicateAnalysis.IndexableComparisons"/> and its conjunct joins
+    /// <see cref="PredicateAnalysis.ResidualConjuncts"/>, so the evaluator decides. The planner must
+    /// never round such a literal; that would return wrong rows through the index.
+    /// <para>Every planner entry that feeds a <see cref="TableDescriptor"/>'s predicates to
+    /// <see cref="IndexScanSelector"/> must call this first — the single-table planner, the join-leaf
+    /// builders and the cost estimator alike — or an index can disagree with the table scan.</para>
     /// </summary>
     public static PredicateAnalysis CoerceConstantsForColumns(PredicateAnalysis analysis, TableDescriptor table)
     {
         List<AnalyzedComparison>? coerced = null;
+        List<NodeAst>? demotedConjuncts = null;
 
         for (int i = 0; i < analysis.IndexableComparisons.Count; i++)
         {
             AnalyzedComparison original = analysis.IndexableComparisons[i];
-            AnalyzedComparison mapped = CoerceStringConstant(original, table);
-            if (ReferenceEquals(mapped, original))
+            AnalyzedComparison? mapped = CoerceStringConstant(original, table);
+
+            TableColumnSchema? column = FindColumn(mapped.ColumnName, table);
+            if (column is not null)
+            {
+                switch (NumericBoundNormalizer.Normalize(mapped.Operator, mapped.Constant, column.Type, out string newOp, out ColumnValue newConstant))
+                {
+                    case NumericBoundNormalizer.Outcome.Converted:
+                        mapped = new AnalyzedComparison(mapped.ColumnName, newOp, newConstant, mapped.Conjunct);
+                        break;
+
+                    case NumericBoundNormalizer.Outcome.LeaveToEvaluator:
+                        (demotedConjuncts ??= new()).Add(mapped.Conjunct);
+                        mapped = null;
+                        break;
+                }
+            }
+
+            if (mapped is not null && ReferenceEquals(mapped, original) && coerced is null)
                 continue;
 
-            coerced ??= [.. analysis.IndexableComparisons];
-            coerced[i] = mapped;
+            if (coerced is null)
+            {
+                coerced = new List<AnalyzedComparison>(analysis.IndexableComparisons.Count);
+                for (int j = 0; j < i; j++)
+                    coerced.Add(analysis.IndexableComparisons[j]);
+            }
+
+            if (mapped is not null)
+                coerced.Add(mapped);
         }
 
         // IN-list constants feed index lookup keys the same way, so they need the same coercion —
@@ -386,32 +424,66 @@ public static class PredicateAnalyzer
         if (coerced is null && coercedInList is null)
             return analysis;
 
+        IReadOnlyList<NodeAst> residual = analysis.ResidualConjuncts;
+        if (demotedConjuncts is not null)
+            residual = [.. analysis.ResidualConjuncts, .. demotedConjuncts];
+
         return new PredicateAnalysis(
             coerced ?? analysis.IndexableComparisons,
             analysis.ColumnComparisons,
-            analysis.ResidualConjuncts,
+            residual,
             coercedInList ?? analysis.InListComparisons);
     }
 
     private static AnalyzedInList CoerceInListConstants(AnalyzedInList inList, TableDescriptor table)
     {
-        ColumnType? target = TargetCoercionType(inList.ColumnName, table);
-        if (target is null)
+        TableColumnSchema? column = FindColumn(inList.ColumnName, table);
+        if (column is null)
             return inList;
 
-        ColumnValue[]? values = null;
+        ColumnType? stringTarget = column.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
+        bool numericColumn = NumericBoundNormalizer.IsNumeric(column.Type);
+        if (stringTarget is null && !numericColumn)
+            return inList;
+
+        List<ColumnValue>? values = null;
         for (int i = 0; i < inList.Values.Count; i++)
         {
             ColumnValue original = inList.Values[i];
-            if (original.Type != ColumnType.String)
+            ColumnValue? replacement = original;
+
+            if (stringTarget is not null)
+            {
+                if (original.Type == ColumnType.String)
+                {
+                    // An invalid literal stays as-is; it simply matches nothing.
+                    replacement = TryCoerceStringTo(original, stringTarget.Value) ?? original;
+                }
+            }
+            else
+            {
+                // Only equality applies to a list item, so an item the column's domain cannot hold
+                // exactly (1.5 on an INT column) matches nothing and is dropped from the list.
+                replacement = NumericBoundNormalizer.NormalizeInListItem(original, column.Type, out ColumnValue converted) switch
+                {
+                    NumericBoundNormalizer.ItemOutcome.Converted => converted,
+                    NumericBoundNormalizer.ItemOutcome.Drop => null,
+                    _ => original,
+                };
+            }
+
+            if (ReferenceEquals(replacement, original) && values is null)
                 continue;
 
-            ColumnValue? coerced = TryCoerceStringTo(original, target.Value);
-            if (coerced is null)
-                continue; // invalid list item stays as-is; it simply matches nothing
+            if (values is null)
+            {
+                values = new List<ColumnValue>(inList.Values.Count);
+                for (int j = 0; j < i; j++)
+                    values.Add(inList.Values[j]);
+            }
 
-            values ??= [.. inList.Values];
-            values[i] = coerced;
+            if (replacement is not null)
+                values.Add(replacement);
         }
 
         return values is null ? inList : new AnalyzedInList(inList.ColumnName, values, inList.Conjunct);
@@ -857,7 +929,7 @@ public static class PredicateAnalyzer
                 extendedThree: null,
                 extendedFour: null,
                 extendedFive: null,
-                yytext: value.FloatValue.ToString()),
+                yytext: value.FloatValue.ToString("R", System.Globalization.CultureInfo.InvariantCulture)),
             ColumnType.Bool => value.BoolValue ? NodeAst.True : NodeAst.False,
             ColumnType.String => new NodeAst(
                 NodeType.String,

@@ -60,7 +60,12 @@ public sealed class TestQueryResultCacheStrictValidation : CommandsExecutor.Base
                    cache: _cache);
     }
 
-    private QueryResultCache Cache => _cache!;
+    /// <summary>
+    /// The cache the last-built engine uses. A test that never builds an engine (it drives the
+    /// cache directly) gets a standalone cache with the fixture options, so it runs the same alone
+    /// as after another test of this class.
+    /// </summary>
+    private QueryResultCache Cache => _cache ??= new QueryResultCache(Options, sweepIntervalMs: -1);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
