@@ -80,6 +80,14 @@ public sealed class ExecuteSQLQueryResponse
     /// <summary>Logical cache family name from the query hint. Non-null when the cache path was entered.</summary>
     public string? CacheName { get; set; }
 
+    /// <summary>
+    /// Advisory routing metadata. Present only when the request negotiated it
+    /// (<c>routingAcceptVersion = 1</c>) and the statement produced advice; omitted from the JSON
+    /// otherwise so pre-routing clients see their exact response shape.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public SqlRoutingMetadataDto? Routing { get; set; }
+
     public ExecuteSQLQueryResponse(string status, int total, List<ColumnSchemaDto> columns, PositionalRowSet rows)
     {
         Status = status;

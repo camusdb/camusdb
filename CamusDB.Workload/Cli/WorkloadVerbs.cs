@@ -38,6 +38,12 @@ public abstract class CommonOptions
     [Option("no-auto-prepare", Default = false, HelpText = "Append MaxAutoPrepare=0 to every connection string (read, write, setup), disabling client auto-prepare.")]
     public bool NoAutoPrepare { get; set; }
 
+    [Option("routing-mode", HelpText = "Learned statement routing: Off, Learned, or Auto. Omitted = driver default (Auto, which engages only when --routing-nodes maps two or more distinct endpoints).")]
+    public string? RoutingMode { get; set; }
+
+    [Option("routing-nodes", HelpText = "Trust map from server node identities to endpoint pool members, e.g. '10.101.0.2:7070=http://localhost:15095,10.101.0.3:7072=http://localhost:15096'. Only mapped, pool-member addresses are ever routed to.")]
+    public string? RoutingNodes { get; set; }
+
     [Option("request-timeout", HelpText = "Per-request timeout in seconds appended to every connection string (client default when omitted).")]
     public int? RequestTimeout { get; set; }
 }

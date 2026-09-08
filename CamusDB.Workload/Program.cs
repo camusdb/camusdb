@@ -345,7 +345,8 @@ public static class Program
             }
         }
 
-        ConnectionSettings settings = new(locking, isolation, o.NoAutoPrepare, o.RequestTimeout);
+        ConnectionSettings settings = new(
+            locking, isolation, o.NoAutoPrepare, o.RequestTimeout, o.RoutingMode, o.RoutingNodes);
         await using ConnectionSet connections =
             await ConnectionSet.OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, settings, ct).ConfigureAwait(false);
 

@@ -1766,17 +1766,58 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     /// <summary>
-    /// Scans the registry bucket and returns every orphaned-database record. Backing store for
-    /// <c>SHOW ORPHAN DATABASES</c> and the GC reclamation sweep.
+    /// How many times a full registry bucket scan is attempted before a transient failure is allowed
+    /// to surface. A whole-scan restart is safe because these scans only read, and every consumer
+    /// re-confirms what it acts on (the reclaimer under its per-id fence, relink under the drop
+    /// intent). Kept small: one failed attempt can already have spent the store's per-page settle
+    /// budget (seconds), so a large count would turn a persistent fault into a very long stall.
     /// </summary>
-    public async Task<List<OrphanDatabaseRecord>> LoadDatabaseOrphansAsync()
+    private const int MaxScanAttempts = 3;
+
+    /// <summary>
+    /// Runs one registry bucket scan, restarting it a bounded number of times when it fails with a
+    /// transient store response. Under registry write contention (relink versus GC is the ordinary
+    /// case) a scan page can fail loudly instead of truncating: <c>Aborted</c> on a read conflict,
+    /// or <c>MustRetry</c>/<c>WaitingForReplication</c> when a page's settle budget runs out while
+    /// a key holds an unresolved write intent. The scan is idempotent, so the whole scan is simply
+    /// re-run; any other failure — and a transient one that persists across every attempt — still
+    /// propagates.
+    /// </summary>
+    private static async Task<T> RetryTransientScanAsync<T>(Func<Task<T>> scan)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await scan().ConfigureAwait(false);
+            }
+            catch (KahunaServerException ex) when (
+                attempt < MaxScanAttempts - 1 &&
+                ex.ResponseType is KeyValueResponseType.Aborted
+                    or KeyValueResponseType.MustRetry
+                    or KeyValueResponseType.WaitingForReplication)
+            {
+                await Task.Delay((attempt + 1) * 25).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Scans the registry bucket and returns every orphaned-database record. Backing store for
+    /// <c>SHOW ORPHAN DATABASES</c> and the GC reclamation sweep. Reads through the synthetic
+    /// read-only identity (see <see cref="ScanAllEntriesAsync"/>), never a read-write transaction:
+    /// a read-write scan binds an OCC snapshot to every registry key it touches, and a concurrent
+    /// registry writer — relink versus GC contention is the ordinary case — that commits past a
+    /// bound snapshot aborts the whole scan. The reclaimer re-confirms each orphan under its
+    /// per-id fence before acting, so per-key read-committed reads are sufficient here. Transient
+    /// scan failures are absorbed by <see cref="RetryTransientScanAsync"/>.
+    /// </summary>
+    public Task<List<OrphanDatabaseRecord>> LoadDatabaseOrphansAsync() => RetryTransientScanAsync(async () =>
     {
         string orphanPrefix = OrphanKeyPrefix;
         List<OrphanDatabaseRecord> orphans = [];
 
-        KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
+        KvTransaction tx = transactions.CreateReadOnlyTransaction();
         try
         {
             await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
@@ -1801,7 +1842,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         }
 
         return orphans;
-    }
+    });
 
     /// <summary>
     /// Authoritatively resolves the live registered name for a database <paramref name="id"/> by
@@ -1834,8 +1875,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// <para>As a side effect, any entry loaded from the scan that is absent from the local caches
     /// is backfilled into <c>byName</c> and <c>byId</c>, consistent with the lazy-load pattern
     /// used by <see cref="TryResolveEntryAsync"/>.</para>
+    ///
+    /// <para>Transient scan failures are absorbed by <see cref="RetryTransientScanAsync"/>; a
+    /// restarted attempt re-runs the backfill, which is harmless because the cache adds are
+    /// idempotent.</para>
     /// </summary>
-    public async Task<IReadOnlyList<DatabaseRegistryEntry>> ScanAllEntriesAsync()
+    public Task<IReadOnlyList<DatabaseRegistryEntry>> ScanAllEntriesAsync() => RetryTransientScanAsync(async () =>
     {
         string namePrefix = NameKeyPrefix;
         List<DatabaseRegistryEntry> entries = [];
@@ -1878,8 +1923,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
 
-        return entries;
-    }
+        return (IReadOnlyList<DatabaseRegistryEntry>)entries;
+    });
 
     /// <summary>
     /// How long a background snapshot is reused before it is rescanned. Sized to coalesce the sweeps

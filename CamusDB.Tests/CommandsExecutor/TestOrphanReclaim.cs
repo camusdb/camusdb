@@ -282,4 +282,57 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
             Assert.AreEqual(0, rowCount, "GC won → data must be FULLY purged, never half-relinked");
         }
     }
+
+    /// <summary>
+    /// The registry orphan scan must survive concurrent registry writers. The scan once ran inside
+    /// a read-write transaction, which bound an optimistic-concurrency snapshot to every registry
+    /// key it read; a concurrent writer that committed past a bound snapshot aborted the whole scan,
+    /// and the sweep failed loudly instead of reading a consistent-enough list. The scan now uses
+    /// the synthetic read-only identity and restarts itself on a transient scan failure, so
+    /// registry write contention cannot fail the caller.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task LoadDatabaseOrphans_SurvivesConcurrentRegistryWriters()
+    {
+        string idA = ObjectIdGenerator.Generate().ToString();
+        string idB = ObjectIdGenerator.Generate().ToString();
+
+        // A bounded burst of autocommit orphan writes and deletes against the registry bucket. Each
+        // write leaves a short-lived prepared intent on its key; a scan racing the settlement is the
+        // contention the relink-versus-GC path produces. The burst is bounded — not "until the reader
+        // finishes" — because an unbounded writer can legitimately starve a latest-read scan page and
+        // the test would then measure starvation, not robustness.
+        Task writer = Task.Run(async () =>
+        {
+            for (int i = 0; i < 400; i++)
+            {
+                string id = (i % 2 == 0) ? idA : idB;
+                await sharedRegistry!.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+                {
+                    Id = id,
+                    FormerName = "contended",
+                    DroppedAt = HLCTimestamp.Zero,
+                });
+                await sharedRegistry.DeleteDatabaseOrphanAsync(id);
+            }
+        });
+
+        try
+        {
+            // Every scan must complete without an exception while the writer bursts, and one more
+            // must succeed after it finishes.
+            while (!writer.IsCompleted)
+                await sharedRegistry!.LoadDatabaseOrphansAsync();
+
+            await writer;
+            await sharedRegistry!.LoadDatabaseOrphansAsync();
+        }
+        finally
+        {
+            // The writer can leave a record behind; remove both so no later sweep sees them.
+            await sharedRegistry!.DeleteDatabaseOrphanAsync(idA);
+            await sharedRegistry.DeleteDatabaseOrphanAsync(idB);
+        }
+    }
 }

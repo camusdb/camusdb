@@ -60,14 +60,21 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private readonly CamusDBOptions options;
     private readonly IHostApplicationLifetime appLifetime;
     private readonly ForegroundRequestGauge loadGauge;
+    private readonly Core.Routing.StatementRoutingResolver? routing;
 
+    /// <param name="routing">
+    /// Optional and last so the many positional construction sites (tests included) stay valid;
+    /// null means this service never emits routing metadata, which is also the correct behavior
+    /// for a harness that did not register the resolver.
+    /// </param>
     public CamusSqlService(
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
         ILogger<ICamusDB> logger,
         IHostApplicationLifetime appLifetime,
         ForegroundRequestGauge loadGauge,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        Core.Routing.StatementRoutingResolver? routing = null)
     {
         this.executor     = executor;
         this.transactions = transactions;
@@ -75,6 +82,58 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         this.appLifetime  = appLifetime;
         this.loadGauge    = loadGauge;
         this.options      = options;
+        this.routing      = routing;
+    }
+
+    /// <summary>
+    /// A collector for the statement's routing metadata when the request negotiated it and this
+    /// node emits advice, else null so the engine pays one null check and nothing more. Autocommit
+    /// paths only — an explicit transaction is pinned to its stream and endpoint, so advice for its
+    /// statements is deferred until measured demand exists.
+    /// </summary>
+    private Core.Routing.StatementRoutingCollector? BeginRoutingCollection(SqlRequest request)
+        => routing is not null
+           && request.RoutingAcceptVersion == Core.Routing.StatementRoutingAdvice.WireVersion
+           && routing.EmissionEnabled
+            ? new Core.Routing.StatementRoutingCollector()
+            : null;
+
+    /// <summary>
+    /// Resolves and converts the response's routing metadata. Best-effort by contract — the
+    /// statement already committed, so a metadata failure returns null rather than surfacing,
+    /// following the same terminal discipline as <see cref="TryWriteBatchAsync"/>.
+    /// </summary>
+    private RoutingAdvice? BuildRoutingAdvice(DatabaseDescriptor? database, Core.Routing.StatementRoutingCollector? collector)
+    {
+        if (routing is null || collector is null)
+            return null;
+
+        try
+        {
+            Core.Routing.StatementRoutingAdvice? advice = routing.Resolve(database, collector);
+            if (advice is null)
+                return null;
+
+            return new RoutingAdvice
+            {
+                Version = Core.Routing.StatementRoutingAdvice.WireVersion,
+                Disposition = advice.Disposition == Core.Routing.StatementRoutingDisposition.Prefer
+                    ? RoutingDisposition.Prefer
+                    : RoutingDisposition.Clear,
+                PreferredNodeId = advice.PreferredNodeId ?? "",
+                ReuseScope = advice.ParametersIndependent
+                    ? RoutingReuseScope.StatementParametersIndependent
+                    : RoutingReuseScope.Unspecified,
+                DependencyToken = advice.DependencyToken ?? "",
+                MaxAgeMs = advice.MaxAgeMs,
+                Provenance = Core.Routing.StatementRoutingAdvice.ProvenancePlacementHint,
+                Reason = advice.Reason,
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -157,13 +216,22 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             bool retry = (reqLevel ?? options.DefaultIsolationLevel) == CamusIsolationLevel.Serializable;
 
             CacheMetadataHolder cacheMeta = new();
-            HLCTimestamp commitToken = await RunAutocommitQuery(request, sql, sink, retry, principal, cacheMeta, ct).ConfigureAwait(false);
+            Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
+            (HLCTimestamp commitToken, DatabaseDescriptor? routingDb) =
+                await RunAutocommitQuery(request, sql, sink, retry, principal, cacheMeta, routingCollector, ct).ConfigureAwait(false);
 
             // Trailing cache verdict, mirroring the REST envelope: written only when the statement went
             // through the cache path, and necessarily after the last row since the holder is populated
             // when the cursor drains.
             if (cacheMeta.CacheName is not null)
                 await responseStream.WriteAsync(new QueryStreamMessage { CacheMetadata = BuildCacheMetadata(cacheMeta) }, ct).ConfigureAwait(false);
+
+            // Trailing routing advice, present only for a request that negotiated it. The commit
+            // already happened; the advice lookup itself is best-effort (BuildRoutingAdvice), and
+            // the write shares the stream's fate like the cache verdict above.
+            RoutingAdvice? unaryAdvice = BuildRoutingAdvice(routingDb, routingCollector);
+            if (unaryAdvice is not null)
+                await responseStream.WriteAsync(new QueryStreamMessage { RoutingAdvice = unaryAdvice }, ct).ConfigureAwait(false);
 
             if (!commitToken.IsNull())
             {
@@ -255,17 +323,19 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// (<c>!sink.HasWritten</c>); once output is on the wire the conflict is reported as the terminal
     /// error, because replaying would re-emit the schema/rows and corrupt the stream.
     /// </summary>
-    private async Task<HLCTimestamp> RunAutocommitQuery(
+    private async Task<(HLCTimestamp CommitToken, DatabaseDescriptor? Database)> RunAutocommitQuery(
         SqlRequest request,
         string sql,
         IQueryRowSink sink,
         bool retry,
         Principal? principal,
         CacheMetadataHolder? cacheMeta,
+        Core.Routing.StatementRoutingCollector? routingCollector,
         CancellationToken ct)
     {
         HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
         HLCTimestamp commitToken = default;
+        DatabaseDescriptor? committedDb = null;
         EnginePriority? reqPriority = ToPriority(request.Priority);
 
         async Task<HLCTimestamp> Attempt(CancellationToken innerCt)
@@ -285,10 +355,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     sql: sql,
                     parameters: ToColumnValueMap(request.Parameters),
                     principal: principal,
-                    cancellationToken: innerCt
+                    cancellationToken: innerCt,
+                    routing: routingCollector
                 );
                 DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, innerCt, cacheMeta).ConfigureAwait(false);
                 commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
+                committedDb = db;
                 return commitToken;
             }
             catch
@@ -304,7 +376,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         else
             await Attempt(ct).ConfigureAwait(false);
 
-        return commitToken;
+        return (commitToken, committedDb);
     }
 
     // ─── ExecuteNonQuery ──────────────────────────────────────────────────────
@@ -371,6 +443,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // warning of the attempt that actually committed, not one left over from an aborted try.
             string? warning = null;
             HLCTimestamp causalToken = default;
+            Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
+            DatabaseDescriptor? routingDb = null;
 
             async Task AutocommitDml(CancellationToken innerCt)
             {
@@ -383,12 +457,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         database: request.Database,
                         sql: request.Sql ?? "",
                         parameters: ToColumnValueMap(request.Parameters),
-                        principal: principal
+                        principal: principal,
+                        routing: routingCollector
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken = await transactions.CommitOrReleaseAsync(r.Database, tx, innerCt).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
+                    routingDb = r.Database;
                 }
                 catch
                 {
@@ -406,6 +482,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             NonQueryReply reply = new() { AffectedRows = modifiedRows, Warning = warning ?? "" };
             if (!causalToken.IsNull())
                 ApplyCausalToken(reply, causalToken);
+            RoutingAdvice? advice = BuildRoutingAdvice(routingDb, routingCollector);
+            if (advice is not null)
+                reply.Routing = advice;
             return reply;
         });
 
@@ -833,6 +912,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchQuerySink sink = new(stream, writeLock, requestId);
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
+        Core.Routing.StatementRoutingCollector? routingCollector = null;
+        DatabaseDescriptor? routingDb = null;
 
         // A server-level query needs no database context and no transaction.
         if (StatementScope.IsServerLevelQuery(resolved.RootType))
@@ -865,12 +946,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
             try
             {
+                routingCollector = BeginRoutingCollection(request);
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: resolved.Database, sql: sql,
                     parameters: resolved.Parameters, principal: principal,
-                    cancellationToken: ct);
+                    cancellationToken: ct, routing: routingCollector);
                 DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
                 commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
+                routingDb = db;
             }
             catch
             {
@@ -892,6 +975,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // query never entered the cache path.
         if (cacheMeta.CacheName is not null)
             complete.CacheMetadata = BuildCacheMetadata(cacheMeta);
+        // Routing advice rides the terminator, present only for a request that negotiated it.
+        // Building it is best-effort — the read already completed successfully.
+        RoutingAdvice? queryAdvice = BuildRoutingAdvice(routingDb, routingCollector);
+        if (queryAdvice is not null)
+            complete.Routing = queryAdvice;
         await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
         {
             RequestId = requestId,
@@ -951,15 +1039,19 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             int rows;
             string? batchWarning;
             HLCTimestamp token;
+            Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
+            DatabaseDescriptor? routingDb;
             try
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: resolved.Database, sql: resolved.Sql,
-                    parameters: resolved.Parameters, principal: principal);
+                    parameters: resolved.Parameters, principal: principal,
+                    routing: routingCollector);
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                 token = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;
                 batchWarning = r.Warning;
+                routingDb = r.Database;
             }
             catch
             {
@@ -970,6 +1062,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             reply = new NonQueryReply { AffectedRows = rows, Warning = batchWarning ?? "" };
             if (!token.IsNull())
                 ApplyCausalToken(reply, token);
+            // Best-effort routing advice on the terminator — the mutation already committed.
+            RoutingAdvice? advice = BuildRoutingAdvice(routingDb, routingCollector);
+            if (advice is not null)
+                reply.Routing = advice;
         }
 
         // Best-effort terminal: the mutation already committed, so a failed write must not be

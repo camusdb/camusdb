@@ -18,10 +18,8 @@ internal sealed class ScalarFunctionRegistry
     {
         foreach (string name in descriptor.AllNames)
         {
-            if (functions.ContainsKey(name))
+            if (!functions.TryAdd(name, descriptor))
                 throw new InvalidOperationException($"Scalar function '{name}' is already registered");
-
-            functions[name] = descriptor;
         }
     }
 
@@ -37,10 +35,7 @@ internal sealed class ScalarFunctionRegistry
 
     public ColumnType InferReturnType(string functionName, IReadOnlyList<ColumnType> argumentTypes)
     {
-        if (!TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
-            return ColumnType.String;
-
-        return descriptor.InferReturnType(argumentTypes);
+        return !TryGet(functionName, out ScalarFunctionDescriptor? descriptor) ? ColumnType.String : descriptor.InferReturnType(argumentTypes);
     }
 
     public static ScalarFunctionRegistry CreateDefault()

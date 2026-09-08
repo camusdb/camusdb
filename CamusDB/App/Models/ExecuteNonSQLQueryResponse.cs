@@ -37,6 +37,14 @@ public sealed class ExecuteNonSQLQueryResponse
     /// </summary>
     public double? ServerTimeMs { get; set; }
 
+    /// <summary>
+    /// Advisory routing metadata. Present only when the request negotiated it
+    /// (<c>routingAcceptVersion = 1</c>) and the statement produced advice; omitted from the JSON
+    /// otherwise so pre-routing clients see their exact response shape.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public SqlRoutingMetadataDto? Routing { get; set; }
+
     public ExecuteNonSQLQueryResponse(string status, int rows)
     {
         Status = status;

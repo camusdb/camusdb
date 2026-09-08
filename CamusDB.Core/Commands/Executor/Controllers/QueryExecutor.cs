@@ -275,18 +275,6 @@ internal sealed class QueryExecutor
             return null;
         }
 
-        void RecordHitMetadata(CachedQueryResult served)
-        {
-            if (metaOut is null)
-                return;
-
-            metaOut.Status = QueryCacheStatus.Hit;
-            metaOut.CacheName = hint.CacheName;
-            metaOut.CachedAtHlc = served.CachedAt;
-            metaOut.AgeMs = served.CreatedAtMs == 0
-                ? null : Environment.TickCount64 - served.CreatedAtMs;
-        }
-
         CachedQueryResult? hit = await ProbeCacheAsync().ConfigureAwait(false);
         if (hit is not null)
         {
@@ -452,6 +440,20 @@ internal sealed class QueryExecutor
             // No-op when ExitSingleFlight was already called (idempotent _inFlight.Remove).
             if (isSingleFlightOwner)
                 cache.ExitSingleFlight(fingerprint, published: false);
+        }
+
+        yield break;
+
+        void RecordHitMetadata(CachedQueryResult served)
+        {
+            if (metaOut is null)
+                return;
+
+            metaOut.Status = QueryCacheStatus.Hit;
+            metaOut.CacheName = hint.CacheName;
+            metaOut.CachedAtHlc = served.CachedAt;
+            metaOut.AgeMs = served.CreatedAtMs == 0
+                ? null : Environment.TickCount64 - served.CreatedAtMs;
         }
     }
 

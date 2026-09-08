@@ -374,6 +374,13 @@ builder.Services.AddSingleton(optionsHolder);
 builder.Services.AddTransient<CamusDBOptions>(services =>
     services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>().Current);
 
+// Resolves advisory routing metadata for SQL responses. A singleton on purpose: emission and the
+// advertised TTL are restart-class (latched at construction from the boot snapshot), and the
+// resolver's short-TTL placement cache should be shared across requests.
+builder.Services.AddSingleton<CamusDB.Core.Routing.StatementRoutingResolver>(services =>
+    new CamusDB.Core.Routing.StatementRoutingResolver(
+        services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>().Current));
+
 // Owns the replicated runtime-settings overlay: validates and proposes changes, applies committed
 // changes from the settings log, persists the load-time checkpoint, and publishes merged snapshots
 // through the holder. In standalone mode the same pipeline runs with no replication.

@@ -66,4 +66,76 @@ public sealed class CamusGrpcOptions
     /// pool) aren't all funneled onto a single connection's stream limit. On by default.
     /// </summary>
     public bool EnableMultipleHttp2Connections { get; set; } = true;
+
+    // ─── Learned routing ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Learned statement-routing configuration for a multi-endpoint connection. Snapshotted at
+    /// <c>Connect</c> time — later mutation of this object does not affect an existing connection,
+    /// unlike the batching tunables above, because routing state (endpoint pools, the trust map)
+    /// cannot safely change underneath in-flight selection.
+    /// </summary>
+    public CamusRoutingOptions Routing { get; } = new();
+}
+
+/// <summary>Whether and how a connection learns per-statement destinations. See <see cref="CamusRoutingOptions.Mode"/>.</summary>
+public enum CamusRoutingMode
+{
+    /// <summary>Rotate over the configured endpoints; never negotiate or learn.</summary>
+    Off = 0,
+
+    /// <summary>Negotiate routing metadata and prefer learned destinations for unpinned work.</summary>
+    Learned = 1,
+
+    /// <summary>
+    /// Behave as <see cref="Learned"/> when the trust map names at least two distinct reachable
+    /// addresses, else as <see cref="Off"/>. A single load-balancer URL is not a set of routable
+    /// database nodes, so learning against it would only add bookkeeping. The default.
+    /// </summary>
+    Auto = 2,
+}
+
+/// <summary>
+/// Tunables for learned statement routing. All values are snapshotted at <c>Connect</c>.
+///
+/// <para><b>The trust map is the routing authority.</b> <see cref="NodeAddresses"/> maps a
+/// server-advertised opaque node identity to an operator-configured client address. Advice naming
+/// an identity outside this map is ignored: the client never dials a response-provided address and
+/// never derives one from a server identity, so a compromised or confused response cannot steer
+/// traffic — or credentials — anywhere the operator did not list.</para>
+/// </summary>
+public sealed class CamusRoutingOptions
+{
+    /// <summary>
+    /// Routing mode. Default <see cref="CamusRoutingMode.Auto"/>: learning engages by itself when
+    /// the operator maps at least two distinct endpoints in <see cref="NodeAddresses"/>, and a
+    /// connection with no trust map behaves exactly as <see cref="CamusRoutingMode.Off"/> — no
+    /// negotiation, requests byte-identical to a pre-routing client.
+    /// </summary>
+    public CamusRoutingMode Mode { get; set; } = CamusRoutingMode.Auto;
+
+    /// <summary>
+    /// Node identity → client address (e.g. <c>"camus-b:7070"</c> → <c>"https://db-b.internal:9090"</c>).
+    /// Addresses named here join the connection's endpoint pool and get the connection's full TLS,
+    /// credential and timeout policy.
+    /// </summary>
+    public IDictionary<string, string> NodeAddresses { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>Bound on learned route entries. High-cardinality SQL must not grow the cache without limit.</summary>
+    public int RouteCacheMaxEntries { get; set; } = 4_096;
+
+    /// <summary>Bound on the bytes the route cache retains (keys included), same rationale as the entry cap.</summary>
+    public long RouteCacheMaxBytes { get; set; } = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// Client-side ceiling on a hint's advertised age. The effective TTL of a learned route is the
+    /// smaller of this and the server's <c>maxAgeMs</c>, measured monotonically from receipt.
+    /// </summary>
+    public TimeSpan MaxHintAge { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long a transport-failed endpoint is skipped for future <b>unpinned</b> work. A domain
+    /// SQL error never triggers this — only the transport failing does.
+    /// </summary>
+    public TimeSpan EndpointCooldown { get; set; } = TimeSpan.FromSeconds(1);
 }

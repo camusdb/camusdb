@@ -55,6 +55,15 @@ public readonly struct ExecuteSQLTicket
     /// </summary>
     public Diagnostics.StatementProbe? Probe { get; }
 
+    /// <summary>
+    /// Per-statement collector for advisory routing metadata, or null when the client did not
+    /// negotiate it. The transport creates it, the engine's record sites classify the statement
+    /// onto it with null-conditional calls, and the transport reads it back only after the
+    /// statement succeeded — a failed statement's collector is never read. Follows the same
+    /// carry-forward rule as <see cref="Probe"/>: every rebuild of this ticket must preserve it.
+    /// </summary>
+    public Routing.StatementRoutingCollector? Routing { get; }
+
     public ExecuteSQLTicket(
         KvTransaction txnState,
         string database,
@@ -62,7 +71,8 @@ public readonly struct ExecuteSQLTicket
         Dictionary<string, ColumnValue>? parameters,
         Principal? principal = null,
         CancellationToken cancellationToken = default,
-        Diagnostics.StatementProbe? probe = null)
+        Diagnostics.StatementProbe? probe = null,
+        Routing.StatementRoutingCollector? routing = null)
     {
         TxnState = txnState;
         DatabaseName = database;
@@ -71,6 +81,7 @@ public readonly struct ExecuteSQLTicket
         Principal = principal;
         CancellationToken = cancellationToken;
         Probe = probe;
+        Routing = routing;
     }
 
     /// <summary>
@@ -78,5 +89,5 @@ public readonly struct ExecuteSQLTicket
     /// slow query log creates the probe after the ticket has already been built by the transport.
     /// </summary>
     public ExecuteSQLTicket WithProbe(Diagnostics.StatementProbe? probe)
-        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe);
+        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe, Routing);
 }

@@ -140,14 +140,64 @@ message CacheMetadata {
   optional int64 age_ms = 5;
 }
 
+// Whether routing advice asks the client to remember or to forget a destination.
+enum RoutingDisposition {
+  ROUTING_DISPOSITION_UNSPECIFIED = 0;
+  // Remember the advertised node for future executions of this statement context.
+  ROUTING_DISPOSITION_PREFER      = 1;
+  // Forget any previously learned destination for this statement context.
+  ROUTING_DISPOSITION_CLEAR       = 2;
+}
+
+// How broadly a learned destination may be reused. A client MUST NOT treat an
+// unrecognized value as parameter-independent; it must ignore the advice instead.
+enum RoutingReuseScope {
+  ROUTING_REUSE_SCOPE_UNSPECIFIED = 0;
+  // The destination holds for future executions of this exact statement and binding
+  // context, across different parameter values.
+  ROUTING_REUSE_SCOPE_STATEMENT_PARAMETERS_INDEPENDENT = 1;
+}
+
+// Advisory routing metadata attached to a successful statement response, emitted only when the
+// request negotiated it (SqlRequest.routing_accept_version = 1). It is a performance hint, never
+// an instruction: the operation that carried it already executed normally, and a client that
+// ignores it loses nothing but a network hop. The server emits it only after the statement's
+// normal authorization checks, and it never carries SQL literals, row values, encoded keys,
+// credentials, or a cluster map.
+message RoutingAdvice {
+  // Metadata contract version; today always 1. A client MUST ignore versions it does not know.
+  int32 version = 1;
+  RoutingDisposition disposition = 2;
+  // Opaque node identity to prefer. The client maps it to a CONFIGURED endpoint address; it is
+  // never an address to dial directly, and an identity absent from the client's map is unusable
+  // advice, not an error.
+  string preferred_node_id = 3;
+  RoutingReuseScope reuse_scope = 4;
+  // Opaque change detector over the statement's resolved physical dependencies. It changes when
+  // the dependency set changes (schema change, TRUNCATE, materialized-view refresh, database
+  // recreation). Not sortable, not an authority, not authentication.
+  string dependency_token = 5;
+  // Maximum reuse period, measured by the client with a monotonic clock from receipt. Bounded
+  // further by client policy.
+  int32 max_age_ms = 6;
+  // How the server knows: "placementHint" = this node's local placement belief, not proof of
+  // which node executed the underlying storage operations.
+  string provenance = 7;
+  // Why this disposition: "singleTableHash", "ineligible", "placementUnknown", "cacheAffinity".
+  string reason = 8;
+}
+
 // Streamed query response: exactly one Schema first, then zero or more Rows, then — only for a
 // cache-hinted statement — one trailing CacheMetadata. The cache verdict is known only after the
-// cursor is fully drained, so it can never precede the rows.
+// cursor is fully drained, so it can never precede the rows. A request that negotiated routing
+// metadata may additionally receive one trailing RoutingAdvice after the rows (and after any
+// CacheMetadata); a client that did not negotiate never sees it.
 message QueryStreamMessage {
   oneof payload {
     ResultSchema  schema         = 1;
     ResultRow     row            = 2;
     CacheMetadata cache_metadata = 3;
+    RoutingAdvice routing_advice = 4;
   }
 }
 
@@ -213,6 +263,9 @@ message QueryComplete {
   // Present only for a cache-hinted statement — the batch terminator carries the verdict because
   // it is known only once the cursor has been drained.
   CacheMetadata cache_metadata = 5;
+  // Present only when the request negotiated routing metadata (routing_accept_version = 1) and
+  // the statement produced advice. Advisory — see RoutingAdvice.
+  RoutingAdvice routing = 6;
 }
 
 message BatchExecuteResponse {
@@ -300,6 +353,11 @@ message SqlRequest {
   // txn_handle resumes an existing transaction — priority is consumed when the coordinator
   // session opens, so a resumed transaction has already spent it.
   TransactionPriority priority = 13;
+
+  // Highest RoutingAdvice version the client accepts on this operation's response. 0 (the value
+  // every pre-routing client necessarily sends) means "do not emit routing metadata", so old
+  // clients keep their exact response shape. Today the only accepted value is 1.
+  int32 routing_accept_version = 14;
 }
 
 message NonQueryReply {
@@ -312,6 +370,10 @@ message NonQueryReply {
   // that read no rows, which may mean the requested history had already been reclaimed. Empty
   // otherwise. Carried here because a client cannot see the server's log.
   string warning = 5;
+
+  // Present only when the request negotiated routing metadata (routing_accept_version = 1) and
+  // the statement produced advice. Advisory — see RoutingAdvice.
+  RoutingAdvice routing = 6;
 }
 
 message DdlReply {

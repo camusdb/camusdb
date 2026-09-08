@@ -22,7 +22,9 @@ public sealed record ConnectionSettings(
     CamusLocking Locking = CamusLocking.Optimistic,
     CamusIsolationLevel IsolationLevel = CamusIsolationLevel.ReadCommitted,
     bool NoAutoPrepare = false,
-    int? RequestTimeoutSeconds = null)
+    int? RequestTimeoutSeconds = null,
+    string? RoutingMode = null,
+    string? RoutingNodes = null)
 {
     public static ConnectionSettings Default { get; } = new();
 
@@ -34,6 +36,12 @@ public sealed record ConnectionSettings(
             suffix += ";MaxAutoPrepare=0";
         if (RequestTimeoutSeconds is int seconds)
             suffix += $";Timeout={seconds}";
+        if (!string.IsNullOrWhiteSpace(RoutingMode))
+            suffix += $";RoutingMode={RoutingMode}";
+        // Quoted: the trust-map value carries '=' and ',', which the connection-string parser only
+        // keeps inside a quoted value.
+        if (!string.IsNullOrWhiteSpace(RoutingNodes))
+            suffix += $";RoutingNodes='{RoutingNodes}'";
         return suffix;
     }
 }

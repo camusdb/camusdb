@@ -1433,6 +1433,27 @@ public sealed record CamusDBOptions
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int SessionReaperIntervalMs { get; init; } = 300_000;
 
+    /// <summary>
+    /// Whether this node attaches advisory routing metadata to SQL responses for clients that
+    /// negotiated it (<c>routingAcceptVersion = 1</c> on the request). The metadata is a pure
+    /// response-side hint — it never changes execution, isolation, locking, or commit handling —
+    /// so leaving it on is safe; turning it off is the immediate kill switch for the feature.
+    ///
+    /// <para>Restart-class because the resolver latches it at construction: emission is advisory
+    /// local behavior, and a node answering with or without hints needs no fleet agreement.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public bool SqlRoutingAdviceEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Maximum age, in milliseconds, this node advertises for its routing advice. Clients measure
+    /// it with a monotonic clock from receipt and may clamp it further. Short on purpose: the
+    /// advice is a placement belief that a leader transfer silently invalidates, and expiry is the
+    /// mechanism that heals a stale belief without any invalidation protocol.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int SqlRoutingAdviceTtlMs { get; init; } = 5_000;
+
 
     /// <summary>
     /// When authentication is enabled, refuse credential-bearing requests that arrive over a plaintext

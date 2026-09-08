@@ -35,6 +35,12 @@ internal sealed class FakeBatchTransport : IBatchTransport
     /// <summary>When set, requests are recorded but produce no response (to test holds / deadlines).</summary>
     public bool Hold { get; set; }
 
+    /// <summary>
+    /// When set, its result is attached as the routing advice of each QUERY / NON_QUERY terminator,
+    /// so routing tests can script what "the server" advises per request. Null results attach nothing.
+    /// </summary>
+    public Func<BatchExecuteRequest, RoutingAdvice?>? AdviceFactory { get; set; }
+
     public FakeBatchTransport(long id) => Id = id;
 
     public Task SendAsync(BatchExecuteRequest request, CancellationToken cancellationToken)
@@ -72,7 +78,7 @@ internal sealed class FakeBatchTransport : IBatchTransport
 
     // A deterministic stand-in for the server: the causal token L equals the request id so tests can
     // assert token threading; a QUERY returns a one-column schema + two rows; START mints a handle.
-    private static IEnumerable<BatchExecuteResponse> Respond(BatchExecuteRequest req)
+    private IEnumerable<BatchExecuteResponse> Respond(BatchExecuteRequest req)
     {
         int id = req.RequestId;
         switch (req.Kind)
@@ -87,19 +93,27 @@ internal sealed class FakeBatchTransport : IBatchTransport
                     row.Values.Add(new Value { Int64Value = i });
                     yield return new BatchExecuteResponse { RequestId = id, Row = row };
                 }
-                yield return new BatchExecuteResponse
-                {
-                    RequestId = id,
-                    QueryComplete = new QueryComplete { Total = 2, CausalTokenL = id, CausalTokenC = 1, CausalTokenN = 1 },
-                };
+                QueryComplete complete = new() { Total = 2, CausalTokenL = id, CausalTokenC = 1, CausalTokenN = 1 };
+                if (AdviceFactory?.Invoke(req) is RoutingAdvice queryAdvice)
+                    complete.Routing = queryAdvice;
+                yield return new BatchExecuteResponse { RequestId = id, QueryComplete = complete };
                 break;
 
             case BatchStatementKind.NonQuery:
-                yield return new BatchExecuteResponse
-                {
-                    RequestId = id,
-                    NonQuery = new NonQueryReply { AffectedRows = 1, CausalTokenL = id, CausalTokenC = 1, CausalTokenN = 1 },
-                };
+                NonQueryReply reply = new() { AffectedRows = 1, CausalTokenL = id, CausalTokenC = 1, CausalTokenN = 1 };
+                if (AdviceFactory?.Invoke(req) is RoutingAdvice nonQueryAdvice)
+                    reply.Routing = nonQueryAdvice;
+                yield return new BatchExecuteResponse { RequestId = id, NonQuery = reply };
+                break;
+
+            case BatchStatementKind.Prepare:
+                PrepareReply prepare = new() { StatementId = id };
+                prepare.ParameterNames.Add("@a");
+                yield return new BatchExecuteResponse { RequestId = id, PrepareReply = prepare };
+                break;
+
+            case BatchStatementKind.Close:
+                yield return new BatchExecuteResponse { RequestId = id, CloseReply = new CloseReply() };
                 break;
 
             case BatchStatementKind.Start:

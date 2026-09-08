@@ -146,6 +146,19 @@ await using CamusConnection conn = CamusConnection.Connect("https://host:5096", 
 - Pass a `CancellationToken` to any call to bound it; if you don't, `OperationTimeout` applies (zero =
   no deadline).
 
+## Learned multi-endpoint routing (optional)
+
+`Connect` also accepts a list of addresses, and `options.Routing` configures learned statement
+routing over them: a trust map from server node identities to configured addresses, a mode
+(`Auto` default, `Learned`, `Off`), cache bounds, hint age and endpoint cooldown. With routing on,
+repeated eligible statements are sent straight to the node that leads their data; transactions can
+start on a warmed statement's endpoint via `BeginTransactionAsync(..., affinity: statement)` and
+stay pinned there. Everything about it — the wire contract, eligibility, and the exact client
+semantics — is in [sql-routing-advice.md](sql-routing-advice.md). Routing changes no result and
+adds no retry. Under the `Auto` default the trust map is the opt-in: with no `NodeAddresses`
+(every pre-routing configuration) nothing is negotiated and behavior is exactly pre-routing;
+`Mode = Off` is the explicit kill switch.
+
 ## Errors and retries
 
 A failed call throws `CamusGrpcException` whose **`Code`** is the `CADBxxxx` domain code — branch on the

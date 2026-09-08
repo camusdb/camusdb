@@ -63,7 +63,7 @@ public sealed class CamusTransactionSession
     {
         EnsureLive();
         QueryResult result = await statement
-            .ExecuteQueryAsync(slot, ResumeHandle(), values, cancellationToken).ConfigureAwait(false);
+            .ExecuteQueryAsync(batcher, slot, ResumeHandle(), values, cancellationToken).ConfigureAwait(false);
         Advance(result.Token);
         return result;
     }
@@ -74,7 +74,7 @@ public sealed class CamusTransactionSession
     {
         EnsureLive();
         NonQueryResult result = await statement
-            .ExecuteNonQueryAsync(slot, ResumeHandle(), values, cancellationToken).ConfigureAwait(false);
+            .ExecuteNonQueryAsync(batcher, slot, ResumeHandle(), values, cancellationToken).ConfigureAwait(false);
         Advance(result.Token);
         return result;
     }

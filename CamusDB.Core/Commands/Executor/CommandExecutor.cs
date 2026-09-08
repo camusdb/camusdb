@@ -947,7 +947,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
-            return await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
+        {
+            ExecuteNonSQLResult plain = await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
+            RecordRoutingForNonQuery(ticket, plain);
+            return plain;
+        }
 
         recording.Describe(SafeParseKind(ticket.Sql));
 
@@ -959,6 +963,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             // Rows affected stands in for rows returned: the column means "rows this statement was
             // about", and for a mutation that is what it changed.
             recording.Finish(result.ModifiedRows, Diagnostics.SlowQueryOutcome.Completed);
+            RecordRoutingForNonQuery(ticket, result);
             return result;
         }
         catch (Exception exception)
@@ -966,6 +971,39 @@ public sealed class CommandExecutor : IAsyncDisposable
             recording.FinishFailed(exception);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Classifies a finished mutation for advisory routing metadata. Runs only after the final
+    /// successful attempt — the dispatcher's fence retries and the transport's serializable
+    /// retries never reach it with a failed attempt's state — so the collector describes exactly
+    /// the execution the caller is about to see succeed. Only plain INSERT, UPDATE and DELETE are
+    /// candidates; every other statement kind leaves the collector untouched, which the resolver
+    /// answers with no metadata. The parse goes through the statement cache, so its cost is a
+    /// dictionary lookup.
+    /// </summary>
+    private void RecordRoutingForNonQuery(ExecuteSQLTicket ticket, ExecuteNonSQLResult result)
+    {
+        Routing.StatementRoutingCollector? routing = ticket.Routing;
+        if (routing is null)
+            return;
+
+        NodeAst ast;
+        try
+        {
+            ast = ParseSql(ticket.Sql);
+        }
+        catch (Exception)
+        {
+            // The statement executed, so the SQL parses; this guard only keeps a diagnostic-path
+            // surprise from failing a mutation that already committed.
+            return;
+        }
+
+        if (ast.nodeType is not (NodeType.Insert or NodeType.Update or NodeType.Delete))
+            return;
+
+        routing.RecordDml(result.Table, Routing.StatementRoutingCollector.ContainsSubqueryNodes(ast));
     }
 
     /// <summary>

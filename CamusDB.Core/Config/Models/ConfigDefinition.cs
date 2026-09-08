@@ -869,6 +869,18 @@ public class ConfigDefinition
     public int SessionReaperIntervalMs { get; set; } = 300_000;
 
     /// <summary>
+    /// Whether SQL responses carry advisory routing metadata for clients that negotiated it.
+    /// Default <c>true</c>. Maps to <c>CamusDBOptions.SqlRoutingAdviceEnabled</c>.
+    /// </summary>
+    public bool SqlRoutingAdviceEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Maximum advertised age of routing advice, in milliseconds. Must be between 1 and 600 000.
+    /// Default 5 000. Maps to <c>CamusDBOptions.SqlRoutingAdviceTtlMs</c>.
+    /// </summary>
+    public int SqlRoutingAdviceTtlMs { get; set; } = 5_000;
+
+    /// <summary>
     /// Maximum staleness, in milliseconds, of a per-node authorization cache hit; 0 forces an
     /// authoritative lookup on every request. Must be &gt;= 0. Default 1 000. Maps to
     /// <c>CamusDBOptions.AuthenticationCacheTtl</c>.
@@ -1293,6 +1305,9 @@ public class ConfigDefinition
 
         if (LoginRateLimitMaxEntries < 1)
             throw Invalid($"'login_rate_limit_max_entries' must be >= 1, got {LoginRateLimitMaxEntries}");
+
+        if (SqlRoutingAdviceTtlMs is < 1 or > 600_000)
+            throw Invalid($"'sql_routing_advice_ttl_ms' must be between 1 and 600000, got {SqlRoutingAdviceTtlMs}");
 
         if (AuthenticationCacheTtl < 0)
             throw Invalid(

@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -147,9 +148,21 @@ internal sealed class StartupRecoveryService
         for (int round = 0; round < 3; round++)
         {
             List<string> keys = [];
-            await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-                HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
-                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+
+            ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, 
+                metaBucket, 
+                null, 
+                true, 
+                null, 
+                true, 
+                512,
+                HLCTimestamp.Zero, 
+                KeyValueDurability.Persistent, 
+                CancellationToken.None
+            ).ConfigureAwait(false);
+            
+            await foreach ((string key, ReadOnlyKeyValueEntry _) in cursor)
             {
                 if (key.StartsWith(metaPrefix, StringComparison.Ordinal))
                     keys.Add(key);
@@ -163,8 +176,10 @@ internal sealed class StartupRecoveryService
                 try
                 {
                     await kahuna.LocateAndTryDeleteKeyValue(
-                        HLCTimestamp.Zero, key,
-                        KeyValueDurability.Persistent, CancellationToken.None
+                        HLCTimestamp.Zero, 
+                        key,
+                        KeyValueDurability.Persistent, 
+                        CancellationToken.None
                     ).ConfigureAwait(false);
                 }
                 catch (Exception ex)

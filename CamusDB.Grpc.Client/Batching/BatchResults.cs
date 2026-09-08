@@ -33,11 +33,20 @@ public sealed class QueryResult
     public IReadOnlyList<ResultRow> Rows { get; }
     public CausalToken Token { get; }
 
-    public QueryResult(ResultSchema schema, IReadOnlyList<ResultRow> rows, CausalToken token)
+    /// <summary>
+    /// Routing advice the reply carried, or null. Present only when the connection negotiated
+    /// routing metadata; the connection has already learned from it, so this is diagnostic.
+    /// </summary>
+    public Routing.CamusRoutingAdvice? Routing { get; }
+
+    public QueryResult(
+        ResultSchema schema, IReadOnlyList<ResultRow> rows, CausalToken token,
+        Routing.CamusRoutingAdvice? routing = null)
     {
-        Schema = schema;
-        Rows   = rows;
-        Token  = token;
+        Schema  = schema;
+        Rows    = rows;
+        Token   = token;
+        Routing = routing;
     }
 }
 
@@ -47,10 +56,14 @@ public sealed class NonQueryResult
     public int AffectedRows { get; }
     public CausalToken Token { get; }
 
-    public NonQueryResult(int affectedRows, CausalToken token)
+    /// <inheritdoc cref="QueryResult.Routing"/>
+    public Routing.CamusRoutingAdvice? Routing { get; }
+
+    public NonQueryResult(int affectedRows, CausalToken token, Routing.CamusRoutingAdvice? routing = null)
     {
         AffectedRows = affectedRows;
         Token        = token;
+        Routing      = routing;
     }
 }
 

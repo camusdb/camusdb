@@ -115,8 +115,14 @@ internal static class SessionScalarFunctions
         // exists to add session parameters, and a value dropped here is silently lost for the rest
         // of the statement — the request's cancellation token and its diagnostic probe included.
         return new ExecuteSQLTicket(
-            ticket.TxnState, ticket.DatabaseName, ticket.Sql, parameters, ticket.Principal,
-            ticket.CancellationToken, ticket.Probe);
+            ticket.TxnState, 
+            ticket.DatabaseName, 
+            ticket.Sql, 
+            parameters, ticket.Principal,
+            ticket.CancellationToken, 
+            ticket.Probe, 
+            ticket.Routing
+        );
     }
 
     private static ScalarFunctionDescriptor Describe(string name, string parameterKey, ColumnType returnType)

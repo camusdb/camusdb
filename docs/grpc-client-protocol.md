@@ -100,7 +100,9 @@ QueryStreamMessage(schema)          // ALWAYS first, exactly one, even for an em
 QueryStreamMessage(row)             // zero or more, in cursor order
 QueryStreamMessage(row)
 ...
-QueryStreamMessage(cache_metadata)  // at most one, strictly last — only for a {cache=…}-hinted SELECT
+QueryStreamMessage(cache_metadata)  // at most one — only for a {cache=…}-hinted SELECT
+QueryStreamMessage(routing_advice)  // at most one, strictly last — only when the request negotiated
+                                    // routing metadata (routing_accept_version = 1)
 ```
 
 Rules:
@@ -121,6 +123,12 @@ Rules:
   once the cursor has drained. An **absent** message means the statement carried no hint, which is
   distinct from a hinted statement whose verdict was `bypass`. A client that ignores the message still
   reads a well-formed result, so this is backward compatible.
+- **Routing advice, when present, is last of all.** A request that set
+  `SqlRequest.routing_accept_version = 1` may receive one trailing `RoutingAdvice` message after the
+  rows and after any cache verdict. It is advisory metadata for learned client routing (see
+  [sql-routing-advice.md](sql-routing-advice.md)); the query already executed normally, and a client
+  that ignores the message still reads a well-formed result. A request that did not negotiate
+  (`routing_accept_version` absent or 0 — every pre-routing client) never sees this message.
 - The stream ends by normal gRPC stream completion. (For the batched variant, a `QueryComplete`
   terminator is used instead — see §7.)
 
@@ -334,10 +342,14 @@ Because one `BatchExecute` call carries many ops, per-op metadata that the unary
   The `QueryComplete` terminator replaces normal stream completion and carries the op's trailing
   causal token. Thread that token forward like any other (§4.2). For a `{cache=…}`-hinted statement it
   also carries `cache_metadata` — the batched equivalent of the trailing `CacheMetadata` message on
-  the unary stream (§3), absent when the statement carried no hint.
+  the unary stream (§3), absent when the statement carried no hint. When the op negotiated routing
+  metadata (`routing_accept_version = 1`) it may also carry `routing` — per-op advisory routing
+  advice, correlated by `request_id` like everything else on the shared stream (see
+  [sql-routing-advice.md](sql-routing-advice.md)).
 
 - **A `NON_QUERY` op** produces exactly one `non_query` (`NonQueryReply` with `affected_rows` +
-  causal token) for its `request_id`.
+  causal token) for its `request_id`; when the op negotiated routing metadata it may also carry
+  `routing`, same contract as on `QueryComplete`.
 
 - **A `START` op** produces one `start_reply` (a `TxnHandle`) for its `request_id`. The client awaits
   it to learn the server-minted handle, then references that handle on the transaction's later ops.
@@ -514,6 +526,8 @@ Use this as an acceptance list when building a client:
 
 ## 10. Related documents
 
+- **Learned client routing** (advisory `RoutingAdvice` metadata, negotiation, eligibility, the
+  endpoint trust map): [sql-routing-advice.md](sql-routing-advice.md)
 - The ready-made **.NET client** for this protocol: [grpc-dotnet-client.md](grpc-dotnet-client.md)
   (`CamusDB.Grpc.Client`). Use it if you're on .NET rather than implementing the wire contract yourself.
 - Message shapes (source of truth): [`CamusDB.Grpc.Contracts/Protos/camus_sql.proto`](../CamusDB.Grpc.Contracts/Protos/camus_sql.proto)

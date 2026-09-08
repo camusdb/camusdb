@@ -21,6 +21,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.Core.Routing;
 using CamusDB.Core.SQLParser;
 using CamusDB.App.Services;
 using Kahuna.Shared.KeyValue;
@@ -32,13 +33,55 @@ public sealed class ExecuteSQLController : CommandsController
 {
     private readonly PreparedStatementRegistry preparedStatements;
 
+    private readonly StatementRoutingResolver? routing;
+
+    /// <param name="routing">
+    /// Optional and last so the many positional construction sites (tests included) stay valid;
+    /// null means this controller never emits routing metadata, which is also the correct behavior
+    /// for a harness that did not register the resolver.
+    /// </param>
     public ExecuteSQLController(
         CommandExecutor executor,
         HttpTransactionCoordinator transactions,
         PreparedStatementRegistry preparedStatements,
-        ILogger<ICamusDB> logger, CamusDBOptions options) : base(executor, transactions, logger, options)
+        ILogger<ICamusDB> logger, CamusDBOptions options,
+        StatementRoutingResolver? routing = null) : base(executor, transactions, logger, options)
     {
         this.preparedStatements = preparedStatements;
+        this.routing = routing;
+    }
+
+    /// <summary>
+    /// A collector for the statement's routing metadata when the request negotiated it and this
+    /// node emits advice, else null so the engine pays one null check and nothing more. Autocommit
+    /// paths only: an explicit transaction is pinned to its endpoint, so advice for its statements
+    /// would only be usable for later transactions and is deferred until measured demand exists.
+    /// </summary>
+    private StatementRoutingCollector? BeginRoutingCollection(ExecuteSQLRequest request)
+        => routing is not null
+           && request.RoutingAcceptVersion == StatementRoutingAdvice.WireVersion
+           && routing.EmissionEnabled
+            ? new StatementRoutingCollector()
+            : null;
+
+    /// <summary>
+    /// Resolves the response's routing metadata. Best-effort by contract: the statement already
+    /// committed, so a metadata failure returns null rather than surfacing — converting a
+    /// committed success into an error here would invite a double-applying client retry.
+    /// </summary>
+    private SqlRoutingMetadataDto? ResolveRoutingDto(DatabaseDescriptor? database, StatementRoutingCollector? collector)
+    {
+        if (routing is null || collector is null)
+            return null;
+
+        try
+        {
+            return SqlRoutingMetadataDto.From(routing.Resolve(database, collector));
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -224,6 +267,8 @@ public sealed class ExecuteSQLController : CommandsController
             IReadOnlyList<DerivedColumnSchema> resultSchema = [];
             Kommander.Time.HLCTimestamp causalToken = default;
             CacheMetadataHolder cacheMeta = new();
+            StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
+            DatabaseDescriptor? routingDb = null;
 
             async Task AutocommitBody(CancellationToken ct)
             {
@@ -241,7 +286,8 @@ public sealed class ExecuteSQLController : CommandsController
                         principal: principal,
                         // The query observes the client's disconnect; the surrounding begin/commit/
                         // rollback keep `ct`, which the serializable retry owns.
-                        cancellationToken: requestAborted
+                        cancellationToken: requestAborted,
+                        routing: routingCollector
                     );
                     // Fully buffer the decoded, transaction-independent rows, THEN commit — so a
                     // serializable retry can restart cleanly (no bytes are written until the
@@ -254,6 +300,7 @@ public sealed class ExecuteSQLController : CommandsController
                     resultRows = rows;
                     resultColumns = ToColumnDtos(schemaHolder.Schema);
                     resultSchema = schemaHolder.Schema;
+                    routingDb = db;
                 }
                 catch
                 {
@@ -283,6 +330,8 @@ public sealed class ExecuteSQLController : CommandsController
                 queryResponse.AgeMs = cacheMeta.AgeMs;
                 queryResponse.CacheName = cacheMeta.CacheName;
             }
+
+            queryResponse.Routing = ResolveRoutingDto(routingDb, routingCollector);
 
             queryResponse.ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds;
             return new JsonResult(queryResponse);
@@ -622,6 +671,8 @@ public sealed class ExecuteSQLController : CommandsController
             // warning of the attempt that actually committed, not one left over from an aborted try.
             string? warning = null;
             Kommander.Time.HLCTimestamp causalToken2 = default;
+            StatementRoutingCollector? routingCollector2 = BeginRoutingCollection(request);
+            DatabaseDescriptor? routingDb2 = null;
 
             async Task AutocommitDmlBody(CancellationToken ct)
             {
@@ -635,12 +686,14 @@ public sealed class ExecuteSQLController : CommandsController
                         database: resolved.Database,
                         sql: resolved.Sql,
                         parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        routing: routingCollector2
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken2 = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
+                    routingDb2 = r.Database;
                 }
                 catch
                 {
@@ -655,7 +708,13 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitDmlBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows) { Warning = warning, CausalToken = causalToken2.IsNull() ? null : causalToken2, ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows)
+            {
+                Warning = warning,
+                CausalToken = causalToken2.IsNull() ? null : causalToken2,
+                Routing = ResolveRoutingDto(routingDb2, routingCollector2),
+                ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds
+            });
         }
         catch (CamusDBException e)
         {

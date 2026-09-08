@@ -387,12 +387,14 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             case BatchExecuteResponse.PayloadOneofCase.QueryComplete:
                 Complete(op, new QueryResult(
                     op.Schema ?? new ResultSchema(), op.Rows,
-                    new CausalToken(resp.QueryComplete.CausalTokenN, resp.QueryComplete.CausalTokenL, resp.QueryComplete.CausalTokenC)));
+                    new CausalToken(resp.QueryComplete.CausalTokenN, resp.QueryComplete.CausalTokenL, resp.QueryComplete.CausalTokenC),
+                    Routing.CamusRoutingAdvice.From(resp.QueryComplete.Routing)));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.NonQuery:
                 Complete(op, new NonQueryResult(
                     resp.NonQuery.AffectedRows,
-                    new CausalToken(resp.NonQuery.CausalTokenN, resp.NonQuery.CausalTokenL, resp.NonQuery.CausalTokenC)));
+                    new CausalToken(resp.NonQuery.CausalTokenN, resp.NonQuery.CausalTokenL, resp.NonQuery.CausalTokenC),
+                    Routing.CamusRoutingAdvice.From(resp.NonQuery.Routing)));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.StartReply:
                 Complete(op, resp.StartReply);

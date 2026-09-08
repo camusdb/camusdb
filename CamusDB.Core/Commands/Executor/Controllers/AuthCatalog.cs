@@ -8,6 +8,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -39,8 +40,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 public sealed class AuthCatalog
 {
     private readonly IKahuna kahuna;
+    
     private readonly KvTransactionsManager transactions;
+    
     private readonly string keyPrefix;
+    
     private readonly bool isClusterMode;
 
     private readonly SemaphoreSlim writeSem = new(1, 1);
@@ -67,12 +71,19 @@ public sealed class AuthCatalog
     // user and scope with ':' (both are '/'-free), never '/'.
     /// <summary>KV routing bucket that holds every auth key.</summary>
     public string AuthBucket => $"{keyPrefix}auth";
+    
     private string UserKeyPrefix => $"{keyPrefix}auth/user:";
+    
     private string UserKey(string normalizedName) => $"{keyPrefix}auth/user:{normalizedName}";
+    
     private string GrantKeyPrefix => $"{keyPrefix}auth/grant:";
+    
     private string GrantKey(string normalizedUser, string scopeKey) => $"{keyPrefix}auth/grant:{normalizedUser}:{scopeKey}";
+    
     private string SessionKeyPrefix => $"{keyPrefix}auth/session:";
+    
     private string SessionKey(string tokenId) => $"{keyPrefix}auth/session:{tokenId}";
+    
     private string GenerationKey => $"{keyPrefix}auth/generation";
 
     private AuthCatalog(IKahuna kahuna, KvTransactionsManager transactions, string keyPrefix, bool isClusterMode)
@@ -97,14 +108,15 @@ public sealed class AuthCatalog
     {
         ArgumentNullException.ThrowIfNull(sharedNode);
 
-        Func<HLCTimestamp?, HLCTimestamp> mintLocalT = (floor) =>
+        HLCTimestamp MintLocalT(HLCTimestamp? floor)
         {
-            if (floor.HasValue && !floor.Value.IsNull())
+            if (floor.HasValue && !floor.Value.IsNull()) 
                 return sharedNode.Raft.HybridLogicalClock.ReceiveEvent(sharedNode.Raft.GetLocalNodeId(), floor.Value);
+            
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
-        };
+        }
 
-        KvTransactionsManager txManager = new(sharedNode.Kahuna, options, mintLocalT);
+        KvTransactionsManager txManager = new(sharedNode.Kahuna, options, MintLocalT);
         AuthCatalog catalog = new(sharedNode.Kahuna, txManager, "_system/", isClusterMode);
 
         await sharedNode.WaitUntilStartedAsync().ConfigureAwait(false);
@@ -147,9 +159,20 @@ public sealed class AuthCatalog
 
         KvTransaction tx = KvTransaction.CreateReadOnly();
 
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId, AuthBucket, null, true, null, true, 1000,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            AuthBucket,
+            null,
+            true,
+            null,
+            true,
+            1000,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None
+        ).ConfigureAwait(false);
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in cursor)
         {
             if (entry.Value is null)
                 continue;
@@ -327,13 +350,14 @@ public sealed class AuthCatalog
     public async Task<UserRecord?> TryGetUserAsync(string name)
     {
         await EnsureCoherentAsync().ConfigureAwait(false);
-        return usersByName.TryGetValue(Normalize(name), out UserRecord? user) ? user : null;
+        return usersByName.GetValueOrDefault(Normalize(name));
     }
 
     /// <summary>Returns every grant for <paramref name="name"/> (empty if none / unknown user).</summary>
     public async Task<IReadOnlyList<GrantRecord>> ListGrantsAsync(string name)
     {
         await EnsureCoherentAsync().ConfigureAwait(false);
+        
         return grantsByUser.TryGetValue(Normalize(name), out ConcurrentDictionary<string, GrantRecord>? map)
             ? [.. map.Values]
             : [];
@@ -381,11 +405,13 @@ public sealed class AuthCatalog
             byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.UserRecord);
 
             long newGen = 0;
+            
             await RunInTransactionAsync(async tx =>
             {
                 bool written = await WriteAuthKey(tx, UserKey(normalized), bytes, ifAbsent: true).ConfigureAwait(false);
                 if (!written)
                     throw new CamusDBException(CamusDBErrorCodes.UserAlreadyExists, $"User '{name}' already exists");
+                
                 newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -470,8 +496,10 @@ public sealed class AuthCatalog
                 List<string> sessionKeys = await ScanUserSessionKeysAsync(tx, normalized).ConfigureAwait(false);
 
                 await DeleteAuthKey(tx, UserKey(normalized)).ConfigureAwait(false);
+                
                 foreach (string grantKey in grantKeys)
                     await DeleteAuthKey(tx, grantKey).ConfigureAwait(false);
+                
                 foreach (string sessionKey in sessionKeys)
                     await DeleteAuthKey(tx, sessionKey).ConfigureAwait(false);
 
@@ -541,8 +569,12 @@ public sealed class AuthCatalog
 
                 updatedUser = lockedUser.Copy();
                 updatedUser.AuthorizationEpoch = lockedUser.AuthorizationEpoch + 1;
-                await SetKeyLockedAsync(tx, UserKey(normalized),
-                    MetaJsonSerializer.Serialize(updatedUser, MetaJsonContext.Default.UserRecord), ifAbsent: false).ConfigureAwait(false);
+                
+                await SetKeyLockedAsync(tx, 
+                    UserKey(normalized),
+                    MetaJsonSerializer.Serialize(updatedUser, MetaJsonContext.Default.UserRecord), 
+                    ifAbsent: false
+                ).ConfigureAwait(false);
 
                 if (newMask == Privilege.None)
                 {
@@ -554,8 +586,13 @@ public sealed class AuthCatalog
                     // Bind the grant to the user record read under the lock above, not merely to the
                     // name in the key, so a later account that takes this name cannot inherit it.
                     updatedGrant = new GrantRecord { User = normalized, UserId = lockedUser.Id, Scope = scope, Privileges = newMask };
-                    await SetKeyLockedAsync(tx, GrantKey(normalized, scopeKey),
-                        MetaJsonSerializer.Serialize(updatedGrant, MetaJsonContext.Default.GrantRecord), ifAbsent: false).ConfigureAwait(false);
+                    
+                    await SetKeyLockedAsync(
+                        tx, 
+                        GrantKey(normalized, scopeKey),
+                        MetaJsonSerializer.Serialize(updatedGrant, MetaJsonContext.Default.GrantRecord), 
+                        ifAbsent: false
+                    ).ConfigureAwait(false);
                 }
 
                 newGen = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
@@ -599,6 +636,7 @@ public sealed class AuthCatalog
         string normalized = Normalize(name);
 
         await writeSem.WaitAsync().ConfigureAwait(false);
+        
         try
         {
             if (isClusterMode)
@@ -615,10 +653,12 @@ public sealed class AuthCatalog
                 IsSuperuser = true,
                 CreatedAt = DateTime.UtcNow,
             };
+            
             byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.UserRecord);
 
             bool created = false;
             long newGen = 0;
+            
             await RunInTransactionAsync(async tx =>
             {
                 created = await WriteAuthKey(tx, UserKey(normalized), bytes, ifAbsent: true).ConfigureAwait(false);
@@ -631,6 +671,7 @@ public sealed class AuthCatalog
                 usersByName[normalized] = record;
                 AdoptGeneration(newGen);
             }
+            
             return created;
         }
         finally
@@ -647,12 +688,15 @@ public sealed class AuthCatalog
     public async Task CreateSessionAsync(SessionRecord session)
     {
         ArgumentNullException.ThrowIfNull(session);
+        
         byte[] bytes = MetaJsonSerializer.Serialize(session, MetaJsonContext.Default.SessionRecord);
+        
         await RunInTransactionAsync(async tx =>
         {
             bool written = await WriteAuthKey(tx, SessionKey(session.TokenId), bytes, ifAbsent: true).ConfigureAwait(false);
             if (!written)
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, "Session token id collision");
+            
         }).ConfigureAwait(false);
     }
 
@@ -694,9 +738,20 @@ public sealed class AuthCatalog
     {
         List<string> expired = [];
 
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero, AuthBucket, null, true, null, true, 1000,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, 
+            AuthBucket, 
+            null, 
+            true, 
+            null, 
+            true, 
+            1000,
+            HLCTimestamp.Zero, 
+            KeyValueDurability.Persistent, 
+            CancellationToken.None
+        ).ConfigureAwait(false);
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in cursor)
         {
             if (entry.Value is null || !key.StartsWith(SessionKeyPrefix, StringComparison.Ordinal))
                 continue;
@@ -729,8 +784,13 @@ public sealed class AuthCatalog
     private async Task<byte[]?> GetAuthValueAsync(string key)
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, key, -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+            HLCTimestamp.Zero, 
+            key, 
+            -1,
+            HLCTimestamp.Zero, 
+            KeyValueDurability.Persistent, 
+            CancellationToken.None
+        ).ConfigureAwait(false);
 
         return type == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
     }
@@ -754,15 +814,19 @@ public sealed class AuthCatalog
         string key = GrantKey(Normalize(grant.User), grant.Scope.ScopeKey());
 
         await writeSem.WaitAsync().ConfigureAwait(false);
+        
         try
         {
             await RunInTransactionAsync(async tx =>
             {
                 await LockAndReadAsync(tx, key).ConfigureAwait(false);
+                
                 await SetKeyLockedAsync(
-                    tx, key,
+                    tx, 
+                    key,
                     MetaJsonSerializer.Serialize(grant, MetaJsonContext.Default.GrantRecord),
-                    ifAbsent: false).ConfigureAwait(false);
+                    ifAbsent: false
+                ).ConfigureAwait(false);
 
                 await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
             }).ConfigureAwait(false);
@@ -776,7 +840,10 @@ public sealed class AuthCatalog
     private async Task RunInTransactionAsync(Func<KvTransaction, Task> body)
     {
         KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite).ConfigureAwait(false);
+            CamusIsolationLevel.ReadCommitted, 
+            CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        
         try
         {
             await body(tx).ConfigureAwait(false);
@@ -801,8 +868,13 @@ public sealed class AuthCatalog
         await AcquireKeyLock(tx, key).ConfigureAwait(false);
 
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
-            tx.TransactionId, key, -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+            tx.TransactionId, 
+            key, 
+            -1,
+            HLCTimestamp.Zero, 
+            KeyValueDurability.Persistent, 
+            CancellationToken.None
+        ).ConfigureAwait(false);
 
         return getType == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
     }
@@ -815,9 +887,20 @@ public sealed class AuthCatalog
         string prefix = $"{GrantKeyPrefix}{normalizedUser}:";
         List<string> keys = [];
 
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId, AuthBucket, null, true, null, true, 1000,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+        ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            AuthBucket,
+            null,
+            true,
+            null,
+            true,
+            1000,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None
+        ).ConfigureAwait(false);
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in cursor)
         {
             if (entry.Value is not null && key.StartsWith(prefix, StringComparison.Ordinal))
                 keys.Add(key);

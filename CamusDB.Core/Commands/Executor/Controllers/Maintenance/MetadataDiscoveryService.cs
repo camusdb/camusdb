@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -213,7 +214,8 @@ internal sealed class MetadataDiscoveryService
                     -1,
                     HLCTimestamp.Zero,
                     KeyValueDurability.Persistent,
-                    ct).ConfigureAwait(false);
+                    ct
+                ).ConfigureAwait(false);
 
             if (type != KeyValueResponseType.Get || entry?.Value is null)
                 return null;
@@ -236,7 +238,8 @@ internal sealed class MetadataDiscoveryService
         ConcurrentDictionary<string, MetaDiscoveryResult> cache,
         string dbId,
         Func<string, CancellationToken, Task<List<(string tableId, string tableName)>>> scan,
-        CancellationToken ct)
+        CancellationToken ct
+    )
     {
         long? version = await TryReadSchemaVersionAsync(dbId, ct).ConfigureAwait(false);
 
@@ -418,17 +421,27 @@ internal sealed class MetadataDiscoveryService
 
         string metaBucket = $"{dbId}/meta";
         string tablePrefix = $"{dbId}/meta/table:";
-        List<(string, string)> tables = new();
+        List<(string, string)> tables = [];
 
-        await foreach ((string key, ReadOnlyKeyValueEntry kvEntry) in context.SharedNode!.Kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).ConfigureAwait(false))
+        ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = context.SharedNode!.Kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, 
+            metaBucket, 
+            null, 
+            true, 
+            null, 
+            true, 
+            512,
+            HLCTimestamp.Zero, 
+            KeyValueDurability.Persistent, 
+            ct
+        ).ConfigureAwait(false);
+
+        await foreach ((string key, ReadOnlyKeyValueEntry kvEntry) in cursor)
         {
             if (!key.StartsWith(tablePrefix, StringComparison.Ordinal) || kvEntry.Value is null)
                 continue;
 
-            TableSchema schema = MetaJsonSerializer.Deserialize(
-                kvEntry.Value, MetaJsonContext.Default.TableSchema);
+            TableSchema schema = MetaJsonSerializer.Deserialize(kvEntry.Value, MetaJsonContext.Default.TableSchema);
 
             // Honor the per-table opt-out (ALTER TABLE ... SET (sql_stats_automatic_collection_enabled
             // = false)) straight from the authoritative meta blob, so a disabled table costs discovery

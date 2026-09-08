@@ -388,6 +388,15 @@ internal sealed class SelectStatementExecutor
 
                     SelectQuery selectQuery = boundQuery.Query;
 
+                    // Classify the statement for advisory routing metadata before the cursor runs:
+                    // the decision is a pure shape question, and a retried attempt simply
+                    // re-classifies (last write wins on the collector).
+                    ticket.Routing?.RecordSelect(
+                        boundQuery,
+                        hasTimeTravel: ast.extendedSeven is not null,
+                        hasSubquery: Routing.StatementRoutingCollector.ContainsSubqueryNodes(ast),
+                        hasCacheHint: selectQuery.CacheHint is not null);
+
                     // Join queries bypass the result cache: caching a multi-table result
                     // requires fencing ALL involved tables' row keyspaces, not just one.
                     // Until the multi-keyspace fence is implemented, any {cache=name} hint
@@ -752,7 +761,7 @@ internal sealed class SelectStatementExecutor
         // fails open. Carrying it costs nothing and removes that trap.
         return new ExecuteSQLTicket(
             snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters, ticket.Principal,
-            ticket.CancellationToken, ticket.Probe);
+            ticket.CancellationToken, ticket.Probe, ticket.Routing);
     }
 
     /// <summary>

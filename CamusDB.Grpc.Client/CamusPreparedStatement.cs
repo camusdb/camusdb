@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Grpc.Client.Batching;
+using CamusDB.Grpc.Client.Routing;
 
 namespace CamusDB.Grpc.Client;
 
@@ -14,11 +15,14 @@ namespace CamusDB.Grpc.Client;
 /// A statement registered once and executed many times with different values, so neither the SQL nor
 /// the parameter names travel again per execution.
 ///
-/// <para><b>One statement, many streams.</b> A server-side handle belongs to the stream that minted
-/// it, but the client multiplexes autocommit work across a pool of streams and rebuilds one after a
-/// fault. This object therefore stands for the <em>statement</em>, not for a single handle: it
-/// registers itself lazily on whichever stream an execution lands on, and a stream that was rebuilt
-/// simply gets a fresh registration on next use. Callers never see handles or streams.</para>
+/// <para><b>One statement, many streams — and many endpoints.</b> A server-side handle belongs to
+/// the stream that minted it, but the client multiplexes autocommit work across per-endpoint pools
+/// of streams and rebuilds a stream after a fault. This object therefore stands for the logical
+/// <em>statement</em>, not for a single handle: an autocommit execution first selects an endpoint
+/// (learned advice or rotation, via the owning connection), then registers itself lazily on
+/// whichever stream it lands on there; a rebuilt stream simply gets a fresh registration on next
+/// use. Registrations are scoped per endpoint per stream incarnation and never travel between
+/// them. Callers never see handles, streams, or endpoints.</para>
 ///
 /// <para><b>Values are positional.</b> <see cref="ParameterNames"/> gives the binding order the
 /// server published (names keep their leading <c>@</c>), so a caller preferring to bind by name maps
@@ -27,7 +31,7 @@ namespace CamusDB.Grpc.Client;
 /// </summary>
 public sealed class CamusPreparedStatement : IAsyncDisposable
 {
-    private readonly GrpcBatcher batcher;
+    private readonly CamusConnection owner;
 
     /// <summary>
     /// The cache key, built once here rather than per execution. Every execution looks the statement
@@ -35,6 +39,11 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     /// on the hot path — the exact allocation prepared statements exist to remove.
     /// </summary>
     private readonly PreparedStatementKey key;
+
+    /// <summary>Route-cache identities, precomputed for the same hot-path reason as <see cref="key"/>.</summary>
+    private readonly StatementRouteKey queryRouteKey;
+
+    private readonly StatementRouteKey nonQueryRouteKey;
 
     /// <summary>
     /// Lifecycle state, read and written with <see cref="Interlocked"/> because disposal races
@@ -47,13 +56,21 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     private const int StateDisposing = 1;
 
     internal CamusPreparedStatement(
-        GrpcBatcher batcher, PreparedStatementKey key, IReadOnlyList<string> parameterNames)
+        CamusConnection owner, PreparedStatementKey key, IReadOnlyList<string> parameterNames)
     {
-        this.batcher = batcher;
+        this.owner = owner;
         this.key = key;
+        queryRouteKey = new StatementRouteKey(key.Database, key.Sql, RouteOpKind.Query);
+        nonQueryRouteKey = new StatementRouteKey(key.Database, key.Sql, RouteOpKind.NonQuery);
         ParameterNames = parameterNames;
         NameOrdinals = BuildNameOrdinals(parameterNames);
     }
+
+    /// <summary>The connection this statement belongs to; transaction-start affinity checks it.</summary>
+    internal CamusConnection Owner => owner;
+
+    /// <summary>The statement's query-side route identity, used for transaction-start affinity.</summary>
+    internal StatementRouteKey QueryRouteKey => queryRouteKey;
 
     /// <summary>The parameter names in binding order, verbatim including the leading <c>@</c>.</summary>
     public IReadOnlyList<string> ParameterNames { get; }
@@ -86,21 +103,52 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
 
     // ─── Autocommit execution ─────────────────────────────────────────────────
 
-    /// <summary>Executes the statement as an autocommit query, binding <paramref name="values"/> by ordinal.</summary>
-    public Task<QueryResult> ExecuteQueryAsync(
+    /// <summary>
+    /// Executes the statement as an autocommit query, binding <paramref name="values"/> by ordinal.
+    /// The endpoint is selected first (learned route or rotation), then the statement is registered
+    /// there on demand, then the execution is sent — so a learned destination pays its registration
+    /// round trip once and every later execution rides the warmed handle.
+    /// </summary>
+    public async Task<QueryResult> ExecuteQueryAsync(
         IReadOnlyList<object?> values, CancellationToken cancellationToken = default)
-        => ExecuteAsync(
-            batcher.ReserveSlot(), values, txn: null,
-            static (b, request, slot, transportId, ct) => b.EnqueueQueryAsync(request, slot, ct, transportId),
-            cancellationToken);
+    {
+        RoutedEndpoint endpoint = owner.SelectEndpoint(queryRouteKey, out long observed);
+        try
+        {
+            QueryResult result = await ExecuteAsync(
+                endpoint.Batcher, endpoint.Batcher.ReserveSlot(), values, txn: null, negotiate: owner.RoutingNegotiated,
+                static (b, request, slot, transportId, ct) => b.EnqueueQueryAsync(request, slot, ct, transportId),
+                cancellationToken).ConfigureAwait(false);
+            owner.LearnFromResult(queryRouteKey, result.Routing, observed);
+            return result;
+        }
+        catch (Exception ex) when (CamusConnection.IsTransportFailure(ex))
+        {
+            owner.NoteTransportFailure(endpoint);
+            throw;
+        }
+    }
 
-    /// <summary>Executes the statement as an autocommit non-query, binding <paramref name="values"/> by ordinal.</summary>
-    public Task<NonQueryResult> ExecuteNonQueryAsync(
+    /// <inheritdoc cref="ExecuteQueryAsync(IReadOnlyList{object?}, CancellationToken)"/>
+    public async Task<NonQueryResult> ExecuteNonQueryAsync(
         IReadOnlyList<object?> values, CancellationToken cancellationToken = default)
-        => ExecuteAsync(
-            batcher.ReserveSlot(), values, txn: null,
-            static (b, request, slot, transportId, ct) => b.EnqueueNonQueryAsync(request, slot, ct, transportId),
-            cancellationToken);
+    {
+        RoutedEndpoint endpoint = owner.SelectEndpoint(nonQueryRouteKey, out long observed);
+        try
+        {
+            NonQueryResult result = await ExecuteAsync(
+                endpoint.Batcher, endpoint.Batcher.ReserveSlot(), values, txn: null, negotiate: owner.RoutingNegotiated,
+                static (b, request, slot, transportId, ct) => b.EnqueueNonQueryAsync(request, slot, ct, transportId),
+                cancellationToken).ConfigureAwait(false);
+            owner.LearnFromResult(nonQueryRouteKey, result.Routing, observed);
+            return result;
+        }
+        catch (Exception ex) when (CamusConnection.IsTransportFailure(ex))
+        {
+            owner.NoteTransportFailure(endpoint);
+            throw;
+        }
+    }
 
     // ─── Binding by name ──────────────────────────────────────────────────────
 
@@ -163,17 +211,23 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
 
     // ─── Execution inside a transaction ───────────────────────────────────────
 
+    /// <summary>
+    /// Transactional executions take the session's own batcher and slot: the transaction is pinned
+    /// to the endpoint and stream it started on, so the statement must register and execute there —
+    /// never on a learned route — and no routing metadata is negotiated for pinned work.
+    /// </summary>
     internal Task<QueryResult> ExecuteQueryAsync(
-        int slot, TxnHandle txn, IReadOnlyList<object?> values, CancellationToken ct)
+        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, CancellationToken ct)
         => ExecuteAsync(
-            slot, values, txn,
+            batcher, slot, values, txn, negotiate: false,
             static (b, request, s, transportId, c) => b.EnqueueQueryAsync(request, s, c, transportId),
             ct);
 
+    /// <inheritdoc cref="ExecuteQueryAsync(GrpcBatcher, int, TxnHandle, IReadOnlyList{object?}, CancellationToken)"/>
     internal Task<NonQueryResult> ExecuteNonQueryAsync(
-        int slot, TxnHandle txn, IReadOnlyList<object?> values, CancellationToken ct)
+        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, CancellationToken ct)
         => ExecuteAsync(
-            slot, values, txn,
+            batcher, slot, values, txn, negotiate: false,
             static (b, request, s, transportId, c) => b.EnqueueNonQueryAsync(request, s, c, transportId),
             ct);
 
@@ -195,9 +249,11 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     /// invisible to the client and alive until the stream ends.</para>
     /// </summary>
     private async Task<TResult> ExecuteAsync<TResult>(
+        GrpcBatcher batcher,
         int slot,
         IReadOnlyList<object?> values,
         TxnHandle? txn,
+        bool negotiate,
         Func<GrpcBatcher, SqlRequest, int, long, CancellationToken, Task<TResult>> send,
         CancellationToken cancellationToken)
     {
@@ -228,6 +284,8 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
                 request.PositionalParameters.Add(CamusValue.From(value));
             if (txn is not null)
                 request.TxnHandle = txn;
+            if (negotiate)
+                request.RoutingAcceptVersion = RoutingWire.AcceptVersion;
 
             try
             {
@@ -250,13 +308,14 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
         (ex is CamusGrpcException grpc && grpc.Code == "CADB0520");
 
     /// <summary>
-    /// Releases the statement on every stream it was registered on.
+    /// Releases the statement on every stream — of every endpoint — it was registered on.
     ///
     /// <para>Disposal marks the statement first, so no execution can start a new registration, and
     /// then <b>awaits</b> the registrations it took — including any still in flight. Closing only the
     /// finished ones would leave a registration that completed a moment later holding a handle nobody
     /// references, alive until the stream ends. When this returns, every id this statement ever
-    /// minted has been closed or belongs to a stream that is already gone.</para>
+    /// minted has been closed or belongs to a stream that is already gone. Every endpoint is swept
+    /// because routing may have registered this statement on any of them.</para>
     ///
     /// <para>Each close is best-effort: a stream that has ended already freed its handles, so a
     /// failure here means the work was done for us. Skipping disposal entirely is safe for the same
@@ -268,19 +327,22 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
         if (Interlocked.Exchange(ref state, StateDisposing) != StateLive)
             return;
 
-        foreach ((int slot, Task<PreparedSlotEntry> registration) in batcher.TakePrepared(key))
+        foreach (RoutedEndpoint endpoint in owner.Endpoints)
         {
-            PreparedSlotEntry entry;
-            try
+            foreach ((int slot, Task<PreparedSlotEntry> registration) in endpoint.Batcher.TakePrepared(key))
             {
-                entry = await registration.ConfigureAwait(false);
-            }
-            catch
-            {
-                continue;   // that registration never produced a handle; nothing to release.
-            }
+                PreparedSlotEntry entry;
+                try
+                {
+                    entry = await registration.ConfigureAwait(false);
+                }
+                catch
+                {
+                    continue;   // that registration never produced a handle; nothing to release.
+                }
 
-            await batcher.ClosePreparedAsync(slot, entry, CancellationToken.None).ConfigureAwait(false);
+                await endpoint.Batcher.ClosePreparedAsync(slot, entry, CancellationToken.None).ConfigureAwait(false);
+            }
         }
     }
 }

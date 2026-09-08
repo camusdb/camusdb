@@ -84,4 +84,11 @@ public sealed class ExecuteSQLRequest
     public string? Priority { get; set; }
 
     public HLCTimestamp? CausalToken { get; set; }
+
+    /// <summary>
+    /// Highest routing-metadata version the client accepts on this response. 0 or absent — the
+    /// value every pre-routing client necessarily sends — means "do not emit routing metadata",
+    /// so old clients keep their exact response shape. Today the only accepted value is 1.
+    /// </summary>
+    public int RoutingAcceptVersion { get; set; }
 }
