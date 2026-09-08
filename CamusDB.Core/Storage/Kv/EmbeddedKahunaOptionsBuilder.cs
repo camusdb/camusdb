@@ -50,6 +50,12 @@ public static class EmbeddedKahunaOptionsBuilder
     /// durability. Kahuna's own embedded default is off, so the value is stated here rather than
     /// inherited — a future change to Kahuna's default must not silently move CamusDB's. A
     /// <c>kahuna.wal_single_fsync_commit</c> config value still overrides it.</para>
+    ///
+    /// <para>Enables one-phase apply-time validation by default, so a single-partition read-modify-write
+    /// commits in one durable Raft round instead of two. A cluster carrying prepared-intent snapshots
+    /// written before the ledger existed, or one mid rolling upgrade across Kahuna versions, must set
+    /// <c>kahuna.one_phase_apply_time_validation: false</c> until that is no longer true — see the
+    /// comment on the field below and docs/configuration.md.</para>
     /// </summary>
     public static EmbeddedKahunaOptions ClusterBaseline(ConfigDefinition config, CamusDBOptions options)
     {
@@ -71,6 +77,21 @@ public static class EmbeddedKahunaOptionsBuilder
             WalPath = Path.Combine(dataDir, "wal"),
             WalRevision = CurrentStorageRevision,
             RaftWalSingleFsyncCommit = true,
+            // One-phase apply-time validation is ON by default. With CamusDB's grouped key layout a
+            // single-row read-modify-write has one participant partition and reads on the anchor, so it
+            // commits in one durable Raft round instead of two: measured +24% throughput on a
+            // three-partition accounts workload at a 99.8% one-phase rate. Stated here rather than
+            // inherited — Kahuna's own embedded default is off, and a future change to it must not move
+            // CamusDB's. Kahuna enforces three rules, and the third is an UPGRADE STEP: a node that
+            // starts with the gate on over a prepared-intent snapshot written before the ledger existed
+            // fails at startup, so a cluster carrying pre-ledger data must run once with
+            // kahuna.one_phase_apply_time_validation: false, let a checkpoint rewrite every partition's
+            // snapshot with its ledger, then drop the override. The other two: the same value on every
+            // node of the group (for this key and staged_base_fence_retention_ms), and never enabled
+            // across mixed Kahuna versions — an old node skips the check and commits where a current
+            // node refuses, which forks the state machine. Rolling upgrades must therefore set the
+            // override to false until the last old node is gone. See docs/configuration.md.
+            OnePhaseApplyTimeValidation = true,
             StartElectionTimeout = 2000,
             EndElectionTimeout = 4000,
             // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000
@@ -109,6 +130,11 @@ public static class EmbeddedKahunaOptionsBuilder
             WalRevision = CurrentStorageRevision,
             InitialPartitions = 1,
             RaftWalSingleFsyncCommit = true,
+            // One-phase apply-time validation is ON by default, as in ClusterBaseline — see the comment
+            // there for the rules. Single-node standalone cannot hit the mixed-version fork, but the
+            // upgrade step still applies: a data directory whose prepared-intent snapshot predates the
+            // ledger must start once with kahuna.one_phase_apply_time_validation: false.
+            OnePhaseApplyTimeValidation = true,
             // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
             // default of a single Raft partition, TPC-C measured ProcessorCount actors at 28.8 tx/s vs
             // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
@@ -152,6 +178,11 @@ public static class EmbeddedKahunaOptionsBuilder
             WalRevision = CurrentStorageRevision,
             InitialPartitions = 1,
             RaftWalSingleFsyncCommit = true,
+            // One-phase apply-time validation is ON by default, as in ClusterBaseline — see the comment
+            // there for the rules. Single-node standalone cannot hit the mixed-version fork, but the
+            // upgrade step still applies: a data directory whose prepared-intent snapshot predates the
+            // ledger must start once with kahuna.one_phase_apply_time_validation: false.
+            OnePhaseApplyTimeValidation = true,
             // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
             // default of a single Raft partition, TPC-C measured ProcessorCount actors at 28.8 tx/s vs
             // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already

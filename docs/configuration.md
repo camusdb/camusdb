@@ -114,13 +114,16 @@ Storage backends: `memory`, `sqlite`, `rocksdb`.
 
 ### One-phase apply-time validation
 
-`kahuna.one_phase_apply_time_validation` (default **off**) lets a read-modify-write or read-carrying
+`kahuna.one_phase_apply_time_validation` (default **on**) lets a read-modify-write or read-carrying
 transaction commit in **one** durable round instead of two: the bundled commit carries its
 on-partition read dependencies, and every replica judges them at apply time, in log order, against the
 partition's replicated committed-head ledger. With it off, those transactions pay one extra Raft
 proposal plus the replica-fence exchange per commit. Eligibility is decided by the transaction, not by
 the flag: only one participant partition, the anchor on that partition, and a read set the gate can
-decide there. A cross-partition transaction stays on two-phase commit either way.
+decide there. A cross-partition transaction stays on two-phase commit either way. CamusDB's grouped key
+layout is what makes it pay: a table row and its index entries hash to the same partition, so a
+single-row update is a one-partition transaction. Measured on a three-partition `accounts` workload,
+turning it on is worth about **+24% throughput** at a 99.8% one-phase rate.
 
 `kahuna.staged_base_fence_retention_ms` (default 600,000) is the horizon the fence — and the ledger the
 gate judges against — remembers a key's last transactionally committed head for. It must comfortably
@@ -132,12 +135,23 @@ Three operating rules, all of them enforced by Kahuna rather than by CamusDB:
 - **Same value on every node of the group** — for both keys. The gate is a property of the replicated
   command, and nodes with different horizons would judge the same bundled commit differently.
 - **Never enable it across mixed Kahuna versions.** A node too old to know the check skips it and
-  commits where a current node refuses, which forks the state machine. Enable it only once the last old
-  node is gone.
+  commits where a current node refuses, which forks the state machine. Set
+  `one_phase_apply_time_validation: false` for the duration of a rolling upgrade and remove the override
+  once the last old node is gone.
 - **Start once with it off.** A node that starts with it on over a prepared-intent snapshot written
   before the ledger existed fails at startup, and refuses to install a partition snapshot exported
-  without a ledger. Run with it off so the next checkpoint rewrites every partition's snapshot with its
-  ledger, then enable it.
+  without a ledger.
+
+Because the default is on, the last rule is an **upgrade step**, not a one-time setup note. Bringing a
+data directory written by a build that predates the committed-head ledger into a build that defaults the
+gate on will fail to start. Upgrading such a deployment:
+
+1. Set `one_phase_apply_time_validation: false` in the `kahuna:` block before starting the new build.
+2. Start the cluster and let a checkpoint run, which rewrites every partition's snapshot with its ledger.
+3. Remove the override and restart.
+
+A cluster created on a build that defaults it on needs none of this — its first snapshot already carries
+a ledger.
 
 ### Memory profile
 

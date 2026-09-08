@@ -558,12 +558,14 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # One-phase durable commit for read-modify-write transactions. Off by default. When on, an eligible
 #   # transaction (one participant partition, anchor on it, an on-partition read set) commits in one
 #   # Raft round instead of two, and every replica judges its read dependencies at apply time against
-#   # the partition's committed-head ledger. THREE RULES, all enforced by Kahuna: give every node of the
-#   # group the same value for BOTH keys below; never enable it across mixed Kahuna versions (an old
-#   # node skips the check and commits where a new node refuses, forking the state machine); and start
-#   # the cluster once with it off, or a node whose prepared-intent snapshot predates the ledger fails
-#   # to start. See docs/configuration.md.
-#   one_phase_apply_time_validation: false
+#   # the partition's committed-head ledger. DEFAULT TRUE — worth ~+24% throughput on a multi-partition
+#   # row-update workload. Set it to false when either of Kahuna's rules says you must: during a ROLLING
+#   # UPGRADE across Kahuna versions (an old node skips the check and commits where a new node refuses,
+#   # forking the state machine), and for the first start of a data directory written before the
+#   # committed-head ledger existed (such a node fails to start with the gate on — run once with false,
+#   # let a checkpoint rewrite the snapshots, then remove the override). Whatever the value, give every
+#   # node of the group the same one, for this key and the one below. See docs/configuration.md.
+#   one_phase_apply_time_validation: true
 #   staged_base_fence_retention_ms: 600000  # horizon the staged-base fence (and the ledger the gate
 #                                        # judges against) remembers a key's last committed head for.
 #                                        # Must comfortably exceed the longest transaction lifetime:

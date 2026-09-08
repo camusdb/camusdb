@@ -158,21 +158,45 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
-    public void OnePhaseApplyTimeValidation_DefaultsOffOnBothBaselines()
+    public void OnePhaseApplyTimeValidation_DefaultsOnOnBothBaselines()
     {
-        // The gate is a per-group property: every node of a cluster must carry the same value, and an
-        // older Kahuna in the group would not apply the check at all. CamusDB therefore states no
-        // baseline of its own and leaves Kahuna's default (off, 600 s fence horizon) in place.
+        // CamusDB turns the gate on: with the grouped key layout a single-row read-modify-write has one
+        // participant partition and reads on the anchor, so it commits in one durable round. The value is
+        // stated rather than inherited — Kahuna's own default is off — and the fence horizon it is judged
+        // against stays at Kahuna's 600 s. A deployment carrying pre-ledger snapshots, or one mid rolling
+        // upgrade across Kahuna versions, overrides it back to false; see OnePhaseApplyTimeValidation.
         ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
 
         EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
         EmbeddedKahunaOptions standalone =
             EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/one-phase-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
 
-        Assert.That(cluster.OnePhaseApplyTimeValidation, Is.False);
-        Assert.That(standalone.OnePhaseApplyTimeValidation, Is.False);
+        Assert.That(cluster.OnePhaseApplyTimeValidation, Is.True);
+        Assert.That(standalone.OnePhaseApplyTimeValidation, Is.True);
         Assert.That(cluster.StagedBaseFenceRetentionMs, Is.EqualTo(600_000));
         Assert.That(standalone.StagedBaseFenceRetentionMs, Is.EqualTo(600_000));
+    }
+
+    [Test]
+    public void OnePhaseApplyTimeValidation_FalseOverrideBeatsTheBaseline()
+    {
+        // The upgrade path depends on this: a cluster whose prepared-intent snapshots predate the ledger,
+        // or one still running an older Kahuna on some node, sets the key to false and must actually get
+        // false — a bool? override of "off" is a value, not an absent one.
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { OnePhaseApplyTimeValidation = false },
+        };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/one-phase-db",
+            config.Kahuna,
+            CamusDBOptions.Default);
+
+        Assert.That(cluster.OnePhaseApplyTimeValidation, Is.False);
+        Assert.That(standalone.OnePhaseApplyTimeValidation, Is.False);
     }
 
     [Test]

@@ -537,8 +537,9 @@ public sealed class KahunaOptionsConfig
     /// Lets a read-modify-write or read-carrying durable transaction commit in <b>one</b> durable round in a
     /// multi-process Raft group: the bundled commit carries its on-partition read dependencies and every
     /// replica judges them at apply time, in log order, against the partition's replicated committed-head
-    /// ledger. Off (Kahuna's own default), those transactions run the two-phase flow — one more Raft
-    /// proposal and the replica-fence exchange per commit. Only a transaction with a single participant
+    /// ledger. Off, those transactions run the two-phase flow — one more Raft proposal and the replica-fence
+    /// exchange per commit. <b>CamusDB's baselines turn it on</b> (Kahuna's own default is off); set this
+    /// key to <c>false</c> to run the two-phase flow, which the upgrade rule below requires. Only a transaction with a single participant
     /// partition, its anchor on that partition, and a read set the gate can decide on that partition is
     /// eligible; a cross-partition transaction stays on 2PC whatever this says.
     ///
@@ -548,11 +549,12 @@ public sealed class KahunaOptionsConfig
     /// <item><description>Give every node of the cluster the same value — and the same
     /// <see cref="StagedBaseFenceRetentionMs"/>, which bounds the ledger the gate judges against.</description></item>
     /// <item><description>Never enable it across mixed Kahuna versions: a node too old to know the check
-    /// skips it and commits where a current node refuses, which forks the state machine. Enable it only
-    /// after the last old node is gone.</description></item>
+    /// skips it and commits where a current node refuses, which forks the state machine. A rolling upgrade
+    /// must set this key to <c>false</c> until the last old node is gone.</description></item>
     /// <item><description>A node that starts with it on over a prepared-intent snapshot written before the
-    /// ledger existed <b>fails to start</b>. Start the cluster once with it off so the next checkpoint
-    /// rewrites every partition's snapshot with its ledger, then enable it.</description></item>
+    /// ledger existed <b>fails to start</b>. A data directory from a build that predates the ledger must
+    /// start once with this key <c>false</c>, so the next checkpoint rewrites every partition's snapshot
+    /// with its ledger; then remove the override.</description></item>
     /// </list>
     ///
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.OnePhaseApplyTimeValidation"/>.
