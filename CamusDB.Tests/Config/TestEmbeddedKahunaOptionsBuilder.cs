@@ -347,6 +347,34 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         }
     }
 
+    // ── RocksDB direct reads ─────────────────────────────────────────────────
+
+    [Test]
+    public void RocksDbBaselines_DisableDirectReads_ByDefault()
+    {
+        // Kahuna's own default is direct I/O; CamusDB turns it off so a block-cache miss is served from
+        // the page cache rather than queued on the device behind the Raft WAL's fsyncs (the leader
+        // read stall measured in the 45-minute bank soaks, feature 80af367a).
+        string dataPath = "/tmp/direct-reads-test";
+        ConfigDefinition config = new() { DataDir = dataPath };
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).RocksDbDirectReads, Is.False);
+        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).RocksDbDirectReads, Is.False);
+        Assert.That(new EmbeddedKahunaOptions().RocksDbDirectReads, Is.True, "the Kahuna default this baseline deliberately departs from");
+    }
+
+    [Test]
+    public void DirectReads_Override_FlowsThrough()
+    {
+        KahunaOptionsConfig on = new() { RocksdbDirectReads = true };
+        KahunaOptionsConfig off = new() { RocksdbDirectReads = false };
+        KahunaOptionsConfig unset = new();
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/dr-on", on, CamusDBOptions.Default).RocksDbDirectReads, Is.True);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/dr-off", off, CamusDBOptions.Default).RocksDbDirectReads, Is.False);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/dr-unset", unset, CamusDBOptions.Default).RocksDbDirectReads, Is.False);
+    }
+
     [Test]
     public void SharedMemoryOff_Override_DisablesFlag()
     {

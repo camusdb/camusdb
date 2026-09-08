@@ -215,6 +215,16 @@ total against a computed 512 MiB memtable — and fails startup with `InvalidCon
 together. Likewise `max_bytes_per_actor` is **per actor**: multiply by `key_value_workers` (default:
 one per CPU) to get the total.
 
+`kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
+RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read
+cache and every miss is a physical device read. On a node whose disk is already carrying the Raft
+WAL's fsyncs those misses queue behind the flushes, and because the key/value actor performs its
+as-of-timestamp history read synchronously, one device-bound miss stalls every key on that actor. In
+the 45-minute `bank` soaks this took leader reads from 1 ms to 40-50 ms with the CPU idle. Buffered
+reads serve misses from the page cache instead; the page cache is charged to the container's memory
+cgroup and shows in `docker stats`, but it is reclaimable and does not threaten an OOM kill. Set it
+`true` to restore the block-cache-only footprint.
+
 ## Validation errors
 
 | Condition | Error |

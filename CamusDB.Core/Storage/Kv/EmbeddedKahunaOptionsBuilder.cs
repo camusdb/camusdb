@@ -108,6 +108,12 @@ public static class EmbeddedKahunaOptionsBuilder
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
+            // Buffered SST reads (Kahuna's default is direct I/O). A block-cache miss then comes from
+            // the page cache instead of the device, where it would queue behind the Raft WAL's fsyncs;
+            // the as-of history read runs on the key/value actor thread, so a device-bound miss stalls
+            // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
+            // Override with kahuna.rocksdb_direct_reads.
+            RocksDbDirectReads = false,
             // With join_existing the peer list is the SEED list of the running cluster rather than
             // the founding roster: the node contacts a seed, enters the committed roster as a
             // learner, and is promoted once caught up. ConfigDefinition.Validate has already
@@ -155,6 +161,12 @@ public static class EmbeddedKahunaOptionsBuilder
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
+            // Buffered SST reads (Kahuna's default is direct I/O). A block-cache miss then comes from
+            // the page cache instead of the device, where it would queue behind the Raft WAL's fsyncs;
+            // the as-of history read runs on the key/value actor thread, so a device-bound miss stalls
+            // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
+            // Override with kahuna.rocksdb_direct_reads.
+            RocksDbDirectReads = false,
         };
     }
 
@@ -203,6 +215,12 @@ public static class EmbeddedKahunaOptionsBuilder
             RocksDbSharedMemoryEnabled = true,
             RocksDbSharedMemoryBudgetMb = 320,
             RocksDbSharedMemtableBudgetMb = 128,
+            // Buffered SST reads (Kahuna's default is direct I/O). A block-cache miss then comes from
+            // the page cache instead of the device, where it would queue behind the Raft WAL's fsyncs;
+            // the as-of history read runs on the key/value actor thread, so a device-bound miss stalls
+            // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
+            // Override with kahuna.rocksdb_direct_reads.
+            RocksDbDirectReads = false,
         };
     }
 
@@ -343,6 +361,9 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is int memtableBudget)
             baseline.RocksDbSharedMemtableBudgetMb = memtableBudget;
+
+        if (kahuna.RocksdbDirectReads is bool directReads)
+            baseline.RocksDbDirectReads = directReads;
 
         if (kahuna.BackupDir is not null)
             baseline.BackupDir = kahuna.BackupDir;

@@ -59,6 +59,7 @@ public sealed class KahunaOptionsConfig
         "rocksdb_shared_memory",
         "rocksdb_shared_memory_budget_mb",
         "rocksdb_shared_memtable_budget_mb",
+        "rocksdb_direct_reads",
         "backup_dir",
         "pitr_window_seconds",
         "base_snapshot_interval_seconds",
@@ -327,6 +328,21 @@ public sealed class KahunaOptionsConfig
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbSharedMemtableBudgetMb"/>.
     /// </summary>
     public int? RocksdbSharedMemtableBudgetMb { get; set; }
+
+    /// <summary>
+    /// Whether the RocksDB key/value backend reads SST files with direct I/O, bypassing the OS page
+    /// cache so RocksDB's block cache is the only in-RAM read cache. Kahuna's own default is on, for a
+    /// footprint bounded by the block cache alone. CamusDB defaults it <b>off</b>: with direct reads
+    /// every block-cache miss is a physical device read that queues behind the Raft WAL's fsyncs on
+    /// the same disk, and the key/value actor performs its as-of-timestamp history read synchronously,
+    /// so under sustained write load a cache miss stalls every key on that actor for the device's
+    /// queue depth (measured in the 45-minute <c>bank</c> soaks: leader reads went from 1 ms to 40-50 ms
+    /// while CPU sat idle). Buffered reads serve those misses from the page cache instead. The page
+    /// cache is charged to the container's memory cgroup but is reclaimable, so it shows in
+    /// <c>docker stats</c> without threatening an OOM kill. Set <c>true</c> to restore the
+    /// block-cache-only footprint. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbDirectReads"/>.
+    /// </summary>
+    public bool? RocksdbDirectReads { get; set; }
 
     /// <summary>
     /// Filesystem directory where node-wide backups (base images, WAL segments, manifests) are written

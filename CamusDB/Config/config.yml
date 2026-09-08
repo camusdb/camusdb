@@ -454,6 +454,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   rocksdb_shared_memtable_budget_mb: 512      # memtable sub-budget (MiB), charged INSIDE the total budget
 #                                               # (not added to it); must be <= the total. Unset => a quarter of it
 #
+#   # SST read path. Kahuna's own default is direct I/O (block cache is the only read cache; misses go
+#   # to the device). CamusDB defaults it OFF: on a node whose disk is already busy with the Raft WAL's
+#   # fsyncs, a device-bound miss stalls the key/value actor that issued it, and under sustained write
+#   # load that turned 1 ms leader reads into 40-50 ms. Buffered reads serve misses from the page cache
+#   # (charged to the container but reclaimable). Set true for a footprint bounded by the block cache alone.
+#   rocksdb_direct_reads: false
+#
 #   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized
 #   # from the machine's available memory at startup (container limits respected), not left at a fixed
 #   # value: block cache = 10% of RAM clamped to [320 MiB, 2 GiB]; memtable sub-budget = a quarter of

@@ -203,6 +203,14 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void ReadsRocksDbDirectReadsOverride()
+    {
+        ConfigDefinition config = new ConfigReader().Read("kahuna:\n  rocksdb_direct_reads: true");
+
+        Assert.That(config.Kahuna.RocksdbDirectReads, Is.True);
+    }
+
+    [Test]
     public void ReadsAbandonedTransactionReaperOverrides()
     {
         // The reaper keys were shipped in the sample config.yml but were missing from the
