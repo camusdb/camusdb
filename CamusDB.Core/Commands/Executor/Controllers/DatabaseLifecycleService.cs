@@ -230,6 +230,16 @@ internal sealed class DatabaseLifecycleService
                     CamusDBErrorCodes.InvalidInput,
                     $"Could not acquire a snapshot-floor hold on '{ticket.BranchFrom}' at the fork point (status {holdType}); branch not created because its frozen view could not be guaranteed durable");
 
+            // The metadata copy below has no duration bound, and the registry-driven renewer only
+            // sweeps holds of REGISTERED branches — during creation nothing else renews this hold.
+            // A copy slower than the lease would publish a branch whose protection had already
+            // lapsed. This keep-alive renews the hold privately for the whole create; ThrowIfLost
+            // before RegisterAsync and again before success are the validation gates that make
+            // "published" imply "protected". It never releases the hold — release on abort stays
+            // with the catch block below, and on success ownership passes to the sweep renewer.
+            SnapshotHoldLease creationKeepAlive = SnapshotHoldLease.AdoptForKeepAlive(
+                sourceKahuna, context.Logger, holdId, forkT, currentOptions.BranchSnapshotHoldLeaseMs);
+
             bool metaCopied = false;
             bool childRegistered = false;
             bool leaveMarkerForScrubber = false;
@@ -261,6 +271,10 @@ internal sealed class DatabaseLifecycleService
                 await catalogs.CopyMetaForBranchAsync(sourceDescriptor, branchId, forkT).ConfigureAwait(false);
                 metaCopied = true;
 
+                // Publication gate: the hold must still be alive after the copy. Publishing past a
+                // lapsed hold would register a branch whose inherited rows may already be reclaimed.
+                creationKeepAlive.ThrowIfLost($"the creation of branch '{branchName}'");
+
                 await registry.RegisterAsync(branchName, branchId, ancestors, holdId).ConfigureAwait(false);
                 childRegistered = true;
 
@@ -277,9 +291,18 @@ internal sealed class DatabaseLifecycleService
                     throw new CamusDBException(
                         CamusDBErrorCodes.DatabaseDoesntExist,
                         $"Source database '{ticket.BranchFrom}' is being dropped concurrently; branch creation aborted");
+
+                // Final validation before declaring success: the branch is published, so a lost
+                // hold here throws into the catch below, which retracts the registration and
+                // releases what is left rather than handing the caller an unprotected branch.
+                creationKeepAlive.ThrowIfLost($"the creation of branch '{branchName}'");
             }
             catch
             {
+                // Stop the private renew loop before the cleanup below releases the hold, so the
+                // loop does not race the release into a misleading "refused renewal" warning.
+                await creationKeepAlive.DisposeAsync().ConfigureAwait(false);
+
                 // If the child was published (e.g. the drop-intent check threw after RegisterAsync, or
                 // returned an indeterminate status), retract it before releasing the hold or purging the
                 // metadata. The destructive cleanup below is only safe once the child is CONFIRMED
@@ -343,6 +366,10 @@ internal sealed class DatabaseLifecycleService
             }
             finally
             {
+                // Stop the private renew loop on every path (idempotent; on success ownership of
+                // the still-live hold passes to the registry-driven sweep renewer).
+                await creationKeepAlive.DisposeAsync().ConfigureAwait(false);
+
                 // Remove the pending marker whether creation succeeded or was cleanly aborted.
                 // EXCEPTION: if the inline purge failed the namespace is still present and the
                 // marker is the scrubber's only handle — keep it so startup can reclaim it.
@@ -552,6 +579,10 @@ internal sealed class DatabaseLifecycleService
                 // (left by a crashed relink) must go too — otherwise the id stays "relinkable" to an
                 // empty/partial keyspace.
                 await registry.DeleteDatabaseOrphanAsync(entry.Id).ConfigureAwait(false);
+
+                // Dropping the branch is the one action that resolves a lost-snapshot-protection
+                // state, so retire its marker with it. Ids are never reused; best-effort.
+                await registry.ClearSnapshotProtectionLostAsync(entry.Id).ConfigureAwait(false);
             }
 
             // Evict every cache entry for this database. The descriptor may no longer be available

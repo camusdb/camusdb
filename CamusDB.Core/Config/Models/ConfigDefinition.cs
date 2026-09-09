@@ -698,7 +698,10 @@ public class ConfigDefinition
     /// <summary>
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
     /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
-    /// &gt; 0. Default 300 000 (5 min). Maps to <c>CamusDBOptions.BranchSnapshotHoldLeaseMs</c>.
+    /// &gt;= 5000: the renewer never ticks faster than once per second (renewing every lease/3), and a
+    /// lease at or below its tick would be guaranteed to lapse between sweeps — a lapsed hold is
+    /// permanent and fails the branch closed. Default 300 000 (5 min). Maps to
+    /// <c>CamusDBOptions.BranchSnapshotHoldLeaseMs</c>.
     /// </summary>
     public int BranchSnapshotHoldLeaseMs { get; set; } = 300_000;
 
@@ -1144,8 +1147,11 @@ public class ConfigDefinition
                 $"'ttl_default_job_cron' must be one of {Catalogs.Models.TtlCron.SupportedForMessage}, " +
                 $"got '{TtlDefaultJobCron}'");
 
-        if (BranchSnapshotHoldLeaseMs <= 0)
-            throw Invalid($"'branch_snapshot_hold_lease_ms' must be > 0, got {BranchSnapshotHoldLeaseMs}");
+        // The renewer's minimum tick is 1 second (it renews every lease/3, never faster than once a
+        // second). A lease that is not comfortably above that tick lapses between sweeps, and a
+        // lapsed hold permanently fails the branch closed — refuse the configuration instead.
+        if (BranchSnapshotHoldLeaseMs < 5000)
+            throw Invalid($"'branch_snapshot_hold_lease_ms' must be >= 5000 (the renewer ticks at most once a second and needs a wide margin inside the lease), got {BranchSnapshotHoldLeaseMs}");
 
         if (SqlParserCacheTtlSeconds < 0)
             throw Invalid(

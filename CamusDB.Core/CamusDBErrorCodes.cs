@@ -417,6 +417,22 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string StatementNotAllowedInTransaction = "CADB0538";
 
+    /// <summary>
+    /// A branch database lost the snapshot-floor hold that pins its ancestor's MVCC history at the
+    /// fork point, so inherited rows may already be reclaimed.
+    ///
+    /// <para>The hold is leased. When the lease lapses — a renewal outage, full-cluster downtime
+    /// longer than the lease — Kahuna refuses further renewals and revision reclamation may trim
+    /// the pinned history. From that moment an ancestor read at the fork timestamp can silently
+    /// miss rows, and an empty result is indistinguishable from a correct empty answer. The engine
+    /// therefore fails closed: every read or write that would consult the branch's ancestry is
+    /// refused with this code instead of returning a possibly incomplete result. The state is
+    /// permanent for the branch — a lapsed hold cannot be re-acquired safely because the reclaimed
+    /// history does not come back. Recreate the branch from the parent. Maps to HTTP 410 (the
+    /// frozen view is gone).</para>
+    /// </summary>
+    public const string BranchSnapshotProtectionLost = "CADB0539";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -573,6 +589,7 @@ public static class CamusDBErrorCodes
         InsufficientDiskSpace => 507,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,
+        BranchSnapshotProtectionLost => 410,
         PreparedStatementLimitExceeded => 429,
         DatabaseAlreadyExists => 409,
         TableAlreadyExists => 409,

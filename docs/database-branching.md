@@ -226,6 +226,34 @@ A key property that makes this cheap to reason about: a **live hold keeps the fo
 revision in memory regardless of storage backend**, and the *same* hold protects both the
 ancestor row/index reads and the metadata copy at `forkT`.
 
+**Fail-closed on a lost hold.** A hold is leased, and a lapsed lease is permanent: Kahuna answers
+`DoesNotExist` to every later renew, and re-acquiring at the old timestamp does not bring
+reclaimed history back. Without a fence, an ancestor read past that point reports reclaimed rows
+as confirmed absences — a successful, silently incomplete (possibly empty) result. Three layers
+turn that into a hard error instead:
+
+- **Read-side guard (`BranchSnapshotHoldGuard`).** Every branch descriptor carries one guard,
+  shared by all its ancestor-level stores. Each ancestor probe/scan verifies, after the Kahuna
+  read and before its result (value, tombstone, *or absence*) is used, that the branch's whole
+  hold chain — its own hold plus each non-root ancestor's hold — is still alive. The proof:
+  Kahuna only renews a live hold, so one confirmed renew proves the chain never lapsed up to that
+  instant; the guard caches the confirmation and re-verifies once it is older than half the
+  lease, so the fast path is one tick comparison per ancestor access. A definitive refusal
+  latches the branch permanently and throws `BranchSnapshotProtectionLost` (HTTP 410); a
+  transient verification failure past 0.8 × lease throws a retryable error instead of guessing.
+  This covers descendants (a grandchild verifies the middle branch's hold too), reopen, failover,
+  and renewer starvation — the sweep is an optimization for unopened branches, not the safety.
+- **Durable lost marker.** When the renewer sweep (or a guard) gets a definitive refusal, it
+  writes `dbregistry/holdlost:{branchId}`; a later open pre-latches the guard from the marker so
+  the very first read fails fast with the recorded reason. Correctness never depends on the
+  marker — the refused renew is visible on every node — and dropping the branch clears it.
+- **Creation keep-alive.** During branch creation nothing else renews the fresh hold (the sweep
+  only sees *registered* branches), and the metadata copy has no duration bound. Creation runs a
+  private keep-alive (`SnapshotHoldLease.AdoptForKeepAlive`) for the whole create and validates
+  it before `RegisterAsync` and again before returning success, so "published" implies
+  "protected". `branch_snapshot_hold_lease_ms` must be ≥ 5000 for the same reason: the renewer
+  never ticks faster than once a second, and a lease inside that tick would lapse by design.
+
 ---
 
 ## 7. Branch creation, step by step

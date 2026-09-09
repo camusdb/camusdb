@@ -30,9 +30,20 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// leader; a standalone node always leads and always sweeps. Renewing every <c>lease/3</c> keeps a wide
 /// margin below expiry so a single missed tick (election, transient error) does not drop a hold.
 ///
-/// This is best-effort and idempotent: renewing an already-live hold simply extends its lease, and a
-/// transient renew failure is logged and retried on the next tick. A non-<c>Set</c> renew result is
-/// surfaced as a warning because it means a branch's frozen view may be losing protection.
+/// Renewal is idempotent: renewing an already-live hold simply extends its lease, and a transient
+/// renew failure is logged and retried on the next tick. A <b>definitive</b> refusal
+/// (<c>DoesNotExist</c> — the hold expired or was released) is permanent by Kahuna's contract, so
+/// the sweep durably marks the branch's protection as lost
+/// (<see cref="DatabaseRegistry.MarkSnapshotProtectionLostAsync"/>) and the branch fails closed
+/// from then on; see <see cref="Storage.Kv.BranchSnapshotHoldGuard"/> for the read-side fence that
+/// enforces this even when the sweep itself is starved or down.
+///
+/// <para><b>Timing contract.</b> The sweep is sequential and its cycle includes every renew RPC's
+/// latency, so the lease must be far larger than both the 1-second minimum tick and the expected
+/// sweep duration; configuration enforces a floor on
+/// <see cref="CamusDBOptions.BranchSnapshotHoldLeaseMs"/>. The sweep is an optimization that keeps
+/// holds alive for branches nobody has open — correctness under sweep starvation comes from each
+/// open branch's own guard, which verifies (and thereby renews) the chain on its read path.</para>
 /// </summary>
 internal sealed class SnapshotHoldRenewer : IAsyncDisposable
 {
@@ -152,9 +163,11 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
 
                 if (type == KeyValueResponseType.Set)
                     renewed++;
+                else if (type == KeyValueResponseType.DoesNotExist)
+                    await MarkProtectionLostAsync(entry).ConfigureAwait(false);
                 else
                     logger.LogWarning(
-                        "Renew of snapshot hold {HoldId} for branch '{Database}' returned {Type}; its frozen view may lose protection",
+                        "Renew of snapshot hold {HoldId} for branch '{Database}' returned transient {Type}; will retry on the next tick",
                         entry.ImmediateParentHoldId, entry.Name, type);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -167,6 +180,47 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
         // renew failures above are contained and do not count against liveness.
         MarkSweepSucceeded();
         return renewed;
+    }
+
+    /// <summary>
+    /// Handles a definitive renewal refusal: Kahuna answered <c>DoesNotExist</c>, so the hold has
+    /// expired (or was released) and can never be renewed again — the branch's frozen ancestor view
+    /// is permanently unprotected. Durably records that state so opens and reads fail closed with a
+    /// definitive message everywhere, including after restart and failover.
+    ///
+    /// <para>The one benign way to reach here is a concurrent branch drop: drop unregisters the
+    /// entry <em>before</em> releasing the hold, so by the time this sweep (working from a snapshot
+    /// taken earlier) sees <c>DoesNotExist</c> for a dropped branch, the entry is already gone from
+    /// the registry. The by-id re-check filters that case out; the hold-id comparison guards
+    /// against the id having been reused by a different registration (ids are never reused, so
+    /// this is defensive only). Marking is best-effort — a genuinely lost branch still fails
+    /// closed through its own guard's refused renew even when the marker write fails.</para>
+    /// </summary>
+    private async Task MarkProtectionLostAsync(DatabaseRegistryEntry entry)
+    {
+        try
+        {
+            DatabaseRegistryEntry? still = await registry.TryResolveEntryByIdAsync(entry.Id).ConfigureAwait(false);
+            if (still is null || still.ImmediateParentHoldId != entry.ImmediateParentHoldId)
+                return; // dropped (or re-registered) concurrently — nothing to protect
+
+            logger.LogError(
+                "Snapshot hold {HoldId} for branch '{Database}' no longer exists (lease expired or released); " +
+                "the branch's frozen ancestor view is permanently unprotected and will fail closed",
+                entry.ImmediateParentHoldId, entry.Name);
+
+            await registry.MarkSnapshotProtectionLostAsync(
+                entry.Id,
+                $"Snapshot hold {entry.ImmediateParentHoldId} protecting the frozen ancestor view of branch " +
+                $"'{entry.Name}' no longer exists (its lease expired or it was released), so ancestor history " +
+                "at the fork point may already be reclaimed").ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Failed to durably mark lost snapshot protection for branch '{Database}'; reads still fail " +
+                "closed through the branch's own guard", entry.Name);
+        }
     }
 
     /// <summary>Stamps <see cref="LastSuccessfulSweep"/> with a fresh local HLC event.</summary>

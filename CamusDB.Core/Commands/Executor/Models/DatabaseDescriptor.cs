@@ -306,6 +306,14 @@ public sealed record DatabaseDescriptor : IDisposable
     /// </summary>
     public IReadOnlyList<DatabaseBranchAncestor> Ancestors { get; }
 
+    /// <summary>
+    /// Fail-closed verifier of this branch's snapshot-hold chain, shared by every ancestor-level
+    /// table store the branch opens. Null for root databases — their reads use live MVCC snapshots
+    /// and depend on no retention pin. Built by <see cref="Controllers.DatabaseOpener"/> at load
+    /// time; see <see cref="BranchSnapshotHoldGuard"/> for why every ancestor read must pass it.
+    /// </summary>
+    public BranchSnapshotHoldGuard? SnapshotProtection { get; }
+
     public Schema Schema { get; } = new();
 
     public SystemSchema SystemSchema { get; set; } = new();
@@ -509,7 +517,8 @@ public sealed record DatabaseDescriptor : IDisposable
         KvTransactionsManager transactions,
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors,
         CamusDBOptions options,
-        IReadOnlyList<DatabaseBranchAncestor>? ancestors = null
+        IReadOnlyList<DatabaseBranchAncestor>? ancestors = null,
+        BranchSnapshotHoldGuard? snapshotProtection = null
     )
     {
         Options = options;
@@ -520,6 +529,7 @@ public sealed record DatabaseDescriptor : IDisposable
         Transactions = transactions;
         TableDescriptors = tableDescriptors;
         Ancestors = ancestors ?? [];
+        SnapshotProtection = snapshotProtection;
     }
 
     public void SetSchemaReplicationSubscription(IDisposable subscription)

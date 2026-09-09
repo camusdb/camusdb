@@ -57,12 +57,33 @@ internal sealed class KvBranchReader
     private readonly KvKeyBuilder keys;
     private readonly BranchLevel[] levels;
 
-    internal KvBranchReader(IKahuna kahuna, KvKeyBuilder keys, BranchLevel[] levels)
+    /// <summary>
+    /// Set only on a reader whose store serves as a frozen <em>ancestor level</em> of some branch:
+    /// every read this reader answers is then an as-of-fork snapshot read whose completeness
+    /// depends on that branch's snapshot-hold chain staying alive. Each such read verifies the
+    /// chain through this guard after the Kahuna round-trip and before its result — value,
+    /// tombstone, or absence — is surfaced, so a lapsed hold produces a hard error instead of a
+    /// silently incomplete answer. Null on level-0 readers and on root databases, where reads use
+    /// live MVCC snapshots that need no retention pin.
+    /// </summary>
+    private readonly BranchSnapshotHoldGuard? snapshotGuard;
+
+    internal KvBranchReader(IKahuna kahuna, KvKeyBuilder keys, BranchLevel[] levels, BranchSnapshotHoldGuard? snapshotGuard = null)
     {
         this.kahuna = kahuna;
         this.keys = keys;
         this.levels = levels;
+        this.snapshotGuard = snapshotGuard;
     }
+
+    /// <summary>
+    /// Verifies the owning branch's snapshot protection when this reader is an ancestor level;
+    /// no-op otherwise. Called after a Kahuna read completes so the confirmation covers it — a
+    /// renew confirmed at time T proves the hold chain was live continuously until T, which
+    /// validates every read that finished before T.
+    /// </summary>
+    private ValueTask GuardSnapshotAsync(CancellationToken cancellationToken) =>
+        snapshotGuard is null ? ValueTask.CompletedTask : snapshotGuard.EnsureProtectedAsync(cancellationToken);
 
     /// <summary>
     /// The ancestry levels, nearest parent first. Treat as read-only: the array is shared, and the
@@ -120,6 +141,10 @@ internal sealed class KvBranchReader
         if (type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
             throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
                 $"Read of key {key} did not return a confirmed result ({type}) — retry the operation from BeginAsync");
+
+        // On an ancestor level a "confirmed" answer is only as good as the snapshot pin behind it:
+        // a reclaimed revision reads as a confirmed miss. Verify the pin before the answer is used.
+        await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
 
         if (entry is null || type == KeyValueResponseType.DoesNotExist)
             return BranchKvValue.Miss;  // confirmed Kahuna miss — continue ancestry walk
@@ -233,6 +258,10 @@ internal sealed class KvBranchReader
 
             pending = nextPending;
         }
+
+        // Same rule as ProbeRaw: on an ancestor level, a batch full of confirmed misses is exactly
+        // what reclaimed history looks like. Verify the snapshot pin before decoding any of it.
+        await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
 
         BranchKvValue[] decoded = new BranchKvValue[probeKeys.Count];
 
@@ -358,11 +387,20 @@ internal sealed class KvBranchReader
             txId, keys.RowBucketPrefix, startKey, startInclusive, endKey, endKey is null, KvStoreConstants.DefaultPageSize,
             readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
         {
+            // Per-entry on the fast path this is one volatile read and one tick comparison; the
+            // renew round-trip happens at most once per refresh window. Checking as the scan
+            // streams keeps every yielded page covered by a confirmation that postdates it.
+            await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
+
             if (entry.Value is null) continue;
             string rowIdHex = key.AsSpan(prefixLen).ToString();
             BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
             yield return (rowIdHex, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
         }
+
+        // End-of-stream is information too: a scan over reclaimed history simply ends early, so the
+        // absence of further rows must be validated exactly like a returned row.
+        await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
     }
 
     // Yields every index entry within optional encoded bounds from this store's namespace at the
@@ -401,11 +439,18 @@ internal sealed class KvBranchReader
             txId, bucketPrefix, startKey, fromInclusive, endKey, toInclusive,
             KvStoreConstants.DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
         {
+            // See ScanRowsRawAsync: cheap per-entry check keeping every streamed page covered by a
+            // snapshot-pin confirmation that postdates it.
+            await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
+
             if (entry.Value is null || !kvKey.StartsWith(keyPrefix, StringComparison.Ordinal)) continue;
             string suffix = kvKey.Substring(prefixLen);
             BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
             yield return (suffix, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
         }
+
+        // See ScanRowsRawAsync: an early end over reclaimed history must not read as a normal end.
+        await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

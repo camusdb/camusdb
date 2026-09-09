@@ -1447,6 +1447,107 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         catch { }
     }
 
+    // ── Lost-snapshot-protection markers (branch fail-closed state) ────────────────────────────
+    //
+    // A branch whose snapshot-floor hold lapses can never regain its frozen ancestor view: Kahuna
+    // refuses to renew an expired hold, and re-acquiring at the old timestamp does not bring
+    // reclaimed history back. The marker durably records that state so every node — including one
+    // that opens the branch after a restart or failover — fails the branch closed with a definitive
+    // message instead of rediscovering the loss through a refused renew. Correctness does not
+    // depend on the marker (the refused renew is itself permanent and visible everywhere); the
+    // marker is the fast, well-explained path.
+    //
+    // Keys: _system/dbregistry/holdlost:{dbId}  (value is a human-readable reason)
+
+    private string HoldLostKey(string dbId) => $"{keyPrefix}dbregistry/holdlost:{dbId}";
+
+    /// <summary>
+    /// Durably marks branch <paramref name="dbId"/> as having lost its snapshot protection.
+    /// Idempotent — a repeat overwrites the reason. Throws when the write cannot be confirmed;
+    /// callers treat the marker as best-effort and log, because the fail-closed behavior itself
+    /// comes from the refused renew, not from this record.
+    /// </summary>
+    public async Task MarkSnapshotProtectionLostAsync(string dbId, string reason)
+    {
+        string key = HoldLostKey(dbId);
+        KeyValueResponseType type;
+        int retries = 0;
+
+        do
+        {
+            if (retries > 0)
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+
+            (type, _, _) = await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, key, System.Text.Encoding.UTF8.GetBytes(reason), null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++retries < MaxRetries);
+
+        if (type != KeyValueResponseType.Set)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to write lost-snapshot-protection marker for database id '{dbId}': {type}");
+    }
+
+    /// <summary>
+    /// Reads the lost-snapshot-protection marker for <paramref name="dbId"/>: the recorded reason,
+    /// or <c>null</c> when no marker exists. An indeterminate read (exhausted transient retries)
+    /// also returns <c>null</c> — deliberately lenient, because the marker only accelerates the
+    /// error at open time; the guard's own refused renew still fails a genuinely lost branch closed.
+    /// </summary>
+    public async Task<string?> TryGetSnapshotProtectionLostAsync(string dbId)
+    {
+        int retries = 0;
+        while (true)
+        {
+            KeyValueResponseType type;
+            ReadOnlyKeyValueEntry? entry;
+            try
+            {
+                (type, entry) = await kahuna.LocateAndTryGetValue(
+                    HLCTimestamp.Zero, HoldLostKey(dbId), -1,
+                    HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+                ).ConfigureAwait(false);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (type == KeyValueResponseType.Get && entry?.Value is not null)
+                return System.Text.Encoding.UTF8.GetString(entry.Value);
+
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+                && ++retries < MaxRetries)
+            {
+                await Task.Delay(retries * 10).ConfigureAwait(false);
+                continue;
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Removes the lost-snapshot-protection marker for <paramref name="dbId"/>. Called when the
+    /// branch is dropped — ids are never reused, so a stale marker is only clutter, but dropping
+    /// the branch is the one action that genuinely resolves the state. Best-effort.
+    /// </summary>
+    public async Task ClearSnapshotProtectionLostAsync(string dbId)
+    {
+        try
+        {
+            await kahuna.LocateAndTryDeleteKeyValue(
+                HLCTimestamp.Zero, HoldLostKey(dbId),
+                KeyValueDurability.Persistent, CancellationToken.None
+            ).ConfigureAwait(false);
+        }
+        catch { }
+    }
+
     /// <summary>
     /// Scans for drop-in-progress markers owned by <em>this</em> node and returns their database ids.
     /// Each is an interrupted drop this node started before a crash: the caller resumes the keyspace
@@ -1857,6 +1958,31 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         {
             if (string.Equals(entry.Id, id, StringComparison.Ordinal))
                 return entry.Name;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Resolves the full registry entry for a database <paramref name="id"/>: local cache first,
+    /// falling back to a persistent-KV scan for entries registered on other nodes. Returns
+    /// <c>null</c> when the id is not currently registered anywhere.
+    ///
+    /// <para>A cache hit is served without cross-node revalidation, so use this only where the
+    /// fields consumed are immutable after registration — the snapshot-hold chain resolution reads
+    /// <see cref="DatabaseRegistryEntry.Ancestors"/> and
+    /// <see cref="DatabaseRegistryEntry.ImmediateParentHoldId"/>, both of which never change (a
+    /// rename preserves them). A caller that needs the current <em>name</em> must not rely on the
+    /// cached copy.</para>
+    /// </summary>
+    public async Task<DatabaseRegistryEntry?> TryResolveEntryByIdAsync(string id)
+    {
+        if (byId.TryGetValue(id, out DatabaseRegistryEntry? cached))
+            return cached;
+
+        foreach (DatabaseRegistryEntry entry in await ScanAllEntriesAsync().ConfigureAwait(false))
+        {
+            if (string.Equals(entry.Id, id, StringComparison.Ordinal))
+                return entry;
         }
         return null;
     }

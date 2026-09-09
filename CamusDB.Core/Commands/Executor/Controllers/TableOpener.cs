@@ -153,11 +153,15 @@ internal sealed class TableOpener
         // key-space while deliberately keeping the identity that grants and dependencies are hung on.
         string storageId = tableSchema.EffectiveStorageId;
 
+        // Every ancestor store carries the branch's snapshot-protection guard: reads answered from
+        // an ancestor level are frozen as-of-fork reads whose completeness depends on the branch's
+        // snapshot-hold chain, and the guard is what fails them closed once that chain lapses.
         (KvTableStore store, HLCTimestamp forkTimestamp)[]? ancestorStores =
             database.Ancestors.Count > 0
                 ? database.Ancestors
                     .Select(a => (
-                        new KvTableStore(database.Kahuna.Kahuna, database.Options, a.DatabaseId, storageId, tableSchema.Name ?? "", logger),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
+                        new KvTableStore(database.Kahuna.Kahuna, database.Options, a.DatabaseId, storageId, tableSchema.Name ?? "", logger,
+                            ancestorReadGuard: database.SnapshotProtection),   // ancestor store: its own database name is not resolved here, so messages fall back to the ancestor's id
                         a.ForkTimestamp
                     ))
                     .ToArray()

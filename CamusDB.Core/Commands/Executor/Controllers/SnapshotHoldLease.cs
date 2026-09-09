@@ -74,13 +74,23 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
     /// <summary>True once the hold has been lost; latches, and never returns to false.</summary>
     internal bool IsLost => lost.IsCancellationRequested;
 
+    /// <summary>
+    /// When false, <see cref="DisposeAsync"/> only stops the renew loop and leaves the hold alive —
+    /// the keep-alive mode used by branch creation, where the hold must outlive this object (the
+    /// registry-driven renewer takes over once the branch is published) and release decisions
+    /// belong to the creation flow's own cleanup paths.
+    /// </summary>
+    private readonly bool releaseOnDispose;
+
     private SnapshotHoldLease(
-        IKahuna kahuna, ILogger<ICamusDB> logger, string holdId, HLCTimestamp snapshot, int leaseMs)
+        IKahuna kahuna, ILogger<ICamusDB> logger, string holdId, HLCTimestamp snapshot, int leaseMs,
+        bool releaseOnDispose = true)
     {
         this.kahuna = kahuna;
         this.logger = logger;
         this.holdId = holdId;
         this.leaseMs = leaseMs;
+        this.releaseOnDispose = releaseOnDispose;
         Snapshot = snapshot;
     }
 
@@ -113,6 +123,36 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
             // Test-only: stand in for a lease that lapsed mid-read. Renewal cannot be made to fail
             // against a healthy embedded Kahuna, and the behavior worth proving is not the renew RPC
             // but what the readers above do once the pin is gone.
+            lease.MarkLost();
+            return lease;
+        }
+
+        lease.loop = lease.RenewLoopAsync();
+        return lease;
+    }
+
+    /// <summary>
+    /// Wraps an <em>already acquired</em> hold in a keep-alive: renews it in the background and
+    /// fails closed exactly like an acquired lease, but never releases it — disposal only stops
+    /// the renew loop. Branch creation uses this to keep its fresh fork-point hold alive through
+    /// the (unbounded-duration) metadata copy and to validate, via <see cref="ThrowIfLost"/>, that
+    /// the hold survived before and after the branch is published; ownership of the hold then
+    /// passes to the registry-driven <see cref="SnapshotHoldRenewer"/>. Release on the abort paths
+    /// stays with the caller, which already owns that cleanup.
+    /// </summary>
+    internal static SnapshotHoldLease AdoptForKeepAlive(
+        IKahuna kahuna,
+        ILogger<ICamusDB> logger,
+        string holdId,
+        HLCTimestamp snapshot,
+        int leaseMs)
+    {
+        SnapshotHoldLease lease = new(kahuna, logger, holdId, snapshot, leaseMs, releaseOnDispose: false);
+
+        if (LoseEveryHoldForTesting)
+        {
+            // Same test seam as AcquireAsync: stands in for a lease that lapsed mid-operation, so a
+            // test can prove branch creation aborts rather than publishing an unprotected branch.
             lease.MarkLost();
             return lease;
         }
@@ -240,15 +280,18 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
             }
         }
 
-        try
+        if (releaseOnDispose)
         {
-            await kahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            // Best effort: a hold that outlives its statement only over-retains revisions until its
-            // lease lapses, which is far better than failing a read that already succeeded.
-            logger.LogWarning(ex, "Failed to release the snapshot-floor hold {HoldId}", holdId);
+            try
+            {
+                await kahuna.LocateAndReleaseSnapshotHold(holdId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Best effort: a hold that outlives its statement only over-retains revisions until its
+                // lease lapses, which is far better than failing a read that already succeeded.
+                logger.LogWarning(ex, "Failed to release the snapshot-floor hold {HoldId}", holdId);
+            }
         }
 
         lost.Dispose();

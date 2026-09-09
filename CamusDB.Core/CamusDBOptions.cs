@@ -449,7 +449,10 @@ public sealed record CamusDBOptions
     /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The
     /// hold must be renewed well inside this window for as long as the branch exists (see the
     /// leader-owned renewer); if renewal stops, the hold lapses after one lease and the branch's
-    /// frozen view can be reclaimed. Chosen coarse so lease renewals are not a hot Raft path.
+    /// frozen view can be reclaimed — a permanent state the engine then fails closed on (see
+    /// <see cref="Storage.Kv.BranchSnapshotHoldGuard"/>). Configuration enforces a floor of 5000:
+    /// the renewer never ticks faster than once a second, so a smaller lease would lapse between
+    /// sweeps by design. Chosen coarse so lease renewals are not a hot Raft path.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int BranchSnapshotHoldLeaseMs { get; init; } = 300_000;

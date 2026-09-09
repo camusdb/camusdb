@@ -112,6 +112,10 @@ public sealed partial class KvTableStore
     /// <paramref name="dbName"/> and <paramref name="tableName"/> are carried purely for
     /// diagnostics (lock-conflict and deadline messages name the object a user recognizes);
     /// they are never part of a KV key, so an empty value only degrades an error message.
+    /// Pass <paramref name="ancestorReadGuard"/> when THIS store is itself one of a branch's
+    /// ancestor levels: every read it answers is then a frozen as-of-fork snapshot read, and the
+    /// guard verifies the branch's snapshot-hold chain so a lapsed hold fails the read closed
+    /// instead of returning a silently incomplete result (see <see cref="BranchSnapshotHoldGuard"/>).
     /// </summary>
     public KvTableStore(
         IKahuna kahuna,
@@ -121,7 +125,8 @@ public sealed partial class KvTableStore
         string tableName = "",
         ILogger<ICamusDB>? logger = null,
         (KvTableStore store, HLCTimestamp forkTimestamp)[]? ancestorStores = null,
-        string dbName = "")
+        string dbName = "",
+        BranchSnapshotHoldGuard? ancestorReadGuard = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         ArgumentNullException.ThrowIfNull(options);
@@ -144,7 +149,7 @@ public sealed partial class KvTableStore
             levels[i] = new BranchLevel(ancestorStore.keys, ancestorStore.branch, forkTimestamp);
         }
 
-        branch = new KvBranchReader(kahuna, keys, levels);
+        branch = new KvBranchReader(kahuna, keys, levels, ancestorReadGuard);
         rows = new KvRowAccessor(kahuna, keys, locks, branch, retry);
         indexes = new KvIndexAccessor(kahuna, keys, locks, branch, retry);
         batch = new KvBatchWriter(kahuna, this.logger, keys, branch, retry, messages, options);

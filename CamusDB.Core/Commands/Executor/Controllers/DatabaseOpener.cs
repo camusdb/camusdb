@@ -113,10 +113,9 @@ internal sealed class DatabaseOpener
             throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, $"Database '{name}' does not exist");
 
         string id = entry.Id;
-        IReadOnlyList<DatabaseBranchAncestor> ancestors = entry.Ancestors;
 
         AsyncLazy<DatabaseDescriptor> lazy = databaseDescriptors.Descriptors.GetOrAdd(
-            id, _ => new(() => LoadDatabase(id, name, ancestors)));
+            id, _ => new(() => LoadDatabase(registry, entry, name)));
 
         DatabaseDescriptor descriptor = await lazy;
 
@@ -139,8 +138,11 @@ internal sealed class DatabaseOpener
         return descriptor;
     }
 
-    private async Task<DatabaseDescriptor> LoadDatabase(string id, string name, IReadOnlyList<DatabaseBranchAncestor> ancestors)
+    private async Task<DatabaseDescriptor> LoadDatabase(DatabaseRegistry registry, DatabaseRegistryEntry entry, string name)
     {
+        string id = entry.Id;
+        IReadOnlyList<DatabaseBranchAncestor> ancestors = entry.Ancestors;
+
         // Both modes use the single shared node. Opening a database is a pure metadata
         // load — no per-database node is constructed, started, or flushed here.
         HLCTimestamp mintLocalT(HLCTimestamp? floor)
@@ -154,6 +156,10 @@ internal sealed class DatabaseOpener
         KvTransactionsManager transactions = new(sharedNode.Kahuna, options, (Func<HLCTimestamp?, HLCTimestamp>)mintLocalT, logger, cache);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new(StringComparer.OrdinalIgnoreCase);
 
+        BranchSnapshotHoldGuard? snapshotProtection = ancestors.Count > 0
+            ? await BuildBranchSnapshotGuardAsync(registry, entry).ConfigureAwait(false)
+            : null;
+
         DatabaseDescriptor databaseDescriptor = new(
             id: id,
             name: name,
@@ -161,7 +167,8 @@ internal sealed class DatabaseOpener
             transactions: transactions,
             tableDescriptors: tableDescriptors,
             options: options,
-            ancestors: ancestors
+            ancestors: ancestors,
+            snapshotProtection: snapshotProtection
         )
         {
             Cache = cache,
@@ -199,5 +206,80 @@ internal sealed class DatabaseOpener
         Log.LogDatabaseOpened(logger, name);
 
         return databaseDescriptor;
+    }
+
+    /// <summary>
+    /// Builds the fail-closed snapshot-protection guard a branch descriptor carries for its
+    /// lifetime (see <see cref="BranchSnapshotHoldGuard"/>).
+    ///
+    /// <para>The chain of hold ids the guard verifies — the branch's own hold on its immediate
+    /// parent plus each non-root ancestor's hold on <em>its</em> parent — is resolved lazily on the
+    /// guard's first verify, not here: a transient registry failure at open time must not poison
+    /// the descriptor's <c>AsyncLazy</c>, and every id in the chain is immutable after
+    /// registration, so late resolution loses nothing. A durable lost-protection marker found now
+    /// pre-latches the guard so the first read fails fast with the recorded reason.</para>
+    ///
+    /// <para>A branch created before snapshot-floor durability landed has no hold id anywhere in
+    /// its chain; its guard then verifies an empty chain (a warning is logged once at open). That
+    /// preserves the pre-existing behavior for legacy branches instead of bricking them.</para>
+    /// </summary>
+    private async Task<BranchSnapshotHoldGuard> BuildBranchSnapshotGuardAsync(
+        DatabaseRegistry registry, DatabaseRegistryEntry entry)
+    {
+        string branchId = entry.Id;
+        string branchName = entry.Name;
+        string selfHoldId = entry.ImmediateParentHoldId;
+        string[] ancestorIds = new string[entry.Ancestors.Count];
+        for (int i = 0; i < entry.Ancestors.Count; i++)
+            ancestorIds[i] = entry.Ancestors[i].DatabaseId;
+
+        if (string.IsNullOrEmpty(selfHoldId))
+            logger.LogWarning(
+                "Branch '{Branch}' has no snapshot-hold id (created before snapshot-floor durability); " +
+                "its frozen ancestor view is NOT protected against revision reclamation",
+                branchName);
+
+        async Task<IReadOnlyList<string>> ResolveChainHoldIds(CancellationToken ct)
+        {
+            List<string> holdIds = new(ancestorIds.Length);
+
+            if (!string.IsNullOrEmpty(selfHoldId))
+                holdIds.Add(selfHoldId);
+
+            // Each non-root ancestor is itself a registered branch owning a hold on ITS parent;
+            // this branch's deeper frozen levels stay readable only while those holds live too.
+            // The root's entry has an empty hold id and drops out naturally.
+            foreach (string ancestorId in ancestorIds)
+            {
+                DatabaseRegistryEntry? ancestorEntry = await registry.TryResolveEntryByIdAsync(ancestorId).ConfigureAwait(false);
+                if (ancestorEntry is null)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        $"Could not resolve ancestor database id '{ancestorId}' of branch '{branchName}' " +
+                        "to verify its snapshot protection; retry the operation");
+
+                if (!string.IsNullOrEmpty(ancestorEntry.ImmediateParentHoldId))
+                    holdIds.Add(ancestorEntry.ImmediateParentHoldId);
+            }
+
+            return holdIds;
+        }
+
+        BranchSnapshotHoldGuard guard = new(
+            sharedNode.Kahuna,
+            logger,
+            branchName,
+            options.BranchSnapshotHoldLeaseMs,
+            ResolveChainHoldIds,
+            persistLostAsync: reason => registry.MarkSnapshotProtectionLostAsync(branchId, reason));
+
+        // Fast-fail path only: a marker written by the renewer (or by another node's guard) makes
+        // the very first read fail with the definitive recorded reason. A transient miss here is
+        // harmless — a genuinely lost chain still fails closed through the guard's refused renew.
+        string? lostReason = await registry.TryGetSnapshotProtectionLostAsync(branchId).ConfigureAwait(false);
+        if (lostReason is not null)
+            guard.LatchLostFromDurableMarker(lostReason);
+
+        return guard;
     }
 }
