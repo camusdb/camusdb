@@ -42,13 +42,15 @@ public sealed class RunComparisonTests
 
     private static RunManifest ManifestWith(
         long rows = 100_000, int workers = 64, string workload = "accounts", string mode = "closed",
-        int targetOps = 0, string client = "CamusDB.Client 0.10.0")
+        int targetOps = 0, string client = "CamusDB.Client 0.10.0",
+        string? routingMode = null, string? routingNodes = null)
         => new(
             ToolVersion: "1.0.0", GitCommit: "abc", Endpoint: "http://camus1:5096", Database: "wl", Protocol: "grpc",
             Mode: mode, Seed: 1847, Rows: rows, PayloadBytes: 256, Tables: 1, WorkloadKind: workload,
             Workers: workers, Connections: 8, TargetOps: targetOps, ReadPercent: 60, WritePercent: 40,
             WritesPerTransaction: 1, Locking: "Optimistic", Isolation: "ReadCommitted", NoAutoPrepare: false,
-            RequestTimeoutSeconds: null, ExpectFaults: false, SchemaFingerprint: "fp-1",
+            RequestTimeoutSeconds: null, RoutingMode: routingMode, RoutingNodes: routingNodes,
+            ExpectFaults: false, SchemaFingerprint: "fp-1",
             StartedAtUtc: "2026-08-28T12:00:00Z", Runtime: "10.0", Os: "test", ProcessorCount: 8,
             ClientPackageVersion: client);
 
@@ -218,6 +220,37 @@ public sealed class RunComparisonTests
         Assert.That(result.Comparable, Is.True);
         Assert.That(result.Differences.Select(d => d.Name), Does.Contain("workers"));
         Assert.That(result.Ratio, Is.EqualTo(2.0).Within(0.001));
+    }
+
+    [Test]
+    public void TreatsRoutingAsNotableRatherThanBlocking()
+    {
+        // Routing off vs learned is the A/B, so refusing the comparison would make the experiment
+        // unrunnable. It has to appear as a difference, though: a routing arm and its control differ in
+        // nothing else, so if the manifest does not carry it the two runs are indistinguishable.
+        ComparisonResult result = RunComparison.Compare(
+            Bundle(ManifestWith(routingMode: "Off"), SummaryWith(100), FactsWith()),
+            Bundle(ManifestWith(routingMode: "Learned"), SummaryWith(102), FactsWith()));
+
+        Assert.That(result.Comparable, Is.True);
+        Assert.That(result.Differences.Select(d => d.Name), Does.Contain("routing-mode"));
+    }
+
+    [Test]
+    public void ReportsATrustMapDifferenceEvenWhenTheModeMatches()
+    {
+        // The map is what decides whether a mode does anything: a client ignores advice naming a node
+        // outside it, so "Learned with a good map" and "Learned with an empty map" are different
+        // experiments that agree on every other field. Comparing them silently is the failure this
+        // records against.
+        ComparisonResult result = RunComparison.Compare(
+            Bundle(ManifestWith(routingMode: "Learned", routingNodes: "10.0.0.1:7070=https://camus1:5096"),
+                SummaryWith(100), FactsWith()),
+            Bundle(ManifestWith(routingMode: "Learned", routingNodes: null), SummaryWith(100), FactsWith()));
+
+        Assert.That(result.Comparable, Is.True);
+        Assert.That(result.Differences.Select(d => d.Name), Does.Contain("routing-nodes"));
+        Assert.That(result.Differences.Select(d => d.Name), Does.Not.Contain("routing-mode"));
     }
 
     [Test]

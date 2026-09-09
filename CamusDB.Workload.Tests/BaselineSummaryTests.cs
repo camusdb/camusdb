@@ -37,7 +37,8 @@ public sealed class BaselineSummaryTests
         Mode: "closed", Seed: 1847, Rows: rows, PayloadBytes: 256, Tables: 1, WorkloadKind: "bank",
         Workers: 32, Connections: 16, TargetOps: 0, ReadPercent: 50, WritePercent: 50,
         WritesPerTransaction: 1, Locking: "Optimistic", Isolation: "ReadCommitted", NoAutoPrepare: false,
-        RequestTimeoutSeconds: null, ExpectFaults: true, SchemaFingerprint: "fp",
+        RequestTimeoutSeconds: null, RoutingMode: null, RoutingNodes: null,
+        ExpectFaults: true, SchemaFingerprint: "fp",
         StartedAtUtc: "2026-08-29T00:00:00Z", Runtime: "10.0", Os: "test", ProcessorCount: 6,
         ClientPackageVersion: "CamusDB.Client 0.10.0");
 

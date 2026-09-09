@@ -840,6 +840,8 @@ public static class Program
         Isolation: isolation.ToString(),
         NoAutoPrepare: o.NoAutoPrepare,
         RequestTimeoutSeconds: o.RequestTimeout,
+        RoutingMode: o.RoutingMode,
+        RoutingNodes: o.RoutingNodes,
         ExpectFaults: o.ExpectFaults,
         SchemaFingerprint: dataset.Fingerprint(),
         StartedAtUtc: DateTime.UtcNow.ToString("O"),

@@ -126,6 +126,12 @@ public static class RunComparison
         Check("endpoint", m1.Endpoint, m2.Endpoint, blocking: false);
         Check("no-auto-prepare", m1.NoAutoPrepare, m2.NoAutoPrepare, blocking: false);
         Check("request-timeout", m1.RequestTimeoutSeconds, m2.RequestTimeoutSeconds, blocking: false);
+
+        // Routing is a legitimate thing to A/B, so differing modes are notable rather than blocking. The
+        // trust map is checked too: two runs that agree on the mode but disagree on the map are not the
+        // same experiment, because the map is what decides whether the mode does anything.
+        Check("routing-mode", m1.RoutingMode, m2.RoutingMode, blocking: false);
+        Check("routing-nodes", m1.RoutingNodes, m2.RoutingNodes, blocking: false);
         Check("measured-seconds", baseline.Summary.MeasuredSeconds, candidate.Summary.MeasuredSeconds, blocking: false);
 
         List<string> warnings = new();

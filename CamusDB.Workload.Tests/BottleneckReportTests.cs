@@ -40,7 +40,7 @@ public sealed class BottleneckReportTests
         Mode: "closed", Seed: 1, Rows: 1000, PayloadBytes: 256, Tables: 1, WorkloadKind: "accounts",
         Workers: 64, Connections: 8, TargetOps: 0, ReadPercent: 60, WritePercent: 40, WritesPerTransaction: 1,
         Locking: "Optimistic", Isolation: "ReadCommitted", NoAutoPrepare: false, RequestTimeoutSeconds: null,
-        ExpectFaults: false, SchemaFingerprint: "fp", StartedAtUtc: Base.ToString("O"), Runtime: "10.0",
+        RoutingMode: null, RoutingNodes: null, ExpectFaults: false, SchemaFingerprint: "fp", StartedAtUtc: Base.ToString("O"), Runtime: "10.0",
         Os: "test", ProcessorCount: 8, ClientPackageVersion: "CamusDB.Client 0.10.0");
 
     private static MetricPoint Point(int second, string node, string metric, double value, string labels = "")
