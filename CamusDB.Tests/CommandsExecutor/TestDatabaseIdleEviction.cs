@@ -31,6 +31,13 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// count. The dangerous failure is not a missed eviction; it is a released descriptor that a running
 /// statement still holds, so each "is refused" case is paired with evidence that the work it was
 /// protecting then completes normally.</para>
+///
+/// <para>One consequence of that bar shapes how these tests assert success: a DML statement schedules
+/// a debounced statistics flush that runs a real background transaction on the database, and while it
+/// runs the evictor correctly refuses with <see cref="DatabaseEvictionOutcome.InUse"/>. A refusal is a
+/// normal outcome the production sweep retries on its next tick, so every "must be released" assertion
+/// here retries the primitive until the transient maintenance drains, instead of demanding a one-shot
+/// success the primitive does not promise.</para>
 /// </summary>
 [TestFixture]
 // Serial: boots an embedded Kahuna node and asserts on process-wide open-object counts.
@@ -102,6 +109,36 @@ public sealed class TestDatabaseIdleEviction : BaseTest
         await database.Transactions.CommitAsync(txn);
     }
 
+    /// <summary>
+    /// Runs the sweep until it releases exactly one database, tolerating the transient
+    /// <see cref="DatabaseEvictionOutcome.InUse"/> refusals a background statistics flush causes.
+    /// Returns whether a sweep released one database inside the budget. A sweep that never gets to 1 —
+    /// a database that stays refused forever, or was already gone — returns <see langword="false"/>
+    /// for the caller's assert.
+    /// </summary>
+    private static Task<bool> SweepUntilOneReleasedAsync(CommandExecutor executor) =>
+        WaitForAsync(() => executor.EvictIdleDatabasesForTests(EvictImmediately) == 1);
+
+    /// <summary>
+    /// Retries a single-database eviction attempt while it reports
+    /// <see cref="DatabaseEvictionOutcome.InUse"/>, then returns the first settled outcome. The
+    /// transient InUse comes from background maintenance — the statistics flush a DML statement
+    /// schedules runs a real transaction on the database — and the production sweep simply retries it
+    /// on the next tick, so tests of the primitive do the same. Every other outcome is stable, and is
+    /// returned so the caller's assert shows the actual refusal reason on failure.
+    /// </summary>
+    private static async Task<DatabaseEvictionOutcome> TryEvictWhenQuiescentAsync(
+        CommandExecutor executor, string databaseId)
+    {
+        DatabaseEvictionOutcome outcome = DatabaseEvictionOutcome.InUse;
+
+        await WaitForAsync(() =>
+            (outcome = executor.TryEvictDatabaseForTests(databaseId, EvictImmediately))
+                != DatabaseEvictionOutcome.InUse);
+
+        return outcome;
+    }
+
     private static async Task<int> CountRobotsAsync(CommandExecutor executor, string dbname)
     {
         DatabaseDescriptor database = await executor.OpenDatabase(dbname);
@@ -134,9 +171,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
 
         Assert.AreEqual(1, executor.OpenDatabaseCount, "Precondition: the database is open");
 
-        int evicted = executor.EvictIdleDatabasesForTests(EvictImmediately);
-
-        Assert.AreEqual(1, evicted, "The idle database must be released");
+        Assert.IsTrue(await SweepUntilOneReleasedAsync(executor), "The idle database must be released");
         Assert.AreEqual(0, executor.OpenDatabaseCount, "No descriptor should remain open");
 
         // Reopen through the ordinary path and read back through the real query pipeline.
@@ -160,13 +195,13 @@ public sealed class TestDatabaseIdleEviction : BaseTest
         {
             await InsertRobotsAsync(executor, dbname, 2);
 
-            Assert.AreEqual(1, executor.EvictIdleDatabasesForTests(EvictImmediately),
+            Assert.IsTrue(await SweepUntilOneReleasedAsync(executor),
                 $"Cycle {cycle}: the idle database must be released");
 
             Assert.AreEqual((cycle + 1) * 2, await CountRobotsAsync(executor, dbname),
                 $"Cycle {cycle}: every row written so far must survive the release");
 
-            Assert.AreEqual(1, executor.EvictIdleDatabasesForTests(EvictImmediately),
+            Assert.IsTrue(await SweepUntilOneReleasedAsync(executor),
                 $"Cycle {cycle}: the database reopened by the read must be releasable again");
         }
     }
@@ -182,7 +217,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
         (string dbname, _, CommandExecutor executor) = await CreateDatabase(Options);
         await CreateRobotsTableAsync(executor, dbname);
 
-        Assert.AreEqual(1, executor.EvictIdleDatabasesForTests(EvictImmediately));
+        Assert.IsTrue(await SweepUntilOneReleasedAsync(executor));
 
         await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
             txnState: null!, database: dbname, sql: $"ALTER TABLE {TableName} ADD COLUMN nickname STRING", parameters: null));
@@ -195,7 +230,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
             "DDL issued after an eviction must land on the reopened descriptor's schema");
 
         // And it is durable, not just in memory.
-        Assert.AreEqual(1, executor.EvictIdleDatabasesForTests(EvictImmediately));
+        Assert.IsTrue(await SweepUntilOneReleasedAsync(executor));
         DatabaseDescriptor secondReopen = await executor.OpenDatabase(dbname);
         Assert.IsTrue(
             secondReopen.Schema.Tables[TableName].Columns!.Exists(c => c.Name == "nickname"),
@@ -226,7 +261,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
         // Once the reference is gone it becomes evictable — the refusal was about the reference, not a
         // descriptor that had been quietly broken by the attempt.
         Assert.AreEqual(
-            DatabaseEvictionOutcome.Evicted, executor.TryEvictDatabaseForTests(database.Id, EvictImmediately),
+            DatabaseEvictionOutcome.Evicted, await TryEvictWhenQuiescentAsync(executor, database.Id),
             "Releasing the reference must make the descriptor evictable again");
     }
 
@@ -367,7 +402,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
 
         Assert.AreEqual(
             DatabaseEvictionOutcome.BranchAncestor,
-            executor.TryEvictDatabaseForTests(root.Id, EvictImmediately),
+            await TryEvictWhenQuiescentAsync(executor, root.Id),
             "A database an open branch reads through must be refused");
     }
 
@@ -390,7 +425,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
             "Precondition: writing rows tracks statistics for the table");
 
         Assert.AreEqual(
-            DatabaseEvictionOutcome.Evicted, executor.TryEvictDatabaseForTests(database.Id, EvictImmediately));
+            DatabaseEvictionOutcome.Evicted, await TryEvictWhenQuiescentAsync(executor, database.Id));
 
         Assert.AreEqual(0, executor.Statistics.CachedTableCount,
             "Releasing a database must release its tables' statistics entries too");
@@ -544,7 +579,7 @@ public sealed class TestDatabaseIdleEviction : BaseTest
 
         Assert.AreEqual(
             DatabaseEvictionOutcome.Evicted,
-            executor.TryEvictDatabaseForTests(renamedDescriptor.Id, EvictImmediately),
+            await TryEvictWhenQuiescentAsync(executor, renamedDescriptor.Id),
             "Once the window is satisfied the renamed database is an ordinary eviction candidate");
 
         Assert.AreEqual(4, await CountRobotsAsync(executor, renamed),
