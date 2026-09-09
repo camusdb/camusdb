@@ -65,6 +65,13 @@ internal sealed class KvKeyBuilder
     /// <summary><c>|i:</c> — the infix between a table prefix and an index id in an index key space.</summary>
     internal const string IndexSpaceInfix = "|i:";
 
+    /// <summary>
+    /// <c>|tx</c> — the suffix that turns a placement group into the key space of the transaction
+    /// session anchors composed by <see cref="SessionAnchorKeyOf"/>. It shares the group's
+    /// partition and is never written to the store.
+    /// </summary>
+    internal const string SessionSpaceSuffix = "|tx";
+
     // Caches "{dbId}:{tableId}|i:{indexId}" per index so the bucket prefix is interpolated once
     // instead of on every lock/scan. The index-id set is small and bounded by the table's schema.
     private readonly ConcurrentDictionary<string, string> indexBucketPrefixCache = new();
@@ -133,6 +140,26 @@ internal sealed class KvKeyBuilder
     /// </summary>
     internal static string IndexSpaceOf(string dbId, string tableId, string indexId)
         => string.Concat(dbId, ":", tableId, IndexSpaceInfix, indexId);
+
+    /// <summary>
+    /// <c>{placementGroup}|tx/{sessionId}</c> — the Kahuna coordinator key that anchors a
+    /// transaction's session to the partition of <paramref name="placementGroup"/>.
+    ///
+    /// <para>Kahuna places a transaction's coordinator session by hashing the coordinator key with
+    /// the same placement rule as data keys: the key space is the prefix before the last <c>'/'</c>
+    /// (<c>{group}|tx</c>) and the placement group is the prefix before the first <c>'|'</c>
+    /// (<c>{group}</c>). A key composed here therefore lands on the same partition as every row and
+    /// index key space of the table whose group it names, so the node that leads the table's data
+    /// also owns the session: every operation registration and the commit itself stay local when
+    /// the transaction executes on that leader. A plain GUID has no separators, is its own group, and
+    /// hashes to a random partition — which is why the session anchor exists.</para>
+    ///
+    /// <para>The key is never stored as a KV entry and is never scanned; Kahuna treats it as an
+    /// opaque routing string. <paramref name="sessionId"/> must be unique per transaction (the
+    /// transaction's GUID), because the group prefix is shared by every transaction on the table.</para>
+    /// </summary>
+    internal static string SessionAnchorKeyOf(string placementGroup, string sessionId)
+        => string.Concat(placementGroup, SessionSpaceSuffix, "/", sessionId);
 
     /// <summary>
     /// Registers the human-readable display name for an index KvId so that duplicate-key errors show

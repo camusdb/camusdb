@@ -309,7 +309,7 @@ internal sealed class KvRangeLockManager
 
         // Start the deferred Kahuna session (if not yet started) before any lock attempt.
         // For zero-snapshot and eager-start transactions this is a no-op.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         // A range lock needs a real transaction identity to own and later release it. The
         // Zero-snapshot read-only fast path (point reads, and all reads in single-partition mode)
@@ -513,7 +513,7 @@ internal sealed class KvRangeLockManager
     {
         // Start the deferred Kahuna session before the optimistic/pessimistic branch so the
         // session is open for the write that follows even when optimistic skips the lock.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
             return;

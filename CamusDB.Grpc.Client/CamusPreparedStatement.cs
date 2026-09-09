@@ -72,6 +72,9 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     /// <summary>The statement's query-side route identity, used for transaction-start affinity.</summary>
     internal StatementRouteKey QueryRouteKey => queryRouteKey;
 
+    /// <summary>The statement's mutation-side route identity, used when it starts a deferred transaction.</summary>
+    internal StatementRouteKey NonQueryRouteKey => nonQueryRouteKey;
+
     /// <summary>The parameter names in binding order, verbatim including the leading <c>@</c>.</summary>
     public IReadOnlyList<string> ParameterNames { get; }
 
@@ -214,20 +217,22 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     /// <summary>
     /// Transactional executions take the session's own batcher and slot: the transaction is pinned
     /// to the endpoint and stream it started on, so the statement must register and execute there —
-    /// never on a learned route — and no routing metadata is negotiated for pinned work.
+    /// never on a learned route. Routing metadata is still negotiated when the session asks for it:
+    /// the advice names the statement's table leader and the session learns it for the next
+    /// transaction's start, without moving this one.
     /// </summary>
     internal Task<QueryResult> ExecuteQueryAsync(
-        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, CancellationToken ct)
+        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, bool negotiate, CancellationToken ct)
         => ExecuteAsync(
-            batcher, slot, values, txn, negotiate: false,
+            batcher, slot, values, txn, negotiate,
             static (b, request, s, transportId, c) => b.EnqueueQueryAsync(request, s, c, transportId),
             ct);
 
-    /// <inheritdoc cref="ExecuteQueryAsync(GrpcBatcher, int, TxnHandle, IReadOnlyList{object?}, CancellationToken)"/>
+    /// <inheritdoc cref="ExecuteQueryAsync(GrpcBatcher, int, TxnHandle, IReadOnlyList{object?}, bool, CancellationToken)"/>
     internal Task<NonQueryResult> ExecuteNonQueryAsync(
-        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, CancellationToken ct)
+        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, bool negotiate, CancellationToken ct)
         => ExecuteAsync(
-            batcher, slot, values, txn, negotiate: false,
+            batcher, slot, values, txn, negotiate,
             static (b, request, s, transportId, c) => b.EnqueueNonQueryAsync(request, s, c, transportId),
             ct);
 

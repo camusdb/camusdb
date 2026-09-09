@@ -203,10 +203,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 return;
             }
 
-            // Explicit (caller-supplied) transaction — client owns the lifecycle.
+            // Explicit (caller-supplied) transaction — client owns the lifecycle. Advice is still
+            // emitted when negotiated: it names the statement's table leader so the client can
+            // place its next transaction there; it never relocates this one.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
-                await RunExplicitTxnQuery(request, sql, handle, sink, principal, ct).ConfigureAwait(false);
+                Core.Routing.StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
+                DatabaseDescriptor? txnDb =
+                    await RunExplicitTxnQuery(request, sql, handle, sink, principal, txnCollector, ct).ConfigureAwait(false);
+                RoutingAdvice? txnAdvice = BuildRoutingAdvice(txnDb, txnCollector);
+                if (txnAdvice is not null)
+                    await responseStream.WriteAsync(new QueryStreamMessage { RoutingAdvice = txnAdvice }, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -286,12 +293,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
     }
 
-    private async Task RunExplicitTxnQuery(
+    /// <summary>
+    /// Runs a query inside a client-owned transaction and returns the resolved database so the
+    /// caller can build routing advice for the statement (null for a server-level statement).
+    /// </summary>
+    private async Task<DatabaseDescriptor?> RunExplicitTxnQuery(
         SqlRequest request,
         string sql,
         TxnHandle handle,
         IQueryRowSink sink,
         Principal? principal,
+        Core.Routing.StatementRoutingCollector? routingCollector,
         CancellationToken ct)
     {
         KvTransaction? txnState = null;
@@ -304,9 +316,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 sql: sql,
                 parameters: ToColumnValueMap(request.Parameters),
                 principal: principal,
-                cancellationToken: ct
+                cancellationToken: ct,
+                routing: routingCollector
             );
-            await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
+            return await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -411,23 +424,31 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 return new NonQueryReply { AffectedRows = 0 };
             }
 
-            // Explicit transaction — client handles retry and lifecycle.
+            // Explicit transaction — client handles retry and lifecycle. Advice is still collected:
+            // it describes the statement's table and informs where the client starts its next
+            // transaction; it never relocates this one.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
                 KvTransaction? txnState = null;
                 try
                 {
                     txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                    Core.Routing.StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
                         database: request.Database,
                         sql: request.Sql ?? "",
                         parameters: ToColumnValueMap(request.Parameters),
-                        principal: principal
+                        principal: principal,
+                        routing: txnCollector
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     // proto3 strings are never null; an absent warning is the empty string.
-                    return new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+                    NonQueryReply txnReply = new() { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+                    RoutingAdvice? txnAdvice = BuildRoutingAdvice(result.Database, txnCollector);
+                    if (txnAdvice is not null)
+                        txnReply.Routing = txnAdvice;
+                    return txnReply;
                 }
                 catch (Exception)
                 {
@@ -927,12 +948,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
         {
             // Explicit transaction — the client owns the lifecycle, so no commit and no auto-rollback.
+            // Advice is still collected: it describes the statement's table, and a client uses it to
+            // place the next transaction's START on that table's leader; it never moves this one.
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+            routingCollector = BeginRoutingCollection(request);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: sql,
                 parameters: resolved.Parameters, principal: principal,
-                cancellationToken: ct);
-            await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
+                cancellationToken: ct, routing: routingCollector);
+            routingDb = await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else
         {
@@ -1024,13 +1048,19 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
         {
-            // Explicit transaction — client owns commit/rollback.
+            // Explicit transaction — client owns commit/rollback. Advice is collected all the same
+            // (see the query path above): it informs where the client starts its next transaction.
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+            Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: resolved.Sql,
-                parameters: resolved.Parameters, principal: principal);
+                parameters: resolved.Parameters, principal: principal,
+                routing: routingCollector);
             ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
             reply = new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+            RoutingAdvice? advice = BuildRoutingAdvice(result.Database, routingCollector);
+            if (advice is not null)
+                reply.Routing = advice;
         }
         else
         {

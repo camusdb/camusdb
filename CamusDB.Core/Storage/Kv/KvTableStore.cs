@@ -188,6 +188,14 @@ public sealed partial class KvTableStore
     public string RowKeySpace => keys.RowBucketPrefix;
 
     /// <summary>
+    /// <c>{dbId}:{tableId}</c> — the placement group every key space of this table shares. Handed to
+    /// <see cref="KvTransaction.EnsureSessionStartedAsync"/> by paths that open a deferred session
+    /// without going through this store's accessors, so the session anchors on this table's
+    /// partition exactly as an accessor-opened session would.
+    /// </summary>
+    public string PlacementGroup => keys.TableKeyPrefix;
+
+    /// <summary>
     /// The Kahuna key space for a secondary index (<c>{dbId}:{tableId}|i:{indexId}</c>). Pass to
     /// <see cref="IKahuna.RegisterKeyRange"/> when opting an index into key-range routing. All
     /// column types are order-safe for range routing (String included, via its ordered ASCII encoding).

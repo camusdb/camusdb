@@ -83,7 +83,7 @@ internal sealed class KvIndexAccessor
         CancellationToken cancellationToken = default)
     {
         // Serializable+RW acquires a shared point lock on the index entry before reading.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         // A lookup key that cannot be encoded (e.g. an Id equality against a non-ObjectId literal)
         // can match no stored row — return a miss rather than throwing on the invalid value.
@@ -173,7 +173,7 @@ internal sealed class KvIndexAccessor
         CompositeColumnValue key,
         CancellationToken cancellationToken = default)
     {
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (!keys.TryBuildUniqueIndexKey(indexId, key, out string kvKey))
             return null;
@@ -228,7 +228,7 @@ internal sealed class KvIndexAccessor
         // Open the deferred Kahuna session before reading tx.TransactionId below: the scan must run
         // under the transaction's own identity, and a tracked scan can only fold reads once the
         // session exists. No-op for eager, read-only, and already-started transactions.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         long emitted = 0;
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);

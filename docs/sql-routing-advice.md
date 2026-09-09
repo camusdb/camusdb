@@ -26,9 +26,10 @@ A request without the field (every pre-routing client sends 0) gets its exact hi
 shape. A server that predates the feature ignores the field and simply attaches nothing; existing
 advice on the client then expires on its own. Unknown metadata versions must be ignored by clients.
 
-Metadata is emitted on **autocommit** statement responses only. Statements inside an explicit
-transaction are pinned to the transaction's node and stream; advice for them is deferred until
-there is measured demand.
+Metadata is emitted on autocommit statement responses **and** on statements inside an explicit
+transaction. A transaction's statements stay pinned to the node and stream the transaction started
+on, so advice for them never moves the current transaction: it names the statement's table leader,
+and a client uses it to choose where its *next* transaction starts (§6).
 
 ## 2. The advice message
 
@@ -141,10 +142,22 @@ await using CamusConnection connection = CamusConnection.Connect(
 - **Prepared statements** select their endpoint before each autocommit execution and register
   themselves there on demand; a handle never moves between endpoints or stream incarnations.
   Disposal sweeps every endpoint the statement ever registered on.
-- **Transactions** pin to the endpoint and stream chosen at `BeginTransactionAsync` for their
-  whole life. The optional `affinity:` parameter reads a warmed prepared statement's learned route
-  to choose where the transaction *starts* — it never relocates a live transaction, and cold
-  advice just uses rotation with no extra round trip.
+- **Transactions** pin to the endpoint and stream START landed on for their whole life. Where
+  START lands is decided once, by the first thing that names a route:
+  - With the optional `affinity:` parameter, START is sent inside `BeginTransactionAsync` on the
+    warmed prepared statement's learned endpoint (rotation when cold).
+  - With routing negotiated and no affinity, START is **deferred to the first statement** and sent
+    on that statement's learned endpoint. No application change is needed for this. The server
+    anchors the transaction's coordinator session to the first table the transaction touches, so
+    starting on that table's leader is what makes every operation registration and the commit
+    local. Statements inside the transaction still carry advice, which is learned for the *next*
+    transaction and never moves this one. A session finalized before any statement sends START
+    and then the finalize on a rotation endpoint. A failed START surfaces at the first statement
+    with the same exception type an eager START would throw. `SET TRANSACTION` as the first
+    statement carries no advice, so it starts on rotation; pass isolation, mode and locking to
+    `BeginTransactionAsync` instead.
+  - With routing off, START is sent inside `BeginTransactionAsync` on rotation, exactly as before
+    routing existed.
 - **Failure handling.** A transport failure puts the endpoint on a short cooldown
   (`Routing.EndpointCooldown`, default 1 s) for future **unpinned** work only. A domain SQL error
   is a healthy server answering and triggers nothing. Routing adds no retry of any kind: the
@@ -160,6 +173,12 @@ await using CamusConnection connection = CamusConnection.Connect(
   unusable on that client, not an error.
 - Advice does not cross databases, credentials, or connections; the cache lives on the client
   connection and dies with it.
+- A transaction's Kahuna coordinator session is placed by hashing its coordinator key with the
+  same placement rule as data keys. A client-owned transaction (deferred session start) anchors
+  that key inside the placement group of the first table it touches, so the session lives on that
+  table's data leader; with the client starting the transaction there too, registrations and the
+  commit are local. Under key-range sharding the anchor is not applied. An autocommit statement
+  opens its session eagerly and is not anchored.
 - Performance claims should come from the qualification benchmark (routing off vs learned vs a
   manually selected leader on identical concurrency and pool budgets), not from intuition. The
   win is bounded by the eligible fraction of the workload and by how often statements repeat.

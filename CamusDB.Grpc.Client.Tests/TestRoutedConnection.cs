@@ -349,6 +349,225 @@ public sealed class TestRoutedConnection
         Assert.That(b.Count(BatchStatementKind.Commit), Is.EqualTo(1));
     }
 
+    // ─── Deferred transaction start ───────────────────────────────────────────
+
+    private static List<BatchStatementKind> KindsInOrder(TestEndpoint endpoint)
+    {
+        List<BatchStatementKind> kinds = new();
+        foreach (BatchExecuteRequest request in endpoint.Requests())
+            kinds.Add(request.Kind);
+        return kinds;
+    }
+
+    [Test]
+    public async Task DeferredStart_WarmRoute_SendsStartAndStatementToLearnedEndpoint()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(
+            CamusRoutingMode.Learned, advice: static _ => Prefer("node-b"));
+        await using CamusConnection _ = connection;
+
+        const string sql = "select balance from accounts where id = 1";
+        await connection.ExecuteQueryAsync("db1", sql);   // warms the route to node-b
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+
+        Assert.That(session.IsStarted, Is.False);
+        Assert.That(a.Count(BatchStatementKind.Start) + b.Count(BatchStatementKind.Start), Is.EqualTo(0),
+            "BEGIN must send nothing under routing: START waits for the first statement");
+
+        await session.ExecuteQueryAsync(sql);
+
+        Assert.That(session.IsStarted, Is.True);
+        Assert.That(a.Count(BatchStatementKind.Start), Is.EqualTo(0));
+        Assert.That(KindsInOrder(b).SkipWhile(static k => k != BatchStatementKind.Start).Take(2),
+            Is.EqualTo(new[] { BatchStatementKind.Start, BatchStatementKind.Query }),
+            "START then the statement, on the learned endpoint, on one stream");
+
+        await session.CommitAsync();
+        Assert.That(b.Count(BatchStatementKind.Commit), Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task DeferredStart_ColdRoute_UsesRotation_AndLaterAdviceDoesNotMoveIt()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(
+            CamusRoutingMode.Learned, advice: static _ => Prefer("node-b"));
+        await using CamusConnection _ = connection;
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await session.ExecuteQueryAsync("select 1");   // cold: rotation picks endpoint a first
+        await session.ExecuteQueryAsync("select 1");   // the reply above advised node-b; pin wins
+        await session.ExecuteNonQueryAsync("update accounts set balance = 1");
+        await session.CommitAsync();
+
+        Assert.That(a.Count(BatchStatementKind.Start), Is.EqualTo(1));
+        Assert.That(a.Count(BatchStatementKind.Query), Is.EqualTo(2));
+        Assert.That(a.Count(BatchStatementKind.NonQuery), Is.EqualTo(1));
+        Assert.That(a.Count(BatchStatementKind.Commit), Is.EqualTo(1));
+        Assert.That(b.Requests().Count(), Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task DeferredStart_StatementsWithDifferentWarmRoutes_AllStayOnTheFirstOne()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(
+            CamusRoutingMode.Learned,
+            advice: static request => Prefer(request.Request.Sql.Contains("accounts") ? "node-b" : "node-a"));
+        await using CamusConnection _ = connection;
+
+        const string accounts = "select balance from accounts where id = 1";
+        const string audits = "select id from audits where accountid = 1";
+        await connection.ExecuteQueryAsync("db1", accounts);   // learns node-b
+        await connection.ExecuteQueryAsync("db1", audits);     // learns node-a
+        Assert.That(connection.LearnedRouteCount, Is.EqualTo(2));
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await session.ExecuteQueryAsync(accounts);   // START lands on node-b
+        await session.ExecuteQueryAsync(audits);     // prefers node-a, but the pin wins
+        await session.CommitAsync();
+
+        Assert.That(b.Count(BatchStatementKind.Start), Is.EqualTo(1));
+        Assert.That(a.Count(BatchStatementKind.Start), Is.EqualTo(0));
+        Assert.That(b.Count(BatchStatementKind.Query), Is.EqualTo(3), "warm-up query plus both transactional queries");
+        Assert.That(a.Count(BatchStatementKind.Query), Is.EqualTo(1), "only its warm-up query");
+    }
+
+    [Test]
+    public async Task DeferredStart_EmptyTransaction_SendsStartThenCommit()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(CamusRoutingMode.Learned);
+        await using CamusConnection _ = connection;
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await session.CommitAsync();
+
+        TestEndpoint chosen = a.Count(BatchStatementKind.Start) == 1 ? a : b;
+        Assert.That(KindsInOrder(chosen), Is.EqualTo(new[] { BatchStatementKind.Start, BatchStatementKind.Commit }));
+        Assert.That(a.Count(BatchStatementKind.Start) + b.Count(BatchStatementKind.Start), Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task DeferredStart_EmptyTransaction_RollbackSendsStartThenRollback()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(CamusRoutingMode.Learned);
+        await using CamusConnection _ = connection;
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await session.RollbackAsync();
+
+        TestEndpoint chosen = a.Count(BatchStatementKind.Start) == 1 ? a : b;
+        Assert.That(KindsInOrder(chosen), Is.EqualTo(new[] { BatchStatementKind.Start, BatchStatementKind.Rollback }));
+    }
+
+    [Test]
+    public async Task RoutingOff_BeginSendsStartEagerly()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(CamusRoutingMode.Off);
+        await using CamusConnection _ = connection;
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+
+        Assert.That(session.IsStarted, Is.True);
+        Assert.That(a.Count(BatchStatementKind.Start) + b.Count(BatchStatementKind.Start), Is.EqualTo(1),
+            "pre-routing behavior: START goes out inside BeginTransactionAsync");
+
+        await session.ExecuteQueryAsync("select 1");
+        await session.CommitAsync();
+        foreach (BatchExecuteRequest request in a.Requests().Concat(b.Requests()))
+            Assert.That(request.Request.RoutingAcceptVersion, Is.EqualTo(0), "routing off never negotiates");
+    }
+
+    [Test]
+    public async Task DeferredStart_StatementsInsideTransaction_NegotiateAndLearn()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(
+            CamusRoutingMode.Learned, advice: static _ => Prefer("node-b"));
+        await using CamusConnection _ = connection;
+
+        const string sql = "select balance from accounts where id = 1";
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await session.ExecuteQueryAsync(sql);   // cold → rotation (a); its reply advises node-b
+        await session.CommitAsync();
+
+        Assert.That(a.Count(BatchStatementKind.Start), Is.EqualTo(1));
+        Assert.That(a.Requests().First(static r => r.Kind == BatchStatementKind.Query).Request.RoutingAcceptVersion,
+            Is.EqualTo(1), "a pinned statement still asks for advice");
+        Assert.That(connection.LearnedRouteCount, Is.EqualTo(1), "advice inside a transaction is learned");
+
+        // The next transaction whose first statement is that SQL starts on the learned leader.
+        CamusTransactionSession next = await connection.BeginTransactionAsync("db1");
+        await next.ExecuteQueryAsync(sql);
+        await next.CommitAsync();
+
+        Assert.That(b.Count(BatchStatementKind.Start), Is.EqualTo(1));
+        Assert.That(b.Count(BatchStatementKind.Commit), Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task DeferredStart_PreparedStatementAsFirstStatement_StartsOnItsLearnedEndpoint()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(
+            CamusRoutingMode.Learned, advice: static _ => Prefer("node-b"));
+        await using CamusConnection _ = connection;
+
+        CamusPreparedStatement statement = await connection.PrepareAsync(
+            "db1", "select balance from accounts where id = @a");
+        await statement.ExecuteQueryAsync([1L]);   // warms the route to node-b
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await session.ExecuteQueryAsync(statement, [2L]);
+        await session.CommitAsync();
+
+        Assert.That(b.Count(BatchStatementKind.Start), Is.EqualTo(1));
+        Assert.That(a.Count(BatchStatementKind.Start), Is.EqualTo(0));
+        Assert.That(b.Count(BatchStatementKind.Commit), Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task DeferredStart_StartFailure_SurfacesAtFirstStatement_AndRollbackIsQuiet()
+    {
+        FakeBatchTransport? transportA = null;
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(
+            CamusRoutingMode.Learned, configureA: t => transportA = t);
+        await using CamusConnection _ = connection;
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+
+        // Rotation will pick endpoint a for the first START; make its stream drop under it.
+        transportA!.Hold = true;
+        Task<QueryResult> pending = session.ExecuteQueryAsync("select 1");
+        await WaitUntilAsync(() => a.Count(BatchStatementKind.Start) == 1);
+        transportA.FailStream(new IOException("dropped"));
+
+        Assert.ThrowsAsync<IOException>(async () => await pending);
+        Assert.That(session.IsStarted, Is.False);
+        Assert.That(b.Count(BatchStatementKind.Start), Is.EqualTo(0), "no second START is attempted elsewhere");
+
+        // Every later statement reports the same failed start; rollback has nothing to undo.
+        Assert.ThrowsAsync<IOException>(async () => await session.ExecuteQueryAsync("select 1"));
+        await session.RollbackAsync();
+        Assert.That(b.Count(BatchStatementKind.Rollback), Is.EqualTo(0));
+    }
+
+    [Test]
+    public async Task DeferredStart_ConcurrentFirstStatements_ShareOneStart()
+    {
+        (CamusConnection connection, TestEndpoint a, TestEndpoint b) = NewPair(CamusRoutingMode.Learned);
+        await using CamusConnection _ = connection;
+
+        CamusTransactionSession session = await connection.BeginTransactionAsync("db1");
+        await Task.WhenAll(
+            session.ExecuteQueryAsync("select 1"),
+            session.ExecuteQueryAsync("select 2"),
+            session.ExecuteNonQueryAsync("update t set a = 1"));
+        await session.CommitAsync();
+
+        Assert.That(a.Count(BatchStatementKind.Start) + b.Count(BatchStatementKind.Start), Is.EqualTo(1));
+        TestEndpoint chosen = a.Count(BatchStatementKind.Start) == 1 ? a : b;
+        Assert.That(chosen.Count(BatchStatementKind.Query), Is.EqualTo(2));
+        Assert.That(chosen.Count(BatchStatementKind.NonQuery), Is.EqualTo(1));
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         for (int i = 0; i < 500; i++)

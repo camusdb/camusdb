@@ -97,19 +97,29 @@ public sealed class KvTransaction
     public HLCTimestamp TransactionId { get; private set; }
 
     /// <summary>
-    /// The unique identifier that routes commit/rollback to the correct Kahuna
-    /// transaction coordinator. Supplied as <c>KeyValueTransactionOptions.CoordinatorKey</c>
-    /// when the transaction is started; it pins the coordinator session to one partition leader.
+    /// The transaction's own unique identifier: a GUID minted at <see cref="KvTransactionsManager.BeginAsync"/>,
+    /// used in logs and conflict messages and as the unique tail of <see cref="CoordinatorKey"/>.
+    /// It is <b>not</b> the coordinator key on its own once a deferred session anchors itself.
     /// </summary>
     public string UniqueId { get; }
 
     /// <summary>
     /// The coordinator key that pins this transaction's server-side session to a partition leader.
-    /// Passed on every registered operation so the confirmed effect folds into the coordinator-owned
-    /// working set. Identical to <see cref="UniqueId"/> — the value CamusDB supplies as
-    /// <c>KeyValueTransactionOptions.CoordinatorKey</c> at start.
+    /// Supplied as <c>KeyValueTransactionOptions.CoordinatorKey</c> when the Kahuna session starts,
+    /// passed on every registered operation so the confirmed effect folds into the coordinator-owned
+    /// working set, and carried by <see cref="Handle"/> at commit/rollback.
+    ///
+    /// <para>Kahuna places the session by hashing this key with the data placement rule, so its
+    /// shape decides which node owns the session. An eager-start transaction uses the bare
+    /// <see cref="UniqueId"/>, which hashes to an arbitrary partition. A deferred-start transaction
+    /// replaces it at session open with the anchored form
+    /// <c>{placementGroup}|tx/{UniqueId}</c> (see <c>KvKeyBuilder.SessionAnchorKeyOf</c>) when the
+    /// first data operation names the table it touches, so the session lands on that table's
+    /// partition and the leader of the data also owns the registrations and the commit. Read it only
+    /// after <see cref="EnsureSessionStartedAsync"/> completed; before that it still equals
+    /// <see cref="UniqueId"/>.</para>
     /// </summary>
-    public string CoordinatorKey => UniqueId;
+    public string CoordinatorKey { get; private set; }
 
     /// <summary>
     /// The coordinator-assigned record anchor: the first confirmed persistent modified key, folded onto
@@ -127,10 +137,10 @@ public sealed class KvTransaction
     /// coordinator key + any record anchor) is the only thing the client supplies at finalize — no
     /// client-built key list. <see cref="RecordAnchorKey"/> is included so a finalize retried after the
     /// coordinator session is lost still reaches the durable decision instead of an unknown
-    /// <c>Errored</c>. The coordinator key equals <see cref="UniqueId"/> (the value supplied as
-    /// <c>KeyValueTransactionOptions.CoordinatorKey</c> at start).
+    /// <c>Errored</c>. The coordinator key is <see cref="CoordinatorKey"/> (the value supplied as
+    /// <c>KeyValueTransactionOptions.CoordinatorKey</c> when the session started).
     /// </summary>
-    public TransactionHandle Handle => new(TransactionId, UniqueId, RecordAnchorKey);
+    public TransactionHandle Handle => new(TransactionId, CoordinatorKey, RecordAnchorKey);
 
     /// <summary>
     /// Folds the coordinator-assigned record anchor onto this transaction so every subsequent
@@ -284,9 +294,11 @@ public sealed class KvTransaction
     /// Session-start delegate set by <see cref="KvTransactionsManager.BeginAsync"/> for
     /// deferred-start transactions. When non-null, the Kahuna coordinator session has not been
     /// opened yet; the first call to <see cref="EnsureSessionStartedAsync"/> invokes it exactly
-    /// once. Null for eager-start and zero-snapshot transactions — those have no pending start.
+    /// once, handing it the placement group of the table that first operation touches (or null
+    /// when the caller has no table) so the starter can anchor the session there. Null for
+    /// eager-start and zero-snapshot transactions — those have no pending start.
     /// </summary>
-    internal Func<CancellationToken, Task>? SessionStarter;
+    internal Func<string?, CancellationToken, Task>? SessionStarter;
 
     /// <summary>Guards <see cref="sessionStartTask"/> so the deferred Kahuna session is opened exactly
     /// once even when several of a transaction's operations race to be the first.</summary>
@@ -379,6 +391,7 @@ public sealed class KvTransaction
         // direct constructions that never pass a clientId and are not tracked across requests.
         ClientId = clientId.IsNull() ? transactionId : clientId;
         UniqueId = uniqueId;
+        CoordinatorKey = uniqueId;
         IsReadOnly = isReadOnly;
         IsolationLevel = isolationLevel;
         TransactionMode = transactionMode;
@@ -434,11 +447,15 @@ public sealed class KvTransaction
 
     /// <summary>
     /// Called by <see cref="KvTransactionsManager"/> when a deferred session actually starts.
-    /// Seats the Kahuna transaction handle so subsequent operations have a valid identity and
-    /// starts the lifetime watch. Never called for eager-start or zero-snapshot transactions.
+    /// Seats the Kahuna transaction handle and the coordinator key the session was opened with
+    /// (see <see cref="CoordinatorKey"/>), so subsequent operations have a valid identity and
+    /// register against the right session owner, and starts the lifetime watch. The key is seated
+    /// before the id: an operation that observes a non-zero <see cref="TransactionId"/> must never
+    /// read the pre-anchor key. Never called for eager-start or zero-snapshot transactions.
     /// </summary>
-    internal void SetSessionId(HLCTimestamp kahunaId)
+    internal void SetSession(HLCTimestamp kahunaId, string coordinatorKey)
     {
+        CoordinatorKey = coordinatorKey;
         TransactionId = kahunaId;
         lifetimeWatch = Stopwatch.StartNew();
     }
@@ -449,8 +466,14 @@ public sealed class KvTransaction
     /// already started (<see cref="TransactionId"/> is non-zero). Called by write and lock paths
     /// in <see cref="CamusDB.Core.Storage.Kv.KvTableStore"/> before any KV operation that
     /// requires a valid transaction handle.
+    ///
+    /// <para><paramref name="placementGroup"/> is the placement group (<c>{dbId}:{tableId}</c>) of
+    /// the table the calling operation touches, or null when the caller has none. Only the call that
+    /// actually opens the session uses it: the session is anchored to that group's partition so
+    /// the table's data leader owns the session. Later calls, and calls on an already-open
+    /// session, ignore it — a session anchors once and never moves.</para>
     /// </summary>
-    public Task EnsureSessionStartedAsync(CancellationToken ct)
+    public Task EnsureSessionStartedAsync(CancellationToken ct, string? placementGroup = null)
     {
         // Reject data operations once the transaction has begun finalizing (or has finalized):
         // the coordinator installs a permanent fence at the first commit/rollback and rejects new
@@ -475,7 +498,7 @@ public sealed class KvTransaction
             // Invoke SessionStarter exactly once; every concurrent first-operation awaits the same
             // task, so only one Kahuna session is ever opened. The starter returns its Task
             // synchronously up to the first await, so nothing blocks under the lock.
-            return sessionStartTask ??= SessionStarter(ct);
+            return sessionStartTask ??= SessionStarter(placementGroup, ct);
         }
     }
 

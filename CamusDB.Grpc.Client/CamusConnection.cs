@@ -383,15 +383,18 @@ public sealed class CamusConnection : IAsyncDisposable
     // ─── Transactions ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Begins a transaction over the batch stream. Reserves a stream slot up front and pins every op of
-    /// the returned session to it, so START/statements/COMMIT land in the same server-side ordering
-    /// chain. The START op itself carries no handle yet, hence the slot is chosen here rather than hashed.
+    /// Begins a transaction over the batch stream. Every op of the returned session is pinned to one
+    /// stream slot, so START/statements/COMMIT land in the same server-side ordering chain.
     ///
-    /// <para><paramref name="affinity"/> optionally selects the endpoint from a warmed prepared
-    /// statement's learned route <b>before</b> START. It is read once, here: after the transaction
-    /// begins its endpoint is immutable — advice can inform the next transaction, never relocate
-    /// this one. Cold advice (or a statement from another connection) simply uses rotation, adding
-    /// no discovery round trip.</para>
+    /// <para><b>Where START lands.</b> With <paramref name="affinity"/> set, the endpoint is the
+    /// warmed prepared statement's learned route and START is sent here, before returning. With
+    /// routing negotiated and no affinity, START is <em>deferred</em>: the session picks its endpoint
+    /// at the first statement, from that statement's learned route, because the server anchors the
+    /// transaction's session to the first table it touches and that table's leader is where every
+    /// registration and the commit become local — see <see cref="CamusTransactionSession"/>. With
+    /// routing off, START goes to rotation here, exactly as before routing existed. In every case the
+    /// endpoint is immutable once START was sent: advice can inform the next transaction, never
+    /// relocate this one.</para>
     /// </summary>
     public async Task<CamusTransactionSession> BeginTransactionAsync(
         string database,
@@ -401,11 +404,6 @@ public sealed class CamusConnection : IAsyncDisposable
         CancellationToken cancellationToken = default,
         CamusPreparedStatement? affinity = null)
     {
-        RoutedEndpoint endpoint = affinity is not null && ReferenceEquals(affinity.Owner, this)
-            ? SelectEndpoint(affinity.QueryRouteKey, out _)
-            : NextRotation(Clock());
-
-        int slot = endpoint.Batcher.ReserveSlot();
         SqlRequest request = new()
         {
             Database         = database,
@@ -413,9 +411,40 @@ public sealed class CamusConnection : IAsyncDisposable
             TransactionMode  = mode,
             Locking          = locking,
         };
-        TxnHandle handle = await endpoint.Batcher.EnqueueStartAsync(request, slot, cancellationToken).ConfigureAwait(false);
-        return new CamusTransactionSession(endpoint.Batcher, database, handle, slot);
+
+        if (affinity is not null && ReferenceEquals(affinity.Owner, this))
+            return await StartOnAsync(SelectEndpoint(affinity.QueryRouteKey, out _), database, request, cancellationToken).ConfigureAwait(false);
+
+        if (negotiate)
+            return new CamusTransactionSession(this, database, request);
+
+        return await StartOnAsync(NextRotation(Clock()), database, request, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Sends START on <paramref name="endpoint"/> now and returns the pinned session.</summary>
+    private async Task<CamusTransactionSession> StartOnAsync(
+        RoutedEndpoint endpoint, string database, SqlRequest request, CancellationToken cancellationToken)
+    {
+        int slot = endpoint.Batcher.ReserveSlot();
+        try
+        {
+            TxnHandle handle = await endpoint.Batcher.EnqueueStartAsync(request, slot, cancellationToken).ConfigureAwait(false);
+            return new CamusTransactionSession(endpoint.Batcher, database, handle, slot, this, negotiate);
+        }
+        catch (Exception ex) when (IsTransportFailure(ex))
+        {
+            NoteTransportFailure(endpoint);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The route cache revision for <paramref name="key"/> at this instant, for a statement that did
+    /// not select its endpoint through the cache (one pinned inside a transaction) but still learns
+    /// from its reply. Zero with routing off or when no entry exists, which is what
+    /// <see cref="LearnFromResult"/> expects for "nothing observed".
+    /// </summary>
+    internal long ObserveRouteRevision(in StatementRouteKey key) => routeCache?.RevisionOf(key) ?? 0;
 
     public async ValueTask DisposeAsync()
     {

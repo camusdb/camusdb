@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.10.2" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>CamusDB: a distributed SQL database written in C#</title>
+  <style>
+
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+
+ul.task-list[class]{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+font-size: inherit;
+width: 0.8em;
+margin: 0 0.8em 0.2em -1.6em;
+vertical-align: middle;
+}
+.display.math{display: block; text-align: center; margin: 0.5rem auto;}
+</style>
+  <style type="text/css">:root { --bg:#ffffff; --fg:#1f2328; --muted:#57606a; --accent:#0969da; --code-bg:#f6f8fa; --border:#d0d7de; --quote:#6e7781; }
+@media (prefers-color-scheme: dark) {
+:root { --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --code-bg:#161b22; --border:#30363d; --quote:#8b949e; }
+}
+html { color-scheme: light dark; }
+body { margin:0; background:var(--bg); color:var(--fg); font-family: Georgia, "Times New Roman", serif; font-size:19px; line-height:1.65; }
+main { max-width: 720px; margin: 0 auto; padding: 48px 20px 96px; }
+h1 { font-size: 2.2em; line-height:1.15; margin: 0 0 .6em; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+h2 { font-size: 1.45em; margin: 2em 0 .6em; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+p { margin: 0 0 1.1em; }
+a { color: var(--accent); }
+blockquote { margin: 1.5em 0; padding: 0 0 0 1.2em; border-left: 3px solid var(--border); color: var(--quote); font-style: italic; }
+blockquote p { margin: 0 0 .4em; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; background: var(--code-bg); padding: .15em .35em; border-radius: 4px; }
+pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; overflow-x: auto; line-height: 1.45; margin: 0 0 1.3em; }
+pre code { background: none; padding: 0; font-size: .82em; }
+ul { padding-left: 1.4em; }
+li { margin-bottom: .5em; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 2.5em 0; }
+strong { font-weight: 700; }
+.byline { color: var(--muted); font-size: .9em; margin-bottom: 2.5em; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<main>
+<h1>CamusDB:
+a distributed SQL database written in C#, and why that matters</h1>
+<p class="byline">By Andres Gutierrez · Creator of CamusDB</p>
+<blockquote>
+<p>Perfection is achieved, not when there is nothing more to add, but
+when there is nothing left to take away.</p>
+<p>— Antoine de Saint-Exupéry</p>
+</blockquote>
+<p>For a long time, the rule was unwritten but clear. If you build a
+database, you write it in C, C++, Go, Rust, or Java. Those are &quot;systems
+languages.&quot; Everything else is for the application on top.</p>
+<p>I want to challenge that rule with a working system, not with an
+opinion.</p>
+<p>CamusDB is an open-source distributed SQL database. It is written in
+C# on .NET, from the SQL parser to the Raft log to the bytes on disk. As
+far as I know, it is the first distributed SQL database built on .NET.
+This article explains why I built it, what it can do today, and how you
+can try it in five minutes.</p>
+<h2 id="where-it-comes-from">Where it comes from</h2>
+<p>I spent years in the video game industry, and part of that time with
+Google Spanner. That is where distributed SQL clicked for me.</p>
+<p>In games, the database is not boring infrastructure in the
+background. It holds inventories, economies, leaderboards, matchmaking
+state, and live event rewards. A duplicated item or a lost purchase is
+not a bug report. It is a broken promise to a player who spent time or
+money.</p>
+<p>Spanner showed me that a database can solve those problems at the
+infrastructure level. Strong consistency and horizontal scale do not
+have to be a choice. Application teams do not have to reinvent queues,
+caches, and repair scripts for every feature.</p>
+<p>In 2021 I started to ask a question: what would it take to build
+something like that myself?</p>
+<p>The answer took years, and most of it was not the database. First
+came <a href="https://github.com/kahunakv/kommander">Kommander</a>, a
+Raft consensus library. Then came <a href="https://github.com/kahunakv/kahuna">Kahuna</a>, a distributed
+key/value store with locks and transactions on top of Raft. CamusDB is
+the SQL layer on top of that stack. All three are .NET.</p>
+<h2 id="why-net">Why .NET</h2>
+<p>People ask this question more than any other. The honest answer has
+two parts.</p>
+<p>The first part is personal. I know .NET well. When the tool fits your
+hand, you move faster and your code stays cleaner.</p>
+<p>The second part is technical, and it is the point of this article.
+Modern .NET is not the .NET of fifteen years ago. The runtime, the JIT,
+and the garbage collector improved every year.
+<code>Span&lt;T&gt;</code>, <code>Memory&lt;T&gt;</code>,
+<code>ArrayPool&lt;T&gt;</code>, and <code>stackalloc</code> let you
+write allocation-free hot paths. <code>async</code>/<code>await</code>
+is mature all the way down to the socket. Native AOT exists. The
+networking stack is fast. Kestrel serves HTTP/2 and gRPC without a proxy
+in front.</p>
+<p>A database is a good test for a runtime. It needs low latency,
+predictable memory, heavy concurrency, careful I/O, and long uptime.
+.NET passed that test for me. The whole engine runs in one process: the
+parser, the cost-based planner, the operators, the transaction layer,
+the Kahuna storage node, and Raft replication. RocksDB sits underneath
+for persistence.</p>
+<p>Go and Java earned their place in infrastructure with real systems:
+etcd, CockroachDB, Kafka, Cassandra. I think .NET deserves a seat at
+that table, and the only way to earn it is to ship a real system.
+CamusDB is my attempt.</p>
+<h2 id="what-camusdb-does-today">What CamusDB does today</h2>
+<p>CamusDB makes a few opinionated choices. I want to be clear about
+them, because they shape the whole product.</p>
+<p><strong>Serializable by default.</strong> Most databases default to a
+weaker isolation level and ask you to opt in to correctness. CamusDB
+does the opposite. Every transaction is serializable unless you ask for
+less. Pessimistic two-phase locking with range locks blocks phantom
+reads. Wait-die scheduling avoids deadlocks. Reads run against
+consistent snapshots. Writes that span partitions use two-phase commit
+on top of Raft. If a workload does not need serializability,
+read-committed is available per transaction with
+<code>SET TRANSACTION</code>. But you have to say so.</p>
+<p><strong>Database branching.</strong> Fork a database the way you
+branch code:</p>
+<pre class="sql"><code>CREATE DATABASE staging BRANCH FROM prod;</code></pre>
+<p>The branch is created instantly. It shares the parent&#39;s bytes until
+it diverges, so no row data is copied. Reads on the branch see the
+parent as of the fork instant. Writes stay private to the branch. The
+parent never sees the branch. Use it for a staging clone of production,
+a dry run of a schema migration, a per-pull-request database, or a &quot;what
+if&quot; experiment on live data.</p>
+<p><strong>Recoverable drops.</strong> <code>DROP TABLE</code> and
+<code>DROP DATABASE</code> do not destroy data. The object is unlinked,
+and a background reclaimer removes it only after a retention window.
+Until then you can bring it back:</p>
+<pre class="sql"><code>SHOW ORPHAN TABLES;
+CREATE TABLE users RELINK TO &#39;&lt;id&gt;&#39;;</code></pre>
+<p><strong>Time travel.</strong> The storage layer keeps prior versions
+of every key, so you can read a table as it was:</p>
+<pre class="sql"><code>SELECT * FROM leaderboard AS OF SYSTEM TIME &#39;-10s&#39;;</code></pre>
+<p>The whole statement reads one consistent historical snapshot,
+lock-free, without blocking writers. It is a debugging tool and a
+recovery tool at the same time.</p>
+<p><strong>A result cache inside the database.</strong> Any read can opt
+into an in-memory, per-node cache with an inline hint:</p>
+<pre class="sql"><code>SELECT id, total FROM orders {cache=recent_orders, ttl=30s} WHERE status = 1;</code></pre>
+<p>A committed write on the same node evicts every dependent entry
+before the write becomes visible. There is no external cache tier to
+keep in sync.</p>
+<p>Beyond those, you get the things you expect from a SQL database: a
+cost-based query optimizer, secondary and covering indexes, joins, views
+and materialized views, check constraints, prepared statements,
+<code>EXPLAIN</code>, row-level TTL, exact vector search over
+embeddings, and a gRPC API with a .NET client.</p>
+<h2 id="testing-is-the-product">Testing is the product</h2>
+<p>A database with clever features and a weak correctness story is a
+liability. So a large part of the work on CamusDB is not features. It is
+Jepsen-style testing, chaos engineering, fault injection, and
+degraded-state testing. Nodes get killed mid-commit. Leaders get
+replaced mid-schema-change. Disks fill up. The suite runs thousands of
+tests, many of them against a real embedded cluster.</p>
+<p>I say this to set expectations. CamusDB runs in production for real
+workloads, and I am proud of that. But it is also young. Some features
+are alpha. APIs and storage formats can change between versions. If you
+try it, you will find rough edges, and I want to hear about them.</p>
+<h2 id="try-it-in-five-minutes">Try it in five minutes</h2>
+<p>CamusDB ships as a .NET global tool. With the .NET 10 SDK or runtime
+installed:</p>
+<pre class="bash"><code>dotnet tool install -g CamusDB.Server
+camusdb</code></pre>
+<p>That is the whole setup. There is no clone, no build, and no
+configuration file. The node starts with built-in defaults, stores its
+data under your local application data directory, and serves the
+JSON/REST API on port 5095 and gRPC on port 5096. Open
+<code>http://localhost:5095</code> in a browser and you get a read-only
+dashboard.</p>
+<p>Then install the SQL shell and talk to it:</p>
+<pre class="bash"><code>dotnet tool install -g CamusDB.SqlSh
+camus-cli -c &quot;Endpoint=http://localhost:5095&quot;</code></pre>
+<pre class="sql"><code>CREATE DATABASE shop;
+CREATE TABLE items (id OID PRIMARY KEY, name STRING, price INT64);
+INSERT INTO items (id, name, price) VALUES (gen_id(), &#39;sword&#39;, 100);
+SELECT * FROM items;</code></pre>
+<p>If you prefer Docker:</p>
+<pre class="bash"><code>docker run --rm -p 5095:5095 -p 5096:5096 -v camus-data:/data camusdb/camusdb:latest</code></pre>
+<p>And if you want to see the distributed part, a three-node cluster is
+one command from a source checkout:</p>
+<pre class="bash"><code>docker compose -f docker/local.yml up --build</code></pre>
+<h2 id="talk-to-it-from-c">Talk to it from C#</h2>
+<p>The .NET client is a multiplexing gRPC client. One connection is
+shared across your whole application, and many concurrent transactions
+pipeline over a small pool of streams.</p>
+<pre class="csharp"><code>using CamusDB.Grpc.Client;
+
+await using CamusConnection conn = CamusConnection.Connect(&quot;http://localhost:5096&quot;);
+
+await conn.ExecuteNonQueryAsync(
+    &quot;shop&quot;, &quot;INSERT INTO items (id, name, price) VALUES (gen_id(), &#39;shield&#39;, 80)&quot;);
+
+QueryResult result = await conn.ExecuteQueryAsync(&quot;shop&quot;, &quot;SELECT name, price FROM items&quot;);
+foreach (ResultRow row in result.Rows)
+    Console.WriteLine($&quot;{row.Values[0].StringValue}: {row.Values[1].Int64Value}&quot;);</code></pre>
+<p>A transaction is a session object:</p>
+<pre class="csharp"><code>CamusTransactionSession tx = await conn.BeginTransactionAsync(&quot;shop&quot;);
+try
+{
+    await tx.ExecuteNonQueryAsync(&quot;UPDATE items SET price = price - 10 WHERE name = &#39;sword&#39;&quot;);
+    await tx.ExecuteNonQueryAsync(&quot;UPDATE items SET price = price + 10 WHERE name = &#39;shield&#39;&quot;);
+    await tx.CommitAsync();
+}
+catch (CamusGrpcException)
+{
+    await tx.RollbackAsync();
+    throw;
+}</code></pre>
+<p>That transaction is serializable. You did not ask for it. That is the
+point.</p>
+<h2 id="why-you-should-care-even-if-you-never-run-it">Why you should
+care, even if you never run it</h2>
+<p>If you write .NET for a living, CamusDB is proof that the platform
+you already know reaches all the way down. You do not have to switch
+languages to build the storage engine, the consensus layer, or the query
+planner. You can read the source of your database in the same language
+as your application, step through it in the same debugger, and extend it
+with the same NuGet packages.</p>
+<p>If you do not write .NET, CamusDB is one more data point that
+&quot;systems language&quot; is a moving target. The runtimes caught up. The
+interesting question is no longer which language, but which design.</p>
+<h2 id="come-build-it-with-me">Come build it with me</h2>
+<p>CamusDB is open source and I build it in the open. There is a lot
+left to do. Databases are never done.</p>
+<ul>
+<li>Try it. Run the commands above and break something. Open an issue
+with what you found.</li>
+<li>Read the docs at <a href="https://camusdb.github.io/docs/intro">camusdb.github.io/docs</a>.
+The architecture guide explains the request lifecycle from SQL text to
+Raft log.</li>
+<li>Read the code at <a href="https://github.com/camusdb/camusdb">github.com/camusdb/camusdb</a>.
+Start with the query planner or the transaction layer. Both are plain
+C#.</li>
+<li>Tell me what you would build with database branching or time travel.
+The best features so far came from real pain, not from a roadmap.</li>
+</ul>
+<p>I wanted to build the database I wish I had for the systems I worked
+on. I also wanted to show that .NET can carry that weight. Both goals
+are still in progress, and that is the fun part.</p>
+<p>Welcome to CamusDB.</p>
+</main>
+</body>
+</html>

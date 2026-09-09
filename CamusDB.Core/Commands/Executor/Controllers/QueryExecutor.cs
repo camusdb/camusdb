@@ -861,7 +861,7 @@ internal sealed class QueryExecutor
             exclusive: plan.Ticket.ExclusivePredicateLocks,
             cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false);
 
-        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
+        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None, table.Store.PlacementGroup).ConfigureAwait(false);
 
         Interlocked.Increment(ref DistributedMetrics.PartialAggregateGathers);
 

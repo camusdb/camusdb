@@ -97,7 +97,7 @@ internal sealed class KvBatchWriter
         // Ensure the Kahuna session is open before building request items that embed
         // tx.TransactionId — the items are built into batch lists before AcquireManyWithRetry
         // runs, so a deferred-start session must start here rather than inside that call.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         bool isBranch = branch.IsBranch;
 
@@ -273,7 +273,7 @@ internal sealed class KvBatchWriter
         if (rows.Count == 0)
             return;
 
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         bool isBranch = branch.IsBranch;
 
@@ -465,7 +465,7 @@ internal sealed class KvBatchWriter
         if (rows.Count == 0)
             return;
 
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         List<string> deleteKeys = [];
 
@@ -522,7 +522,7 @@ internal sealed class KvBatchWriter
     /// </summary>
     internal async Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)
     {
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexName);
         string keyPrefix    = bucketPrefix + "/";
@@ -594,7 +594,7 @@ internal sealed class KvBatchWriter
             return;
 
         // Start the deferred session before building delete items that embed tx.TransactionId.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys =
             deleteKeys.Select(k => (k, 0, KeyValueDurability.Persistent)).ToList();
@@ -635,7 +635,7 @@ internal sealed class KvBatchWriter
     {
         // Start the deferred session before the optimistic check so that the write calls that
         // follow (SetManyWithRetry / DeleteManyWithRetry) have a valid TransactionId.
-        await tx.EnsureSessionStartedAsync(ct).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(ct, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
             return;

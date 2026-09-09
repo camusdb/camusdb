@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Config;
 using CamusDB.Core.Storage;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.Diagnostics;
 
 namespace CamusDB.Core.Transactions;
@@ -391,17 +392,28 @@ public sealed class KvTransactionsManager : IDisposable
             };
 
             DecisionDurability capturedDecision = decisionDurabilityMode;
-            txDeferred.SessionStarter = async ct =>
+            txDeferred.SessionStarter = async (placementGroup, ct) =>
             {
+                // Anchor the session to the partition of the first table this transaction touches.
+                // Kahuna hashes the coordinator key with the data placement rule, so a key inside the
+                // table's placement group puts the session on the table's data leader: registrations
+                // and the commit are then local when the transaction executes there, instead of
+                // forwarded to whichever partition a bare GUID happens to hash to. Under key-range
+                // sharding the data leader is not a function of the hash group, so the anchor would
+                // name an unrelated partition; the bare GUID is kept there.
+                string coordinatorKey = placementGroup is not null && !options.KeyRangeShardingEnabled
+                    ? KvKeyBuilder.SessionAnchorKeyOf(placementGroup, uniqueId)
+                    : uniqueId;
+
                 // Priority is read from the transaction (not captured above) for the same reason
                 // Locking is: a SET TRANSACTION PRIORITY between BeginAsync and the first operation
                 // must be the value the admission gate sees, and the gate runs inside this call.
                 TransactionHandle h = await StartKahunaTransactionAsync(
-                    uniqueId, "start Kahuna transaction",
+                    coordinatorKey, "start Kahuna transaction",
                     txDeferred.Locking, txDeferred.ReadValidation, capturedDecision,
                     txDeferred.Priority, ct
                 ).ConfigureAwait(false);
-                txDeferred.SetSessionId(h.TransactionId);
+                txDeferred.SetSession(h.TransactionId, coordinatorKey);
             };
 
             Track(txDeferred);
@@ -517,7 +529,7 @@ public sealed class KvTransactionsManager : IDisposable
     /// is surfaced immediately.</para>
     /// </summary>
     private async Task<TransactionHandle> StartKahunaTransactionAsync(
-        string uniqueId, 
+        string coordinatorKey, 
         string operation, 
         KeyValueTransactionLocking locking,
         ReadValidation readValidation, 
@@ -534,10 +546,12 @@ public sealed class KvTransactionsManager : IDisposable
             (type, handle) = await kahuna.LocateAndStartTransaction(
                 new KeyValueTransactionOptions
                 {
-                    // The coordinator pins the server-side session to one partition leader by this key,
-                    // and every registered operation is routed by it. Reused as the transaction's
-                    // stable routing identity for commit/rollback.
-                    CoordinatorKey    = uniqueId,
+                    // The coordinator pins the server-side session to one partition leader by hashing
+                    // this key with the data placement rule, and every registered operation is routed
+                    // by it. Reused as the transaction's stable routing identity for commit/rollback.
+                    // A deferred-start transaction passes an anchored key inside the first touched
+                    // table's placement group; eager starts pass the bare GUID.
+                    CoordinatorKey    = coordinatorKey,
                     Locking           = locking,
                     ReadValidation    = readValidation,
                     DecisionDurability = decisionDurability,

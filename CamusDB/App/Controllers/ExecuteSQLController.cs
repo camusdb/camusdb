@@ -229,7 +229,9 @@ public sealed class ExecuteSQLController : CommandsController
                 return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ToColumnDtos(schemaHolder.Schema), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
             }
 
-            // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
+            // Explicit (caller-supplied) transaction — client handles retry and lifecycle. Advice is
+            // still emitted when negotiated: it names the statement's table leader so the client can
+            // place its next transaction there; it never relocates this one.
             if (request.TxnIdPT > 0)
             {
                 KvTransaction? txnState = null;
@@ -237,20 +239,24 @@ public sealed class ExecuteSQLController : CommandsController
                 {
                     txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
                     QuerySchemaHolder schemaHolder = new();
+                    StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
                         database: resolved.Database,
                         sql: sql,
                         parameters: resolved.Parameters,
                         principal: principal,
-                        cancellationToken: requestAborted
+                        cancellationToken: requestAborted,
+                        routing: txnCollector
                     );
                     List<QueryResultRow> rows = [];
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row);
                     PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
-                    return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ToColumnDtos(schemaHolder.Schema), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+                    ExecuteSQLQueryResponse txnResponse = new("ok", rowSet.Count, ToColumnDtos(schemaHolder.Schema), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
+                    txnResponse.Routing = ResolveRoutingDto(database, txnCollector);
+                    return new JsonResult(txnResponse);
                 }
                 catch (Exception)
                 {
@@ -639,22 +645,30 @@ public sealed class ExecuteSQLController : CommandsController
                 return new JsonResult(new ExecuteNonSQLQueryResponse("ok", 0) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
             }
 
-            // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
+            // Explicit (caller-supplied) transaction — client handles retry and lifecycle. Advice is
+            // still emitted when negotiated (see the query path for why).
             if (request.TxnIdPT > 0)
             {
                 KvTransaction? txnState = null;
                 try
                 {
                     txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
                         database: resolved.Database,
                         sql: resolved.Sql,
                         parameters: resolved.Parameters,
-                        principal: principal
+                        principal: principal,
+                        routing: txnCollector
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows) { Warning = result.Warning, ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows)
+                    {
+                        Warning = result.Warning,
+                        ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds,
+                        Routing = ResolveRoutingDto(result.Database, txnCollector),
+                    });
                 }
                 catch (Exception)
                 {

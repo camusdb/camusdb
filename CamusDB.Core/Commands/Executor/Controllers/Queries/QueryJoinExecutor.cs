@@ -1211,7 +1211,7 @@ internal sealed class QueryJoinExecutor
         IReadOnlyList<PlacementSpan> spans = broadcast.Placement.Spans;
 
         // The session must exist before workers read tx.TransactionId concurrently.
-        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
+        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None, table.Store.PlacementGroup).ConfigureAwait(false);
 
         // Linked to the request: every probe worker reads and writes through this token, so the
         // link stops the local scans and the remote fragments together on a client disconnect.

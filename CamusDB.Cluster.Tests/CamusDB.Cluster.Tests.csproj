@@ -27,6 +27,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
+    <ProjectReference Include="..\CamusDB\CamusDB.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The gRPC transport test doubles (call context, stream readers and writers) are shared with
+         the main test project rather than duplicated, so the two suites drive the service the same way. -->
+    <Compile Include="..\CamusDB.Tests\Grpc\GrpcTestInfrastructure.cs" Link="Grpc\GrpcTestInfrastructure.cs" />
   </ItemGroup>
 
 </Project>

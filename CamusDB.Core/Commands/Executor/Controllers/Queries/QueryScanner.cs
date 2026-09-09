@@ -510,7 +510,7 @@ internal sealed class QueryScanner
 
         // The session must exist before workers read tx.TransactionId concurrently; a no-op
         // for eager, read-only, and already-started transactions.
-        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None).ConfigureAwait(false);
+        await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None, table.Store.PlacementGroup).ConfigureAwait(false);
 
         // Linked to the request: every worker already reads and writes through this token, so one
         // link stops the local scans, the remote fragments and the channel writes together.

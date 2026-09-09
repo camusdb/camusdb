@@ -71,7 +71,7 @@ internal sealed class KvRowAccessor
     {
         // Serializable+RW acquires a shared point lock: the session must be open first.
         // For all other transaction types this is a no-op (zero-snapshot reads proceed without a session).
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         string key = keys.BuildRowKey(rowId);
 
@@ -233,7 +233,7 @@ internal sealed class KvRowAccessor
 
         // Serializable+RW acquires the shared point locks first (session must be open before locking);
         // other transaction types skip locking, exactly as GetRow does.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (KvRangeLockManager.IsSerializableReadWrite(tx))
         {
@@ -321,7 +321,7 @@ internal sealed class KvRowAccessor
         // under the transaction's own identity, and a tracked scan can only fold reads once the
         // session exists (FoldReads is false while TransactionId is Zero). No-op for eager,
         // read-only, and already-started transactions.
-        await tx.EnsureSessionStartedAsync(cancellationToken).ConfigureAwait(false);
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (!branch.IsBranch)
         {
