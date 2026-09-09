@@ -45,6 +45,75 @@ public sealed class TestHttpRollbackIdempotency : SharedNodeBaseTest
             CamusTransactionMode.ReadWrite,
             cancellationToken: CancellationToken.None);
 
+    /// <summary>
+    /// The state a commit-time conflict leaves behind: the manager has marked the transaction
+    /// RolledBack and untracked it (then raised CADB0502 to the client), but the coordinator's
+    /// tracking entry is still registered. The client's follow-up ROLLBACK must retire that entry and
+    /// report the no-op, not fail with TransactionAlreadyCompleted and leave it for the idle reaper.
+    /// Produced here by finalizing at the manager level directly, which reaches the same terminal
+    /// status without needing a real conflict.
+    /// </summary>
+    [Test]
+    public async Task RollbackAfterTerminalFinalizeThatLeftTheEntry_RetiresEntryAndIsNoOp()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord) = await SetupAsync();
+        KvTransaction tx = await StartSerializableRwAsync(coord, dbname);
+        int before = coord.ActiveCount;
+
+        await db.Transactions.RollbackAsync(tx);
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
+        Assert.That(coord.ActiveCount, Is.EqualTo(before), "the coordinator entry is still registered (the leak's precondition)");
+
+        bool rolledBack = await coord.RollbackByIdAsync(tx.ClientId.L, tx.ClientId.C, CancellationToken.None);
+
+        Assert.That(rolledBack, Is.False, "nothing left to roll back");
+        Assert.That(coord.ActiveCount, Is.EqualTo(before - 1), "the entry is retired by the client's rollback");
+        Assert.That(await coord.ReapIdleAsync(TimeSpan.Zero, CancellationToken.None), Is.EqualTo(0),
+            "nothing is left for the reaper");
+    }
+
+    /// <summary>
+    /// A COMMIT that fails after the manager has already made the transaction terminal must not
+    /// keep the entry either: the error still propagates, but the registry no longer counts a dead
+    /// transaction as active.
+    /// </summary>
+    [Test]
+    public async Task CommitThatFailsOnTerminalTransaction_RetiresEntry()
+    {
+        (string dbname, DatabaseDescriptor db, HttpTransactionCoordinator coord) = await SetupAsync();
+        KvTransaction tx = await StartSerializableRwAsync(coord, dbname);
+        int before = coord.ActiveCount;
+
+        await db.Transactions.RollbackAsync(tx);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => coord.CommitAsync(db, tx, CancellationToken.None));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionAlreadyCompleted));
+        Assert.That(coord.ActiveCount, Is.EqualTo(before - 1), "a terminal transaction is not kept as active");
+        Assert.That(await coord.ReapIdleAsync(TimeSpan.Zero, CancellationToken.None), Is.EqualTo(0));
+    }
+
+    /// <summary>A finalize that fails while the transaction is still live keeps the entry, so the
+    /// client can retry: retiring it there would turn a transient fault into "Unknown transaction".</summary>
+    [Test]
+    public async Task RollbackRejectedWhileFinalizeInFlight_KeepsEntry()
+    {
+        (string dbname, _, HttpTransactionCoordinator coord) = await SetupAsync();
+        KvTransaction tx = await StartSerializableRwAsync(coord, dbname);
+        int before = coord.ActiveCount;
+
+        // Claim the finalize gate the way a concurrent commit would, then observe the rejection.
+        Assert.That(coord.TryClaimFinalizeForTest(tx), Is.True);
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => coord.RollbackByIdAsync(tx.ClientId.L, tx.ClientId.C, CancellationToken.None));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionAlreadyCompleted));
+        Assert.That(coord.ActiveCount, Is.EqualTo(before), "a live transaction stays tracked");
+        coord.ReleaseFinalizeForTest(tx);
+
+        Assert.That(await coord.RollbackByIdAsync(tx.ClientId.L, tx.ClientId.C, CancellationToken.None), Is.True);
+        Assert.That(coord.ActiveCount, Is.EqualTo(before - 1));
+    }
+
     [Test]
     public async Task RollbackOfNeverStartedTransaction_IsNoOpSuccess()
     {

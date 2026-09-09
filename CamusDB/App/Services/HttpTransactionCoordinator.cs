@@ -289,7 +289,7 @@ public sealed class HttpTransactionCoordinator
         }
         catch
         {
-            entry.EndFinalize();
+            ReleaseAfterFailedFinalize(entry, tx);
             throw;
         }
     }
@@ -354,7 +354,7 @@ public sealed class HttpTransactionCoordinator
         }
         catch
         {
-            entry.EndFinalize();
+            ReleaseAfterFailedFinalize(entry, tx);
             throw;
         }
     }
@@ -381,7 +381,7 @@ public sealed class HttpTransactionCoordinator
         }
         catch
         {
-            entry.EndFinalize();
+            ReleaseAfterFailedFinalize(entry, tx);
             throw;
         }
     }
@@ -414,6 +414,18 @@ public sealed class HttpTransactionCoordinator
         if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
             return false;
 
+        // A tracked entry whose transaction is already terminal has nothing left to roll back: the
+        // manager reached the end state on a finalize that then threw (a commit the coordinator
+        // aborted is marked RolledBack before CADB0502 is raised). Retire the entry and report the
+        // no-op, exactly as for an entry the reaper or a failed statement already removed — otherwise
+        // the manager rejects the rollback with TransactionAlreadyCompleted and the entry idles until
+        // the reaper, which is where every commit-time conflict of the bank workload was ending up.
+        if (IsTerminal(entry.Transaction))
+        {
+            Unregister(entry.Transaction);
+            return false;
+        }
+
         if (!entry.TryBeginFinalize())
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionAlreadyCompleted,
@@ -427,7 +439,7 @@ public sealed class HttpTransactionCoordinator
         }
         catch
         {
-            entry.EndFinalize();
+            ReleaseAfterFailedFinalize(entry, entry.Transaction);
             throw;
         }
     }
@@ -452,7 +464,7 @@ public sealed class HttpTransactionCoordinator
         }
         catch
         {
-            entry.EndFinalize();
+            ReleaseAfterFailedFinalize(entry, tx);
             throw;
         }
     }
@@ -480,6 +492,41 @@ public sealed class HttpTransactionCoordinator
 
     private void Unregister(KvTransaction tx) =>
         active.TryRemove(Key(tx), out _);
+
+    /// <summary>Test seam: claims the finalize gate of a tracked transaction as a concurrent commit would,
+    /// so a test can observe the in-flight rejection path without racing two real finalizes.</summary>
+    internal bool TryClaimFinalizeForTest(KvTransaction tx) =>
+        active.TryGetValue(Key(tx), out ActiveTransaction? entry) && entry.TryBeginFinalize();
+
+    /// <summary>Test seam: releases a gate claimed by <see cref="TryClaimFinalizeForTest"/>.</summary>
+    internal void ReleaseFinalizeForTest(KvTransaction tx)
+    {
+        if (active.TryGetValue(Key(tx), out ActiveTransaction? entry))
+            entry.EndFinalize();
+    }
+
+    private static bool IsTerminal(KvTransaction tx) =>
+        tx.Status is KvTransactionStatus.Committed or KvTransactionStatus.RolledBack;
+
+    /// <summary>
+    /// Restores or retires an entry after its finalize attempt threw. A finalize that failed while the
+    /// transaction is still live — a transport fault, or a MustRetry budget exhausted with the outcome
+    /// unknown — keeps the entry and releases the claim so the client's next COMMIT or ROLLBACK can
+    /// retry it. A finalize whose manager call drove the transaction to a terminal status and then
+    /// threw leaves nothing to finalize: <see cref="KvTransactionsManager.CommitAsync"/> marks a
+    /// coordinator Abort as RolledBack and untracks it before raising CADB0502. Keeping such an entry
+    /// made the client's follow-up ROLLBACK fail with TransactionAlreadyCompleted and parked the entry
+    /// for the idle reaper — under the bank workload roughly half of all commit-time conflicts were
+    /// showing up 300 s later as "Reaped N abandoned transaction(s)", and <c>camus_transaction_active</c>
+    /// read them as live the whole time. The entry is unregistered instead.
+    /// </summary>
+    private void ReleaseAfterFailedFinalize(ActiveTransaction entry, KvTransaction tx)
+    {
+        if (IsTerminal(tx))
+            Unregister(tx);
+        else
+            entry.EndFinalize();
+    }
 
     private static (long L, uint C) Key(KvTransaction tx) => (tx.ClientId.L, tx.ClientId.C);
 }
