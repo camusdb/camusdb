@@ -30,7 +30,7 @@ Fork a database the way you branch code:
 CREATE DATABASE staging BRANCH FROM prod;
 ```
 
-The branch is created instantly and shares the parent's bytes until it diverges — no row data is copied, only a small amount of schema metadata. Reads on the branch see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold, so a long-lived branch keeps reading its parent as-of the fork instant even under heavy parent churn. Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. See [Database Branching](#database-branching) below.
+The branch is created instantly and shares the parent's bytes until it diverges, no row data is copied, only a small amount of schema metadata. Reads on the branch see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold, so a long-lived branch keeps reading its parent as-of the fork instant even under heavy parent churn. Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. See [Database Branching](#database-branching) below.
 
 ### Recover dropped objects
 
@@ -89,22 +89,6 @@ Features
 - **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
 - **Multi-platform** — runs on any platform supported by .NET 10.
 
-Column Types
-------------
-| Type | SQL keyword(s) | Notes |
-|------|----------------|-------|
-| String | `string`, `string(N)`, `varchar`, `char`, `text` | UTF-8 text; `string(N)` bounds the length |
-| Integer64 | `int64`, `int` | 64-bit signed integer |
-| Float64 | `float64` | 64-bit IEEE-754 |
-| Float32 | `float32`, `real` | 32-bit IEEE-754 |
-| Bool | `bool`, `boolean` | |
-| Id | `object_id`, `oid` | 24-hex ObjectId, the default primary-key type |
-| Uuid | `uuid`, `guid` | native 128-bit UUID; `gen_uuid_v4()` / `gen_uuid_v7()` |
-| Bytes | `bytes`, `blob` | binary; `0x…`-hex in SQL, base64 in JSON |
-| Date | `date` | calendar date |
-| DateTime | `datetime`, `timestamp` | date + time |
-| Array | `array(<elem>)` | homogeneous array of a scalar element type (not nested) |
-
 SQL examples
 ------------
 ```sql
@@ -148,8 +132,6 @@ EXPLAIN SELECT * FROM app_users WHERE email = 'a@example.com';
 EXPLAIN (ANALYZE) SELECT role, COUNT(*) FROM app_users GROUP BY role;
 ```
 
-`SELECT DISTINCT` is row-level distinct. Aggregate-level distinct such as `COUNT(DISTINCT code)` is not supported yet.
-
 Installing
 ----------
 CamusDB ships as a .NET global tool. With the [.NET 10 runtime or SDK](https://dotnet.microsoft.com/download)
@@ -162,27 +144,13 @@ camusdb
 
 That is the whole setup — no clone, no build, no configuration file. The node starts on built-in
 defaults and stores its data under `~/.local/share/camusdb` (`%LOCALAPPDATA%\camusdb` on Windows),
-serving the JSON/REST API on port 5095 and gRPC on 5096. Upgrade with
-`dotnet tool update -g CamusDB.Server`.
+serving the JSON/REST API on port 5095 and gRPC on 5096. 
 
 To keep settings of your own, write a starter configuration and edit it:
 
 ```bash
 camusdb init          # writes ~/.camusdb/config.yml
 ```
-
-CamusDB reads the first configuration it finds, in this order:
-
-1. `--config <path>`
-2. the `CAMUS_CONFIG_PATH` environment variable
-3. `./camusdb.yml` or `./Config/config.yml` in the current directory
-4. `~/.camusdb/config.yml` (`%APPDATA%\camusdb\config.yml` on Windows)
-5. built-in defaults, when there is no file anywhere
-
-A path given explicitly (1 or 2) must exist — CamusDB will not quietly start on a different
-configuration than the one you named. The resolved source and data directory are printed at startup.
-Setting `CAMUS_HOME` relocates both the configuration and the data directory. Every available setting
-is documented at [camusdb.github.io/docs/configuration](https://camusdb.github.io/docs/configuration/).
 
 Running with Docker
 -------------------
