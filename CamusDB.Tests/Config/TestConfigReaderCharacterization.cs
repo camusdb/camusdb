@@ -211,6 +211,27 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void ReadsKeyValueWriteMaxInFlightBatchesOverride_AndRejectsOutOfRange()
+    {
+        ConfigDefinition config = new ConfigReader().Read("kahuna:\n  key_value_write_max_in_flight_batches_per_partition: 2");
+        Assert.That(config.Kahuna.KeyValueWriteMaxInFlightBatchesPerPartition, Is.EqualTo(2));
+
+        Assert.That(new ConfigReader().Read("kahuna:\n  key_value_write_max_in_flight_batches_per_partition: 1").Kahuna.KeyValueWriteMaxInFlightBatchesPerPartition, Is.EqualTo(1));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_max_in_flight_batches_per_partition: 0"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_max_in_flight_batches_per_partition: 65"));
+    }
+
+    [Test]
+    public void ReadsKeyValueWriteLingerAndBatchItems_AndRejectsOutOfRange()
+    {
+        ConfigDefinition config = new ConfigReader().Read("kahuna:\n  key_value_write_linger_ms: 4\n  key_value_write_max_batch_items: 1024");
+        Assert.That(config.Kahuna.KeyValueWriteLingerMs, Is.EqualTo(4));
+        Assert.That(config.Kahuna.KeyValueWriteMaxBatchItems, Is.EqualTo(1024));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_linger_ms: -1"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_max_batch_items: 0"));
+    }
+
+    [Test]
     public void ReadsAbandonedTransactionReaperOverrides()
     {
         // The reaper keys were shipped in the sample config.yml but were missing from the

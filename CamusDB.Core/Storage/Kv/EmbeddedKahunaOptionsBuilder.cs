@@ -365,6 +365,15 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.RocksdbDirectReads is bool directReads)
             baseline.RocksDbDirectReads = directReads;
 
+        if (kahuna.KeyValueWriteMaxInFlightBatchesPerPartition is int inFlight)
+            baseline.KeyValueWriteMaxInFlightBatchesPerPartition = inFlight;
+
+        if (kahuna.KeyValueWriteLingerMs is int writeLinger)
+            baseline.KeyValueWriteLingerMs = writeLinger;
+
+        if (kahuna.KeyValueWriteMaxBatchItems is int maxBatchItems)
+            baseline.KeyValueWriteMaxBatchItems = maxBatchItems;
+
         if (kahuna.BackupDir is not null)
             baseline.BackupDir = kahuna.BackupDir;
 

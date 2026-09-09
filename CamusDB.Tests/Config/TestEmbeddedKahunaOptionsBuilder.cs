@@ -376,6 +376,32 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void WriteMaxInFlightBatches_Override_FlowsThrough_AndDefaultsToOne()
+    {
+        KahunaOptionsConfig two = new() { KeyValueWriteMaxInFlightBatchesPerPartition = 2 };
+        KahunaOptionsConfig unset = new();
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/if-2", two, CamusDBOptions.Default).KeyValueWriteMaxInFlightBatchesPerPartition, Is.EqualTo(2));
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/if-unset", unset, CamusDBOptions.Default).KeyValueWriteMaxInFlightBatchesPerPartition, Is.EqualTo(1),
+            "Kahuna's default stays in force until the pipeline depth is qualified");
+    }
+
+    [Test]
+    public void WriteLingerAndBatchItems_Override_FlowThrough()
+    {
+        KahunaOptionsConfig set = new() { KeyValueWriteLingerMs = 4, KeyValueWriteMaxBatchItems = 1024 };
+        KahunaOptionsConfig unset = new();
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-set", set, CamusDBOptions.Default);
+        Assert.That(built.KeyValueWriteLingerMs, Is.EqualTo(4));
+        Assert.That(built.KeyValueWriteMaxBatchItems, Is.EqualTo(1024));
+
+        EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-unset", unset, CamusDBOptions.Default);
+        Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
+        Assert.That(defaults.KeyValueWriteMaxBatchItems, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteMaxBatchItems));
+    }
+
+    [Test]
     public void SharedMemoryOff_Override_DisablesFlag()
     {
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemory = false };

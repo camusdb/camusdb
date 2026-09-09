@@ -215,6 +215,21 @@ total against a computed 512 MiB memtable — and fails startup with `InvalidCon
 together. Likewise `max_bytes_per_actor` is **per actor**: multiply by `key_value_workers` (default:
 one per CPU) to get the total.
 
+`kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
+write-aggregator batches a partition may have waiting on Raft at once. At 1 the next batch is dispatched
+only when the previous completes, so a partition's batch rate is bounded by 1 / (Raft round latency) and
+throughput scales only with items per batch. Higher values pipeline batches in FIFO order; leave it at 1
+until an interleaved A/B on the soak harness shows the gain for your shape. Measured 2026-09-09 on the
+`bank` candidate arm with the device held constant: 2 and 4 in flight lowered throughput 15-20% — the
+Raft round stretched with the in-flight count while batches got smaller.
+
+`kahuna.key_value_write_linger_ms` (default **1**) and `kahuna.key_value_write_max_batch_items` (default
+**512**) shape the write aggregator's batches: the linger is how long the oldest queued item may wait before
+a batch is dispatched while nothing is in flight, the cap bounds a batch's items. The measured round costs
+~1.4 ms fixed plus ~18 µs per item, so denser batches are the lever at one partition; a linger above the
+~2.6 ms an item already waits trades write latency for density. This is the aggregator's linger, not
+`wal_group_commit_linger_ms` (Kommander's cross-partition WAL group commit, inert at one partition).
+
 `kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
 RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read
 cache and every miss is a physical device read. On a node whose disk is already carrying the Raft

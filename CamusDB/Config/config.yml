@@ -461,6 +461,16 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # (charged to the container but reclaimable). Set true for a footprint bounded by the block cache alone.
 #   rocksdb_direct_reads: false
 #
+#   # Write-aggregator batches a partition may have waiting on Raft at once (Kahuna 1.7.1). 1 = one batch
+#   # in flight, the next dispatched on completion, so batches/s <= 1 / Raft round. Raise only after an A/B.
+#   key_value_write_max_in_flight_batches_per_partition: 1
+#
+#   # Write-aggregator batch shaping: how long the oldest queued item may wait (ms) before a batch is
+#   # dispatched with nothing in flight, and the cap on items per batch. Denser batches raise throughput at
+#   # one partition (the round costs ~1.4 ms fixed + ~18 us/item); the linger adds that much write latency.
+#   key_value_write_linger_ms: 1
+#   key_value_write_max_batch_items: 512
+#
 #   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized
 #   # from the machine's available memory at startup (container limits respected), not left at a fixed
 #   # value: block cache = 10% of RAM clamped to [320 MiB, 2 GiB]; memtable sub-budget = a quarter of

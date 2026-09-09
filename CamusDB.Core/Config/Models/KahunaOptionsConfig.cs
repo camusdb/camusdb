@@ -60,6 +60,9 @@ public sealed class KahunaOptionsConfig
         "rocksdb_shared_memory_budget_mb",
         "rocksdb_shared_memtable_budget_mb",
         "rocksdb_direct_reads",
+        "key_value_write_max_in_flight_batches_per_partition",
+        "key_value_write_linger_ms",
+        "key_value_write_max_batch_items",
         "backup_dir",
         "pitr_window_seconds",
         "base_snapshot_interval_seconds",
@@ -343,6 +346,34 @@ public sealed class KahunaOptionsConfig
     /// block-cache-only footprint. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbDirectReads"/>.
     /// </summary>
     public bool? RocksdbDirectReads { get; set; }
+
+    /// <summary>
+    /// How many write-aggregator batches a partition may have waiting on Raft at once (Kahuna 1.7.1,
+    /// default 1: one batch in flight, the next dispatched when it completes). Measured on the
+    /// <c>bank</c> candidate arm with the device held constant, the one-batch pipeline runs ~90% occupied
+    /// on a 2.4 ms round and caps the partition near 400 batches/s; throughput then scales only with
+    /// items per batch. Values above 1 let the next batch start while the previous waits, in FIFO order;
+    /// Kommander already resolves pipelined proposals whose acks arrive out of log order. Kept at 1 by
+    /// default until the A/B on the soak harness qualifies a higher value. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteMaxInFlightBatchesPerPartition"/>.
+    /// </summary>
+    public int? KeyValueWriteMaxInFlightBatchesPerPartition { get; set; }
+
+    /// <summary>
+    /// How long the write aggregator lets a partition's oldest queued item wait, in milliseconds, before
+    /// dispatching a batch while no batch is in flight (Kahuna default 1). With one batch in flight an
+    /// item already waits about one Raft round (~2.6 ms measured on tmpfs), so 1 ms never fires; raising
+    /// it trades write latency for denser batches. The measured round cost is ~1.4 ms fixed plus ~18 µs
+    /// per item, so density is the lever at one partition — not depth (see
+    /// <see cref="KeyValueWriteMaxInFlightBatchesPerPartition"/>). Not the same knob as
+    /// <see cref="WalGroupCommitLingerMs"/>, which is Kommander's cross-partition WAL group commit.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteLingerMs"/>.
+    /// </summary>
+    public int? KeyValueWriteLingerMs { get; set; }
+
+    /// <summary>Upper bound on items per write-aggregator batch (Kahuna default 512). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteMaxBatchItems"/>.</summary>
+    public int? KeyValueWriteMaxBatchItems { get; set; }
 
     /// <summary>
     /// Filesystem directory where node-wide backups (base images, WAL segments, manifests) are written
@@ -948,6 +979,15 @@ public sealed class KahunaOptionsConfig
 
         if (RocksdbSharedMemoryBudgetMb is <= 0)
             throw InvalidConfig($"'kahuna.rocksdb_shared_memory_budget_mb' must be > 0, got {RocksdbSharedMemoryBudgetMb}");
+
+        if (KeyValueWriteMaxInFlightBatchesPerPartition is < 1 or > 64)
+            throw InvalidConfig($"'kahuna.key_value_write_max_in_flight_batches_per_partition' must be in 1..64, got {KeyValueWriteMaxInFlightBatchesPerPartition}");
+
+        if (KeyValueWriteLingerMs is < 0 or > 1000)
+            throw InvalidConfig($"'kahuna.key_value_write_linger_ms' must be in 0..1000, got {KeyValueWriteLingerMs}");
+
+        if (KeyValueWriteMaxBatchItems is < 1 or > 65536)
+            throw InvalidConfig($"'kahuna.key_value_write_max_batch_items' must be in 1..65536, got {KeyValueWriteMaxBatchItems}");
 
         if (RocksdbSharedMemtableBudgetMb is <= 0)
             throw InvalidConfig($"'kahuna.rocksdb_shared_memtable_budget_mb' must be > 0, got {RocksdbSharedMemtableBudgetMb}");
