@@ -391,19 +391,35 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// <para>Because the failure is silent, the bounded retry matters here as much as it does for id
     /// allocation: a leadership blip that skipped the bump would leave every other node serving a stale
     /// registry cache with nothing said about it anywhere.</para>
+    ///
+    /// <para><b>This method must never throw.</b> Every caller invokes it after its mutation has
+    /// durably committed, so an escaping exception (a transport fault, a routing failure) converts a
+    /// committed registration into an apparent failure. The caller's compensation then destroys state
+    /// that belongs to a published database — a registered branch was left pointing at purged metadata
+    /// exactly this way. A failed bump therefore degrades to the same "observed on the next mutation or
+    /// restart" coherence as a non-<c>Set</c> response, and the local generation is returned unchanged.</para>
     /// </summary>
     private async Task<long> BumpGenerationAsync()
     {
-        (KeyValueResponseType type, long revision, _) = await RetryWhileAsync(
-            () => kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, GenerationKey, GenerationMarker, null, -1,
-                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None),
-            r => r.Item1 is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication,
-            ValueStopwatch.StartNew()
-        ).ConfigureAwait(false);
+        try
+        {
+            (KeyValueResponseType type, long revision, _) = await RetryWhileAsync(
+                () => kahuna.LocateAndTrySetKeyValue(
+                    HLCTimestamp.Zero, GenerationKey, GenerationMarker, null, -1,
+                    KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None),
+                r => r.Item1 is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication,
+                ValueStopwatch.StartNew()
+            ).ConfigureAwait(false);
 
-        if (type == KeyValueResponseType.Set)
-            return revision + 1;
+            if (type == KeyValueResponseType.Set)
+                return revision + 1;
+        }
+        catch (Exception)
+        {
+            // A thrown transport fault is the same outcome as a non-Set response: the notification
+            // did not land. The mutation it announces is already committed and must not be undone,
+            // so the failure stays here.
+        }
 
         return Volatile.Read(ref loadedGeneration);
     }
@@ -917,6 +933,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// <summary>
     /// Atomically registers <paramref name="name"/> → <paramref name="id"/> in the
     /// persistent store and the in-memory cache.
+    ///
+    /// <para><b>Failure contract.</b> Once this method returns, the registration is durably
+    /// committed; post-commit work (cache update, generation bump) cannot fail the call. When it
+    /// throws, the exception code states what a compensating caller may assume: any code other
+    /// than <see cref="CamusDBErrorCodes.TransactionFinalizeUnresolved"/> means the entry is
+    /// confirmed not published; <c>TransactionFinalizeUnresolved</c> means the commit outcome is
+    /// unknown and the entry may be — or may later become — durably published, so destructive
+    /// compensation must first prove the state, e.g. via
+    /// <see cref="RetractRegistrationAsync"/>.</para>
     /// </summary>
     /// <param name="ancestors">
     /// Branch ancestry chain, nearest parent first.  Pass <c>null</c> or an empty list
@@ -970,6 +995,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             KvTransaction tx = await transactions.BeginAsync(
                 CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
             ).ConfigureAwait(false);
+            bool commitAttempted = false;
             try
             {
                 // ifAbsent=true: write only when key is currently absent (SetIfNotExists).
@@ -984,11 +1010,35 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                         CamusDBErrorCodes.DatabaseAlreadyExists,
                         $"Database '{name}' is already registered");
                 }
+                commitAttempted = true;
                 await transactions.CommitAsync(tx).ConfigureAwait(false);
             }
-            catch
+            catch (Exception registerEx)
             {
-                await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                try
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Never mask the original failure with a cleanup failure. An unfinalized
+                    // session is reclaimed by the coordinator's own timeout.
+                }
+
+                // Failure classification the caller's compensation depends on. Before the commit
+                // request, nothing can ever become durable, so the original error is rethrown as a
+                // confirmed non-registration. After the commit request, only a definite coordinator
+                // abort (TransactionConflict) proves the entry did not land; every other failure —
+                // an unresolved finalize, a lost session, a transport fault, a cancellation — leaves
+                // the outcome unknown, and the entry may be (or may still become) durably published.
+                // Surface that as TransactionFinalizeUnresolved so a caller never runs destructive
+                // compensation against a registration it cannot prove absent.
+                if (commitAttempted && registerEx is not CamusDBException { Code: CamusDBErrorCodes.TransactionConflict })
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionFinalizeUnresolved,
+                        $"Registration of database '{name}' (id={id}) has an unknown commit outcome " +
+                        $"({registerEx.GetType().Name}: {registerEx.Message}); the entry may or may not be durably published");
+
                 throw;
             }
 
@@ -1044,6 +1094,171 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         {
             writeSem.Release();
         }
+    }
+
+    /// <summary>
+    /// Identity-checked, authoritative retraction of one registration: removes the entry for
+    /// <paramref name="name"/> only when the persistent store still maps it to
+    /// <paramref name="expectedId"/>. This is the compensation primitive for a failed create —
+    /// unlike <see cref="UnregisterAsync"/> it consults the durable key (not the local cache, which
+    /// a failed <see cref="RegisterAsync"/> may have left empty or stale), and it can never remove a
+    /// replacement entry another create registered under the same name.
+    ///
+    /// <para>The read and the delete run under the key's exclusive lock in one transaction, so the
+    /// check-then-delete cannot race a concurrent registration. On every non-throwing return the
+    /// caller has proof that <paramref name="expectedId"/> is not the live owner of the name
+    /// <em>now</em>; whether that proof extends to "will never be" is the caller's to establish
+    /// (an unresolved registration commit can still land after an <see cref="RegistryRetraction.Absent"/>
+    /// read). A throw means the state could not be established or the delete could not be
+    /// confirmed — the caller must then treat the registration as possibly live.</para>
+    /// </summary>
+    public async Task<RegistryRetraction> RetractRegistrationAsync(string name, string expectedId)
+    {
+        string normalized = Normalize(name);
+
+        await writeSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            KvTransaction tx = await transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+
+            RegistryRetraction outcome;
+            bool commitAttempted = false;
+            try
+            {
+                outcome = await DeleteRegistryKeyIfIdAsync(tx, NameKey(normalized), expectedId).ConfigureAwait(false);
+                if (outcome == RegistryRetraction.Retracted)
+                {
+                    commitAttempted = true;
+                    await transactions.CommitAsync(tx).ConfigureAwait(false);
+                }
+                else
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                }
+            }
+            catch (Exception retractEx)
+            {
+                try
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // Never mask the original failure; the abandoned session expires server-side.
+                }
+
+                // Same classification as RegisterAsync: after the commit request, only a definite
+                // coordinator abort proves the delete did not land — anything else leaves the
+                // retraction unconfirmed, which the caller must treat as "possibly still live".
+                if (commitAttempted && retractEx is not CamusDBException { Code: CamusDBErrorCodes.TransactionConflict })
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionFinalizeUnresolved,
+                        $"Retraction of registry entry '{name}' (id={expectedId}) has an unknown commit outcome " +
+                        $"({retractEx.GetType().Name}: {retractEx.Message}); the entry may or may not still be published");
+
+                throw;
+            }
+
+            // The durable state is established. Drop any local cache claim that still maps this
+            // name to this id — including an entry a failed create's RegisterAsync left behind.
+            if (byName.TryGetValue(normalized, out DatabaseRegistryEntry? cached)
+                && string.Equals(cached.Id, expectedId, StringComparison.Ordinal))
+                byName.TryRemove(normalized, out _);
+
+            byId.TryRemove(expectedId, out _);
+
+            if (outcome == RegistryRetraction.Retracted)
+                AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+
+            return outcome;
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    /// <summary>
+    /// The in-transaction body of <see cref="RetractRegistrationAsync"/>: locks <paramref name="key"/>
+    /// exclusively, reads the current owner, and deletes it only on an id match. Lock, read, and
+    /// delete are one lock acquisition so the verify cannot be split from the delete — the same
+    /// shape as <see cref="WriteRegistryKey"/>'s compare-and-set path.
+    /// </summary>
+    private async Task<RegistryRetraction> DeleteRegistryKeyIfIdAsync(KvTransaction tx, string key, string expectedId)
+    {
+        KeyValueResponseType lockType;
+        int lockRetries = 0;
+
+        // Stable per-operation ids reused across the retry loop (see WriteRegistryKey) so the delete
+        // and its lock fold once into the coordinator working set.
+        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
+
+        do
+        {
+            if (lockRetries > 0)
+                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
+
+            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
+                tx.TransactionId, key, 0,
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
+            ).ConfigureAwait(false);
+        }
+        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
+               && ++lockRetries < MaxRetries);
+
+        if (lockType != KeyValueResponseType.Locked)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to lock registry key '{key}': {lockType}");
+
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? current) = await kahuna.LocateAndTryGetValue(
+            tx.TransactionId, key, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (getType == KeyValueResponseType.DoesNotExist
+            || (getType == KeyValueResponseType.Get && current?.Value is null))
+            return RegistryRetraction.Absent;
+
+        if (getType != KeyValueResponseType.Get)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to read registry key '{key}': {getType}");
+
+        DatabaseRegistryEntry entry = MetaJsonSerializer.Deserialize(
+            current!.Value!, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+        if (!string.Equals(entry.Id, expectedId, StringComparison.Ordinal))
+            return RegistryRetraction.OwnedByOther;
+
+        KeyValueResponseType deleteType;
+        int deleteRetries = 0;
+
+        do
+        {
+            if (deleteRetries > 0)
+                await Task.Delay(deleteRetries * 10).ConfigureAwait(false);
+
+            (deleteType, _, _) = await kahuna.LocateAndTryDeleteKeyValue(
+                tx.TransactionId, key,
+                KeyValueDurability.Persistent, CancellationToken.None,
+                coordinatorKey: tx.CoordinatorKey, operationId: deleteOperationId
+            ).ConfigureAwait(false);
+        }
+        while (deleteType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && ++deleteRetries < MaxRetries);
+
+        if (deleteType is not (KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist))
+            throw new CamusDBException(
+                CamusDBErrorCodes.SystemSpaceCorrupt,
+                $"Failed to delete registry key '{key}': {deleteType}");
+
+        tx.TrackModified(key, KeyValueDurability.Persistent);
+        return RegistryRetraction.Retracted;
     }
 
     /// <summary>
@@ -1449,9 +1664,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
     // ── Lost-snapshot-protection markers (branch fail-closed state) ────────────────────────────
     //
-    // A branch whose snapshot-floor hold lapses can never regain its frozen ancestor view: Kahuna
-    // refuses to renew an expired hold, and re-acquiring at the old timestamp does not bring
-    // reclaimed history back. The marker durably records that state so every node — including one
+    // A branch whose snapshot-floor hold is REMOVED from Kahuna's registry (released, or purged by
+    // the reaper after its lease lapsed without renewal) can never regain its frozen ancestor view:
+    // Kahuna refuses to renew a removed hold, and re-acquiring at the old timestamp does not bring
+    // reclaimed history back. (A bare lapse is recoverable — a registered hold keeps constraining
+    // reclamation and the next renew revives it — so no marker is written for that.) The marker
+    // durably records the removed state so every node — including one
     // that opens the branch after a restart or failover — fails the branch closed with a definitive
     // message instead of rediscovering the loss through a refused renew. Correctness does not
     // depend on the marker (the refused renew is itself permanent and visible everywhere); the
@@ -1663,11 +1881,25 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // Branch creation writes metadata before publishing the registry entry; a crash between the two
     // leaves an orphaned namespace. Tracking the allocated id in a persistent pending-set lets a
     // startup scrubber find and purge such orphans. The pending key is deleted on success and on the
-    // abort path; only a crash between TrackPendingBranchAsync and the finally cleanup leaves it.
+    // abort path. A crash between TrackPendingBranchAsync and the finally cleanup leaves the marker.
+    // A failed best-effort ClearPendingBranchAsync after a SUCCESSFUL create also leaves it, so a
+    // marker can point at a live, registered branch. A marker alone is never proof of abandonment.
     //
-    // Keys: _system/dbregistry/pending:{branchId}  (value is a single 0x01 sentinel byte)
+    // Keys: _system/dbregistry/pending:{branchId}  (value is "{nodeId}:{epoch}", the same owner
+    // stamp as the drop-lifecycle markers; markers written before owner stamping carry one 0x01 byte)
 
     private string PendingKey(string branchId) => $"{keyPrefix}dbregistry/pending:{branchId}";
+
+    /// <summary>
+    /// True when this run's startup recovery may act on a pending-create marker. Two cases qualify.
+    /// The marker is this node's from a prior run: its create died with that run, so no live creator
+    /// can exist. Or the marker is a legacy anonymous one (single 0x01 byte) from before owner
+    /// stamping: it is reclaimed only under the scrubber's fence and registration re-checks.
+    /// A current-epoch marker is a live in-flight create in this process. A different node's marker
+    /// can be a live in-flight create on that node. Recovery must never touch either of those.
+    /// </summary>
+    private bool IsReclaimablePendingMarker(byte[]? value) =>
+        IsOwnStaleMarker(value) || value is [0x01];
 
     /// <summary>
     /// Writes a persistent pending-create marker for <paramref name="branchId"/> so a startup
@@ -1684,6 +1916,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     ///
     /// <para>Kahuna errors are propagated to the caller; <see cref="ClearPendingBranchAsync"/>
     /// is best-effort and may be called even when no marker was written (idempotent delete).</para>
+    ///
+    /// <para>The marker value is the <c>{nodeId}:{epoch}</c> owner stamp, like the drop-lifecycle
+    /// markers. Startup recovery uses it to reclaim only this node's prior-run markers, so a live
+    /// in-flight create — in this process or on another node — is never scrubbed.</para>
     /// </summary>
     public async Task TrackPendingBranchAsync(string branchId)
     {
@@ -1697,7 +1933,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 await Task.Delay(retries * 10).ConfigureAwait(false);
 
             (type, _, _) = await kahuna.LocateAndTrySetKeyValue(
-                HLCTimestamp.Zero, key, [0x01], null, -1,
+                HLCTimestamp.Zero, key, LocalOwnerValue, null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
         }
@@ -1733,24 +1969,21 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     /// <summary>
-    /// Scans the registry bucket for pending-create markers and returns the ids of any that are
-    /// not currently registered. These represent branch namespaces written before the registry
-    /// entry was committed — typically from a process crash during
-    /// <see cref="CreateBranchDatabaseAsync"/>. The caller is responsible for purging the
-    /// corresponding <c>{branchId}/meta/…</c> namespace and then calling
-    /// <see cref="ClearPendingBranchAsync"/> for each returned id.
+    /// Scans the registry bucket and returns every pending-create marker as a
+    /// <c>(branchId, markerValue)</c> pair. Shared by the orphan visibility scan and the startup
+    /// reclaim scan, which apply different filters to the same raw marker set.
     /// </summary>
-    public async Task<List<string>> LoadOrphanBranchIdsAsync()
+    private async Task<List<(string BranchId, byte[]? MarkerValue)>> ScanPendingBranchMarkersAsync()
     {
         string pendingPrefix = $"{keyPrefix}dbregistry/pending:";
-        List<string> orphans = [];
+        List<(string, byte[]?)> markers = [];
 
         KvTransaction tx = await transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
         ).ConfigureAwait(false);
         try
         {
-            await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
                 tx.TransactionId,
                 RegistryBucket,
                 null, true,
@@ -1760,12 +1993,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 KeyValueDurability.Persistent,
                 CancellationToken.None).ConfigureAwait(false))
             {
-                if (!key.StartsWith(pendingPrefix, StringComparison.Ordinal))
-                    continue;
-
-                string branchId = key[pendingPrefix.Length..];
-                if (!byId.ContainsKey(branchId))
-                    orphans.Add(branchId);
+                if (key.StartsWith(pendingPrefix, StringComparison.Ordinal))
+                    markers.Add((key[pendingPrefix.Length..], kve.Value));
             }
         }
         finally
@@ -1773,7 +2002,70 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
 
+        return markers;
+    }
+
+    /// <summary>
+    /// Scans the registry bucket for pending-create markers and returns the ids of any that are
+    /// not registered in the PERSISTENT registry. These represent branch namespaces written before
+    /// the registry entry was committed — typically from a process crash during
+    /// <see cref="CreateBranchDatabaseAsync"/>.
+    ///
+    /// <para>Registration is decided against <see cref="ScanAllEntriesAsync"/>, never against the
+    /// local in-memory cache. A registry loaded before a branch was created (another cluster node,
+    /// or a long-lived instance) legitimately has no cached entry for a live branch. Judging
+    /// orphanhood from that cache absence once let the startup scrubber destroy a published
+    /// branch's schema namespace.</para>
+    ///
+    /// <para>This method reports; it is not an authority to destroy. The startup scrubber acts only
+    /// on <see cref="LoadReclaimablePendingBranchIdsAsync"/> and re-confirms each id under a
+    /// per-id fence before it purges anything.</para>
+    /// </summary>
+    public async Task<List<string>> LoadOrphanBranchIdsAsync()
+    {
+        List<(string BranchId, byte[]? MarkerValue)> markers = await ScanPendingBranchMarkersAsync().ConfigureAwait(false);
+        if (markers.Count == 0)
+            return [];
+
+        // Read the registered set AFTER the marker scan: a create that registered between the two
+        // scans is then seen here and correctly excluded, instead of reported as an orphan.
+        HashSet<string> registered = new(StringComparer.Ordinal);
+        foreach (DatabaseRegistryEntry entry in await ScanAllEntriesAsync().ConfigureAwait(false))
+            registered.Add(entry.Id);
+
+        List<string> orphans = new(markers.Count);
+        foreach ((string branchId, _) in markers)
+        {
+            if (!registered.Contains(branchId))
+                orphans.Add(branchId);
+        }
+
         return orphans;
+    }
+
+    /// <summary>
+    /// Returns the pending-create marker ids that THIS run's startup recovery may act on: this
+    /// node's markers from a prior run (their creates died with that run) and legacy anonymous
+    /// markers. Markers from the current run (a live in-flight create in this process) and markers
+    /// owned by other nodes (possibly a live in-flight create there) are excluded, so recovery can
+    /// never reclaim a namespace out from under a running create.
+    ///
+    /// <para>Registered ids are NOT filtered out here. A published branch whose best-effort marker
+    /// cleanup failed must still be visited, so the scrubber can clear its obsolete marker after it
+    /// re-confirms the registration under the fence.</para>
+    /// </summary>
+    public async Task<List<string>> LoadReclaimablePendingBranchIdsAsync()
+    {
+        List<(string BranchId, byte[]? MarkerValue)> markers = await ScanPendingBranchMarkersAsync().ConfigureAwait(false);
+        List<string> reclaimable = [];
+
+        foreach ((string branchId, byte[]? value) in markers)
+        {
+            if (IsReclaimablePendingMarker(value))
+                reclaimable.Add(branchId);
+        }
+
+        return reclaimable;
     }
 
     // -----------------------------------------------------------------------
@@ -1950,7 +2242,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// scanning persistent KV (not the local cache), or <c>null</c> if the id is not currently
     /// registered. Used by relink to decide, under the fence, whether an id is already live (and thus
     /// whether this is an idempotent retry, a conflicting second alias, or a fresh recovery) — a
-    /// decision that must reflect registrations made on other cluster nodes.
+    /// decision that must reflect registrations made on other cluster nodes. Also the source-liveness
+    /// gate branch-create runs after publishing its child: the drop-intent marker only covers a drop
+    /// still in flight, so branch-create must additionally confirm the parent's immutable id is still
+    /// registered — a read that must see an unregister performed on another node, which the local
+    /// cache cannot guarantee.
     /// </summary>
     public async Task<string?> TryResolveNameByIdAsync(string id)
     {
@@ -2343,4 +2639,25 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         transactions.Dispose();
         writeSem.Dispose();
     }
+}
+
+/// <summary>
+/// Outcome of <see cref="DatabaseRegistry.RetractRegistrationAsync"/>. Every value is an
+/// authoritative statement about the persistent store at the moment of the locked read; a caller
+/// deciding whether destructive compensation is safe must also account for whether an unresolved
+/// registration commit could still land afterward (see the method's summary).
+/// </summary>
+public enum RegistryRetraction
+{
+    /// <summary>The name mapped to the expected id and the entry was deleted and committed.</summary>
+    Retracted,
+
+    /// <summary>The name was not registered at the time of the locked read.</summary>
+    Absent,
+
+    /// <summary>
+    /// The name is registered to a different id. The expected id's registration is not live, and the
+    /// other create's entry was deliberately left untouched.
+    /// </summary>
+    OwnedByOther,
 }

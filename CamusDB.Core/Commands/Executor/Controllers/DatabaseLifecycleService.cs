@@ -26,8 +26,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// than against DML.
 ///
 /// <para><b>The hard part here is the races between these operations, not any one of them.</b>
-/// Drop versus branch-create is fenced from both sides — a per-id drop-intent marker the
-/// branch-create re-checks after publishing, plus a live-descendant scan the drop re-runs under the
+/// Drop versus branch-create is fenced from both sides — a per-id drop-intent marker plus an
+/// authoritative source-liveness re-read the branch-create runs after publishing (the marker alone
+/// only covers a drop still in flight; the liveness read catches a drop that already finished and
+/// released it), plus a live-descendant scan the drop re-runs under the
 /// source's <c>SchemaDdlSemaphore</c> — because Raft linearizability then guarantees exactly one of
 /// the two wins with no orphaned child and no purged ancestor. Relink versus the orphan GC takes
 /// that same per-id fence. Every ordering in this class ("metadata first, registry last",
@@ -119,10 +121,12 @@ internal sealed class DatabaseLifecycleService
         }
         catch (Exception openEx)
         {
-            // Roll back the registry entry so the name can be retried.
+            // Roll back the registry entry so the name can be retried. Identity-checked: only this
+            // create's entry may be removed — a replacement registered concurrently under the same
+            // name must never be deleted by this compensation.
             try
             {
-                await registry.UnregisterAsync(name).ConfigureAwait(false);
+                await registry.RetractRegistrationAsync(name, id).ConfigureAwait(false);
             }
             catch (Exception unregEx)
             {
@@ -241,6 +245,7 @@ internal sealed class DatabaseLifecycleService
                 sourceKahuna, context.Logger, holdId, forkT, currentOptions.BranchSnapshotHoldLeaseMs);
 
             bool metaCopied = false;
+            bool registerAttempted = false;
             bool childRegistered = false;
             bool leaveMarkerForScrubber = false;
             try
@@ -275,6 +280,7 @@ internal sealed class DatabaseLifecycleService
                 // lapsed hold would register a branch whose inherited rows may already be reclaimed.
                 creationKeepAlive.ThrowIfLost($"the creation of branch '{branchName}'");
 
+                registerAttempted = true;
                 await registry.RegisterAsync(branchName, branchId, ancestors, holdId).ConfigureAwait(false);
                 childRegistered = true;
 
@@ -292,45 +298,90 @@ internal sealed class DatabaseLifecycleService
                         CamusDBErrorCodes.DatabaseDoesntExist,
                         $"Source database '{ticket.BranchFrom}' is being dropped concurrently; branch creation aborted");
 
+                // The intent marker only fences a drop that is still in flight: DropDatabase releases
+                // it after its purge completes, so a create that stalled between the metadata copy and
+                // RegisterAsync can pass the intent check above even though the source is already fully
+                // dropped. Close that half of the race by re-reading the source's liveness from
+                // persistent KV by its immutable id — never the local cache, which cannot have observed
+                // an unregister performed on another node. The ordering of the two reads makes the pair
+                // complete: a drop whose descendant scan missed this child holds the intent from before
+                // our RegisterAsync until after its unregister, so either the intent read above still
+                // sees the marker, or this liveness read runs after the unregister and finds the id
+                // gone. Database ids are never reused, so a recreate of the source's name under a new
+                // id does not satisfy this check, while a concurrent rename (which preserves the id)
+                // correctly does.
+                if (await registry.TryResolveNameByIdAsync(sourceDescriptor.Id).ConfigureAwait(false) is null)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.DatabaseDoesntExist,
+                        $"Source database '{ticket.BranchFrom}' was dropped concurrently; branch creation aborted");
+
                 // Final validation before declaring success: the branch is published, so a lost
                 // hold here throws into the catch below, which retracts the registration and
                 // releases what is left rather than handing the caller an unprotected branch.
                 creationKeepAlive.ThrowIfLost($"the creation of branch '{branchName}'");
             }
-            catch
+            catch (Exception abortEx)
             {
                 // Stop the private renew loop before the cleanup below releases the hold, so the
                 // loop does not race the release into a misleading "refused renewal" warning.
                 await creationKeepAlive.DisposeAsync().ConfigureAwait(false);
 
-                // If the child was published (e.g. the drop-intent check threw after RegisterAsync, or
-                // returned an indeterminate status), retract it before releasing the hold or purging the
-                // metadata. The destructive cleanup below is only safe once the child is CONFIRMED
-                // unpublished — otherwise it would leave a durable registry entry pointing at a deleted
-                // metadata namespace, with no snapshot floor protecting the inherited rows and no
-                // recovery handle.
-                if (childRegistered)
+                // The cleanup below (hold release + metadata purge + marker clear) is destructive,
+                // and it is only safe once this create's registration is PROVED not to be live.
+                // "childRegistered is false" is not that proof: RegisterAsync can fail after its
+                // commit landed, or with an unknown commit outcome, and destroying the hold and
+                // metadata of a durably registered branch leaves the registry pointing at a purged
+                // namespace with no snapshot floor and no recovery handle. Establish the
+                // authoritative publication state first, retracting the entry (identity-checked, so
+                // a replacement registered by another create is never removed) when it is ours.
+                bool unpublicationProved;
+                if (!registerAttempted)
                 {
+                    // Registration was never attempted, so no registry entry with this id can exist.
+                    unpublicationProved = true;
+                }
+                else
+                {
+                    // An unresolved registration commit can still land AFTER an absence check reads
+                    // nothing, so absence is proof only when the registration failure had a resolved
+                    // outcome (see the RegisterAsync failure contract).
+                    bool commitOutcomeUnresolved = !childRegistered
+                        && abortEx is CamusDBException { Code: CamusDBErrorCodes.TransactionFinalizeUnresolved };
                     try
                     {
-                        await registry.UnregisterAsync(branchName).ConfigureAwait(false);
-                        childRegistered = false;
+                        RegistryRetraction retraction = await registry
+                            .RetractRegistrationAsync(branchName, branchId).ConfigureAwait(false);
+
+                        unpublicationProved = retraction switch
+                        {
+                            RegistryRetraction.Retracted => true,
+                            RegistryRetraction.OwnedByOther => true,
+                            _ => !commitOutcomeUnresolved,
+                        };
                     }
-                    catch (Exception unregEx)
+                    catch (Exception retractEx)
                     {
-                        // Indeterminate create: the child is still registered and we cannot confirm its
-                        // removal. Retain the snapshot hold, the copied metadata, AND the pending-create
-                        // marker so a startup scrubber / reconciliation can later finish either
-                        // unpublication + cleanup or completion of the branch. Do NOT release the hold or
-                        // purge the metadata here. Surface a retryable indeterminate error.
-                        leaveMarkerForScrubber = true;
-                        context.Logger.LogError(unregEx,
-                            "Branch '{Branch}' (id={BranchId}) remains registered after an aborted create and could not be unregistered; retaining snapshot hold, metadata, and pending-create marker for recovery",
+                        unpublicationProved = false;
+                        context.Logger.LogError(retractEx,
+                            "Could not establish or retract the registration of branch '{Branch}' (id={BranchId}) after an aborted create",
                             branchName, branchId);
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.TransactionMustRetry,
-                            $"Branch '{branchName}' creation is in an indeterminate state (the published branch could not be retracted after aborting); retry after reconciliation");
                     }
+                }
+
+                if (!unpublicationProved)
+                {
+                    // Indeterminate create: the branch may be — or may still become — durably
+                    // registered. Retain the snapshot hold, the copied metadata, AND the
+                    // pending-create marker so a startup scrubber / reconciliation can later finish
+                    // either unpublication + cleanup or completion of the branch. Do NOT release the
+                    // hold or purge the metadata here. Surface a retryable indeterminate error.
+                    leaveMarkerForScrubber = true;
+                    context.Logger.LogError(abortEx,
+                        "Branch '{Branch}' (id={BranchId}) may remain registered after an aborted create; retaining snapshot hold, metadata, and pending-create marker for recovery",
+                        branchName, branchId);
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        $"Branch '{branchName}' creation is in an indeterminate state (its registration could not be confirmed retracted after aborting); retry after reconciliation");
                 }
 
                 // Confirmed unpublished (never published, or now retracted): nothing will ever renew or
@@ -594,7 +645,8 @@ internal sealed class DatabaseLifecycleService
             // Release the intent marker now that the keyspace is purged (or on any failure path).
             // Branch-creates that were blocked by this intent now see the id gone; any that already
             // checked and are in-flight will either unregister (if they saw the intent) or will be
-            // caught by a re-read of the now-unregistered source.
+            // caught by branch-create's authoritative post-publication liveness re-read of the
+            // now-unregistered source id.
             if (dropIntentAcquired)
                 await registry.ReleaseDropIntentAsync(entry.Id).ConfigureAwait(false);
         }

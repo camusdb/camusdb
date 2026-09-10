@@ -17,21 +17,26 @@ namespace CamusDB.Core.Storage.Kv;
 /// read the branch issues.
 ///
 /// <para><b>What it protects against.</b> A branch reads its ancestors frozen at the fork
-/// timestamp, and that frozen view survives revision reclamation only while the chain of leased
-/// Kahuna snapshot-floor holds stays alive (the branch's own hold on its immediate parent, plus
-/// each non-root ancestor's hold on <em>its</em> parent). A lapsed lease is silent: Kahuna simply
-/// refuses further renewals, reclamation resumes, and an ancestor read at the fork timestamp then
-/// reports reclaimed rows as confirmed absences — a successful, wrong, possibly empty result.
-/// This guard turns that silent state into a hard error.</para>
+/// timestamp, and that frozen view survives revision reclamation only while the chain of Kahuna
+/// snapshot-floor holds stays registered (the branch's own hold on its immediate parent, plus
+/// each non-root ancestor's hold on <em>its</em> parent). Losing that protection is silent:
+/// reclamation resumes, and an ancestor read at the fork timestamp then reports reclaimed rows as
+/// confirmed absences — a successful, wrong, possibly empty result. This guard turns that silent
+/// state into a hard error.</para>
 ///
-/// <para><b>How the proof works.</b> Kahuna's renew is refused (<c>DoesNotExist</c>) once a hold
-/// has expired, and a lease can only be extended while it is still live — so one successful renew
-/// proves the hold was live continuously from its acquisition until the renew. The guard renews
-/// the whole chain and remembers the confirmation instant on a monotonic clock. A check passes
-/// only while the last confirmation is recent enough that the lease granted by it cannot have
-/// expired yet; past that window the guard re-verifies synchronously before the caller may use
-/// (or trust the absence of) any ancestor data. By induction every passed check proves the chain
-/// never lapsed, so no reclamation past any fork boundary can have occurred.</para>
+/// <para><b>How the proof works.</b> Since Kahuna 1.7.3 a hold's protection ends only when the
+/// hold is <em>removed from the registry</em> — an explicit release, or the reaper's purge of an
+/// expired hold — never at bare lease expiry: a registered hold constrains reclamation even while
+/// its lease is lapsed, and a renew then revives it (this is what makes downtime longer than the
+/// lease recoverable, inside the reaper's startup grace window). Renew is refused
+/// (<c>DoesNotExist</c>) only for a removed hold, so one successful renew proves the hold's
+/// protection was continuous from its acquisition until the renew. The guard renews the whole
+/// chain and remembers the confirmation instant on a monotonic clock. A check passes only while
+/// the last confirmation is recent enough that the lease granted by it cannot have expired yet
+/// (past a lapse, the reaper may purge at any time, so a lapsed guard re-verifies rather than
+/// presumes); past that window the guard re-verifies synchronously before the caller may use (or
+/// trust the absence of) any ancestor data. By induction every passed check proves the chain's
+/// protection never lapsed, so no reclamation past any fork boundary can have occurred.</para>
 ///
 /// <para><b>Three outcomes.</b> A confirmed renew refreshes the window. A definitive refusal
 /// latches <see cref="IsLost"/> permanently, best-effort persists a durable lost marker through
@@ -39,7 +44,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// — the state cannot heal, because re-acquiring a hold at the old timestamp does not bring
 /// reclaimed history back. A transient failure (transport, <c>MustRetry</c>) is tolerated while
 /// the previous confirmation still proves the lease live; once it no longer can, reads fail with
-/// a retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/> — unverifiable, not lost.</para>
+/// a retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/> — unverifiable, not lost
+/// (the next reachable renew settles it: revival on a registered hold, refusal on a removed
+/// one).</para>
 ///
 /// <para><b>Cost.</b> The fast path is one volatile read and one tick comparison per ancestor
 /// access. A renew round-trip happens at most once per refresh window per node (plus bounded
@@ -78,7 +85,7 @@ public sealed class BranchSnapshotHoldGuard
     /// <summary>
     /// Durably records the lost state (registry marker) so a later open of this branch fails fast
     /// with a definitive message instead of re-discovering the loss. Best-effort: correctness never
-    /// depends on the marker — an expired hold refuses renewal forever, on every node.
+    /// depends on the marker — a removed hold refuses renewal forever, on every node.
     /// </summary>
     private readonly Func<string, Task>? persistLostAsync;
 
@@ -206,8 +213,9 @@ public sealed class BranchSnapshotHoldGuard
 
                 if (type == KeyValueResponseType.DoesNotExist)
                 {
-                    // Definitive: the hold expired or was released. Kahuna never renews a lapsed
-                    // hold, so this answer is permanent and the same on every node.
+                    // Definitive: the hold was removed from the registry (released, or purged by
+                    // the reaper after its lease lapsed). Removal is replicated and permanent, so
+                    // this answer is the same on every node, forever.
                     await MarkLostAsync(holdId).ConfigureAwait(false);
                     ThrowIfLost();
                     return; // unreachable — ThrowIfLost always throws here
@@ -255,8 +263,8 @@ public sealed class BranchSnapshotHoldGuard
     {
         string reason =
             $"Snapshot hold {holdId} protecting the frozen ancestor view of branch '{branchName}' no " +
-            "longer exists (its lease expired or it was released), so ancestor history at the fork point " +
-            "may already be reclaimed";
+            "longer exists (it was released, or the reaper purged it after its lease lapsed), so ancestor " +
+            "history at the fork point may already be reclaimed";
 
         // Latch before persisting so a persist failure still fails the branch closed locally.
         lostReason ??= reason;
@@ -277,7 +285,7 @@ public sealed class BranchSnapshotHoldGuard
         {
             logger.LogWarning(ex,
                 "Failed to persist the lost-protection marker for branch '{Branch}'; reads still fail " +
-                "closed (a lapsed hold refuses renewal on every node), but a later open will rediscover " +
+                "closed (a removed hold refuses renewal on every node), but a later open will rediscover " +
                 "the loss instead of failing fast",
                 branchName);
         }

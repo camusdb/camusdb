@@ -31,9 +31,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// margin below expiry so a single missed tick (election, transient error) does not drop a hold.
 ///
 /// Renewal is idempotent: renewing an already-live hold simply extends its lease, and a transient
-/// renew failure is logged and retried on the next tick. A <b>definitive</b> refusal
-/// (<c>DoesNotExist</c> — the hold expired or was released) is permanent by Kahuna's contract, so
-/// the sweep durably marks the branch's protection as lost
+/// renew failure is logged and retried on the next tick. Since Kahuna 1.7.3 a hold's protection
+/// ends at its <em>removal from the registry</em> (release, or the reaper's purge of an expired
+/// hold), not at bare lease expiry — a renew therefore also <b>revives</b> a lapsed-but-registered
+/// hold (e.g. after downtime longer than the lease, while the reaper's startup grace window is
+/// open), and success still proves the protection never lapsed. A <b>definitive</b> refusal
+/// (<c>DoesNotExist</c> — the hold was released or purged) remains permanent, so the sweep durably
+/// marks the branch's protection as lost
 /// (<see cref="DatabaseRegistry.MarkSnapshotProtectionLostAsync"/>) and the branch fails closed
 /// from then on; see <see cref="Storage.Kv.BranchSnapshotHoldGuard"/> for the read-side fence that
 /// enforces this even when the sweep itself is starved or down.
@@ -106,11 +110,20 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
         // could reclaim the revisions branch as-of reads depend on, with nothing to restart the
         // sweep. So the catch lives INSIDE the loop — one failed sweep is logged and the loop keeps
         // sweeping on the next tick. Only cancellation (shutdown) ends the loop.
+        //
+        // The FIRST sweep runs immediately rather than after a full tick. After downtime longer
+        // than the lease, every branch hold is lapsed-but-registered and Kahuna's reaper defers
+        // its purge only for the startup grace window; the sooner a renew revives them, the more
+        // of that window is left as margin. Failed sweeps are still paced by the tick.
+        bool first = true;
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(intervalMs, ct).ConfigureAwait(false);
+                if (!first)
+                    await Task.Delay(intervalMs, ct).ConfigureAwait(false);
+                first = false;
+
                 await (SweepForTesting is null
                     ? RenewDueHoldsAsync(ct)
                     : SweepForTesting(ct)).ConfigureAwait(false);
@@ -183,10 +196,11 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Handles a definitive renewal refusal: Kahuna answered <c>DoesNotExist</c>, so the hold has
-    /// expired (or was released) and can never be renewed again — the branch's frozen ancestor view
-    /// is permanently unprotected. Durably records that state so opens and reads fail closed with a
-    /// definitive message everywhere, including after restart and failover.
+    /// Handles a definitive renewal refusal: Kahuna answered <c>DoesNotExist</c>, so the hold was
+    /// removed from the registry (released, or purged by the reaper after its lease lapsed) and can
+    /// never be renewed again — the branch's frozen ancestor view is permanently unprotected.
+    /// Durably records that state so opens and reads fail closed with a definitive message
+    /// everywhere, including after restart and failover.
     ///
     /// <para>The one benign way to reach here is a concurrent branch drop: drop unregisters the
     /// entry <em>before</em> releasing the hold, so by the time this sweep (working from a snapshot
@@ -205,15 +219,15 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
                 return; // dropped (or re-registered) concurrently — nothing to protect
 
             logger.LogError(
-                "Snapshot hold {HoldId} for branch '{Database}' no longer exists (lease expired or released); " +
-                "the branch's frozen ancestor view is permanently unprotected and will fail closed",
+                "Snapshot hold {HoldId} for branch '{Database}' no longer exists (released, or purged after " +
+                "its lease lapsed); the branch's frozen ancestor view is permanently unprotected and will fail closed",
                 entry.ImmediateParentHoldId, entry.Name);
 
             await registry.MarkSnapshotProtectionLostAsync(
                 entry.Id,
                 $"Snapshot hold {entry.ImmediateParentHoldId} protecting the frozen ancestor view of branch " +
-                $"'{entry.Name}' no longer exists (its lease expired or it was released), so ancestor history " +
-                "at the fork point may already be reclaimed").ConfigureAwait(false);
+                $"'{entry.Name}' no longer exists (it was released, or the reaper purged it after its lease " +
+                "lapsed), so ancestor history at the fork point may already be reclaimed").ConfigureAwait(false);
         }
         catch (Exception ex)
         {

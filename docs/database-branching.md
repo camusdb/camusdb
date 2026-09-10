@@ -100,7 +100,7 @@ Registry and lifecycle bookkeeping live under the reserved `_system/` prefix:
 ```text
 name → entry         _system/dbregistry/db:{name}
 id sequence          _system/dbregistry/seq
-pending-create       _system/dbregistry/pending:{branchId}     -- crash handle for an unpublished branch
+pending-create       _system/dbregistry/pending:{branchId}     -- crash handle for an unpublished branch (owner-tagged)
 drop-intent          _system/dbregistry/drop-intent:{dbId}     -- cross-node drop/create fence (owner-tagged)
 drop-in-progress     _system/dbregistry/dropping:{dbId}        -- crash-resume handle for a purge (owner-tagged)
 ```
@@ -226,7 +226,14 @@ A key property that makes this cheap to reason about: a **live hold keeps the fo
 revision in memory regardless of storage backend**, and the *same* hold protects both the
 ancestor row/index reads and the metadata copy at `forkT`.
 
-**Fail-closed on a lost hold.** A hold is leased, and a lapsed lease is permanent: Kahuna answers
+**Fail-closed on a lost hold, fail-recovered on a mere lapse.** Since Kahuna 1.7.3 a hold's
+protection ends only when the hold is **removed from the replicated registry** — an explicit
+release, or the reaper's purge of a hold whose lease lapsed without renewal. A bare lapse is
+recoverable: a registered hold keeps constraining reclamation even while its lease is expired,
+and the next renew revives it. In particular, full downtime longer than the lease heals itself —
+holds loaded from the durable registry are exempt from the purge for a startup grace window
+(`SnapshotHoldStartupGraceWindow`, default 5 min), and the renewer's first sweep runs immediately
+at startup so revival lands well inside it. Once a hold *is* removed, Kahuna answers
 `DoesNotExist` to every later renew, and re-acquiring at the old timestamp does not bring
 reclaimed history back. Without a fence, an ancestor read past that point reports reclaimed rows
 as confirmed absences — a successful, silently incomplete (possibly empty) result. Three layers
@@ -235,10 +242,11 @@ turn that into a hard error instead:
 - **Read-side guard (`BranchSnapshotHoldGuard`).** Every branch descriptor carries one guard,
   shared by all its ancestor-level stores. Each ancestor probe/scan verifies, after the Kahuna
   read and before its result (value, tombstone, *or absence*) is used, that the branch's whole
-  hold chain — its own hold plus each non-root ancestor's hold — is still alive. The proof:
-  Kahuna only renews a live hold, so one confirmed renew proves the chain never lapsed up to that
-  instant; the guard caches the confirmation and re-verifies once it is older than half the
-  lease, so the fast path is one tick comparison per ancestor access. A definitive refusal
+  hold chain — its own hold plus each non-root ancestor's hold — is still protected. The proof:
+  Kahuna only renews a *registered* hold (renewing revives a lapsed-but-registered one), so one
+  confirmed renew proves the chain's protection never lapsed up to that instant; the guard caches
+  the confirmation and re-verifies once it is older than half the lease, so the fast path is one
+  tick comparison per ancestor access. A definitive refusal — the hold was removed —
   latches the branch permanently and throws `BranchSnapshotProtectionLost` (HTTP 410); a
   transient verification failure past 0.8 × lease throws a retryable error instead of guessing.
   This covers descendants (a grandchild verifies the middle branch's hold too), reopen, failover,
@@ -276,13 +284,31 @@ turn that into a hard error instead:
 6. **Copy schema metadata as of `forkT`** (`CopyMetaForBranchAsync` — an as-of-`forkT` scan, so a
    remote DDL committed after `forkT` is excluded, keeping the branch schema consistent with the
    ancestor data it inherits). All copied keys are written in one transaction.
-7. **Publish the registry entry** (`RegisterAsync`), then **check the drop-intent fence** (§8).
-8. **Clear the pending marker** on success; on abort, release the hold and inline-purge any
-   copied metadata.
+7. **Publish the registry entry** (`RegisterAsync`), then **check the drop-intent fence and
+   re-read the source's liveness by its immutable id** (§8).
+8. **Clear the pending marker** on success; on abort, **prove the registration is not live
+   first**, then release the hold and inline-purge any copied metadata.
 
 The invariant that falls out of this ordering: **every `{branchId}/meta/…` namespace is either
 registered, or has a durable pending marker** the startup scrubber will find. There is no window
 where metadata exists with no recovery handle.
+
+Publication and abort obey two further rules, because a failed `RegisterAsync` does not prove the
+registration is absent:
+
+- **A committed registration cannot be reported as a failure.** `RegisterAsync` returns once its
+  transaction commits; the post-commit work (cache update, cross-node coherence stamp) is
+  best-effort and never throws. Before this held, a transport fault on the coherence stamp made
+  the create's abort path purge the metadata, release the hold, and clear the marker of a branch
+  whose registry entry had already durably committed — leaving a live name backed by nothing.
+- **Destructive abort cleanup requires proof of unpublication.** The abort path calls
+  `RetractRegistrationAsync`, which reads the durable entry under its exclusive lock and deletes
+  it only when it still carries this create's id — so a replacement registered concurrently under
+  the same name is never removed. An absent entry counts as proof only when the registration
+  failure had a resolved outcome; when the commit outcome is unknown
+  (`TransactionFinalizeUnresolved`), the entry may still become durable, so the create keeps the
+  hold, the metadata, and the pending marker, and surfaces a retryable indeterminate error
+  instead of destroying state it cannot prove unpublished.
 
 ---
 
@@ -303,6 +329,15 @@ several layered fences:
   branch-create checks it *after* `RegisterAsync`. Raft linearizability guarantees exactly one
   wins — either branch-create sees the intent and retracts, or drop's descendant scan sees the
   new child and aborts. The intent is released on every exit path.
+- **Source liveness re-read (completed-drop fence).** The intent key only covers a drop still in
+  flight: a create that stalls between its metadata copy and `RegisterAsync` can resume after the
+  drop has fully finished and released the intent. So directly after the intent check,
+  branch-create re-reads the source's liveness from the persistent registry by its **immutable
+  id** (`TryResolveNameByIdAsync`, never the local cache) and aborts when the id is gone. The
+  order of the two reads closes the window: a drop whose scan missed the child holds the intent
+  from before the child's `RegisterAsync` until after its own unregister, so the create either
+  sees the intent, or its later liveness read sees the unregistered id. Ids are never reused, so
+  a recreate of the name under a new id still aborts, while a rename (same id) does not.
 - **Meta-last, resumable, paged purge.** The keyspace purge reads the catalog first, deletes
   row/index/stats, and deletes **meta (catalog included) last** — so a crashed purge can be
   resumed from the still-present catalog. A `dropping:{dbId}` marker is written before
@@ -322,7 +357,7 @@ node currently holds.
 
 | Marker | Written when | Cleared when | On crash, startup does |
 |--------|-------------|--------------|------------------------|
-| `pending:{branchId}` | before copying branch metadata | after publish, or on clean abort | scrub `{branchId}/meta` for any unregistered pending id |
+| `pending:{branchId}` | before copying branch metadata | after publish, or on clean abort | for own prior-run markers only: re-check registration against the *persistent* registry, take the id's fence, re-check again, then scrub `{branchId}/meta`; a registered id only loses its obsolete marker |
 | `drop-intent:{dbId}` | before a drop's descendant scan | after purge / on abort | clear own stale intents (a drop never spans a restart) |
 | `dropping:{dbId}` | before a drop's `UnregisterAsync` | after the purge completes | resume the keyspace purge for any own, no-longer-registered id |
 

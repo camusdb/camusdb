@@ -234,6 +234,124 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void ReadsEveryWalShardTuningKey()
+    {
+        // All eight in one document, each at a non-default value, so a key that parses into the wrong
+        // property — or not at all — cannot pass by coinciding with Kommander's default.
+        ConfigDefinition config = new ConfigReader().Read(
+            "kahuna:\n" +
+            "  wal_shard_write_buffer_size_mb: 32\n" +
+            "  wal_shard_min_write_buffer_number_to_merge: 3\n" +
+            "  wal_shard_max_write_buffer_number: 6\n" +
+            "  wal_shard_level0_file_num_compaction_trigger: 10\n" +
+            "  wal_shard_level0_slowdown_writes_trigger: 30\n" +
+            "  wal_shard_level0_stop_writes_trigger: 50\n" +
+            "  wal_shard_max_bytes_for_level_base_mb: 2048\n" +
+            "  wal_shard_universal_compaction: true");
+
+        Assert.That(config.Kahuna.WalShardWriteBufferSizeMb, Is.EqualTo(32));
+        Assert.That(config.Kahuna.WalShardMinWriteBufferNumberToMerge, Is.EqualTo(3));
+        Assert.That(config.Kahuna.WalShardMaxWriteBufferNumber, Is.EqualTo(6));
+        Assert.That(config.Kahuna.WalShardLevel0FileNumCompactionTrigger, Is.EqualTo(10));
+        Assert.That(config.Kahuna.WalShardLevel0SlowdownWritesTrigger, Is.EqualTo(30));
+        Assert.That(config.Kahuna.WalShardLevel0StopWritesTrigger, Is.EqualTo(50));
+        Assert.That(config.Kahuna.WalShardMaxBytesForLevelBaseMb, Is.EqualTo(2048));
+        Assert.That(config.Kahuna.WalShardUniversalCompaction, Is.True);
+    }
+
+    [Test]
+    public void WalShardTuningKeysAreUnsetWhenAbsent()
+    {
+        // Unset has to stay null all the way down, because null is what Kahuna reads as "leave
+        // Kommander's default for that field". A zero or a stand-in value here would silently retune
+        // every node's Raft log.
+        KahunaOptionsConfig kahuna = new ConfigReader().Read("kahuna:\n  storage: rocksdb").Kahuna;
+
+        Assert.That(kahuna.WalShardWriteBufferSizeMb, Is.Null);
+        Assert.That(kahuna.WalShardMinWriteBufferNumberToMerge, Is.Null);
+        Assert.That(kahuna.WalShardMaxWriteBufferNumber, Is.Null);
+        Assert.That(kahuna.WalShardLevel0FileNumCompactionTrigger, Is.Null);
+        Assert.That(kahuna.WalShardLevel0SlowdownWritesTrigger, Is.Null);
+        Assert.That(kahuna.WalShardLevel0StopWritesTrigger, Is.Null);
+        Assert.That(kahuna.WalShardMaxBytesForLevelBaseMb, Is.Null);
+        Assert.That(kahuna.WalShardUniversalCompaction, Is.Null);
+    }
+
+    [Test]
+    public void RejectsWalShardTuningValuesOutOfRange()
+    {
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  wal_shard_write_buffer_size_mb: 0"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  wal_shard_write_buffer_size_mb: 65537"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  wal_shard_max_bytes_for_level_base_mb: 0"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  wal_shard_min_write_buffer_number_to_merge: 0"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  wal_shard_max_write_buffer_number: 65"));
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  wal_shard_level0_stop_writes_trigger: 0"));
+
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("kahuna:\n  wal_shard_write_buffer_size_mb: -1"))!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("wal_shard_write_buffer_size_mb"));
+    }
+
+    [Test]
+    public void RejectsWalShardMemtableCountsWithoutHeadroomForTheMergeQuorum()
+    {
+        // A flush claims the merge quorum of immutable memtables, so the writer needs one mutable
+        // memtable above it or every rotation stalls the Raft log. Equality is the boundary case.
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read(
+                "kahuna:\n  wal_shard_min_write_buffer_number_to_merge: 4\n  wal_shard_max_write_buffer_number: 4"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("wal_shard_max_write_buffer_number"));
+        Assert.That(ex.Message, Does.Contain("wal_shard_min_write_buffer_number_to_merge"));
+
+        // The one-sided override is the realistic mistake: against Kommander's default of 4 maximum
+        // buffers, a merge count of 4 leaves no mutable memtable, and neither key looks wrong alone.
+        Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("kahuna:\n  wal_shard_min_write_buffer_number_to_merge: 4"));
+
+        // One above the merge count is the minimum Kommander accepts, so it must be accepted here.
+        Assert.DoesNotThrow(
+            () => new ConfigReader().Read(
+                "kahuna:\n  wal_shard_min_write_buffer_number_to_merge: 4\n  wal_shard_max_write_buffer_number: 5"));
+    }
+
+    [Test]
+    public void RejectsWalShardLevel0TriggersThatAreNotStrictlyIncreasing()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read(
+                "kahuna:\n" +
+                "  wal_shard_level0_file_num_compaction_trigger: 40\n" +
+                "  wal_shard_level0_slowdown_writes_trigger: 20\n" +
+                "  wal_shard_level0_stop_writes_trigger: 50"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("wal_shard_level0_slowdown_writes_trigger"));
+
+        // One-sided overrides, checked against Kommander's defaults (8 / 28 / 44) for the rest: a
+        // compaction trigger above the unset slowdown, and a slowdown above the unset stop trigger.
+        Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("kahuna:\n  wal_shard_level0_file_num_compaction_trigger: 30"));
+        Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("kahuna:\n  wal_shard_level0_slowdown_writes_trigger: 45"));
+    }
+
+    [Test]
+    public void AcceptsUniversalCompactionTogetherWithALevelBaseSize()
+    {
+        // RocksDB ignores level sizing under universal compaction, so the pair is inert rather than
+        // contradictory. Documented as inert and deliberately NOT an error: rejecting it would force
+        // an operator comparing the two layouts to edit two keys per arm instead of one.
+        ConfigDefinition config = new ConfigReader().Read(
+            "kahuna:\n  wal_shard_universal_compaction: true\n  wal_shard_max_bytes_for_level_base_mb: 2048");
+
+        Assert.That(config.Kahuna.WalShardUniversalCompaction, Is.True);
+        Assert.That(config.Kahuna.WalShardMaxBytesForLevelBaseMb, Is.EqualTo(2048));
+    }
+
+    [Test]
     public void ReadsAbandonedTransactionReaperOverrides()
     {
         // The reaper keys were shipped in the sample config.yml but were missing from the

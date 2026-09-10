@@ -28,6 +28,14 @@ public sealed class KahunaOptionsConfig
         "wal_sync_writes",
         "wal_group_commit_linger_ms",
         "wal_single_fsync_commit",
+        "wal_shard_write_buffer_size_mb",
+        "wal_shard_min_write_buffer_number_to_merge",
+        "wal_shard_max_write_buffer_number",
+        "wal_shard_level0_file_num_compaction_trigger",
+        "wal_shard_level0_slowdown_writes_trigger",
+        "wal_shard_level0_stop_writes_trigger",
+        "wal_shard_max_bytes_for_level_base_mb",
+        "wal_shard_universal_compaction",
         "default_transaction_timeout_ms",
         "max_transaction_timeout_ms",
         "max_concurrent_sessions",
@@ -143,6 +151,107 @@ public sealed class KahunaOptionsConfig
     /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalSingleFsyncCommit"/>.
     /// </summary>
     public bool? WalSingleFsyncCommit { get; set; }
+
+    // ── Raft WAL shard column-family sizing ───────────────────────────────────────────────────
+    // Eight knobs over the RocksDB column families that hold the Raft log. CamusDB sets none of
+    // them: every key below is null by default, and null leaves Kommander's own default for that
+    // field in force, byte for byte. They are overrides of a default that is tuned in Kommander and
+    // measured there, not a CamusDB posture.
+    //
+    // What they control. A Raft log row dies when a compaction pass covers it with a range
+    // tombstone. A row that meets its tombstone inside one flush unit is dropped at flush and never
+    // reaches L0; a row flushed earlier must be rewritten down the levels before it can die, and
+    // that rewrite is the write amplification these knobs cut. On the 2026-09-09 write probe the
+    // Raft log's RocksDB accounted for most of the ~21.6 KB the host wrote per operation, with
+    // compaction writing about twice what flush did.
+    //
+    // Three cautions apply to the whole group. They reach the WAL only when `wal_storage` is
+    // `rocksdb`. The memtable knobs multiply out to a worst case of
+    // `wal_shard_write_buffer_size_mb x wal_shard_max_write_buffer_number` per actively-written
+    // shard, which competes with `rocksdb_shared_memory_budget_mb` on a small node — under the
+    // shared WriteBufferManager an over-budget node flushes early, which quietly returns the flush
+    // unit to its old size instead of growing memory. And a wider flush unit is a wider WAL-replay
+    // unit, so a restart re-reads more before the node is ready.
+
+    /// <summary>
+    /// Size of one Raft WAL shard memtable in MiB (1..65536). Unset keeps Kommander's default of
+    /// 64 MiB. Raising it widens the flush unit, and so the window in which a log row and its range
+    /// tombstone die together; it also widens the replay unit a restart must re-read, and multiplies
+    /// with <see cref="WalShardMaxWriteBufferNumber"/> into this WAL's memtable ceiling. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardWriteBufferSizeMb"/>.
+    /// </summary>
+    public int? WalShardWriteBufferSizeMb { get; set; }
+
+    /// <summary>
+    /// Immutable Raft WAL memtables merged into one flush (1..64). Unset keeps Kommander's default
+    /// of 2. This is the cheaper way to widen the flush unit than
+    /// <see cref="WalShardWriteBufferSizeMb"/>: the span doubles without doubling the allocation
+    /// granularity the shared WriteBufferManager accounts in. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardMinWriteBufferNumberToMerge"/>.
+    /// </summary>
+    public int? WalShardMinWriteBufferNumberToMerge { get; set; }
+
+    /// <summary>
+    /// Maximum Raft WAL memtables, mutable plus immutable, per shard column family (1..64). Unset
+    /// keeps Kommander's default of 4. Must exceed
+    /// <see cref="WalShardMinWriteBufferNumberToMerge"/>: a flush claims the merge quorum, so the
+    /// writer needs one mutable memtable above it or every rotation stalls until the flush finishes.
+    /// <see cref="Validate"/> checks the effective pair, so a one-sided override cannot produce the
+    /// stalling combination. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardMaxWriteBufferNumber"/>.
+    /// </summary>
+    public int? WalShardMaxWriteBufferNumber { get; set; }
+
+    /// <summary>
+    /// L0 file count that triggers Raft WAL compaction into the base level (1..64). Unset keeps
+    /// Kommander's default of 8, raised from RocksDB's 4 so a short-lived row meets its range
+    /// tombstone in L0 instead of being rewritten down the levels first. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardLevel0FileNumCompactionTrigger"/>.
+    /// </summary>
+    public int? WalShardLevel0FileNumCompactionTrigger { get; set; }
+
+    /// <summary>
+    /// L0 file count at which RocksDB begins slowing Raft WAL writers (1..64). Unset keeps
+    /// Kommander's default of 28. Must sit above
+    /// <see cref="WalShardLevel0FileNumCompactionTrigger"/> and below
+    /// <see cref="WalShardLevel0StopWritesTrigger"/>; a slowdown at or below the compaction trigger
+    /// throttles the Raft quorum path before compaction has been asked to run even once. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardLevel0SlowdownWritesTrigger"/>.
+    /// </summary>
+    public int? WalShardLevel0SlowdownWritesTrigger { get; set; }
+
+    /// <summary>
+    /// L0 file count at which RocksDB stops Raft WAL writers entirely (1..64). Unset keeps
+    /// Kommander's default of 44. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardLevel0StopWritesTrigger"/>.
+    /// </summary>
+    public int? WalShardLevel0StopWritesTrigger { get; set; }
+
+    /// <summary>
+    /// <c>max_bytes_for_level_base</c> for the Raft WAL shard column families, in MiB (1..65536).
+    /// Unset keeps Kommander's default, which leaves RocksDB's own 256 MiB.
+    /// <para>
+    /// Sized at or above the retained-log window, the whole live log stays in the base level, where
+    /// a range tombstone meets its rows in one compaction instead of after an L5-to-L6 push — the
+    /// residue the write probe attributed compaction's bytes to. <b>Inert</b> when
+    /// <see cref="WalShardUniversalCompaction"/> is on: RocksDB does not consult level sizing under
+    /// universal compaction. Setting both is allowed and not an error; the level size simply has no
+    /// effect. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardMaxBytesForLevelBaseMb"/>.
+    /// </para>
+    /// </summary>
+    public int? WalShardMaxBytesForLevelBaseMb { get; set; }
+
+    /// <summary>
+    /// Switches the Raft WAL shard column families from leveled to universal compaction. Unset keeps
+    /// Kommander's default, leveled — the layout every other Kommander host runs. Universal holds
+    /// the log in a few large sorted runs, so a range tombstone drops covered rows without the
+    /// leveled L0-to-Lmax cascade; only the physical layout changes, because retention is bounded by
+    /// the durability floor either way. Makes
+    /// <see cref="WalShardMaxBytesForLevelBaseMb"/> inert. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftWalShardUniversalCompaction"/>.
+    /// </summary>
+    public bool? WalShardUniversalCompaction { get; set; }
 
     public int? DefaultTransactionTimeoutMs { get; set; }
 
@@ -859,6 +968,8 @@ public sealed class KahunaOptionsConfig
         if (WalGroupCommitLingerMs is < 0)
             throw InvalidConfig($"'kahuna.wal_group_commit_linger_ms' must be >= 0, got {WalGroupCommitLingerMs}");
 
+        ValidateWalShardTuning();
+
         if (DefaultTransactionTimeoutMs is <= 0)
             throw InvalidConfig($"'kahuna.default_transaction_timeout_ms' must be > 0, got {DefaultTransactionTimeoutMs}");
 
@@ -1234,6 +1345,79 @@ public sealed class KahunaOptionsConfig
     private const int DefaultLeaderBalancerReportIntervalMs = 5_000;
     private const int DefaultLeaderBalancerReportTtlMs = 20_000;
     private const int DefaultMinLeaderStabilityMs = 5_000;
+
+    /// <summary>
+    /// Range-checks the eight <c>kahuna.wal_shard_*</c> keys and cross-checks the two groups that only
+    /// make sense together.
+    ///
+    /// <para>Kommander's <c>RocksDbWAL</c> and Kahuna's own validator both guard these values, so
+    /// nothing invalid could actually reach RocksDB. What they cannot do is name the key the operator
+    /// wrote: those messages name a Kommander property or a Kahuna option. Checking here turns a
+    /// startup crash naming <c>ShardMaxWriteBufferNumber</c> into a configuration error naming
+    /// <c>kahuna.wal_shard_max_write_buffer_number</c>.</para>
+    ///
+    /// <para>The two cross-checks evaluate the <b>effective</b> values, substituting Kommander's
+    /// defaults for whatever was left unset. A partial override is the realistic mistake — raising
+    /// the merge count alone, or the slowdown trigger alone — and against the unset neighbours it can
+    /// form an invalid combination while neither key looks wrong on its own.</para>
+    /// </summary>
+    private void ValidateWalShardTuning()
+    {
+        ValidateShardSizeMb(WalShardWriteBufferSizeMb, "kahuna.wal_shard_write_buffer_size_mb");
+        ValidateShardSizeMb(WalShardMaxBytesForLevelBaseMb, "kahuna.wal_shard_max_bytes_for_level_base_mb");
+
+        ValidateShardCount(WalShardMinWriteBufferNumberToMerge, "kahuna.wal_shard_min_write_buffer_number_to_merge");
+        ValidateShardCount(WalShardMaxWriteBufferNumber, "kahuna.wal_shard_max_write_buffer_number");
+        ValidateShardCount(WalShardLevel0FileNumCompactionTrigger, "kahuna.wal_shard_level0_file_num_compaction_trigger");
+        ValidateShardCount(WalShardLevel0SlowdownWritesTrigger, "kahuna.wal_shard_level0_slowdown_writes_trigger");
+        ValidateShardCount(WalShardLevel0StopWritesTrigger, "kahuna.wal_shard_level0_stop_writes_trigger");
+
+        int merge = WalShardMinWriteBufferNumberToMerge ?? DefaultWalShardMinWriteBufferNumberToMerge;
+        int maxBuffers = WalShardMaxWriteBufferNumber ?? DefaultWalShardMaxWriteBufferNumber;
+
+        if (maxBuffers <= merge)
+            throw InvalidConfig(
+                $"effective 'kahuna.wal_shard_max_write_buffer_number' ({maxBuffers}) must be > effective " +
+                $"'kahuna.wal_shard_min_write_buffer_number_to_merge' ({merge}), or a flush claims every " +
+                "memtable and each rotation write-stalls the Raft log until that flush finishes");
+
+        int trigger = WalShardLevel0FileNumCompactionTrigger ?? DefaultWalShardLevel0FileNumCompactionTrigger;
+        int slowdown = WalShardLevel0SlowdownWritesTrigger ?? DefaultWalShardLevel0SlowdownWritesTrigger;
+        int stop = WalShardLevel0StopWritesTrigger ?? DefaultWalShardLevel0StopWritesTrigger;
+
+        if (trigger >= slowdown || slowdown >= stop)
+            throw InvalidConfig(
+                "the effective Raft WAL L0 triggers must be strictly increasing, but " +
+                $"'kahuna.wal_shard_level0_file_num_compaction_trigger' ({trigger}) < " +
+                $"'kahuna.wal_shard_level0_slowdown_writes_trigger' ({slowdown}) < " +
+                $"'kahuna.wal_shard_level0_stop_writes_trigger' ({stop}) does not hold, so writers would be " +
+                "slowed or stopped before compaction is ever asked to run");
+    }
+
+    private static void ValidateShardSizeMb(int? value, string field)
+    {
+        // The upper bound is 64 GiB: far above any sane flush unit, and low enough that the MiB-to-byte
+        // conversion Kahuna performs cannot overflow a long.
+        if (value is < 1 or > 65536)
+            throw InvalidConfig($"'{field}' must be between 1 and 65536 MiB, got {value}");
+    }
+
+    private static void ValidateShardCount(int? value, string field)
+    {
+        if (value is < 1 or > 64)
+            throw InvalidConfig($"'{field}' must be between 1 and 64, got {value}");
+    }
+
+    // Kommander's RocksDbWalTuning defaults, used to cross-check a one-sided override of either
+    // group above. Mirrored rather than read from RocksDbWalTuning.Default because CamusDB.Core does
+    // not reference Kommander directly, only Kahuna; if Kommander retunes one, Kahuna's own validator
+    // and RocksDbWAL still hold the line, and this check only becomes less precise, never wrong about
+    // a value the operator wrote.
+    private const int DefaultWalShardMinWriteBufferNumberToMerge = 2;
+    private const int DefaultWalShardMaxWriteBufferNumber = 4;
+    private const int DefaultWalShardLevel0FileNumCompactionTrigger = 8;
+    private const int DefaultWalShardLevel0SlowdownWritesTrigger = 28;
+    private const int DefaultWalShardLevel0StopWritesTrigger = 44;
 
     private static void ValidateStorage(string? value, string field)
     {

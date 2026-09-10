@@ -125,6 +125,87 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void NoWalShardKeys_LeaveEveryKnobNullOnEveryBaseline()
+    {
+        // Null is how Kahuna reads "leave Kommander's default for that field", and CamusDB has no
+        // posture of its own on these eight: the default is tuned and measured in Kommander. If a
+        // baseline ever states one, it must be a deliberate, measured choice — not a value that
+        // arrived because the builder stopped distinguishing unset from zero.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions[] baselines =
+        [
+            EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default),
+            EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/shard-db", new KahunaOptionsConfig(), CamusDBOptions.Default),
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/shard-db", new KahunaOptionsConfig(), CamusDBOptions.Default),
+        ];
+
+        foreach (EmbeddedKahunaOptions built in baselines)
+        {
+            Assert.That(built.RaftWalShardWriteBufferSizeMb, Is.Null);
+            Assert.That(built.RaftWalShardMinWriteBufferNumberToMerge, Is.Null);
+            Assert.That(built.RaftWalShardMaxWriteBufferNumber, Is.Null);
+            Assert.That(built.RaftWalShardLevel0FileNumCompactionTrigger, Is.Null);
+            Assert.That(built.RaftWalShardLevel0SlowdownWritesTrigger, Is.Null);
+            Assert.That(built.RaftWalShardLevel0StopWritesTrigger, Is.Null);
+            Assert.That(built.RaftWalShardMaxBytesForLevelBaseMb, Is.Null);
+            Assert.That(built.RaftWalShardUniversalCompaction, Is.Null);
+        }
+    }
+
+    [Test]
+    public void EveryWalShardKey_ReachesTheKahunaOptions()
+    {
+        // Non-default values throughout, so a knob mapped to the wrong Kahuna option cannot pass.
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Mode = "cluster",
+            InitialPartitions = 3,
+            Kahuna = new KahunaOptionsConfig
+            {
+                WalShardWriteBufferSizeMb = 32,
+                WalShardMinWriteBufferNumberToMerge = 3,
+                WalShardMaxWriteBufferNumber = 6,
+                WalShardLevel0FileNumCompactionTrigger = 10,
+                WalShardLevel0SlowdownWritesTrigger = 30,
+                WalShardLevel0StopWritesTrigger = 50,
+                WalShardMaxBytesForLevelBaseMb = 2048,
+                WalShardUniversalCompaction = true,
+            },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.RaftWalShardWriteBufferSizeMb, Is.EqualTo(32));
+        Assert.That(built.RaftWalShardMinWriteBufferNumberToMerge, Is.EqualTo(3));
+        Assert.That(built.RaftWalShardMaxWriteBufferNumber, Is.EqualTo(6));
+        Assert.That(built.RaftWalShardLevel0FileNumCompactionTrigger, Is.EqualTo(10));
+        Assert.That(built.RaftWalShardLevel0SlowdownWritesTrigger, Is.EqualTo(30));
+        Assert.That(built.RaftWalShardLevel0StopWritesTrigger, Is.EqualTo(50));
+        Assert.That(built.RaftWalShardMaxBytesForLevelBaseMb, Is.EqualTo(2048));
+        Assert.That(built.RaftWalShardUniversalCompaction, Is.True);
+    }
+
+    [Test]
+    public void AWalShardOverride_ReachesTheStandaloneBaselinesToo()
+    {
+        // Both standalone builders must carry the override as well. A knob honoured in cluster mode
+        // and silently dropped in standalone is the exact failure this whole surface exists to close.
+        KahunaOptionsConfig kahuna = new() { WalShardMaxBytesForLevelBaseMb = 2048 };
+
+        Assert.That(
+            EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/shard-db", kahuna, CamusDBOptions.Default)
+                .RaftWalShardMaxBytesForLevelBaseMb,
+            Is.EqualTo(2048));
+
+        Assert.That(
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/shard-db", kahuna, CamusDBOptions.Default)
+                .RaftWalShardMaxBytesForLevelBaseMb,
+            Is.EqualTo(2048));
+    }
+
+    [Test]
     public void RecentHeartbeat_StaysBelowTheCadenceOnEveryBaseline()
     {
         // Kahuna 1.6.3 derives the de-dup window from the cadence (a quarter of it) while it is unset,

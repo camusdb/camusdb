@@ -247,6 +247,47 @@ reads serve misses from the page cache instead; the page cache is charged to the
 cgroup and shows in `docker stats`, but it is reclaimable and does not threaten an OOM kill. Set it
 `true` to restore the block-cache-only footprint.
 
+### Raft WAL shard column families
+
+Eight `kahuna.wal_shard_*` keys size the RocksDB column families that hold the Raft log. **CamusDB sets
+none of them.** Each key is unset by default, and unset leaves Kommander's own default for that field in
+force, field for field — these are overrides of a default that is tuned and measured in Kommander, not a
+CamusDB posture. They take effect only when `kahuna.wal_storage` is `rocksdb`.
+
+A Raft log row dies when a compaction pass covers it with a range tombstone. A row that meets its
+tombstone inside one flush unit is dropped at flush and never reaches L0; a row flushed earlier has to be
+rewritten down the levels before it can die, and that rewrite is the write amplification these knobs cut.
+
+| Key | Kommander default | What it does |
+|-----|-------------------|--------------|
+| `wal_shard_write_buffer_size_mb` | 64 | Size of one shard memtable. Widens the flush unit — and the restart replay unit. |
+| `wal_shard_min_write_buffer_number_to_merge` | 2 | Immutable memtables merged into one flush. The cheaper way to widen the flush unit. |
+| `wal_shard_max_write_buffer_number` | 4 | Memtables per shard, mutable plus immutable. Must exceed the merge count. |
+| `wal_shard_level0_file_num_compaction_trigger` | 8 | L0 files that trigger compaction into the base level. |
+| `wal_shard_level0_slowdown_writes_trigger` | 28 | L0 files at which writers are slowed. |
+| `wal_shard_level0_stop_writes_trigger` | 44 | L0 files at which writers are stopped. |
+| `wal_shard_max_bytes_for_level_base_mb` | RocksDB's 256 | Base-level size. Sized above the retained log, the live log stays in the base level and one compaction annihilates a tombstone's rows. |
+| `wal_shard_universal_compaction` | `false` (leveled) | Universal compaction instead of leveled: few large sorted runs, no L0-to-Lmax cascade. |
+
+Three cautions apply to the whole group.
+
+- **Memory.** The worst case per actively-written shard is `wal_shard_write_buffer_size_mb` ×
+  `wal_shard_max_write_buffer_number` — 256 MB at the defaults. That competes with
+  `kahuna.rocksdb_shared_memory_budget_mb` on a small node. Under the shared WriteBufferManager an
+  over-budget node flushes early, which quietly returns the flush unit to its old size rather than
+  growing memory, so raising the memtable knobs without raising the budget can buy nothing.
+- **Restart.** A wider flush unit is a wider WAL-replay unit. A restart re-reads more before the node
+  reports ready; measure that, not only the bytes written.
+- **Universal makes the level size inert.** Setting `wal_shard_universal_compaction: true` together with
+  `wal_shard_max_bytes_for_level_base_mb` is accepted and is not an error, but RocksDB does not consult
+  level sizing under universal compaction, so the second key has no effect.
+
+Validation rejects a size outside 1..65536 MiB, a count outside 1..64, a
+`wal_shard_max_write_buffer_number` that does not exceed `wal_shard_min_write_buffer_number_to_merge`, and
+L0 triggers that are not strictly increasing. The last two are checked against the **effective** values,
+substituting Kommander's defaults for the keys left unset, so a one-sided override cannot form an invalid
+combination silently.
+
 ## Validation errors
 
 | Condition | Error |
@@ -264,5 +305,9 @@ cgroup and shows in `docker stats`, but it is reclaimable and does not threaten 
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |
 | `kahuna.staged_base_fence_retention_ms` ≤ 0 | `InvalidConfig` |
 | effective `kahuna.recent_heartbeat_ms` ≥ effective `kahuna.heartbeat_interval_ms` (the window is a quarter of the cadence while unset) | `InvalidConfig` |
+| `kahuna.wal_shard_write_buffer_size_mb` or `kahuna.wal_shard_max_bytes_for_level_base_mb` outside 1..65536 | `InvalidConfig` |
+| any `kahuna.wal_shard_*` count outside 1..64 | `InvalidConfig` |
+| effective `kahuna.wal_shard_max_write_buffer_number` ≤ effective `kahuna.wal_shard_min_write_buffer_number_to_merge` | `InvalidConfig` |
+| effective `kahuna.wal_shard_level0_*` triggers not strictly increasing (compaction < slowdown < stop) | `InvalidConfig` |
 
 See `CamusDB/Config/config.yml` for inline documentation of every field.

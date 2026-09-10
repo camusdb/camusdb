@@ -421,15 +421,17 @@ public static class CamusDBErrorCodes
     /// A branch database lost the snapshot-floor hold that pins its ancestor's MVCC history at the
     /// fork point, so inherited rows may already be reclaimed.
     ///
-    /// <para>The hold is leased. When the lease lapses — a renewal outage, full-cluster downtime
-    /// longer than the lease — Kahuna refuses further renewals and revision reclamation may trim
-    /// the pinned history. From that moment an ancestor read at the fork timestamp can silently
-    /// miss rows, and an empty result is indistinguishable from a correct empty answer. The engine
-    /// therefore fails closed: every read or write that would consult the branch's ancestry is
-    /// refused with this code instead of returning a possibly incomplete result. The state is
-    /// permanent for the branch — a lapsed hold cannot be re-acquired safely because the reclaimed
-    /// history does not come back. Recreate the branch from the parent. Maps to HTTP 410 (the
-    /// frozen view is gone).</para>
+    /// <para>A hold's protection ends when the hold is removed from Kahuna's replicated registry:
+    /// an explicit release, or the reaper's purge of a hold whose lease lapsed without renewal (a
+    /// bare lapse alone is recoverable — a registered hold constrains reclamation even while
+    /// lapsed, and the next renew revives it, including after downtime longer than the lease
+    /// inside the reaper's startup grace window). After removal, revision reclamation may trim
+    /// the pinned history, and an ancestor read at the fork timestamp can silently miss rows — an
+    /// empty result indistinguishable from a correct empty answer. The engine therefore fails
+    /// closed: every read or write that would consult the branch's ancestry is refused with this
+    /// code instead of returning a possibly incomplete result. The state is permanent for the
+    /// branch — re-acquiring at the old timestamp cannot bring reclaimed history back. Recreate
+    /// the branch from the parent. Maps to HTTP 410 (the frozen view is gone).</para>
     /// </summary>
     public const string BranchSnapshotProtectionLost = "CADB0539";
 

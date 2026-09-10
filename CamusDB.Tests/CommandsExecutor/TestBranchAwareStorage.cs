@@ -1312,7 +1312,12 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // Invoke the PRODUCTION scrubber — not a reimplementation. This exercises the real
         // bucket/prefix math, 3-round retry loop, per-key error handling, and marker clearing.
-        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry!);
+        // Run it through a FRESH registry: it carries a new startup epoch, so the marker written
+        // above (prior instance's epoch, same node) is a genuine crash remnant it may reclaim.
+        // The same-epoch marker of a live in-flight create is deliberately protected.
+        DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, afterRestart);
+        await afterRestart.DisposeAsync();
 
         // Sentinel meta key must be gone.
         int afterCount = await CountKeysUnder(kahuna, metaBucket, $"{orphanId}/");
@@ -1326,6 +1331,252 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // Root database is unaffected.
         List<QueryResultRow> rows = await SelectAll(rootName, rootDb, executor, "SELECT v FROM things");
         Assert.AreEqual(0, rows.Count, "root database must be unaffected by the orphan scrub");
+    }
+
+    /// <summary>
+    /// A pending-create marker can outlive a SUCCESSFUL branch creation, because the marker
+    /// cleanup after <c>RegisterAsync</c> is best-effort. The startup scrubber must then decide
+    /// registration against the persistent registry, not a node-local cache: a registry instance
+    /// loaded before the branch existed has no cached entry, and a cache-based check once let the
+    /// scrubber purge the live branch's schema namespace. The scrubber must clear only the
+    /// obsolete marker and leave the published branch's metadata intact.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StartupScrubber_StaleRegistryCache_DoesNotDestroyPublishedBranch()
+    {
+        (string rootName, DatabaseDescriptor _, CommandExecutor executor) =
+            await CreateRootWithTable("CREATE TABLE prot (id OBJECT_ID PRIMARY KEY, v STRING)");
+
+        // A second registry over the same store, loaded BEFORE the branch exists. Its in-memory
+        // cache never sees the branch — the deterministic stand-in for another cluster node's
+        // (or a freshly restarted node's) independent cache.
+        await using DatabaseRegistry staleRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+
+        string branchName = NewName();
+        DatabaseDescriptor branch = await executor.CreateDatabase(
+            new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName));
+        TrackDatabase(branchName, executor);
+
+        string branchId = sharedRegistry!.Get(branchName)!.Id;
+        Assert.IsNull(staleRegistry.Get(branchName), "precondition: branch absent from the stale cache");
+
+        // Plant a leftover pending marker for the PUBLISHED branch, stamped with this node's id
+        // and a prior epoch — a best-effort marker cleanup that failed, followed by a restart.
+        IKahuna kahuna = TestNode!.Kahuna;
+        int nodeId = TestNode!.Raft.GetLocalNodeId();
+        string pendingKey = $"_system/dbregistry/pending:{branchId}";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, pendingKey,
+            System.Text.Encoding.UTF8.GetBytes($"{nodeId}:prior-epoch"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        // Run the PRODUCTION scrubber through the stale-cached registry.
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, staleRegistry);
+
+        // The published branch's persisted schema namespace must be intact.
+        (KeyValueResponseType metaType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, $"{branchId}/meta/version", -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.Get, metaType,
+            "the scrubber must not delete a published branch's persisted schema");
+
+        // Only the obsolete marker is gone.
+        (KeyValueResponseType markerType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, pendingKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.DoesNotExist, markerType,
+            "the obsolete marker of a published branch must be cleared");
+
+        // The branch must still serve queries end to end.
+        List<QueryResultRow> rows = await SelectAll(branchName, branch, executor, "SELECT v FROM prot");
+        Assert.AreEqual(0, rows.Count, "published branch must remain fully usable after the scrub");
+    }
+
+    /// <summary>
+    /// A pending-create marker written by THIS run marks a branch creation that can still be
+    /// running: metadata copied, <c>RegisterAsync</c> not yet committed. The scrubber must treat a
+    /// current-epoch marker as live and touch neither the namespace nor the marker. Only a prior
+    /// run's marker is a crash remnant, because its create died with the process.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StartupScrubber_CurrentEpochPendingMarker_LeavesInFlightCreateAlone()
+    {
+        (string _, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateDatabase();
+
+        string branchId = await sharedRegistry!.AllocateIdAsync();
+        IKahuna kahuna = rootDb.Kahuna.Kahuna;
+
+        // Simulate a create in progress in this process: marker written by THIS registry instance
+        // (current epoch), metadata copy under way, id not yet registered.
+        await sharedRegistry.TrackPendingBranchAsync(branchId);
+        string metaKey = $"{branchId}/meta/version";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, metaKey, [0x01], null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        (KeyValueResponseType metaType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, metaKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.Get, metaType,
+            "an in-flight create's namespace must survive the scrub");
+
+        (KeyValueResponseType markerType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, $"_system/dbregistry/pending:{branchId}", -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.Get, markerType,
+            "an in-flight create's marker must survive the scrub");
+
+        // Clean up the simulated create.
+        await sharedRegistry.ClearPendingBranchAsync(branchId);
+        await kahuna.LocateAndTryDeleteKeyValue(
+            HLCTimestamp.Zero, metaKey, KeyValueDurability.Persistent, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// A pending-create marker owned by a DIFFERENT node can mark a live in-flight create on that
+    /// node, and only that node can tell its own crash remnants from its live operations. This
+    /// node's scrubber must leave a foreign marker and its namespace untouched, exactly like the
+    /// owner scoping of the drop-lifecycle markers.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StartupScrubber_ForeignNodePendingMarker_IsLeftForItsOwner()
+    {
+        (string _, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateDatabase();
+
+        string branchId = await sharedRegistry!.AllocateIdAsync();
+        IKahuna kahuna = rootDb.Kahuna.Kahuna;
+        int otherNodeId = TestNode!.Raft.GetLocalNodeId() + 1;
+
+        string pendingKey = $"_system/dbregistry/pending:{branchId}";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, pendingKey,
+            System.Text.Encoding.UTF8.GetBytes($"{otherNodeId}:remote-epoch"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        string metaKey = $"{branchId}/meta/version";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, metaKey, [0x01], null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        (KeyValueResponseType metaType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, metaKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.Get, metaType,
+            "another node's pending namespace must survive this node's scrub");
+
+        (KeyValueResponseType markerType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, pendingKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.Get, markerType,
+            "another node's pending marker must survive this node's scrub");
+
+        // Clean up the simulated foreign create.
+        await kahuna.LocateAndTryDeleteKeyValue(
+            HLCTimestamp.Zero, pendingKey, KeyValueDurability.Persistent, CancellationToken.None);
+        await kahuna.LocateAndTryDeleteKeyValue(
+            HLCTimestamp.Zero, metaKey, KeyValueDurability.Persistent, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Pending markers written before owner stamping carry a single anonymous 0x01 byte. The
+    /// scrubber still reclaims those — under the same fence and persistent-registration checks —
+    /// so a pre-upgrade crash remnant does not leak its namespace forever.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StartupScrubber_LegacyAnonymousPendingMarker_IsStillReclaimed()
+    {
+        (string _, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateDatabase();
+
+        string branchId = await sharedRegistry!.AllocateIdAsync();
+        IKahuna kahuna = rootDb.Kahuna.Kahuna;
+
+        // A legacy marker: the pre-owner-stamp single sentinel byte.
+        string pendingKey = $"_system/dbregistry/pending:{branchId}";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, pendingKey, [0x01], null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        string metaKey = $"{branchId}/meta/version";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, metaKey, [0x01], null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        (KeyValueResponseType metaType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, metaKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.DoesNotExist, metaType,
+            "a legacy crash remnant's namespace must still be purged");
+
+        (KeyValueResponseType markerType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, pendingKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.DoesNotExist, markerType,
+            "a legacy crash remnant's marker must be cleared after the purge");
+    }
+
+    /// <summary>
+    /// An id covered by an orphan-database record keeps its data on disk for
+    /// <c>CREATE DATABASE ... RELINK</c> until the GC retention window elapses. A stale pending
+    /// marker on such an id must not let the scrubber purge that retained data; only the marker
+    /// is cleared, and the reclaim stays with the orphan GC.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task StartupScrubber_IdRetainedByOrphanRecord_ClearsMarkerWithoutPurging()
+    {
+        (string _, DatabaseDescriptor rootDb, CommandExecutor executor) = await CreateDatabase();
+
+        string retainedId = await sharedRegistry!.AllocateIdAsync();
+        IKahuna kahuna = rootDb.Kahuna.Kahuna;
+
+        // Data retained under an orphan record (a deferred-dropped database awaiting relink/GC).
+        string metaKey = $"{retainedId}/meta/version";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, metaKey, [0x01], null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+        await sharedRegistry.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+        {
+            Id = retainedId,
+            FormerName = "retained_db",
+            DroppedAt = HLCTimestamp.Zero,
+        });
+
+        // A stale pending marker from a prior run of this node points at the same id.
+        int nodeId = TestNode!.Raft.GetLocalNodeId();
+        string pendingKey = $"_system/dbregistry/pending:{retainedId}";
+        await kahuna.LocateAndTrySetKeyValue(
+            HLCTimestamp.Zero, pendingKey,
+            System.Text.Encoding.UTF8.GetBytes($"{nodeId}:prior-epoch"), null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
+
+        (KeyValueResponseType metaType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, metaKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.Get, metaType,
+            "data retained by an orphan record must survive the scrub");
+
+        (KeyValueResponseType markerType, _) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero, pendingKey, -1,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None);
+        Assert.AreEqual(KeyValueResponseType.DoesNotExist, markerType,
+            "the stale marker on a retained id must be cleared");
+
+        // Clean up the simulated retained orphan.
+        await sharedRegistry.DeleteDatabaseOrphanAsync(retainedId);
+        await kahuna.LocateAndTryDeleteKeyValue(
+            HLCTimestamp.Zero, metaKey, KeyValueDurability.Persistent, CancellationToken.None);
     }
 
     /// <summary>

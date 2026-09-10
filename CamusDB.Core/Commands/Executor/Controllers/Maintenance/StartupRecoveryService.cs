@@ -199,8 +199,13 @@ internal sealed class StartupRecoveryService
     /// occurs after metadata is written but before the registry entry is published during
     /// <c>CreateBranchDatabaseAsync</c>.
     ///
-    /// <para>Safe to call concurrently with normal operations: orphan ids are not registered,
-    /// so no live transaction or table-open path can reference them. The purge is idempotent.</para>
+    /// <para><b>A pending marker alone is never proof of abandonment.</b> The marker cleanup after
+    /// a successful create is best-effort, so a marker can point at a live, published branch. The
+    /// sweep therefore acts only on markers this node wrote in a prior run (plus legacy anonymous
+    /// markers), decides registration against the persistent registry — never against the local
+    /// cache, whose absence proves nothing on a node that loaded before the branch existed — and
+    /// re-checks that decision under the id's fence before it destroys anything. A registered id
+    /// only gets its obsolete marker cleared. The purge itself is idempotent.</para>
     ///
     /// <para>Also clears <em>this node's own</em> stale drop-intent markers left by a crash during
     /// <c>DropDatabase</c>. A node's own drop-intent can never legitimately survive its restart
@@ -277,20 +282,62 @@ internal sealed class StartupRecoveryService
                 }
             }
 
-            List<string> orphanIds = await registry.LoadOrphanBranchIdsAsync().ConfigureAwait(false);
+            List<string> orphanIds = await registry.LoadReclaimablePendingBranchIdsAsync().ConfigureAwait(false);
             if (orphanIds.Count == 0)
                 return;
 
             if (context.Logger.IsEnabled(LogLevel.Information))
-                context.Logger.LogInformation("Found {Count} orphan branch namespace(s) to scrub on startup", orphanIds.Count);
+                context.Logger.LogInformation("Found {Count} reclaimable pending branch marker(s) to resolve on startup", orphanIds.Count);
 
             IKahuna kahuna = node.Kahuna;
             foreach (string orphanId in orphanIds)
             {
                 try
                 {
-                    await PurgeBranchMetaNamespaceAsync(orphanId, kahuna).ConfigureAwait(false);
-                    await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                    // A pending marker is not proof of abandonment: the marker cleanup after a
+                    // successful create is best-effort, so a PUBLISHED branch can still carry one.
+                    // Registration is decided against the persistent registry (a cache hit is
+                    // accepted; cache absence is not). A registered id gets only its obsolete
+                    // marker cleared — never a purge.
+                    if (await registry.TryResolveEntryByIdAsync(orphanId).ConfigureAwait(false) is not null)
+                    {
+                        await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // Fence the id before destroying anything, exactly like the resumed-drop path
+                    // above: relink and GC serialize on the same per-id fence, so nothing revives
+                    // or reclaims this id while the fence is held. If the fence is unavailable,
+                    // another operation is live on the id — leave the marker for a later pass.
+                    if (!await registry.AcquireDropIntentAsync(orphanId).ConfigureAwait(false))
+                        continue;
+
+                    try
+                    {
+                        // Re-check registration under the fence before the destructive purge.
+                        if (await registry.TryResolveEntryByIdAsync(orphanId).ConfigureAwait(false) is not null)
+                        {
+                            await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        // An orphan record means the id's data is deliberately retained for
+                        // CREATE DATABASE ... RELINK until the GC retention window elapses.
+                        // A purge here would break the retained-data invariant that record
+                        // documents, so only the marker is cleared.
+                        if (await registry.TryGetDatabaseOrphanAsync(orphanId).ConfigureAwait(false) is not null)
+                        {
+                            await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        await PurgeBranchMetaNamespaceAsync(orphanId, kahuna).ConfigureAwait(false);
+                        await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        await registry.ReleaseDropIntentAsync(orphanId).ConfigureAwait(false);
+                    }
                 }
                 catch (Exception ex)
                 {

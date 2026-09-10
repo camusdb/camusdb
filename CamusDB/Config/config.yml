@@ -397,6 +397,30 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   durable and its commit marker rides the next durable flush, without weakening durability. The
 #   standalone and cluster baselines both enable it; set false to restore the two-fsync commit path.
 #
+# The eight wal_shard_* keys size the RocksDB column families that hold the Raft log. They are
+# OVERRIDES OF KOMMANDER'S DEFAULTS, not CamusDB settings: every one is unset here, and unset leaves
+# Kommander's own value for that field in force, field for field. The default is tuned and measured in
+# Kommander, so change one only with a measurement of your own. They apply only when wal_storage is
+# rocksdb.
+#
+# Why they exist: a Raft log row dies when a compaction pass covers it with a range tombstone. A row
+# that meets its tombstone inside one flush unit is dropped at flush and never reaches L0; a row
+# flushed earlier has to be rewritten down the levels first, and that rewrite is the write
+# amplification these knobs cut.
+#
+# Three cautions apply to all eight:
+#   Memory  — worst case per actively-written shard is write_buffer_size_mb x max_write_buffer_number
+#             (256 MB at the defaults), competing with rocksdb_shared_memory_budget_mb on a small
+#             node. Over budget, the shared WriteBufferManager flushes early, which returns the flush
+#             unit to its old size instead of growing memory — so raising the memtable knobs without
+#             raising the budget can buy nothing.
+#   Restart — a wider flush unit is a wider WAL-replay unit, so a restart re-reads more before the
+#             node reports ready. Measure restart time, not only bytes written.
+#   Universal compaction makes wal_shard_max_bytes_for_level_base_mb inert. Setting both is accepted
+#             and is not an error; RocksDB simply does not consult level sizing under universal.
+#
+# See docs/configuration.md for the full table and the validation rules.
+#
 # To opt out of the rocksdb default and use sqlite for both KV and WAL:
 # kahuna:
 #   storage: sqlite
@@ -410,6 +434,15 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   wal_sync_writes: true
 #   wal_group_commit_linger_ms: 0
 #   wal_single_fsync_commit: true   # CamusDB baseline (both modes); false restores the two-fsync commit path
+#   # Raft WAL shard column families — all unset; each line shows Kommander's default.
+#   wal_shard_write_buffer_size_mb: 64                    # one shard memtable
+#   wal_shard_min_write_buffer_number_to_merge: 2         # immutable memtables merged into one flush
+#   wal_shard_max_write_buffer_number: 4                  # must be > min_write_buffer_number_to_merge
+#   wal_shard_level0_file_num_compaction_trigger: 8       # L0 files that trigger compaction
+#   wal_shard_level0_slowdown_writes_trigger: 28          # L0 files at which writers are slowed
+#   wal_shard_level0_stop_writes_trigger: 44              # L0 files at which writers are stopped
+#   wal_shard_max_bytes_for_level_base_mb: 256            # unset leaves RocksDB's own 256 MiB; size it above the retained log to keep the live log in the base level
+#   wal_shard_universal_compaction: false                 # true = universal instead of leveled; makes the line above inert
 #   default_transaction_timeout_ms: 5000
 #   max_transaction_timeout_ms: 3600000  # hard cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset => derived from that lifetime so a long serializable txn is not clamped/reaped early
 #   max_concurrent_sessions: 0           # 0 = no admission gate. For CamusDB this is a ceiling on concurrent WORK (a session per transaction), not on connections — see docs/transaction-priority.md

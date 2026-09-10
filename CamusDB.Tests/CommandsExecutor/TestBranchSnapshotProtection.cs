@@ -40,8 +40,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// branch whose hold lapsed mid-create.
 ///
 /// The lease is shortened to 6 s so the guard's freshness window (half the lease) passes within a
-/// test-sized delay; the hold is released explicitly to model the state after lease expiry, since
-/// a healthy embedded node renews faster than any real expiry could be waited out.
+/// test-sized delay. Since Kahuna 1.7.3 protection ends at the hold's REMOVAL from the registry
+/// (release, or the reaper's purge), not at bare lease expiry: the fail-closed tests release the
+/// hold explicitly to model that removal, while the revival test waits out a real lapse and
+/// proves the branch recovers.
 /// </summary>
 // Serial: boots an embedded Kahuna node per test and uses timing-sensitive lease windows.
 [TestFixture, NonParallelizable]
@@ -142,6 +144,43 @@ public sealed class TestBranchSnapshotProtection : BaseTest
         Assert.That(rows, Has.Count.EqualTo(1), "a protected branch must keep seeing the fork-point row");
         Assert.That(rows[0].Row["v"].StrValue, Is.EqualTo("original"),
             "the branch must see the fork-point value, not a later one");
+    }
+
+    /// <summary>
+    /// Recovery contract (Kahuna >= 1.7.3): a hold whose lease lapses while it stays registered
+    /// keeps constraining reclamation, and the next renew revives it. So a branch that merely
+    /// missed renewals — downtime, a renewal outage shorter than the reaper's purge — must come
+    /// back healthy: the guard's next verify revives the hold and the read returns the complete
+    /// fork-point data. No sweep runs in this fixture, and the reaper's first purge tick (60 s)
+    /// is far beyond the test, so the lapse window is deterministic.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task LapsedButRegisteredHold_NextReadRevives_HistoryIntact()
+    {
+        (string rootName, DatabaseDescriptor root, string branchName, DatabaseDescriptor branch, CommandExecutor executor) =
+            await CreateRootAndBranchWithRow();
+
+        // Let the lease lapse with nothing renewing it. The hold stays registered.
+        await Task.Delay(LeaseMs + 1000);
+
+        // Churn during the lapse: the protective floor must keep the fork-point history readable
+        // even though the lease is expired.
+        for (int i = 0; i < 30; i++)
+            await Exec(executor, root, rootName, $"UPDATE t SET v = \"updated{i}\" WHERE k = \"row\"");
+
+        // The next ancestor read re-verifies; the renew revives the lapsed hold instead of
+        // refusing, and the inherited row is intact.
+        List<QueryResultRow> rows = await Query(executor, branch, branchName, "SELECT * FROM t");
+        Assert.That(rows, Has.Count.EqualTo(1), "a lapsed-but-registered hold must recover, not fail the branch");
+        Assert.That(rows[0].Row["v"].StrValue, Is.EqualTo("original"),
+            "the fork-point value must survive churn during the lapse");
+
+        Assert.That(await sharedRegistry!.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Null,
+            "a recoverable lapse must not be recorded as lost protection");
+
+        (_, _, int liveHolds) = await root.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
+        Assert.That(liveHolds, Is.GreaterThanOrEqualTo(1), "the revived hold must be live again");
     }
 
     /// <summary>

@@ -265,6 +265,34 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.WalSingleFsyncCommit is bool singleFsync)
             baseline.RaftWalSingleFsyncCommit = singleFsync;
 
+        // Raft WAL shard column-family sizing. Each of the eight is left null on the baseline when the
+        // key is absent, because null is what Kahuna reads as "leave Kommander's default for that
+        // field". CamusDB deliberately has no baseline of its own here: these are overrides of a
+        // default that is tuned and measured in Kommander.
+        if (kahuna.WalShardWriteBufferSizeMb is int walShardWriteBufferMb)
+            baseline.RaftWalShardWriteBufferSizeMb = walShardWriteBufferMb;
+
+        if (kahuna.WalShardMinWriteBufferNumberToMerge is int walShardMinToMerge)
+            baseline.RaftWalShardMinWriteBufferNumberToMerge = walShardMinToMerge;
+
+        if (kahuna.WalShardMaxWriteBufferNumber is int walShardMaxBuffers)
+            baseline.RaftWalShardMaxWriteBufferNumber = walShardMaxBuffers;
+
+        if (kahuna.WalShardLevel0FileNumCompactionTrigger is int walShardCompactionTrigger)
+            baseline.RaftWalShardLevel0FileNumCompactionTrigger = walShardCompactionTrigger;
+
+        if (kahuna.WalShardLevel0SlowdownWritesTrigger is int walShardSlowdownTrigger)
+            baseline.RaftWalShardLevel0SlowdownWritesTrigger = walShardSlowdownTrigger;
+
+        if (kahuna.WalShardLevel0StopWritesTrigger is int walShardStopTrigger)
+            baseline.RaftWalShardLevel0StopWritesTrigger = walShardStopTrigger;
+
+        if (kahuna.WalShardMaxBytesForLevelBaseMb is int walShardLevelBaseMb)
+            baseline.RaftWalShardMaxBytesForLevelBaseMb = walShardLevelBaseMb;
+
+        if (kahuna.WalShardUniversalCompaction is bool walShardUniversal)
+            baseline.RaftWalShardUniversalCompaction = walShardUniversal;
+
         if (kahuna.DefaultTransactionTimeoutMs is int txnTimeout)
             baseline.DefaultTransactionTimeout = txnTimeout;
 
