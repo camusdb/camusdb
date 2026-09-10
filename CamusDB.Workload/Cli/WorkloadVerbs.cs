@@ -46,6 +46,9 @@ public abstract class CommonOptions
 
     [Option("request-timeout", HelpText = "Per-request timeout in seconds appended to every connection string (client default when omitted).")]
     public int? RequestTimeout { get; set; }
+
+    [Option("connection-options", HelpText = "Extra connection-string pairs appended verbatim to every connection string (read, write, setup), e.g. 'CoalescingDelay=0;ChannelPoolSize=4'. Recorded in the run manifest; runs that differ here are not comparable.")]
+    public string? ConnectionOptions { get; set; }
 }
 
 /// <summary>

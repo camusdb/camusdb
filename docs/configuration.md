@@ -229,6 +229,13 @@ a batch is dispatched while nothing is in flight, the cap bounds a batch's items
 ~1.4 ms fixed plus ~18 µs per item, so denser batches are the lever at one partition; a linger above the
 ~2.6 ms an item already waits trades write latency for density. This is the aggregator's linger, not
 `wal_group_commit_linger_ms` (Kommander's cross-partition WAL group commit, inert at one partition).
+Measured 2026-09-09: the linger itself is inert at full occupancy (1, 3 and 5 ms all gave the same
+batches), because a completing batch re-dispatches whatever is queued.
+
+`kahuna.key_value_write_post_completion_hold_ms` (default **0**, Kahuna 1.7.2) is the knob that does add
+density at full occupancy: after a batch completes the aggregator holds this long before dispatching
+the next, so more items accumulate per batch; the cost is that much added write latency. Qualify with an
+A/B before changing it.
 
 `kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
 RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read

@@ -68,4 +68,9 @@ public sealed record RunManifest(
     string Runtime,
     string Os,
     int ProcessorCount,
-    string ClientPackageVersion);
+    string ClientPackageVersion,
+
+    /// <summary>Extra connection-string pairs appended verbatim to every client connection (e.g.
+    /// <c>CoalescingDelay=0</c>), or null when none were passed. A client with different batching is a
+    /// different client: the latency it measures is not comparable across values.</summary>
+    string? ConnectionOptions = null);

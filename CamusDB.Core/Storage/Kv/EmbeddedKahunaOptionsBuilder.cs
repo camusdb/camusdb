@@ -371,6 +371,9 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.KeyValueWriteLingerMs is int writeLinger)
             baseline.KeyValueWriteLingerMs = writeLinger;
 
+        if (kahuna.KeyValueWritePostCompletionHoldMs is int hold)
+            baseline.KeyValueWritePostCompletionHoldMs = hold;
+
         if (kahuna.KeyValueWriteMaxBatchItems is int maxBatchItems)
             baseline.KeyValueWriteMaxBatchItems = maxBatchItems;
 
