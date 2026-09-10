@@ -346,7 +346,7 @@ public static class Program
         }
 
         ConnectionSettings settings = new(
-            locking, isolation, o.NoAutoPrepare, o.RequestTimeout, o.RoutingMode, o.RoutingNodes);
+            locking, isolation, o.NoAutoPrepare, o.RequestTimeout, o.RoutingMode, o.RoutingNodes, o.ConnectionOptions);
         await using ConnectionSet connections =
             await ConnectionSet.OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, settings, ct).ConfigureAwait(false);
 
@@ -842,6 +842,7 @@ public static class Program
         RequestTimeoutSeconds: o.RequestTimeout,
         RoutingMode: o.RoutingMode,
         RoutingNodes: o.RoutingNodes,
+        ConnectionOptions: o.ConnectionOptions,
         ExpectFaults: o.ExpectFaults,
         SchemaFingerprint: dataset.Fingerprint(),
         StartedAtUtc: DateTime.UtcNow.ToString("O"),

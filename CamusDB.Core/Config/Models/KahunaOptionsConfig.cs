@@ -62,6 +62,7 @@ public sealed class KahunaOptionsConfig
         "rocksdb_direct_reads",
         "key_value_write_max_in_flight_batches_per_partition",
         "key_value_write_linger_ms",
+        "key_value_write_post_completion_hold_ms",
         "key_value_write_max_batch_items",
         "backup_dir",
         "pitr_window_seconds",
@@ -370,6 +371,16 @@ public sealed class KahunaOptionsConfig
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteLingerMs"/>.
     /// </summary>
     public int? KeyValueWriteLingerMs { get; set; }
+
+    /// <summary>
+    /// How long the write aggregator holds after a batch completes before dispatching the next one, in
+    /// milliseconds (Kahuna 1.7.2, default 0 = dispatch at once). The linger never fires at full occupancy
+    /// because completion re-dispatches whatever is queued; this hold is the knob that actually adds batch
+    /// density there, at the cost of that much write latency. Measured round cost is ~1.4 ms fixed plus
+    /// ~18 µs per item, so a 2 ms hold on a 2.35 ms round is predicted to roughly double items per batch.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePostCompletionHoldMs"/>.
+    /// </summary>
+    public int? KeyValueWritePostCompletionHoldMs { get; set; }
 
     /// <summary>Upper bound on items per write-aggregator batch (Kahuna default 512). Maps to
     /// <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteMaxBatchItems"/>.</summary>
@@ -982,6 +993,9 @@ public sealed class KahunaOptionsConfig
 
         if (KeyValueWriteMaxInFlightBatchesPerPartition is < 1 or > 64)
             throw InvalidConfig($"'kahuna.key_value_write_max_in_flight_batches_per_partition' must be in 1..64, got {KeyValueWriteMaxInFlightBatchesPerPartition}");
+
+        if (KeyValueWritePostCompletionHoldMs is < 0 or > 1000)
+            throw InvalidConfig($"'kahuna.key_value_write_post_completion_hold_ms' must be in 0..1000, got {KeyValueWritePostCompletionHoldMs}");
 
         if (KeyValueWriteLingerMs is < 0 or > 1000)
             throw InvalidConfig($"'kahuna.key_value_write_linger_ms' must be in 0..1000, got {KeyValueWriteLingerMs}");

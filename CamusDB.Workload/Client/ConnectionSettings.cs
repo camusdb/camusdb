@@ -24,7 +24,8 @@ public sealed record ConnectionSettings(
     bool NoAutoPrepare = false,
     int? RequestTimeoutSeconds = null,
     string? RoutingMode = null,
-    string? RoutingNodes = null)
+    string? RoutingNodes = null,
+    string? ConnectionOptions = null)
 {
     public static ConnectionSettings Default { get; } = new();
 
@@ -42,6 +43,11 @@ public sealed record ConnectionSettings(
         // keeps inside a quoted value.
         if (!string.IsNullOrWhiteSpace(RoutingNodes))
             suffix += $";RoutingNodes='{RoutingNodes}'";
+        // Raw passthrough for driver knobs the CLI does not model (client batching: CoalescingDelay,
+        // CoalescingThreshold, ChannelPoolSize). Appended last so an explicit pair overrides nothing the
+        // CLI set on purpose except by the parser's own last-wins rule, which is the operator's intent.
+        if (!string.IsNullOrWhiteSpace(ConnectionOptions))
+            suffix += ";" + ConnectionOptions.Trim().Trim(';');
         return suffix;
     }
 }

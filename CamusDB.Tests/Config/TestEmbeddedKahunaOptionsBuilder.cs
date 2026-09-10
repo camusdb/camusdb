@@ -389,16 +389,18 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     [Test]
     public void WriteLingerAndBatchItems_Override_FlowThrough()
     {
-        KahunaOptionsConfig set = new() { KeyValueWriteLingerMs = 4, KeyValueWriteMaxBatchItems = 1024 };
+        KahunaOptionsConfig set = new() { KeyValueWriteLingerMs = 4, KeyValueWriteMaxBatchItems = 1024, KeyValueWritePostCompletionHoldMs = 2 };
         KahunaOptionsConfig unset = new();
 
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-set", set, CamusDBOptions.Default);
         Assert.That(built.KeyValueWriteLingerMs, Is.EqualTo(4));
         Assert.That(built.KeyValueWriteMaxBatchItems, Is.EqualTo(1024));
+        Assert.That(built.KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
 
         EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-unset", unset, CamusDBOptions.Default);
         Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
         Assert.That(defaults.KeyValueWriteMaxBatchItems, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteMaxBatchItems));
+        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
     }
 
     [Test]
