@@ -1279,7 +1279,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
     /// <c>CopyMetaForBranchAsync</c> and <c>RegisterAsync</c> during a branch creation attempt.
     ///
     /// This test invokes the real scrubber (not a reimplementation) to verify its bucket/prefix
-    /// math, 3-round retry loop, per-key error handling, and pending-marker cleanup end-to-end.
+    /// math, verified paged purge, per-key error handling, and pending-marker cleanup end-to-end.
     /// </summary>
     [Test]
     [NonParallelizable]
@@ -1311,7 +1311,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         Assert.Contains(orphanId, orphansBefore, "pending id not in registry must appear as an orphan");
 
         // Invoke the PRODUCTION scrubber — not a reimplementation. This exercises the real
-        // bucket/prefix math, 3-round retry loop, per-key error handling, and marker clearing.
+        // bucket/prefix math, verified paged purge, per-key error handling, and marker clearing.
         // Run it through a FRESH registry: it carries a new startup epoch, so the marker written
         // above (prior instance's epoch, same node) is a genuine crash remnant it may reclaim.
         // The same-epoch marker of a live in-flight create is deliberately protected.

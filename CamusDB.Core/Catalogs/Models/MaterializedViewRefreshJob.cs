@@ -31,6 +31,19 @@ public sealed class MaterializedViewRefreshJob
     /// <summary>Identifies one refresh attempt. Present so a log line can be tied to a specific run.</summary>
     public string JobId { get; set; } = "";
 
+    /// <summary>
+    /// The id of the database the refresh runs in — the database whose namespace this record was
+    /// written to, and whose fence the run holds.
+    ///
+    /// <para>Stated explicitly so a record found in some <em>other</em> database's namespace can be
+    /// told apart from that database's own work. The one way a record travels is a branch fork
+    /// copying its parent's metadata; the copier now leaves refresh work out, but a record that
+    /// reached a branch anyway names a run the branch never started, and the takeover must not
+    /// rebuild the branch's materialized view on its account. Empty on records written before this
+    /// field existed, which are treated as the database's own.</para>
+    /// </summary>
+    public string DatabaseId { get; set; } = "";
+
     /// <summary>The materialized view's immutable relation id — the fence key, and the record key.</summary>
     public string ViewTableId { get; set; } = "";
 

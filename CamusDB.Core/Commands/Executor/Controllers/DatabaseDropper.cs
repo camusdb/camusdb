@@ -272,7 +272,6 @@ internal sealed class DatabaseDropper
     internal async Task<bool> PurgeKeyspaceByIdAsync(IKahuna kahuna, string id, IReadOnlyList<TableSchema>? safetyNetTables, CancellationToken ct = default)
     {
         string metaBucket = $"{id}/meta";
-        string metaKeyPrefix = $"{id}/meta";
         string catalogPrefix = $"{id}/meta/keyspace:";
 
         // Phase A: read the keyspace catalog. Read-only — meta (including the catalog) is deleted last
@@ -362,9 +361,28 @@ internal sealed class DatabaseDropper
             complete &= await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false);
 
         // Phase E: delete the meta namespace LAST (catalog included) so it survived for every resume.
-        complete &= await PurgeBucketAsync(kahuna, id, metaBucket, metaKeyPrefix, ct).ConfigureAwait(false);
+        complete &= await PurgeMetaNamespaceAsync(kahuna, id, ct).ConfigureAwait(false);
 
         return complete;
+    }
+
+    /// <summary>
+    /// Deletes the whole <c>{id}/meta</c> namespace of database <paramref name="id"/> with verified
+    /// deletes, in bounded batches, and returns <c>true</c> only after a confirming scan proves the
+    /// namespace empty (the <see cref="PurgeBucketAsync"/> contract).
+    ///
+    /// <para>Shared by the last phase of a full keyspace purge and by the reclamation of a branch
+    /// whose creation never published (a crash or an abort between the metadata copy and the registry
+    /// publish). In both cases the caller holds a recovery marker that is the <em>only</em> handle on
+    /// the namespace, and it must clear that marker only on <c>true</c>. A <c>false</c> here means
+    /// some key is still present or its state is unknown, so the marker has to stay for a later
+    /// sweep; reporting success on an unverified delete would leak the namespace permanently, because
+    /// nothing else ever revisits it.</para>
+    /// </summary>
+    internal Task<bool> PurgeMetaNamespaceAsync(IKahuna kahuna, string id, CancellationToken ct = default)
+    {
+        string metaBucket = $"{id}/meta";
+        return PurgeBucketAsync(kahuna, id, metaBucket, metaBucket, ct);
     }
 
     /// <summary>

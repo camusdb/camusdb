@@ -93,6 +93,7 @@ table schema         {dbId}/meta/table:{tableId}
 table history        {dbId}/meta/history:{tableId}:{version}
 keyspace catalog     {dbId}/meta/keyspace:{tableId}    -- grow-only list of every index id ever allocated
 coordinator jobs     {dbId}/meta/coordinator:{tableId}~{elementName}
+refresh jobs         {dbId}/meta/mvrefresh:{viewTableId}       -- in-flight materialized-view rebuild; never copied to a branch
 ```
 
 Registry and lifecycle bookkeeping live under the reserved `_system/` prefix:
@@ -103,6 +104,7 @@ id sequence          _system/dbregistry/seq
 pending-create       _system/dbregistry/pending:{branchId}     -- crash handle for an unpublished branch (owner-tagged)
 drop-intent          _system/dbregistry/drop-intent:{dbId}     -- cross-node drop/create fence (owner-tagged)
 drop-in-progress     _system/dbregistry/dropping:{dbId}        -- crash-resume handle for a purge (owner-tagged)
+hold-lost            _system/dbregistry/holdlost:{dbId}        -- durable record that a snapshot hold was removed (§6)
 ```
 
 Two invariants worth internalizing:
@@ -157,10 +159,16 @@ timestamp — the same MVCC snapshot pattern used everywhere ancestor data is to
 `Tombstone` stops the walk and returns not-found, a miss descends to the next level.
 
 **Scans** run one ordered iterator per lineage level and stream a **k-way merge** (a
-`PriorityQueue`) with nearest-wins resolution and a seen-set for de-duplication. This is bounded
-in memory even for `LIMIT 1` against a huge parent — levels are merged lazily, never
-materialized. Merge keys are the *logical suffix* (the dbId prefixes differ per level): `rowId`
-for rows, `encodedKey` for unique indexes, `encodedKey + rowId` for non-unique.
+`PriorityQueue`) with nearest-wins resolution. Merge keys are the *logical suffix* (the dbId
+prefixes differ per level): `rowId` for rows, `encodedKey` for unique indexes,
+`encodedKey + rowId` for non-unique.
+
+**De-duplication is one last-suffix string, not a seen-set.** The heap priority is the pair
+`(suffix, levelIndex)`, so all entries that share a suffix dequeue consecutively, and the nearest
+level dequeues first. An entry whose suffix equals the previous one is therefore suppressed
+immediately (`lastHex` in `KvRowAccessor`, `lastSuffix` in `KvIndexAccessor`). Scan state is
+O(lineage depth), not O(distinct keys scanned). The merge is also bounded for `LIMIT 1` against a
+huge parent, because levels are merged lazily and never materialized.
 
 **Uniqueness and primary keys** are checked over the **union** of level 0 and the reachable
 ancestry, tombstone-aware (`ResolveBranchUniqueFlagsAsync`): a key present only in an ancestor
@@ -176,6 +184,9 @@ keyspace only; ancestor levels are frozen and need no locks.
 
 - **Parent DDL after a fork is invisible to the branch** — the branch owns an independent schema
   checkpoint copied at `forkT` (§7).
+- **A parent's in-flight materialized-view refresh is invisible to the branch.** The branch gets
+  the view's published contents as of `forkT` and no refresh job; the parent's rebuild finishes
+  or fails on the parent alone (§7, step 6).
 - **Branch DDL is invisible to the parent and siblings** — it writes only the branch dbId's
   metadata/log. Branch `CREATE TABLE`/`ADD INDEX` allocate new ids in the branch; renames stay
   metadata-only and branch-local.
@@ -266,7 +277,8 @@ turn that into a hard error instead:
 
 ## 7. Branch creation, step by step
 
-`CommandExecutor.CreateBranchDatabaseAsync` (under the **source's** `SchemaDdlSemaphore`):
+`DatabaseLifecycleService.CreateBranchDatabaseAsync` (under the **source's**
+`SchemaDdlSemaphore`):
 
 1. **Existence check via the persistent registry** (`TryResolveEntryAsync`, not the local cache).
    `IF NOT EXISTS` opens and returns an already-existing target; a plain create rejects early —
@@ -283,11 +295,25 @@ turn that into a hard error instead:
    never runs.
 6. **Copy schema metadata as of `forkT`** (`CopyMetaForBranchAsync` — an as-of-`forkT` scan, so a
    remote DDL committed after `forkT` is excluded, keeping the branch schema consistent with the
-   ancestor data it inherits). All copied keys are written in one transaction.
+   ancestor data it inherits). All copied keys are written in one transaction. Only the source's
+   **published** schema is copied. Keys that record work the source has in flight are left out:
+   coordinator jobs, the keyspace catalog, and a materialized-view refresh's job record
+   (`mvrefresh:`) together with the staging relation it is building into (its `table:` and
+   `history:` keys). A refresh in flight therefore never blocks a fork. The branch's materialized
+   view keeps whichever storage the view's own record named at `forkT` — the pre-refresh contents,
+   read through ancestry, or the rebuilt contents if the swap already committed — and inherits no
+   rebuild. Copying the job would let the branch's abandoned-refresh sweep, fenced under the
+   branch's own id, "take over" a run the branch never started and rewrite the view from post-fork
+   branch writes. As a second line of defense the job record carries the id of the database it
+   was written in, and a takeover that finds a record naming another database removes it without
+   restarting the rebuild.
 7. **Publish the registry entry** (`RegisterAsync`), then **check the drop-intent fence and
    re-read the source's liveness by its immutable id** (§8).
 8. **Clear the pending marker** on success; on abort, **prove the registration is not live
-   first**, then release the hold and inline-purge any copied metadata.
+   first**, then release the hold and inline-purge any copied metadata. The marker is cleared
+   only when that purge **verifiably** drained the namespace (every delete had a terminal
+   outcome and a confirming scan found nothing). An incomplete purge keeps the marker, so the
+   startup scrubber resumes it on the next restart.
 
 The invariant that falls out of this ordering: **every `{branchId}/meta/…` namespace is either
 registered, or has a durable pending marker** the startup scrubber will find. There is no window
@@ -342,7 +368,7 @@ several layered fences:
   row/index/stats, and deletes **meta (catalog included) last** — so a crashed purge can be
   resumed from the still-present catalog. A `dropping:{dbId}` marker is written before
   `UnregisterAsync` and cleared only after the purge completes; startup resumes any interrupted
-  purge. Deletes are **paged** in bounded batches (`CamusDBConfig.KeyspacePurgeBatchSize`) so a
+  purge. Deletes are **paged** in bounded batches (`CamusDBOptions.KeyspacePurgeBatchSize`) so a
   large database drops in bounded memory.
 
 ---
@@ -350,16 +376,41 @@ several layered fences:
 ## 9. Crash recovery
 
 Every crash-recovery handle in this feature is a **persistent, owner-tagged marker** plus a
-**startup scrubber** (`CommandExecutor.ScrubOrphanBranchNamespacesAsync`, fire-and-forget at
-startup). "Owner-tagged" means the marker's value is the writing node's stable Raft id, so a
-restarting node reclaims only *its own* crash remnants and never disturbs a marker another live
-node currently holds.
+**startup scrubber** (`StartupRecoveryService.ScrubOrphanBranchNamespacesAsync`, fire-and-forget
+at startup; `CommandExecutor` only delegates to it).
+
+**Owner-tagged** means the marker's value is `{nodeId}:{epoch}`. The node id is the stable Raft id
+of the node that wrote the marker. The epoch is a token minted once per process start. The lease
+fence appends `:{acquisitionToken}` to the markers it holds. The node id and the epoch together
+separate three cases that a bare marker cannot:
+
+- **This node, this epoch** — a live operation in this process. Recovery never touches it.
+- **This node, another epoch** — a remnant of a run that died. Recovery may reclaim it.
+- **Another node** — that node's marker, live or not. Recovery never touches it.
+
+One case is deliberately outside that rule. A pending-create marker written before owner stamping
+holds a single `0x01` byte and names no owner, so recovery cannot attribute it and treats it as
+reclaimable.
+
+**A marker alone is never proof of abandonment.** The marker cleanup after a successful create is
+best-effort, so a live, published branch can still carry its pending marker. Before the scrubber
+destroys anything, it therefore does three things:
+
+1. It re-reads registration from the **persistent** registry. The local cache can predate the
+   branch, so an absent cache entry proves nothing.
+2. It takes the id's drop-intent fence, which serializes the scrub against `RELINK` and the
+   orphan GC.
+3. It re-reads registration under that fence.
+
+A registered id loses only its obsolete marker. An id whose data an orphan record retains for
+`RELINK` also loses only its marker. An unresolved read skips the id, so uncertainty never
+destroys data.
 
 | Marker | Written when | Cleared when | On crash, startup does |
 |--------|-------------|--------------|------------------------|
-| `pending:{branchId}` | before copying branch metadata | after publish, or on clean abort | for own prior-run markers only: re-check registration against the *persistent* registry, take the id's fence, re-check again, then scrub `{branchId}/meta`; a registered id only loses its obsolete marker |
+| `pending:{branchId}` | before copying branch metadata | after publish, or after a *verified* purge on abort | for own prior-run markers and unstamped legacy markers only: re-check registration against the *persistent* registry, take the id's fence, re-check again, then scrub `{branchId}/meta` with verified, paged deletes; the marker is cleared only once a confirming scan finds the namespace empty, otherwise it stays for the next startup; a registered id only loses its obsolete marker |
 | `drop-intent:{dbId}` | before a drop's descendant scan | after purge / on abort | clear own stale intents (a drop never spans a restart) |
-| `dropping:{dbId}` | before a drop's `UnregisterAsync` | after the purge completes | resume the keyspace purge for any own, no-longer-registered id |
+| `dropping:{dbId}` | before a drop's `UnregisterAsync` | after the purge completes | under the id's fence, and only for an own, prior-run marker: re-check registration against the *persistent* registry, then resume the keyspace purge; the marker is cleared only after the purge verifiably completes |
 
 Two ordering choices make this robust: the pending marker is written *before* the metadata copy
 (so metadata never exists without a handle), and the drop marker is written *before*
@@ -381,7 +432,7 @@ gauges (under the `Kahuna` meter scope) that operators should dashboard:
 - `kahuna.snapshot_floor.missing_protected_version_total` — **must stay 0.** A non-zero value
   means reclamation touched a protected version — a durability fault; alert on it.
 
-**Lease / renewal.** `CamusDBConfig.BranchSnapshotHoldLeaseMs` (default `300_000` = 5 min) sets
+**Lease / renewal.** `CamusDBOptions.BranchSnapshotHoldLeaseMs` (default `300_000` = 5 min) sets
 the hold lease; the leader-owned renewer refreshes every `lease/3`. Choose it coarse enough that
 renewals are not a hot Raft path. If the renewer's node is unhealthy, failover moves the sweep to
 the new registry-partition leader; a branch only loses its hold if renewal stops for a full lease.
@@ -492,8 +543,8 @@ Unknown database name → database-not-found error.
 | Ancestry model | `DatabaseRegistryEntry`, `DatabaseBranchAncestor`, `DatabaseRegistry` |
 | Branch-aware reads/writes | `KvTableStore` (`ancestorStores[]`), `BranchKvCodec`, `TableOpener` |
 | Union uniqueness | `KvBranchReader.ResolveBranchUniqueFlagsAsync`, `RowUpdater`, `RowInserter` |
-| Create / drop / rename | `CommandExecutor` (`CreateBranchDatabaseAsync`, `DropDatabase`), `DatabaseDropper` |
-| Metadata copy | `CatalogsManager.CopyMetaForBranchAsync` |
+| Create / drop / rename | `DatabaseLifecycleService` (`CreateBranchDatabaseAsync`, `DropDatabase`, `RelinkDatabase`), `DatabaseDropper` (keyspace and meta purges). `CommandExecutor` is a facade that delegates to them. |
+| Metadata copy | `BranchMetaCopier.CopyMetaForBranchAsync`, reached through `CatalogsManager.CopyMetaForBranchAsync` |
 | Durability | `SnapshotHoldRenewer`, `EmbeddedKahuna.AmILeaderForKeyAsync`, `IKahuna` snapshot-floor API |
-| Recovery | `CommandExecutor.ScrubOrphanBranchNamespacesAsync`, the marker methods on `DatabaseRegistry` |
+| Recovery | `StartupRecoveryService.ScrubOrphanBranchNamespacesAsync`, the marker methods on `DatabaseRegistry` |
 | Branch tree queries | `SchemaQuerier.ShowBranches`, `SchemaQuerier.ShowAncestors` |

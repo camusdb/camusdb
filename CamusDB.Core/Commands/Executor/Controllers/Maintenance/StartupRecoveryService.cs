@@ -6,15 +6,11 @@
  * file that was distributed with this source code.
  */
 
-using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using Kahuna;
-using Kahuna.Server.KeyValues;
-using Kahuna.Shared.KeyValue;
-using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Maintenance;
@@ -138,60 +134,17 @@ internal sealed class StartupRecoveryService
     /// Purges the <c>{branchId}/meta/…</c> namespace written by <c>CopyMetaForBranchAsync</c>
     /// when a branch-creation attempt is abandoned — either by a process crash (startup scrubber
     /// path) or by an in-process abort after the copy but before <c>RegisterAsync</c> commits.
-    /// Uses a 3-round retry to absorb transient scan misses; each key is deleted idempotently.
+    ///
+    /// <para>Returns <c>true</c> only when every delete had a verified terminal outcome and a
+    /// confirming scan found the namespace empty; the caller may then clear the pending-create
+    /// marker. Returns <c>false</c> when a key is still present or the outcome of a scan or delete
+    /// is unknown. The caller must then <b>keep the marker</b>: it is the only handle the startup
+    /// scrubber has on this namespace, and clearing it after an unverified purge leaks the keys
+    /// forever. The purge itself is idempotent and paged in bounded batches, so a later sweep
+    /// simply resumes it.</para>
     /// </summary>
-    internal async Task PurgeBranchMetaNamespaceAsync(string branchId, IKahuna kahuna)
-    {
-        string metaBucket = $"{branchId}/meta";
-        string metaPrefix = $"{branchId}/";
-
-        for (int round = 0; round < 3; round++)
-        {
-            List<string> keys = [];
-
-            ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
-                HLCTimestamp.Zero, 
-                metaBucket, 
-                null, 
-                true, 
-                null, 
-                true, 
-                512,
-                HLCTimestamp.Zero, 
-                KeyValueDurability.Persistent, 
-                CancellationToken.None
-            ).ConfigureAwait(false);
-            
-            await foreach ((string key, ReadOnlyKeyValueEntry _) in cursor)
-            {
-                if (key.StartsWith(metaPrefix, StringComparison.Ordinal))
-                    keys.Add(key);
-            }
-
-            if (keys.Count == 0)
-                break;
-
-            foreach (string key in keys)
-            {
-                try
-                {
-                    await kahuna.LocateAndTryDeleteKeyValue(
-                        HLCTimestamp.Zero, 
-                        key,
-                        KeyValueDurability.Persistent, 
-                        CancellationToken.None
-                    ).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    context.Logger.LogWarning(ex, "Failed to delete orphan key '{Key}' for branch id {BranchId}", key, branchId);
-                }
-            }
-
-            if (context.Logger.IsEnabled(LogLevel.Information))
-                context.Logger.LogInformation("Purged {Count} meta key(s) for branch id {BranchId}", keys.Count, branchId);
-        }
-    }
+    internal Task<bool> PurgeBranchMetaNamespaceAsync(string branchId, IKahuna kahuna)
+        => databaseDropper.PurgeMetaNamespaceAsync(kahuna, branchId);
 
     /// <summary>
     /// Purges KV namespace entries for branch ids that appear in the pending-create set but
@@ -289,7 +242,10 @@ internal sealed class StartupRecoveryService
             if (context.Logger.IsEnabled(LogLevel.Information))
                 context.Logger.LogInformation("Found {Count} reclaimable pending branch marker(s) to resolve on startup", orphanIds.Count);
 
-            IKahuna kahuna = node.Kahuna;
+            // The purge runs through the registry's own client: the pending marker and the namespace
+            // it guards are one recovery unit, and a fault test that overrides that client must reach
+            // both halves (see DatabaseRegistry.Kahuna). In production it is the shared node.
+            IKahuna kahuna = registry.Kahuna;
             foreach (string orphanId in orphanIds)
             {
                 try
@@ -331,8 +287,22 @@ internal sealed class StartupRecoveryService
                             continue;
                         }
 
-                        await PurgeBranchMetaNamespaceAsync(orphanId, kahuna).ConfigureAwait(false);
-                        await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                        // Clear the marker only when the purge verifiably drained the namespace.
+                        // Otherwise it stays, so the next startup sweep resumes the purge; the
+                        // marker is the only discovery handle on these keys.
+                        if (await PurgeBranchMetaNamespaceAsync(orphanId, kahuna).ConfigureAwait(false))
+                        {
+                            await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+
+                            if (context.Logger.IsEnabled(LogLevel.Information))
+                                context.Logger.LogInformation("Purged orphaned meta namespace for branch id {BranchId}", orphanId);
+                        }
+                        else
+                        {
+                            context.Logger.LogWarning(
+                                "Purge of orphaned meta namespace for branch id {BranchId} is incomplete; leaving the pending marker for the next startup",
+                                orphanId);
+                        }
                     }
                     finally
                     {

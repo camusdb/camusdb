@@ -145,8 +145,11 @@ internal sealed class DatabaseLifecycleService
     /// Creates a branch database from <paramref name="ticket"/>.<see cref="CreateDatabaseTicket.BranchFrom"/>.
     /// The source must be schema-stable — <c>HeadSchemaVersion == SchemaVersion</c>, all columns and
     /// indexes in the Public state, and no persisted coordinator jobs — before the branch is taken.
-    /// Schema metadata is copied O(schema-size) to the branch namespace under the source's
-    /// <c>SchemaDdlSemaphore</c> to keep the copy point consistent.  The registry entry is published
+    /// A materialized-view refresh in flight on the source does <em>not</em> block the fork: its job
+    /// record and staging relation are the source's own work, and the copy leaves them out so the
+    /// branch opens with the view's published contents and no rebuild to inherit (see
+    /// <c>BranchMetaCopier</c>). Schema metadata is copied O(schema-size) to the branch namespace
+    /// under the source's <c>SchemaDdlSemaphore</c> to keep the copy point consistent.  The registry entry is published
     /// last ("metadata first, registry last") so an orphaned namespace from a crash between the two
     /// steps is cleaned up by the startup orphan-namespace scrubber rather than being served to clients.
     /// </summary>
@@ -291,8 +294,8 @@ internal sealed class DatabaseLifecycleService
                 // Raft linearizability guarantees: if drop's intent write committed before our
                 // RegisterAsync, we observe it here and abort; if our RegisterAsync committed first,
                 // drop's subsequent HasLiveDescendantsAsync scan sees our child and drop aborts
-                // instead.  One of those two cases always applies, so exactly one of drop or
-                // branch-create wins with no orphaned child and no purged-ancestor branch.
+                // instead. Neither of those two orderings leaves an orphaned child. A third
+                // ordering escapes this check alone; the liveness re-read below covers it.
                 if (await registry.HasDropIntentAsync(sourceDescriptor.Id).ConfigureAwait(false))
                     throw new CamusDBException(
                         CamusDBErrorCodes.DatabaseDoesntExist,
@@ -396,13 +399,18 @@ internal sealed class DatabaseLifecycleService
                 }
 
                 // If metadata was already written before the abort, purge it inline so the orphaned
-                // namespace does not linger. If the inline purge fails, leave the pending marker so
-                // the startup scrubber can still reclaim the namespace on next restart.
+                // namespace does not linger. The marker is cleared (in the finally below) only when
+                // the purge verifiably drained the namespace: an incomplete purge — a delete whose
+                // outcome is not a terminal success, a failed scan, or an exception — keeps the
+                // pending marker, because it is the startup scrubber's only handle on these keys.
+                // The purge runs through the registry's client for the same reason the scrubber
+                // does (see DatabaseRegistry.Kahuna); in production it is the shared node.
                 if (metaCopied)
                 {
+                    bool purged;
                     try
                     {
-                        await startupRecovery.PurgeBranchMetaNamespaceAsync(branchId, sourceKahuna).ConfigureAwait(false);
+                        purged = await startupRecovery.PurgeBranchMetaNamespaceAsync(branchId, registry.Kahuna).ConfigureAwait(false);
                     }
                     catch (Exception purgeEx)
                     {
@@ -411,6 +419,14 @@ internal sealed class DatabaseLifecycleService
                             branchId);
                         leaveMarkerForScrubber = true;
                         throw;
+                    }
+
+                    if (!purged)
+                    {
+                        leaveMarkerForScrubber = true;
+                        context.Logger.LogWarning(
+                            "Inline purge of orphaned branch metadata for id {BranchId} is incomplete; keeping the pending marker so the startup scrubber can resume it",
+                            branchId);
                     }
                 }
                 throw;
@@ -422,8 +438,9 @@ internal sealed class DatabaseLifecycleService
                 await creationKeepAlive.DisposeAsync().ConfigureAwait(false);
 
                 // Remove the pending marker whether creation succeeded or was cleanly aborted.
-                // EXCEPTION: if the inline purge failed the namespace is still present and the
-                // marker is the scrubber's only handle — keep it so startup can reclaim it.
+                // EXCEPTION: if the inline purge did not verifiably complete, the namespace may
+                // still be present and the marker is the scrubber's only handle — keep it so
+                // startup can reclaim it.
                 if (!leaveMarkerForScrubber)
                     await registry.ClearPendingBranchAsync(branchId).ConfigureAwait(false);
             }
@@ -478,9 +495,10 @@ internal sealed class DatabaseLifecycleService
         // it to obtain the semaphore. If the open itself fails the descriptor is unusable and no
         // concurrent branch-create can be in flight against it, so we fall through without the lock.
         //
-        // Cross-node limitation (documented): a branch-create racing on a different cluster node
-        // can still interleave because the registry KV scan and the remote Open are not atomic.
-        // A stronger cross-node guard (e.g. a replicated drop-lock key) is deferred.
+        // This semaphore is node-local, and the registry KV scan and a remote Open are not atomic,
+        // so it fences a branch-create on this node only. The cross-node case is fenced instead by
+        // the replicated drop-intent marker acquired below, together with the source-liveness
+        // re-read that branch-create runs after it publishes the child.
         DatabaseDescriptor? targetDescriptor = null;
         try
         {
@@ -500,6 +518,9 @@ internal sealed class DatabaseLifecycleService
         //   (a) intent committed before branch-create's RegisterAsync: branch-create sees it and aborts, or
         //   (b) branch-create's RegisterAsync committed first: HasLiveDescendantsAsync below sees the child
         //       and this drop aborts with DatabaseHasLiveDescendants.
+        // A branch-create that stalls before RegisterAsync can also resume after this drop completes
+        // and releases the marker. That ordering is fenced on the create side, which re-reads the
+        // source's liveness by its immutable id after it publishes the child.
         // The intent is held through purge and released on every exit path (success, descendant check
         // failure, or Drop error) via the outer finally below.
         bool dropIntentAcquired = false;

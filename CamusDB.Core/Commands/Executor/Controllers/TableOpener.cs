@@ -175,7 +175,9 @@ internal sealed class TableOpener
         // independently when it first opens the table; this AsyncLazy runs once per node per process,
         // which is exactly the "every node, every startup" contract RegisterKeyRangeAsync requires.
         // The seed itself is a single replicated meta write that only the meta-partition leader
-        // commits (a no-op on other nodes — the descriptor arrives by replication). Idempotent.
+        // commits. A node that does not lead that partition forwards the seed to the leader and
+        // waits for the descriptor to replicate back, so the call is correct from any node.
+        // Idempotent.
         // Never register {db}/meta (Kahuna rejects it — the schema log must stay hash-routed for
         // total ordering). Index spaces are registered below, after column types are resolved.
         //
@@ -193,8 +195,10 @@ internal sealed class TableOpener
         // data survives: re-registering later re-seeds a single whole-space descriptor at the initial
         // generation, discarding the boundaries the auto-splitter had discovered for data that is still
         // physically distributed by them.
-        // Lazy-on-open registration is the correct contract: K1 forwarding means the very first
-        // writer pays at most one extra round-trip to establish the range descriptor.
+        // Lazy-on-open registration is the correct contract: because a non-leader forwards the
+        // seed to the meta-partition leader, the very first writer on each node pays at most one
+        // extra round-trip to establish the range descriptor. Registering at CREATE TABLE time
+        // would buy nothing.
         if (database.Options.KeyRangeShardingEnabled)
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 

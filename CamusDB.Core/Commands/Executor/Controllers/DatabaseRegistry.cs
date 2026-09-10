@@ -44,6 +44,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 {
     private readonly IKahuna kahuna;
 
+    /// <summary>
+    /// The KV client this registry's entries and recovery markers live on. A recovery step that
+    /// destroys a namespace guarded by one of those markers runs through this same client, so the
+    /// marker and the namespace are always observed through one node and a fault seen by the marker
+    /// write is the fault the purge sees. It also lets the test-only client override of
+    /// <see cref="OpenForTestingAsync"/> reach the purge, so a fault test covers the whole recovery
+    /// unit and not only the marker.
+    /// </summary>
+    internal IKahuna Kahuna => kahuna;
+
     /// <summary>Configuration for this engine; injected, never ambient.</summary>
     private readonly CamusDBOptions options;
     private readonly KvTransactionsManager transactions;
@@ -1456,9 +1466,20 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     //   either A's set happened before B's register and B will observe it here, or B's register
     //   happened before A's set in which case A's subsequent descendant scan sees B's child and
     //   A aborts instead).
-    // Together these two checks guarantee exactly one wins with no orphaned child.
+    // Those two checks alone do not cover a third ordering: A's descendant scan runs before B
+    // registers, A finishes the whole drop, and A releases the key — all while B is stalled between
+    // its metadata copy and RegisterAsync. B then reads an absent key, which only proves that no
+    // drop is in flight, not that the source still exists. B therefore runs a second gate right
+    // after this one: it re-reads the source's liveness by its immutable id from the persistent
+    // registry (TryResolveNameByIdAsync) and aborts when the id is gone. See
+    // DatabaseLifecycleService.CreateBranchDatabaseAsync. The two reads in that order close the
+    // window, because a drop that missed the child holds this key from before the child's
+    // RegisterAsync until after its own UnregisterAsync.
     //
-    // Keys: _system/dbregistry/drop-intent:{dbId}  (value is a single 0x01 sentinel byte)
+    // Keys: _system/dbregistry/drop-intent:{dbId}  (value is the owner stamp "{nodeId}:{epoch}",
+    // followed by the ":{acquisitionToken}" the lease fence appends per acquisition — see
+    // LocalOwnerValue and IsOwnStaleMarker. Startup recovery parses it to reclaim only this node's
+    // own prior-run remnants, never a live drop another node holds.)
 
     private string DropIntentKey(string dbId) => $"{keyPrefix}dbregistry/drop-intent:{dbId}";
 
@@ -1537,7 +1558,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// purged at any moment. A branch-create that detects this after registering must unregister the
     /// newly-created branch and abort.
     ///
-    /// <para>This read is the second half of the cross-node drop/create fence, so an <em>indeterminate</em>
+    /// <para><b>An absent marker does not prove the source still exists.</b> It proves only that no
+    /// drop is in flight right now: a drop that already finished released its marker. The create path
+    /// therefore follows this read with an authoritative liveness re-read of the source's immutable id
+    /// (<see cref="TryResolveNameByIdAsync"/>), and the two reads in that order close the window.</para>
+    ///
+    /// <para>This read is part of the cross-node drop/create fence, so an <em>indeterminate</em>
     /// result must never be reported as "no drop". Only an authoritative key-absent response
     /// (<see cref="KeyValueResponseType.DoesNotExist"/>) returns <c>false</c>; a present marker
     /// (<see cref="KeyValueResponseType.Get"/>) returns <c>true</c>; transient statuses

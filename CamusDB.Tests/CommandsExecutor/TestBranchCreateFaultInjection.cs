@@ -825,4 +825,191 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         Assert.That(liveHolds, Is.GreaterThanOrEqualTo(1),
             "the published branch's snapshot hold on the renamed parent must stay live");
     }
+
+    /// <summary>
+    /// Fault fake for an incomplete branch-metadata purge. While <see cref="FailMetaDeletes"/> is on,
+    /// every delete of a key under a branch's <c>{branchId}/meta/</c> namespace fails (a thrown
+    /// exception, or an <c>Errored</c> status) while every other operation — including the delete of
+    /// the pending-create marker itself — passes through to the real node. That is exactly the shape
+    /// that once lost the recovery handle: the purge "finished", the marker was deleted, and the
+    /// namespace leaked with nothing left to find it. Optionally also forces the post-publication
+    /// drop-intent check to see a concurrent drop, so a real branch-create takes its abort path after
+    /// the metadata copy. Records the branch id from the pending-create marker write, since an aborted
+    /// create leaves no other visible record of the id it allocated.
+    /// </summary>
+    private sealed class FailBranchMetaDeleteKahuna : DelegatingKahuna
+    {
+        private readonly bool abortCreate;
+        private readonly bool throwOnDelete;
+        private int metaDeleteAttempts;
+
+        public FailBranchMetaDeleteKahuna(IKahuna inner, bool abortCreate, bool throwOnDelete, string? branchId = null)
+            : base(inner)
+        {
+            this.abortCreate = abortCreate;
+            this.throwOnDelete = throwOnDelete;
+            ObservedBranchId = branchId;
+        }
+
+        /// <summary>The branch whose meta deletes are faulted; captured from the marker write when not given.</summary>
+        public string? ObservedBranchId { get; private set; }
+
+        /// <summary>Turn off to let a later sweep finish the purge.</summary>
+        public volatile bool FailMetaDeletes = true;
+
+        /// <summary>How many branch meta deletes were refused; proves the purge was attempted, not skipped.</summary>
+        public int MetaDeleteAttempts => Volatile.Read(ref metaDeleteAttempts);
+
+        public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
+            HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision,
+            KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken,
+            long routedGeneration = 0, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            const string pendingMarker = "dbregistry/pending:";
+            int idx = key.IndexOf(pendingMarker, StringComparison.Ordinal);
+            if (idx >= 0 && ObservedBranchId is null)
+                ObservedBranchId = key[(idx + pendingMarker.Length)..];
+
+            return base.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision,
+                flags, expiresMs, durability, cancellationToken, routedGeneration, coordinatorKey, operationId);
+        }
+
+        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+            HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
+            KeyValueDurability durability, CancellationToken cancellationToken,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            if (abortCreate && key.Contains("dbregistry/drop-intent:", StringComparison.Ordinal))
+                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.Get, null));
+
+            return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
+                cancellationToken, coordinatorKey, operationId);
+        }
+
+        public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(
+            HLCTimestamp transactionId, string key, KeyValueDurability durability,
+            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            if (FailMetaDeletes && ObservedBranchId is not null
+                && key.StartsWith($"{ObservedBranchId}/meta/", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref metaDeleteAttempts);
+                if (throwOnDelete)
+                    throw new InvalidOperationException("injected branch meta delete failure");
+                return Task.FromResult((KeyValueResponseType.Errored, 0L, HLCTimestamp.Zero));
+            }
+
+            return base.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken, coordinatorKey, operationId);
+        }
+    }
+
+    /// <summary>
+    /// Startup scrub of an abandoned branch namespace whose metadata deletes all fail, while the
+    /// marker delete would succeed. The pending-create marker must survive — it is the only handle
+    /// the scrubber has on the namespace — and the namespace must still be intact. Once the fault is
+    /// gone, a later sweep (a fresh registry, i.e. the next startup) must finish the purge and only
+    /// then clear the marker.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task OrphanScrub_IncompletePurge_KeepsPendingMarker_ThenLaterSweepFinishes()
+    {
+        await using DatabaseRegistry writerRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+        await using CommandExecutor executor = BuildExecutorWith(writerRegistry);
+
+        // An allocated id with copied metadata and a durable marker but no registry entry: the state a
+        // crash between CopyMetaForBranchAsync and RegisterAsync leaves behind.
+        string orphanId = await writerRegistry.AllocateIdAsync();
+        IKahuna kahuna = TestNode!.Kahuna;
+        string[] metaKeys = [$"{orphanId}/meta/version", $"{orphanId}/meta/table:1", $"{orphanId}/meta/history:1:1"];
+        foreach (string metaKey in metaKeys)
+            await kahuna.LocateAndTrySetKeyValue(
+                HLCTimestamp.Zero, metaKey, [0x01], null, -1,
+                KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
+        await writerRegistry.TrackPendingBranchAsync(orphanId);
+
+        Assert.That(await CountMetaKeysHeadlessAsync(kahuna, orphanId), Is.EqualTo(metaKeys.Length),
+            "sanity: the orphan namespace must be present before the scrub");
+
+        // A scrub from a later run (fresh registry = new startup epoch, so the marker is reclaimable)
+        // whose branch-meta deletes all fail.
+        FailBranchMetaDeleteKahuna fault = new(kahuna, abortCreate: false, throwOnDelete: true, branchId: orphanId);
+        await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, faultRegistry);
+
+        Assert.That(fault.MetaDeleteAttempts, Is.GreaterThan(0),
+            "sanity: the scrub must have attempted (and been refused) the branch meta deletes");
+        Assert.That(await writerRegistry.PendingMarkerExistsForTestingAsync(orphanId), Is.True,
+            "an incomplete purge must keep the pending-create marker: it is the only recovery handle on the namespace");
+        Assert.That(await CountMetaKeysHeadlessAsync(kahuna, orphanId), Is.EqualTo(metaKeys.Length),
+            "the namespace must be intact after the failed purge");
+
+        // The fault is gone; the next startup sweep must finish the purge and clear the marker.
+        fault.FailMetaDeletes = false;
+        await using DatabaseRegistry laterRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, laterRegistry);
+
+        Assert.That(await CountMetaKeysHeadlessAsync(kahuna, orphanId), Is.EqualTo(0),
+            "a later sweep must finish the purge once deletes succeed");
+        Assert.That(await writerRegistry.PendingMarkerExistsForTestingAsync(orphanId), Is.False,
+            "the marker is cleared only after the purge verifiably drained the namespace");
+    }
+
+    /// <summary>
+    /// The in-process counterpart: a real branch-create aborts cleanly after its metadata copy (the
+    /// registration is retracted and the hold released), but its inline purge cannot delete the copied
+    /// metadata. The abort must keep the pending-create marker and the namespace, so the startup
+    /// scrubber can resume the purge; once it can delete, that scrub must finish the job and clear the
+    /// marker.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task InlineAbort_IncompletePurge_KeepsPendingMarker_ThenStartupScrubFinishes()
+    {
+        string branchName = "b_" + Guid.NewGuid().ToString("n");
+
+        FailBranchMetaDeleteKahuna fault = new(TestNode!.Kahuna, abortCreate: true, throwOnDelete: false);
+        await using DatabaseRegistry faultRegistry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
+        await using CommandExecutor executor = BuildExecutorWith(faultRegistry);
+
+        string rootName = "r_" + Guid.NewGuid().ToString("n");
+        DatabaseDescriptor rootDb = await executor.CreateDatabase(new CreateDatabaseTicket(rootName, ifNotExists: false));
+        TrackDatabase(rootName, executor);
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: rootName,
+            sql: "CREATE TABLE t (id OID PRIMARY KEY, name STRING)", parameters: null));
+
+        // The create publishes, sees the (faked) concurrent drop, and takes the clean-abort path.
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.CreateDatabase(new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName)));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.DatabaseDoesntExist),
+            "the create must abort on the concurrent-drop fence, not on the purge");
+
+        string? branchId = fault.ObservedBranchId;
+        Assert.That(branchId, Is.Not.Null, "sanity: the create must have written its pending-create marker");
+        Assert.That(fault.MetaDeleteAttempts, Is.GreaterThan(0),
+            "sanity: the abort must have attempted (and been refused) the inline purge");
+
+        IKahuna kahuna = TestNode!.Kahuna;
+        Assert.That(await faultRegistry.TryResolveEntryAsync(branchName), Is.Null,
+            "the aborted branch must not remain registered");
+        (_, _, int liveHolds) = await kahuna.GetSnapshotFloor(CancellationToken.None);
+        Assert.That(liveHolds, Is.EqualTo(0), "a clean abort must release the branch's snapshot hold");
+        Assert.That(await faultRegistry.PendingMarkerExistsForTestingAsync(branchId!), Is.True,
+            "an incomplete inline purge must keep the pending-create marker as the scrubber's recovery handle");
+        Assert.That(await CountMetaKeysHeadlessAsync(kahuna, branchId!), Is.GreaterThan(0),
+            "the copied metadata must still be present after the failed inline purge");
+
+        // Next startup: the marker belongs to a prior epoch of this node, so the scrubber reclaims it.
+        fault.FailMetaDeletes = false;
+        await using DatabaseRegistry afterRestart = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+        await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, afterRestart);
+
+        Assert.That(await CountMetaKeysHeadlessAsync(kahuna, branchId!), Is.EqualTo(0),
+            "the startup scrub must finish the purge the abort could not");
+        Assert.That(await afterRestart.PendingMarkerExistsForTestingAsync(branchId!), Is.False,
+            "the marker is cleared only after the scrub verifiably drained the namespace");
+        Assert.That(await afterRestart.TryResolveEntryAsync(rootName), Is.Not.Null,
+            "the parent must be unaffected");
+    }
 }

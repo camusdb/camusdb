@@ -184,6 +184,7 @@ internal sealed class MaterializedViewRefresher
         await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
         {
             JobId = ObjectIdGenerator.Generate().ToString(),
+            DatabaseId = database.Id,
             ViewTableId = viewTableId,
             ViewName = viewName,
             StagingTableId = stagingTableId,
@@ -527,8 +528,22 @@ internal sealed class MaterializedViewRefresher
         int spent = abandoned.TakeoverAttempts;
         int allowed = database.Options.MaterializedViewRefreshTakeoverAttempts;
 
+        // A record that names another database describes a run this database never started — it
+        // could only have arrived by a branch fork copying its parent's namespace. Nothing about it
+        // is abandoned work of THIS database, so the rebuild it would trigger is one nobody asked
+        // for, run against base tables that may already hold post-fork writes. The record and any
+        // storage that was copied with it are removed; the view keeps the contents it forked with.
+        bool foreign = !string.IsNullOrEmpty(abandoned.DatabaseId)
+            && !string.Equals(abandoned.DatabaseId, database.Id, StringComparison.Ordinal);
+
+        if (foreign)
+            logger.LogWarning(
+                "Refresh job {JobId} found in database '{DatabaseName}' belongs to database id {OwnerDatabaseId}; removing the record without restarting its rebuild",
+                abandoned.JobId, database.Name, abandoned.DatabaseId);
+
         bool restart =
-            view is not null
+            !foreign
+            && view is not null
             && database.Options.MaterializedViewRefreshEnabled
             && spent < allowed
             && !cancellationToken.IsCancellationRequested;
