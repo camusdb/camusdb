@@ -475,9 +475,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   cache_entry_ttl_ms: 300000          # idle TTL before an aged cache entry may be evicted (5 min)
 #   cache_entries_to_remove: 1000       # max aged entries evicted per collection sweep
 #   collection_interval_ms: 60000       # background eviction-sweep + range-lock renewal cadence (60 s); range_lock_expires_ms must be >= 2x this
-#   compact_every_operations: 1000      # take a Raft-log compaction point every N operations
+#   compact_every_operations: 1000      # Raft-log compaction pass every N persisted WAL *batches* (not entries; a
+#                                       # batch carries ~100 entries under load). Kommander >= 1.6.1 advances the
+#                                       # reclaim floor to the true floor on every pass, so this cadence only sets
+#                                       # how often the pass runs, not how much it may reclaim.
 #   compact_number_entries: 50          # trailing log entries retained at each compaction point
-#   max_entries_per_compaction: 5000    # cap on entries removed by a single compaction pass
+#   max_entries_per_compaction: 5000    # cap on entries a single pass tombstones (the whole-file reclaim below the
+#                                       # floor is not bounded by it since Kommander 1.6.1)
 #
 #   # RocksDB memory sharing (default: on whenever storage AND wal_storage are rocksdb;
 #   # a no-op otherwise). One block cache + one write-buffer manager serve both databases,
