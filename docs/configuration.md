@@ -153,6 +153,26 @@ gate on will fail to start. Upgrading such a deployment:
 A cluster created on a build that defaults it on needs none of this — its first snapshot already carries
 a ledger.
 
+### Persistent MVCC revision retention
+
+Every version of every row is a physical row in the KV store. Without pruning, a hot table's history —
+and the disk behind it — grows without bound for the life of the store.
+
+By default (both keys unset), CamusDB bounds the persisted history **by age, aligned with the effective
+PITR window** (`kahuna.pitr_window_seconds`, default 3600): Kahuna's background writer prunes revision
+rows older than the window. An as-of restore inside the window always finds the revisions it needs — a
+key untouched since before the window restores from its current row, which pruning never removes.
+Snapshot reads older than the retention age are **not guaranteed**; readers that must reach further
+back (branch forks) pin their own snapshot floors, which pruning honors.
+
+- `kahuna.persistent_revision_retention_age_seconds` — explicit age bound. Must be ≥ the effective
+  PITR window (pruning below the window deletes history an in-window restore may need — the backup
+  machinery would then fail closed). `0` disables age pruning and, together with an unset count,
+  restores the unbounded-history behavior.
+- `kahuna.persistent_revision_retention_count` — hard per-key revision cap, `0` (default) disabled.
+  A count cap can cut below the PITR window on a hot key; prefer the age bound unless a per-key cap
+  is the goal.
+
 ### Memory profile
 
 `memory_profile` (`--memory-profile`) selects *how* the four cache-sizing knobs below are defaulted.
@@ -304,6 +324,8 @@ combination silently.
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |
 | `kahuna.staged_base_fence_retention_ms` ≤ 0 | `InvalidConfig` |
+| `kahuna.persistent_revision_retention_count` < 0, or `..._age_seconds` < 0 | `InvalidConfig` |
+| `kahuna.persistent_revision_retention_age_seconds` in (0, effective `kahuna.pitr_window_seconds`) | `InvalidConfig` |
 | effective `kahuna.recent_heartbeat_ms` ≥ effective `kahuna.heartbeat_interval_ms` (the window is a quarter of the cadence while unset) | `InvalidConfig` |
 | `kahuna.wal_shard_write_buffer_size_mb` or `kahuna.wal_shard_max_bytes_for_level_base_mb` outside 1..65536 | `InvalidConfig` |
 | any `kahuna.wal_shard_*` count outside 1..64 | `InvalidConfig` |

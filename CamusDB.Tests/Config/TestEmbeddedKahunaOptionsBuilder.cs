@@ -308,6 +308,90 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void RevisionRetention_DefaultsToPitrWindowOnPersistentBaselines()
+    {
+        // With neither retention key set, persisted MVCC history is bounded by age, aligned with
+        // the effective PITR window — otherwise every version of every row is kept forever and a
+        // hot table's history (and the disk behind it) grows without bound.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/retention-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(cluster.PersistentRevisionRetentionAge, Is.EqualTo(cluster.PitrWindow));
+        Assert.That(cluster.PersistentRevisionRetentionCount, Is.EqualTo(0));
+        Assert.That(standalone.PersistentRevisionRetentionAge, Is.EqualTo(standalone.PitrWindow));
+        Assert.That(standalone.PersistentRevisionRetentionCount, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void RevisionRetention_TracksAnOverriddenPitrWindow()
+    {
+        // The alignment is decided after overrides, so raising the PITR window raises the
+        // derived retention age with it — a restore inside the window always finds its revisions.
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { PitrWindowSeconds = 7200 },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.PersistentRevisionRetentionAge, Is.EqualTo(TimeSpan.FromSeconds(7200)));
+    }
+
+    [Test]
+    public void RevisionRetention_ExplicitKeysBeatTheDerivedDefault()
+    {
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig
+            {
+                PersistentRevisionRetentionCount = 64,
+                PersistentRevisionRetentionAgeSeconds = 7200,
+                PitrWindowSeconds = 7200,
+            },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.PersistentRevisionRetentionCount, Is.EqualTo(64));
+        Assert.That(built.PersistentRevisionRetentionAge, Is.EqualTo(TimeSpan.FromSeconds(7200)));
+    }
+
+    [Test]
+    public void RevisionRetention_ExplicitZeroAgeDisablesTheDerivedDefault()
+    {
+        // An explicit 0 is the operator's "never prune" opt-out; the builder must not replace it
+        // with the PITR-aligned default.
+        ConfigDefinition config = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { PersistentRevisionRetentionAgeSeconds = 0 },
+        };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+
+        Assert.That(built.PersistentRevisionRetentionAge, Is.EqualTo(TimeSpan.Zero));
+        Assert.That(built.PersistentRevisionRetentionCount, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void RevisionRetention_MemoryStorageStaysDisabled()
+    {
+        // The memory backend keeps no persisted revision rows, so the derived age bound is not
+        // applied there — it would only announce pruning that can never happen.
+        KahunaOptionsConfig kahuna = new() { Storage = "memory" };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/memory-db", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.PersistentRevisionRetentionAge, Is.EqualTo(TimeSpan.Zero));
+        Assert.That(built.PersistentRevisionRetentionCount, Is.EqualTo(0));
+    }
+
+    [Test]
     public void KahunaStorageRocksdb_OverridesStandaloneBaseline()
     {
         KahunaOptionsConfig kahuna = new() { Storage = "rocksdb" };

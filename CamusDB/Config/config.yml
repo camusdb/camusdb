@@ -624,6 +624,15 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #                                        # Must comfortably exceed the longest transaction lifetime:
 #                                        # a transaction that began before it is refused. Must be
 #                                        # identical on every node while the gate is on
+#
+#   # Persistent MVCC revision retention. Every version of every row is a physical row in the KV
+#   # store; without pruning a hot table's history and the disk behind it grow without bound.
+#   # Default (both keys unset): age-based pruning aligned with the effective PITR window, so an
+#   # as-of restore inside the window always finds the revisions it needs. Snapshot reads older
+#   # than the retention age are not guaranteed; branch forks pin their own snapshot floors,
+#   # which pruning honors. An explicit age below the PITR window is rejected. 0 disables a bound.
+#   persistent_revision_retention_age_seconds: 3600
+#   persistent_revision_retention_count: 0  # hard per-key cap; can cut below the PITR window — prefer the age bound
 
 # ── Diagnostics (opt-in) ──────────────────────────────────────────────────────
 # Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:

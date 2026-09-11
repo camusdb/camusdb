@@ -52,6 +52,62 @@ public sealed class TestConfigReaderBackup
     }
 
     [Test]
+    public void RevisionRetentionKeys_AcceptedByReader_ValuesApplied()
+    {
+        const string yml = """
+            kahuna:
+              persistent_revision_retention_count: 64
+              persistent_revision_retention_age_seconds: 7200
+              pitr_window_seconds: 7200
+            """;
+
+        ConfigDefinition config = new ConfigReader().Read(yml);
+
+        Assert.AreEqual(64, config.Kahuna.PersistentRevisionRetentionCount);
+        Assert.AreEqual(7200, config.Kahuna.PersistentRevisionRetentionAgeSeconds);
+    }
+
+    [Test]
+    public void RevisionRetentionAgeBelowEffectivePitrWindow_Rejected()
+    {
+        // The window key is absent, so the cross-check must compare against the effective
+        // default window (3600 s), not skip because only one side was provided: pruning below
+        // the window deletes history an as-of restore inside it may need.
+        const string yml = """
+            kahuna:
+              persistent_revision_retention_age_seconds: 600
+            """;
+
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => new ConfigReader().Read(yml))!;
+        StringAssert.Contains("pitr_window_seconds", ex.Message);
+    }
+
+    [Test]
+    public void RevisionRetentionAgeZero_ExplicitOptOut_Accepted()
+    {
+        // 0 is the explicit "never prune by age" opt-out; it must not trip the below-window check.
+        const string yml = """
+            kahuna:
+              persistent_revision_retention_age_seconds: 0
+            """;
+
+        ConfigDefinition config = new ConfigReader().Read(yml);
+
+        Assert.AreEqual(0, config.Kahuna.PersistentRevisionRetentionAgeSeconds);
+    }
+
+    [Test]
+    public void NegativeRevisionRetentionCount_Rejected()
+    {
+        const string yml = """
+            kahuna:
+              persistent_revision_retention_count: -1
+            """;
+
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read(yml));
+    }
+
+    [Test]
     public void PitrWindow_AboveSixHours_Rejected()
     {
         const string yml = """

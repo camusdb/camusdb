@@ -100,6 +100,8 @@ public sealed class KahunaOptionsConfig
         "one_phase_apply_time_validation",
         "staged_base_fence_retention_ms",
         "scan_page_retry_budget_ms",
+        "persistent_revision_retention_count",
+        "persistent_revision_retention_age_seconds",
         "range_merge_min_size",
         "enable_load_reports",
         "replication_factor",
@@ -757,6 +759,29 @@ public sealed class KahunaOptionsConfig
     public int? ScanPageRetryBudgetMs { get; set; }
 
     /// <summary>
+    /// Maximum persisted MVCC revisions Kahuna keeps per key; older revision rows are pruned by the
+    /// background writer. <c>0</c> disables count-based pruning. A count bound can cut deeper into
+    /// history than the PITR window and make an exact as-of backup fail closed, so prefer the age
+    /// bound unless a hard per-key cap is the goal. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.PersistentRevisionRetentionCount"/>; unset keeps the
+    /// CamusDB default of 0 (age-based pruning only).
+    /// </summary>
+    public int? PersistentRevisionRetentionCount { get; set; }
+
+    /// <summary>
+    /// Maximum age, in <b>seconds</b>, of a persisted MVCC revision before the background writer
+    /// prunes its row. <c>0</c> disables age-based pruning. Every version of every row is a
+    /// physical row in the KV store, so with pruning fully disabled a hot table's history — and the
+    /// disk behind it — grows without bound for the life of the store. Snapshot reads older than
+    /// this age are not guaranteed (a transaction or branch fork that must read further back pins
+    /// its own snapshot floor, which pruning honors). When unset, CamusDB aligns the effective
+    /// value with the effective PITR window so an as-of restore inside the window always finds the
+    /// revisions it needs; setting it explicitly below the PITR window is rejected. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.PersistentRevisionRetentionAge"/>.
+    /// </summary>
+    public int? PersistentRevisionRetentionAgeSeconds { get; set; }
+
+    /// <summary>
     /// Key count below which two adjacent ranges become eligible to merge back into one. <c>0</c>
     /// disables auto-merge and stops the periodic merge checker. Maps to
     /// <see cref="Kahuna.EmbeddedKahunaOptions.RangeMergeMinSize"/>; unset keeps Kahuna's default
@@ -1235,6 +1260,24 @@ public sealed class KahunaOptionsConfig
         if (ScanPageRetryBudgetMs is <= 0)
             throw InvalidConfig(
                 $"'kahuna.scan_page_retry_budget_ms' must be > 0, got {ScanPageRetryBudgetMs}");
+
+        if (PersistentRevisionRetentionCount is < 0)
+            throw InvalidConfig(
+                $"'kahuna.persistent_revision_retention_count' must be >= 0 (0 disables count-based pruning), got {PersistentRevisionRetentionCount}");
+
+        if (PersistentRevisionRetentionAgeSeconds is < 0)
+            throw InvalidConfig(
+                $"'kahuna.persistent_revision_retention_age_seconds' must be >= 0 (0 disables age-based pruning), got {PersistentRevisionRetentionAgeSeconds}");
+
+        // An explicit age below the effective PITR window prunes revision history that an exact
+        // as-of restore inside the window may still need; the backup machinery then fails closed.
+        // Compare the EFFECTIVE window (same reasoning as the base-snapshot cross-check above).
+        if (PersistentRevisionRetentionAgeSeconds is int retentionAge && retentionAge > 0
+            && retentionAge < (PitrWindowSeconds ?? DefaultPitrWindowSeconds))
+            throw InvalidConfig(
+                $"'kahuna.persistent_revision_retention_age_seconds' ({retentionAge}) must be >= the effective " +
+                $"'kahuna.pitr_window_seconds' ({PitrWindowSeconds ?? DefaultPitrWindowSeconds}): pruning below the " +
+                "PITR window deletes revision history an as-of restore inside the window may need");
 
         if (RangeSplitSettleWindowMs is <= 0)
             throw InvalidConfig(

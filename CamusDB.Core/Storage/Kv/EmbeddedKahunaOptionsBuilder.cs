@@ -474,6 +474,12 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.ScanPageRetryBudgetMs is int scanPageRetryBudget)
             baseline.ScanPageRetryBudgetMs = scanPageRetryBudget;
 
+        if (kahuna.PersistentRevisionRetentionCount is int revisionRetentionCount)
+            baseline.PersistentRevisionRetentionCount = revisionRetentionCount;
+
+        if (kahuna.PersistentRevisionRetentionAgeSeconds is int revisionRetentionAge)
+            baseline.PersistentRevisionRetentionAge = TimeSpan.FromSeconds(revisionRetentionAge);
+
         if (kahuna.RangeMergeMinSize is int rangeMergeMinSize)
             baseline.RangeMergeMinSize = rangeMergeMinSize;
 
@@ -587,6 +593,21 @@ public static class EmbeddedKahunaOptionsBuilder
                 $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.RocksDbSharedMemtableBudgetMb}) must be <= " +
                 $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.RocksDbSharedMemoryBudgetMb})");
         }
+
+        // Persistent MVCC revision retention. Every version of every row is a physical row in the
+        // KV store, and Kahuna's own default never prunes one — a hot table's history, and the disk
+        // behind it, then grow without bound for the life of the store. When the operator set
+        // neither retention knob, bound the history by age, aligned with the effective PITR window:
+        // an as-of restore inside the window still finds every revision it needs (a quiet key's
+        // as-of image comes from its current row, which pruning never removes), and snapshot
+        // readers that must reach further back — branch forks — pin their own snapshot floors,
+        // which pruning honors. Decided after the overrides so the alignment tracks an overridden
+        // PITR window. Memory storage keeps no revision rows, so there is nothing to prune there.
+        if (kahuna is { PersistentRevisionRetentionCount: null, PersistentRevisionRetentionAgeSeconds: null }
+            && baseline.Storage != "memory"
+            && baseline.PersistentRevisionRetentionCount == 0
+            && baseline.PersistentRevisionRetentionAge == TimeSpan.Zero)
+            baseline.PersistentRevisionRetentionAge = baseline.PitrWindow;
 
         return baseline;
     }
