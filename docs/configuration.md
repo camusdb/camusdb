@@ -110,6 +110,16 @@ older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed toget
 `compact_every_operations` (how often), `compact_number_entries` (trailing entries kept), and
 `max_entries_per_compaction` (per-pass removal cap).
 
+`compact_every_operations` counts persisted WAL **batches**, not log entries: Kommander's
+`RaftWriteAhead.NotifyCommitted` decrements once per batch, and under load a batch carries on the order of
+a hundred entries. With a RocksDB Raft log the log is reclaimed by dropping whole SST files below a persisted
+compaction floor. On Kommander 1.6.0 that floor advanced at most `max_entries_per_compaction` rows per pass,
+which at Kahuna's defaults (1,000 batches, 5,000 rows) reclaimed a few hundred entries per second against
+~9,000 written on the 2026-09-10 write probe and let the live log grow ~100 MB per minute per node; CamusDB
+shipped a temporary 100 / 100,000 default for that version. Kommander 1.6.1 (Kahuna 1.7.6) advances the floor
+to the true floor on every pass, so the Kahuna defaults are in force again and the cadence only decides how
+often a pass runs.
+
 Storage backends: `memory`, `sqlite`, `rocksdb`.
 
 ### One-phase apply-time validation

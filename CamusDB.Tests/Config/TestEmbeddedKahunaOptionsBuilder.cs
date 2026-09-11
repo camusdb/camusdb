@@ -380,6 +380,32 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
+    public void RocksDbWal_UnsetCompactionCadence_KeepsKahunaDefaults()
+    {
+        // Kommander 1.6.1 (via Kahuna 1.7.6) advances the Raft-log reclaim floor to the true floor on every
+        // pass, so the temporary 100 / 100,000 cadence CamusDB shipped for Kommander 1.6.0 is gone: with a
+        // RocksDB WAL and the keys unset, Kahuna's own defaults apply, exactly as on the SQLite WAL.
+        EmbeddedKahunaOptions defaults = new();
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/cadence-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(built.WalStorage, Is.EqualTo("rocksdb"));
+        Assert.That(built.CompactEveryOperations, Is.EqualTo(defaults.CompactEveryOperations));
+        Assert.That(built.MaxEntriesPerCompaction, Is.EqualTo(defaults.MaxEntriesPerCompaction));
+        Assert.That(built.CompactNumberEntries, Is.EqualTo(defaults.CompactNumberEntries));
+    }
+
+    [Test]
+    public void RocksDbWal_ExplicitCompactionCadence_IsHonoured()
+    {
+        KahunaOptionsConfig kahuna = new() { CompactEveryOperations = 100, MaxEntriesPerCompaction = 100_000 };
+
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/cadence-explicit-db", kahuna, CamusDBOptions.Default);
+
+        Assert.That(built.CompactEveryOperations, Is.EqualTo(100));
+        Assert.That(built.MaxEntriesPerCompaction, Is.EqualTo(100_000));
+    }
+
+    [Test]
     public void NonPositiveEvictionKnob_IsRejected()
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(
