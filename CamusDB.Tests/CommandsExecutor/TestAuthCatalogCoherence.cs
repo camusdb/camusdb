@@ -191,6 +191,96 @@ internal sealed class TestAuthCatalogCoherence : BaseTest
             "DROP USER must delete the user's sessions");
     }
 
+    /// <summary>
+    /// A flush on node A must reach node B, and the bound must be a property of the design rather than
+    /// a hope. It is: the generation is a durable, replicated key, and a cluster-mode read consults it,
+    /// so B observes the move on its very next read — no waiting, and no node-to-node call.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task FlushOnOneNodeIsObservedOnAnotherOnItsNextRead()
+    {
+        (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
+
+        string user = "coh_" + Guid.NewGuid().ToString("n");
+        await a.CreateUserAsync(user, null, ifNotExists: false);
+
+        // Warm B so it stands at a known generation.
+        Assert.IsNotNull(await b.TryGetUserAsync(user));
+        long before = b.LocalGeneration;
+
+        await a.FlushPrivilegesAsync();
+
+        Assert.Greater(a.LocalGeneration, before, "the flushing node advances the generation");
+
+        // One ordinary read is all it takes; nothing sleeps and nothing polls.
+        await b.TryGetUserAsync(user);
+
+        Assert.AreEqual(a.LocalGeneration, b.LocalGeneration,
+            "the other node picks the flush up on its next read");
+    }
+
+    /// <summary>
+    /// A flush reloads the caches from storage rather than trusting them, which is the whole reason the
+    /// statement exists. Proven with a grant written straight to the keyspace, so no cache anywhere was
+    /// told about it: only a node that genuinely re-reads storage can see it.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task FlushRereadsTheCatalogFromStorage()
+    {
+        (AuthCatalog a, _) = await TwoNodesAsync();
+
+        string user = "coh_" + Guid.NewGuid().ToString("n");
+        await a.CreateUserAsync(user, null, ifNotExists: false);
+        Assert.IsEmpty(await a.ListGrantsAsync(user));
+
+        await a.WriteRawGrantForTestingAsync(new GrantRecord
+        {
+            User = user.ToLowerInvariant(),
+            Scope = DbScope("db_flush"),
+            Privileges = Privilege.Select,
+        });
+
+        await a.FlushPrivilegesAsync();
+
+        Assert.AreEqual(1, (await a.ListGrantsAsync(user)).Count,
+            "the flush must re-read the keyspace, not revalidate against what it already believed");
+    }
+
+    /// <summary>
+    /// The snapshot the listing statements read is taken from storage too, and it carries every account
+    /// with its grants in one consistent picture.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task SnapshotReadsEveryAccountFromStorage()
+    {
+        (AuthCatalog a, AuthCatalog b) = await TwoNodesAsync();
+
+        string first = "coh_a" + Guid.NewGuid().ToString("n");
+        string second = "coh_b" + Guid.NewGuid().ToString("n");
+
+        await a.CreateUserAsync(first, null, ifNotExists: false);
+        await a.GrantAsync(first, DbScope("db1"), Privilege.Select, revoke: false);
+        await a.CreateUserAsync(second, null, ifNotExists: false);
+
+        // Taken through the OTHER catalog, which never saw either write, so the picture can only have
+        // come from storage.
+        AuthCatalogSnapshot snapshot = await b.SnapshotAsync();
+
+        AuthCatalogEntry firstEntry = snapshot.Entries.Single(e => e.User.Name == first);
+        AuthCatalogEntry secondEntry = snapshot.Entries.Single(e => e.User.Name == second);
+
+        Assert.AreEqual(1, firstEntry.Grants.Count);
+        Assert.AreEqual(Privilege.Select, firstEntry.Grants[0].Privileges);
+        Assert.IsEmpty(secondEntry.Grants);
+
+        List<string> names = snapshot.Entries.Select(e => e.User.Name.ToLowerInvariant()).ToList();
+        Assert.AreEqual(names.OrderBy(n => n, StringComparer.Ordinal).ToList(), names,
+            "the snapshot is name-ordered, which is what pins the listing statements' row order");
+    }
+
     /// <summary>H3 — two nodes granting different privileges to the same (user, scope) must not lose an
     /// update: the second grant reads the first's committed mask under lock and unions onto it.</summary>
     [Test]

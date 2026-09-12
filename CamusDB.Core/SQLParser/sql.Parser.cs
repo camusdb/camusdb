@@ -65,6 +65,19 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// Validates the word that opens a <c>FLUSH</c> statement. FLUSH is matched as a plain identifier
+    /// so the word stays usable as a table and column name, which means a typo reaches this action
+    /// rather than the tokenizer and carries no positional hint of its own — hence the message names
+    /// both accepted statements.
+    /// </summary>
+    private static void RequireFlushWord(string? word)
+    {
+        if (!string.Equals(word, "flush", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "Expected: FLUSH PRIVILEGES or FLUSH SESSIONS");
+    }
+
+    /// <summary>
     /// Splits the single <c>table@index</c> token the scanner produced into the relation name and
     /// the index name. The scanner matches the pair as one token so the '@' is never seen as a bind
     /// placeholder; the split belongs here because the token's text is the only place both halves

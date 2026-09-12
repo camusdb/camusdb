@@ -615,6 +615,67 @@ internal sealed class SchemaQuerier
         }
     }
 
+    /// <summary>
+    /// Returns one row per account in <paramref name="snapshot"/>, optionally narrowed by a LIKE
+    /// <paramref name="pattern"/> on the account name. Rows come out in the snapshot's own order, which
+    /// is the normalized name ascending.
+    ///
+    /// <para>The snapshot is a parameter rather than something read here, so this class keeps no handle
+    /// on the authentication catalog. It is also why the listing is unfiltered by caller: the statement
+    /// is refused outright to anyone but a superuser, so there is no per-caller visibility to apply the
+    /// way <see cref="ShowDatabases"/> does.</para>
+    ///
+    /// <para><c>id</c> is null on an account written before account ids existed. It is emitted as a
+    /// real NULL rather than an empty string, so "no id recorded" stays distinguishable from an id that
+    /// happens to be empty.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowUsers(AuthCatalogSnapshot snapshot, string? pattern = null)
+    {
+        await Task.CompletedTask;
+
+        foreach (AuthCatalogEntry entry in snapshot.Entries)
+        {
+            if (pattern is not null && !LikeMatch(entry.User.Name, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "user",         new ColumnValue(ColumnType.String, entry.User.Name) },
+                { "id",           entry.User.Id is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, entry.User.Id) },
+                { "superuser",    new ColumnValue(ColumnType.Bool, entry.User.IsSuperuser) },
+                { "has_password", new ColumnValue(ColumnType.Bool, entry.User.Credential is not null) },
+                { "grants",       new ColumnValue(ColumnType.Integer64, entry.Grants.Count) },
+                { "created_at",   new ColumnValue(ColumnType.String, IsoFromUtc(entry.User.CreatedAt)) },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Returns every stored grant of every account in <paramref name="snapshot"/>, in the same three
+    /// columns <see cref="ShowGrants"/> emits, ordered by account name then by grant scope.
+    ///
+    /// <para>An account with no grants contributes no row. That is deliberate and is why
+    /// <c>SHOW USERS</c> exists alongside this: an account's existence is that statement's subject, and
+    /// a grant listing that invented a placeholder row for one would be lying about a grant.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowAllGrants(AuthCatalogSnapshot snapshot)
+    {
+        await Task.CompletedTask;
+
+        foreach (AuthCatalogEntry entry in snapshot.Entries)
+        {
+            foreach (GrantRecord grant in entry.Grants)
+            {
+                yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "user",       new ColumnValue(ColumnType.String, grant.User) },
+                    { "object",     new ColumnValue(ColumnType.String, grant.Scope.DisplayObject()) },
+                    { "privileges", new ColumnValue(ColumnType.String, FormatPrivileges(grant.Privileges)) }
+                });
+            }
+        }
+    }
+
     /// <summary>Renders a privilege bitmask as an uppercase, comma-separated list (<c>ALL PRIVILEGES</c> when complete).</summary>
     private static string FormatPrivileges(Privilege privileges)
     {
@@ -1035,6 +1096,14 @@ internal sealed class SchemaQuerier
 
         return new QueryResultRow(default, row);
     }
+
+    /// <summary>
+    /// Formats a UTC <see cref="DateTime"/> as ISO-8601 with millisecond precision — the same shape
+    /// <see cref="IsoFromUnixMs"/> produces, so every timestamp column of every SHOW statement reads
+    /// alike whether its source is a clock reading or an HLC.
+    /// </summary>
+    private static string IsoFromUtc(DateTime value) =>
+        DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("yyyy-MM-ddTHH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
 
     /// <summary>Formats Unix-epoch milliseconds (the HLC physical component) as UTC ISO-8601 with millisecond precision.</summary>
     private static string IsoFromUnixMs(long unixMs) =>

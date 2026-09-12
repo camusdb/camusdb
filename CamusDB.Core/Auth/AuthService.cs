@@ -52,7 +52,23 @@ public sealed class AuthService
 
     private static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(1);
 
-    private readonly record struct CachedSession(Principal Principal, byte[] SecretMac, DateTime Expires);
+    /// <summary>
+    /// One cached authorization decision, plus everything needed to tell whether it is still the right
+    /// one without going back to storage.
+    ///
+    /// <para><see cref="Generation"/> is the catalog coherence generation the principal was built
+    /// under. <see cref="CredentialEpoch"/> and <see cref="AuthorizationEpoch"/> are the account's two
+    /// epochs at that moment. Together they answer the question a hit has to answer — "has anything
+    /// that produced this changed?" — with two integer comparisons and no storage access. See
+    /// <see cref="ResolvePrincipalAsync"/> for how the two checks divide the work.</para>
+    /// </summary>
+    private readonly record struct CachedSession(
+        Principal Principal,
+        byte[] SecretMac,
+        DateTime Expires,
+        long Generation,
+        long CredentialEpoch,
+        long AuthorizationEpoch);
 
     /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
     private readonly CamusDBOptions options;
@@ -146,6 +162,19 @@ public sealed class AuthService
     /// by token id alone. On a miss it validates the HMAC, expiry/revocation, and that the session's
     /// captured credential epoch still matches the user's, then caches the resolved principal bounded by
     /// the lesser of the session's absolute expiry and the cache TTL.
+    ///
+    /// <para><b>A hit is also checked against the catalog, in two steps, without touching storage.</b>
+    /// First the catalog's coherence generation: unchanged means nothing in the catalog has moved since
+    /// the entry was built, and this is the hot path — one volatile read of a local field. Second, when
+    /// the generation has moved, the account's own two epochs: a grant or revoke advances its
+    /// authorization epoch and a password change advances its credential epoch, so an account whose
+    /// epochs are both unchanged is unaffected by whatever moved and its entry is restamped rather than
+    /// rebuilt. Anything else falls through to the full path.</para>
+    ///
+    /// <para>That pairing is why an authorization change applies on the very next request on this node
+    /// rather than when the cache entry happens to expire, and why one <c>GRANT</c> does not force every
+    /// session on the node to re-read its own. It is sound only because the catalog publishes its
+    /// generation after the maps that generation describes.</para>
     /// </summary>
     public async Task<Principal> ResolvePrincipalAsync(string? bearer)
     {
@@ -158,12 +187,20 @@ public sealed class AuthService
         // known id falls through to full validation (which also fails).
         if (principalCache.TryGetValue(tokenId, out CachedSession cached)
             && cached.Expires > DateTime.UtcNow
-            && TokenCodec.MacEquals(presentedMac, cached.SecretMac))
+            && TokenCodec.MacEquals(presentedMac, cached.SecretMac)
+            && TryRevalidateAgainstCatalog(tokenId, cached))
         {
             return cached.Principal;
         }
 
         AuthCatalog catalog = await catalogTask.ConfigureAwait(false);
+
+        // Read the stamp BEFORE the records it will describe. A mutation that lands during the reads
+        // below then leaves the entry stamped behind its own data, which costs one extra revalidation
+        // and is always safe. Stamping afterwards would do the opposite — mark data read before a
+        // change as belonging to the generation after it — and the next cache hit would serve it.
+        long generationAtRead = catalog.LocalGeneration;
+
         SessionRecord? session = await catalog.TryGetSessionAsync(tokenId).ConfigureAwait(false);
         if (session is null || session.Revoked || session.ExpiresAt <= DateTime.UtcNow)
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
@@ -178,9 +215,71 @@ public sealed class AuthService
         IReadOnlyList<GrantRecord> grants = await catalog.ListGrantsAsync(session.User).ConfigureAwait(false);
         Principal principal = new(session.User, user.IsSuperuser, grants, user.Id);
 
-        CachePrincipal(tokenId, principal, session.SecretMac, session.ExpiresAt);
+        CachePrincipal(tokenId, principal, session.SecretMac, session.ExpiresAt, generationAtRead, user);
         return principal;
     }
+
+    /// <summary>
+    /// Decides whether a cache hit may still be served, without a storage read and without awaiting.
+    ///
+    /// <para>Returns true when the catalog has not moved since the entry was built, and also when it
+    /// has moved but this account's credential and authorization epochs are both unchanged — nothing
+    /// that produced this principal is different, so the entry is restamped to the current generation
+    /// and kept. Returns false when the account's epochs moved, when its record is gone, or when the
+    /// catalog is not open yet, all of which the caller answers by resolving from storage.</para>
+    ///
+    /// <para>Comparing the epochs against the cached maps is correct precisely because the generation
+    /// being compared is the generation those maps stand at — the catalog publishes the two in that
+    /// order. Reading them the other way round would compare an account's state at one generation with
+    /// a stamp from another.</para>
+    /// </summary>
+    private bool TryRevalidateAgainstCatalog(string tokenId, CachedSession cached)
+    {
+        if (!catalogTask.IsCompletedSuccessfully)
+            return false;
+
+        AuthCatalog catalog = catalogTask.Result;
+
+        long generation = catalog.LocalGeneration;
+        if (generation == cached.Generation)
+            return true;
+
+        UserRecord? user = catalog.TryGetUserCached(cached.Principal.UserName);
+        if (user is null
+            || user.CredentialEpoch != cached.CredentialEpoch
+            || user.AuthorizationEpoch != cached.AuthorizationEpoch)
+        {
+            return false;
+        }
+
+        // TryUpdate, not an assignment: the entry is rewritten only while it is still exactly the one
+        // read above. A flush that cleared the cache between the read and here would otherwise see a
+        // pre-flush decision written straight back into it.
+        principalCache.TryUpdate(tokenId, cached with { Generation = generation }, cached);
+        return true;
+    }
+
+    /// <summary>
+    /// The coherence generation of this engine's authentication catalog, or zero while the catalog is
+    /// still opening.
+    ///
+    /// <para>Published for a transport that holds a resolved principal for longer than one request — a
+    /// long-lived duplex stream — so it can tell in constant time that the catalog moved and re-resolve,
+    /// instead of serving an authorization snapshot taken when the stream opened.</para>
+    /// </summary>
+    public long AuthorizationGeneration =>
+        catalogTask.IsCompletedSuccessfully ? catalogTask.Result.LocalGeneration : 0;
+
+    /// <summary>
+    /// Drops every cached authorization decision on this node, so the next request for each token is
+    /// resolved from the catalog.
+    ///
+    /// <para>The flush statements need this as a separate step: a flush changes no account's epochs, so
+    /// the per-account revalidation in <see cref="TryRevalidateAgainstCatalog"/> would restamp every
+    /// entry and keep it. That narrowing is right for an ordinary grant and wrong for an operator
+    /// saying "drop what you think you know".</para>
+    /// </summary>
+    public void DropPrincipalCache() => principalCache.Clear();
 
     /// <summary>Looks up a user record by name, or null when no such user exists.</summary>
     public async Task<UserRecord?> TryGetUserAsync(string name)
@@ -238,7 +337,22 @@ public sealed class AuthService
         await catalog.DeleteSessionAsync(tokenId).ConfigureAwait(false);
     }
 
-    private void CachePrincipal(string tokenId, Principal principal, byte[] secretMac, DateTime sessionExpiresAt)
+    /// <summary>
+    /// Stores one resolved authorization decision, stamped with the catalog generation its records were
+    /// read under and with the account's two epochs, so <see cref="TryRevalidateAgainstCatalog"/> can
+    /// judge a later hit without touching storage.
+    /// </summary>
+    /// <param name="generationAtRead">
+    /// The generation observed <b>before</b> the records were read — see the comment at the read site.
+    /// A stamp behind its own data is safe; a stamp ahead of it is not.
+    /// </param>
+    private void CachePrincipal(
+        string tokenId,
+        Principal principal,
+        byte[] secretMac,
+        DateTime sessionExpiresAt,
+        long generationAtRead,
+        UserRecord user)
     {
         DateTime now = DateTime.UtcNow;
         if (principalCache.Count >= options.AuthenticationCacheMaxEntries)
@@ -257,7 +371,8 @@ public sealed class AuthService
         if (sessionExpiresAt < expires)
             expires = sessionExpiresAt;
 
-        principalCache[tokenId] = new CachedSession(principal, secretMac, expires);
+        principalCache[tokenId] = new CachedSession(
+            principal, secretMac, expires, generationAtRead, user.CredentialEpoch, user.AuthorizationEpoch);
     }
 
     /// <summary>

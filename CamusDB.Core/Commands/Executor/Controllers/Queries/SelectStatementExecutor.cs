@@ -355,6 +355,28 @@ internal sealed class SelectStatementExecutor
             return (null!, schemaQuerier.ShowGrants(grantUser, grants));
         }
 
+        // SHOW USERS and SHOW GRANTS FOR * read the same server-level auth catalog — no database
+        // context — and take the same picture of it. One snapshot serves either statement, and it is
+        // read from storage rather than from a cache, because an operator taking an inventory of
+        // accounts would believe a short list. The snapshot is complete or it raises.
+        if (ast.nodeType is NodeType.ShowUsers or NodeType.ShowAllGrants)
+        {
+            AuthCatalogSnapshot snapshot = await userAdmin.SnapshotForShowAsync().ConfigureAwait(false);
+
+            if (ast.nodeType == NodeType.ShowUsers)
+            {
+                if (schemaOut is not null)
+                    schemaOut.Schema = DerivedTableSchemaBuilder.ShowUsersSchema;
+
+                return (null!, schemaQuerier.ShowUsers(snapshot, UnquoteLikePattern(ast.leftAst?.yytext)));
+            }
+
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowGrantsSchema;
+
+            return (null!, schemaQuerier.ShowAllGrants(snapshot));
+        }
+
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName);
 
         ast = ExpandViews(database, ast);

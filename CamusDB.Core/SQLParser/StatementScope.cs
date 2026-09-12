@@ -43,6 +43,9 @@ public static class StatementScope
         NodeType.AlterUser or
         NodeType.DropUser or NodeType.DropUserIfExists or
         NodeType.Grant or NodeType.Revoke or
+        // The two flushes act on that same server-level auth keyspace and on this node's own caches.
+        // They name no database, so a transport must open neither one nor a transaction for them.
+        NodeType.FlushPrivileges or NodeType.FlushSessions or
         // Cluster settings are server-level: they name their key in the SQL, touch only the shared
         // _system/settings keyspace (via the replicated settings log), and return no descriptor.
         NodeType.SetClusterSetting or NodeType.ResetClusterSetting;
@@ -103,8 +106,11 @@ public static class StatementScope
         NodeType.ShowBranches or
         NodeType.ShowAncestors or
         NodeType.ShowOrphanDatabases or
-        // Grants live in the shared auth keyspace, not in any database.
+        // Grants live in the shared auth keyspace, not in any database. So do the accounts themselves
+        // and the all-account grant listing.
         NodeType.ShowGrants or
+        NodeType.ShowAllGrants or
+        NodeType.ShowUsers or
         // Per-process metrics; there is no database to read them from.
         NodeType.ShowEngineStats or
         // Per-process configuration; likewise not read from any database.

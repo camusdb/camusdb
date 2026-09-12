@@ -116,9 +116,13 @@ internal sealed class StatementAuthorizer
                 CamusDBErrorCodes.InsufficientPrivilege, "Changing another user's password requires a superuser");
         }
 
-        // Other server-level user/grant administration: superuser only.
+        // Other server-level user/grant administration: superuser only. The two flush statements join
+        // this gate rather than a gentler one because each is an authorization lever over the whole
+        // server: one decides when a privilege change is believed, and the other ends every session on
+        // the node. Neither has any per-database meaning a grant could scope down.
         if (ast.nodeType is NodeType.CreateUser or NodeType.CreateUserIfNotExists
-            or NodeType.DropUser or NodeType.DropUserIfExists or NodeType.Grant or NodeType.Revoke)
+            or NodeType.DropUser or NodeType.DropUserIfExists or NodeType.Grant or NodeType.Revoke
+            or NodeType.FlushPrivileges or NodeType.FlushSessions)
         {
             if (!principal.CanAdministerUsers)
                 throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "User administration requires a superuser");
@@ -201,6 +205,21 @@ internal sealed class StatementAuthorizer
             // otherwise hand to any authenticated caller.
             throw new CamusDBException(
                 CamusDBErrorCodes.InsufficientPrivilege, "Reading another user's grants requires a superuser");
+        }
+
+        // Listing the accounts, or every account's grants, is strictly more of the same reconnaissance
+        // material, so both are held to the same bar with no per-caller exception — there is no "own"
+        // subset of a whole-server listing to carve out, the way SHOW GRANTS has one.
+        //
+        // The refusal is raised here, before the catalog is read, so it cannot vary with what the
+        // catalog holds. A gate that answered differently once an account existed would enumerate the
+        // catalog just as surely as the listing it is refusing.
+        if (ast.nodeType is NodeType.ShowUsers or NodeType.ShowAllGrants)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege, "Listing the user catalog requires a superuser");
+            return;
         }
 
         // Server-level introspection: any authenticated caller may run these.

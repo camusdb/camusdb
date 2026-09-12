@@ -40,11 +40,23 @@ internal sealed class UserAdminService
     /// </summary>
     private readonly Task<AuthCatalog>? authCatalogTask;
 
-    internal UserAdminService(ExecutorContext context, CamusDBOptions options, Task<AuthCatalog>? authCatalogTask)
+    /// <summary>
+    /// The per-node authentication service, whose resolved-principal cache the flush statements drop.
+    /// Null on the same engines <see cref="authCatalogTask"/> is null on — an engine with no shared
+    /// node has neither — so every use of it is null-conditional rather than guarded separately.
+    /// </summary>
+    private readonly AuthService? authService;
+
+    internal UserAdminService(
+        ExecutorContext context,
+        CamusDBOptions options,
+        Task<AuthCatalog>? authCatalogTask,
+        AuthService? authService = null)
     {
         this.context = context;
         this.options = options;
         this.authCatalogTask = authCatalogTask;
+        this.authService = authService;
     }
 
     /// <summary>
@@ -347,5 +359,78 @@ internal sealed class UserAdminService
             return ([], false);
 
         return (await auth.ListGrantsAsync(userName).ConfigureAwait(false), true);
+    }
+
+    /// <summary>
+    /// Returns the whole catalog — every account with its grants — for <c>SHOW USERS</c> and
+    /// <c>SHOW GRANTS FOR *</c>. Server-level: it reads the auth catalog and needs no open database.
+    ///
+    /// <para>It takes a fresh picture from storage rather than reading the in-memory caches, because
+    /// these two statements are what an operator inventories accounts with, and a listing that is
+    /// quietly short is worse than no listing at all. The snapshot is complete or it raises; see
+    /// <see cref="AuthCatalog.SnapshotAsync"/>.</para>
+    /// </summary>
+    internal async Task<AuthCatalogSnapshot> SnapshotForShowAsync()
+    {
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        return await auth.SnapshotAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Makes an authorization change take effect now: advances the catalog's coherence generation,
+    /// reloads this node's user and grant caches from storage, and drops this node's resolved-principal
+    /// cache.
+    ///
+    /// <para>The generation is durable and replicated, so the other nodes discard what they derived
+    /// from the older one as soon as they observe it — which is on the first read each one makes after
+    /// its own cached authorization snapshots expire. No node-to-node call is involved.</para>
+    ///
+    /// <para>It revokes nothing. A client whose grants did not change keeps working across it without
+    /// logging in again; <see cref="FlushSessionsAsync"/> is the statement that ends sessions.</para>
+    /// </summary>
+    internal async Task<ExecuteDDLSQLResult> FlushPrivilegesAsync()
+    {
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        await auth.FlushPrivilegesAsync().ConfigureAwait(false);
+
+        // The catalog owns the durable half; this drops what this process derived from it. A flush
+        // moves no account's epochs, so the per-account revalidation on a cache hit would otherwise
+        // keep every entry — which is right for a grant and wrong for an operator forcing a reload.
+        authService?.DropPrincipalCache();
+
+        Audit("flush-privileges", "*");
+        return new ExecuteDDLSQLResult(null!, true);
+    }
+
+    /// <summary>
+    /// Deletes every stored login session, so every client must authenticate again, and drops this
+    /// node's resolved-principal cache so none of them is served from it in the meantime.
+    ///
+    /// <para>This is the blunt instrument, for staleness that <see cref="FlushPrivilegesAsync"/> cannot
+    /// reach because something outside this server holds it. On another node a principal cached before
+    /// the flush stays usable until it expires, which is the same bound every revocation already
+    /// carries (<see cref="CamusDBOptions.AuthenticationCacheTtl"/>).</para>
+    /// </summary>
+    internal async Task<ExecuteDDLSQLResult> FlushSessionsAsync()
+    {
+        AuthCatalog auth = await GetAuthCatalogAsync().ConfigureAwait(false);
+        int revoked;
+
+        try
+        {
+            revoked = await auth.RevokeAllSessionsAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            // In the finally, because a statement that deleted most of the sessions and then failed
+            // must not leave this node still serving cached decisions for the ones it did delete.
+            authService?.DropPrincipalCache();
+        }
+
+        // Logging out a whole fleet is the kind of change an incident review asks about afterwards,
+        // so how many sessions went is recorded and not only the fact that the statement ran. The
+        // count goes in the target field because the operation field is a fixed vocabulary.
+        Audit("flush-sessions", $"{revoked} session(s)");
+        return new ExecuteDDLSQLResult(null!, true);
     }
 }

@@ -609,4 +609,56 @@ public enum NodeType
     /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
     /// </summary>
     ShowRanges,
+
+    /// <summary>
+    /// <c>SHOW USERS [LIKE 'pattern']</c> — every account in the server-level authentication catalog.
+    /// <c>leftAst</c> = the LIKE pattern node matched against the account name, or null for no filter.
+    ///
+    /// <para>The catalog belongs to no database, so the statement is dispatched before any database is
+    /// opened. It is superuser-only: the output names every account on the server, and no per-database
+    /// grant narrows it.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    ShowUsers,
+
+    /// <summary>
+    /// <c>SHOW GRANTS FOR *</c> — every stored grant of every account. It carries no child node,
+    /// because the <c>*</c> is the whole argument.
+    ///
+    /// <para>A separate type rather than a flag on <see cref="ShowGrants"/>, because the two are
+    /// authorized differently: an account may read its own grants through that one, and this one is
+    /// never anything but a superuser read.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    ShowAllGrants,
+
+    /// <summary>
+    /// <c>FLUSH PRIVILEGES</c> — make an authorization change take effect now, instead of waiting for
+    /// a cached authorization snapshot to expire.
+    ///
+    /// <para>It advances the durable authentication coherence generation, reloads this node's user and
+    /// grant caches from storage, and drops this node's resolved-principal cache. It revokes nothing:
+    /// a client whose grants did not change keeps working across it without logging in again.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    FlushPrivileges,
+
+    /// <summary>
+    /// <c>FLUSH SESSIONS</c> — delete every stored login session, so every client must log in again.
+    ///
+    /// <para>This is the blunt instrument, for staleness that <see cref="FlushPrivileges"/> cannot
+    /// reach because something outside this server holds it. It is deliberately not a side effect of
+    /// that statement: an operator who wants one grant to apply does not want a whole fleet logged
+    /// out.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    FlushSessions,
 }

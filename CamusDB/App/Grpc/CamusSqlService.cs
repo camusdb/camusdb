@@ -618,9 +618,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, appLifetime.ApplicationStopping);
         CancellationToken ct = shutdownLinked.Token;
 
-        // Resolve the principal once for the whole stream. When auth is enabled a missing/invalid token
-        // fails the entire batch call here (before any op runs), which is the desired fail-closed shape.
-        Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
+        // Resolve once here so a missing or invalid token fails the entire batch call before any op
+        // runs — the fail-closed shape this path has always had. What has changed is that the answer is
+        // no longer kept for the life of the stream: see BatchStreamPrincipal.
+        BatchStreamPrincipal streamPrincipal = new();
+        await PrincipalForBatchOpAsync(context, streamPrincipal).ConfigureAwait(false);
 
         SemaphoreSlim writeLock = new(1, 1);
         int maxInFlight = Math.Max(1, options.GrpcBatchMaxInFlight);
@@ -668,6 +670,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             await foreach (BatchExecuteRequest req in requestStream.ReadAllAsync(ct).ConfigureAwait(false))
             {
+                // Re-resolve before the op is admitted, so an authorization change reaches this stream
+                // instead of waiting for the client to open a new one. Resolved here, ahead of the two
+                // reservations below, because a token that has become invalid must fail without first
+                // taking a slot it will never release.
+                Principal? opPrincipal = await PrincipalForBatchOpAsync(context, streamPrincipal).ConfigureAwait(false);
+
                 // Memory-bound only. The execution limit (inFlight) is acquired inside the op, AFTER its
                 // chain predecessor completes, so an op queued behind its transaction's chain never pins
                 // an execution slot it cannot use yet — see maxBuffered above for the failure this avoids.
@@ -685,12 +693,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 if (handleKey is { } hk)
                 {
                     Task prev = tracker.PredecessorFor(hk);
-                    op = RunBatchOpAfterAsync(prev, inFlight, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
+                    op = RunBatchOpAfterAsync(prev, inFlight, req, responseStream, writeLock, startedHandles, prepared, opPrincipal, ct);
                     tail = hk;
                 }
                 else
                 {
-                    op = RunBatchOpGatedAsync(inFlight, req, responseStream, writeLock, startedHandles, prepared, principal, ct);
+                    op = RunBatchOpGatedAsync(inFlight, req, responseStream, writeLock, startedHandles, prepared, opPrincipal, ct);
                 }
 
                 // Attach the completion callback before anything else can fail: without it the
@@ -718,6 +726,71 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             await RollbackStartedSurvivorsAsync(startedHandles).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The authorization snapshot one <see cref="BatchExecute"/> stream is currently working under,
+    /// plus what is needed to notice that it has gone out of date.
+    ///
+    /// <para>A local of the call, so it is freed with the stream. Written and read only from the read
+    /// loop, which is single-threaded, so it needs no synchronization of its own.</para>
+    /// </summary>
+    private sealed class BatchStreamPrincipal
+    {
+        /// <summary>The resolved principal, or null when authentication is off.</summary>
+        internal Principal? Principal;
+
+        /// <summary><see cref="Environment.TickCount64"/> at which the snapshot must be resolved again.</summary>
+        internal long RefreshAtTicks;
+
+        /// <summary>The authentication catalog generation the snapshot was resolved under.</summary>
+        internal long Generation;
+    }
+
+    /// <summary>
+    /// Returns the principal the next batched operation should run as, resolving it again when the
+    /// current snapshot has aged out or the authentication catalog has moved underneath it.
+    ///
+    /// <para><b>Why a batch stream needs this at all.</b> This stream is long-lived by design — a
+    /// multiplexing client keeps one open across a whole session — so an authorization snapshot taken
+    /// when it opened would be the authorization for every operation until the client reconnects. In
+    /// practice that is the token's own lifetime, because re-login is the only refresh, and it is why a
+    /// <c>GRANT</c> appeared to take about fifteen minutes to reach such a client. Every other transport
+    /// resolves per request and was never affected.</para>
+    ///
+    /// <para>The check costs one clock read and one field read per operation. A full resolve happens at
+    /// most once per <see cref="CamusDBOptions.AuthenticationCacheTtl"/> per stream, and it goes through
+    /// the same per-node principal cache every other transport uses — so this transport now carries the
+    /// same staleness bound as the rest, rather than none.</para>
+    ///
+    /// <para>The generation check is what makes a change on this node apply to the very next operation
+    /// instead of at the end of that window. It is a plain field read, so it is free to consult.</para>
+    ///
+    /// <para>A resolve that fails — the session was logged out, revoked, or its account dropped — throws,
+    /// which ends the stream. That is deliberate: the alternative is a stream that keeps working on
+    /// authority that no longer exists, which is what it did before.</para>
+    /// </summary>
+    private async Task<Principal?> PrincipalForBatchOpAsync(ServerCallContext context, BatchStreamPrincipal state)
+    {
+        if (!options.AuthenticationEnabled)
+            return null;
+
+        long generation = executor.AuthorizationGeneration;
+
+        if (state.Principal is not null
+            && Environment.TickCount64 < state.RefreshAtTicks
+            && generation == state.Generation)
+        {
+            return state.Principal;
+        }
+
+        Principal? resolved = await ResolvePrincipalAsync(context).ConfigureAwait(false);
+
+        state.Principal = resolved;
+        state.Generation = generation;
+        state.RefreshAtTicks = Environment.TickCount64 + (long)options.AuthenticationCacheTtl.TotalMilliseconds;
+
+        return resolved;
     }
 
     /// <summary>

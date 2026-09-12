@@ -530,7 +530,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         );
         tableSettings = new Controllers.DDL.TableSettingsService(executorContext, options, catalogs);
         statementAuthorizer = new Controllers.Auth.StatementAuthorizer(executorContext, options);
-        userAdmin = new Controllers.Auth.UserAdminService(executorContext, options, authCatalogTask);
+        userAdmin = new Controllers.Auth.UserAdminService(executorContext, options, authCatalogTask, authService);
         selectExecutor = new Controllers.Queries.SelectStatementExecutor(
             executorContext,
             options,
@@ -1214,6 +1214,20 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     /// <summary>Revokes the presented token (logout).</summary>
     public Task LogoutAsync(string? bearer) => RequireAuthService().LogoutAsync(bearer);
+
+    /// <summary>
+    /// The coherence generation of this engine's authentication catalog. Zero when the engine has no
+    /// authentication service at all, and while the catalog is still opening.
+    ///
+    /// <para>A transport that keeps one resolved <see cref="Principal"/> for longer than a single
+    /// request — a long-lived duplex stream — reads this per operation to tell, at the cost of one
+    /// field read, that the catalog has changed and the principal must be resolved again. Without it a
+    /// stream serves whatever authorization was true when it opened, for as long as it stays open.</para>
+    ///
+    /// <para>It is deliberately not a throwing accessor: a caller polls it on a hot path and must not
+    /// have to know whether this engine was built with a shared node.</para>
+    /// </summary>
+    public long AuthorizationGeneration => authService?.AuthorizationGeneration ?? 0;
 
     private BackupManager RequireBackupManager()
     {

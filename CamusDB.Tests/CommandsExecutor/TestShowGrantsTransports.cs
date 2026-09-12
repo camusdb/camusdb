@@ -425,6 +425,8 @@ internal sealed class TestShowGrantsTransports : BaseTest
             (NodeType.ShowAncestors,       $"SHOW ANCESTORS FROM {db}"),
             (NodeType.ShowOrphanDatabases, "SHOW ORPHAN DATABASES"),
             (NodeType.ShowGrants,          $"SHOW GRANTS FOR {user}"),
+            (NodeType.ShowAllGrants,       "SHOW GRANTS FOR *"),
+            (NodeType.ShowUsers,           "SHOW USERS"),
             (NodeType.ShowEngineStats,     "SHOW ENGINE STATS"),
             (NodeType.ShowVariables,       "SHOW VARIABLES"),
             (NodeType.ShowSlowQueries,     "SHOW SLOW QUERIES"),
@@ -457,5 +459,128 @@ internal sealed class TestShowGrantsTransports : BaseTest
             async () => await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
                 txnState: null!, database: "", sql: "SHOW CLUSTER SETTINGS", parameters: null)))!;
         Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, refused.Code);
+    }
+
+    // ─── SHOW USERS / SHOW GRANTS FOR * / FLUSH over the transports ───────────
+
+    /// <summary>
+    /// The catalog listing over the buffered REST endpoint, with a database named. A database in scope
+    /// must change nothing, because the statement opens none — and naming one is what turned the same
+    /// gap in <c>SHOW GRANTS</c> into a null-descriptor commit rather than a clean refusal.
+    /// </summary>
+    [Test]
+    public async Task RestQueryEndpointListsUsers()
+    {
+        (string db, string user) = await SeedGrantAsync();
+
+        // A database IS named, which is the shape that broke SHOW GRANTS: the statement opens none, so
+        // a transport that opened a transaction for it would commit a descriptor that was never there.
+        JsonResult result = await Sql(new { databaseName = db, sql = "SHOW USERS" }).ExecuteSQLQuery();
+        ExecuteSQLQueryResponse response = (ExecuteSQLQueryResponse)result.Value!;
+
+        Assert.AreEqual("ok", response.Status, response.Message);
+        Assert.AreEqual(
+            new[] { "user", "id", "superuser", "has_password", "grants", "created_at" },
+            response.Columns.Select(c => c.Name).ToArray(),
+            "clients decode rows positionally, so the declared schema is the contract");
+
+        Assert.IsTrue(response.Rows.Rows.Any(r => r.Row["user"].StrValue == user), "the seeded account is listed");
+    }
+
+    /// <summary>The all-account grant listing declares the same three columns the per-account form does,
+    /// so a client that reads one reads the other with no change.</summary>
+    [Test]
+    public async Task RestQueryEndpointListsEveryGrant()
+    {
+        (string db, string user) = await SeedGrantAsync();
+
+        JsonResult result = await Sql(new { sql = "SHOW GRANTS FOR *" }).ExecuteSQLQuery();
+        ExecuteSQLQueryResponse response = (ExecuteSQLQueryResponse)result.Value!;
+
+        Assert.AreEqual("ok", response.Status, response.Message);
+        Assert.AreEqual(
+            new[] { "user", "object", "privileges" },
+            response.Columns.Select(c => c.Name).ToArray());
+
+        Assert.IsTrue(
+            response.Rows.Rows.Any(r => r.Row["user"].StrValue == user && r.Row["object"].StrValue == $"{db}.*"),
+            "the seeded grant appears in the all-account listing");
+    }
+
+    /// <summary>The streaming endpoint carries its own copy of the routing decision, so it needs its own case.</summary>
+    [Test]
+    public async Task RestStreamingEndpointStreamsUserRows()
+    {
+        (_, string user) = await SeedGrantAsync();
+
+        ExecuteSQLController controller = Sql(new { sql = "SHOW USERS" });
+        await controller.ExecuteSQLQueryStream();
+
+        string body = ReadBody(controller);
+        Assert.AreEqual(200, controller.Response.StatusCode, body);
+        StringAssert.Contains("\"has_password\"", body, "the schema header must precede the rows");
+        StringAssert.Contains(user, body);
+        StringAssert.Contains("\"status\":\"ok\"", body, "the trailer reports the terminal status");
+    }
+
+    /// <summary>The gRPC query path carries its own copy of the routing decision too.</summary>
+    [Test]
+    public async Task GrpcQueryStreamsUserRows()
+    {
+        (_, string user) = await SeedGrantAsync();
+
+        CapturingStreamWriter<ProtoQueryStreamMessage> writer = new();
+        await grpc.ExecuteQuery(
+            new SqlRequest { Sql = "SHOW USERS" },
+            writer,
+            new TestServerCallContext(CancellationToken.None));
+
+        List<ProtoQueryStreamMessage> schemas = writer.Written.Where(m => m.Schema is not null).ToList();
+        Assert.AreEqual(1, schemas.Count, "exactly one schema message precedes the rows");
+        Assert.AreEqual(
+            new[] { "user", "id", "superuser", "has_password", "grants", "created_at" },
+            schemas[0].Schema.Columns.Select(c => c.Name).ToArray());
+
+        Assert.IsTrue(
+            writer.Written.Where(m => m.Row is not null).Any(m => m.Row.Values[0].StringValue == user),
+            "the seeded account is streamed");
+    }
+
+    /// <summary>
+    /// Both flushes must run through the DDL and the no-rows endpoints alike, with no database in
+    /// scope. A client routes every non-SELECT statement to whichever endpoint it uses for those, so a
+    /// statement that works through one and reports "unknown statement" through the other is, to that
+    /// client, indistinguishable from a feature the server does not have.
+    /// </summary>
+    [Test]
+    public async Task RestEndpointsAcceptBothFlushStatements()
+    {
+        await SeedGrantAsync();
+
+        foreach (string sql in new[] { "FLUSH PRIVILEGES", "FLUSH SESSIONS" })
+        {
+            JsonResult ddl = await Sql(new { sql }).ExecuteSQLDDL();
+            Assert.AreEqual("ok", ((ExecuteDDLSQLResponse)ddl.Value!).Status, $"{sql} through /execute-sql-ddl");
+
+            JsonResult nonQuery = await Sql(new { sql }).ExecuteNonSQLQuery();
+            Assert.AreEqual("ok", ((ExecuteNonSQLQueryResponse)nonQuery.Value!).Status, $"{sql} through /execute-sql-non-query");
+        }
+    }
+
+    /// <summary>The gRPC DDL method carries its own routing decision as well.</summary>
+    [Test]
+    public async Task GrpcDdlAcceptsBothFlushStatements()
+    {
+        await SeedGrantAsync();
+
+        foreach (string sql in new[] { "FLUSH PRIVILEGES", "FLUSH SESSIONS" })
+        {
+            // A refused or misrouted statement surfaces as an RpcException here, so reaching the
+            // assertion at all is the routing check; the row count pins that it wrote nothing.
+            CamusDB.Grpc.DdlReply reply = await grpc.ExecuteDdl(
+                new SqlRequest { Sql = sql }, new TestServerCallContext(CancellationToken.None));
+
+            Assert.AreEqual(0, reply.AffectedRows, $"{sql} writes no rows");
+        }
     }
 }

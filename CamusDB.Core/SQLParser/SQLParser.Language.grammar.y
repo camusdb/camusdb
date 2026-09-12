@@ -80,6 +80,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | reset_cluster_setting_stmt { $$.n = $1.n; }
         | analyze_stmt { $$.n = $1.n; }
         | evict_cache_stmt { $$.n = $1.n; }
+        | flush_stmt { $$.n = $1.n; }
         | comment_stmt { $$.n = $1.n; }
         | create_user_stmt { $$.n = $1.n; }
         | alter_user_stmt { $$.n = $1.n; }
@@ -734,6 +735,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TORPHAN TDATABASES { $$.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS { $$.n = new(NodeType.ShowGrants, null, null, null, null, null, null, null, null); }
           | TSHOW TGRANTS TFOR any_identifier { $$.n = new(NodeType.ShowGrants, $4.n, null, null, null, null, null, null, null); }
+          /* SHOW GRANTS FOR * — every account's grants. The star is TMULT, which any_identifier can
+             never derive, so this production cannot conflict with the one above it. The spelling was
+             chosen over FOR ALL deliberately: "all" arrives as a plain TIDENTIFIER, so SHOW GRANTS FOR
+             all already parses as a request for an account named "all", and giving that text a second
+             meaning would silently change behaviour for anyone who has such an account. */
+          | TSHOW TGRANTS TFOR TMULT { $$.n = new(NodeType.ShowAllGrants, null, null, null, null, null, null, null, null); }
           /* STATISTICS is likewise matched as a plain identifier, so the word stays usable as a
              column and table name. The TFOR in third position keeps this production distinct from
              the two-identifier ENGINE STATS / CLUSTER SETTINGS shape below, so neither conflicts. */
@@ -790,23 +797,37 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
           }
-          /* VARIABLES is likewise a plain identifier rather than a keyword, so it stays usable as a
-             column and table name. */
+          /* VARIABLES and USERS are likewise plain identifiers rather than keywords, so both words
+             stay usable as column and table names. "users" in particular is a table name in most
+             schemas, so reserving it would be a real regression. The two statements share ONE
+             production per token shape and are dispatched on the word, because a second production
+             with the same token shape would be a reduce/reduce conflict — the same constraint the
+             ENGINE STATS / CLUSTER SETTINGS / SLOW QUERIES rules above document.
+
+             Note the singular TUSER token already exists for CREATE USER and is NOT reused here:
+             GPLEX resolves by longest match, so "users" matches {Identifier} (5 characters) rather
+             than {TUser} (4) and reaches the parser as TIDENTIFIER with no lexer rule of its own. */
           | TSHOW TIDENTIFIER
           {
-            if (!string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowVariables, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "users", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowUsers, null, null, null, null, null, null, null, null);
+            else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>']");
-            $$.n = new(NodeType.ShowVariables, null, null, null, null, null, null, null, null);
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'] or SHOW USERS [LIKE '<pattern>']");
           }
           | TSHOW TIDENTIFIER TLIKE string
           {
-            if (!string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowVariables, $4.n, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "users", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowUsers, $4.n, null, null, null, null, null, null, null);
+            else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>']");
-            $$.n = new(NodeType.ShowVariables, $4.n, null, null, null, null, null, null, null);
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'] or SHOW USERS [LIKE '<pattern>']");
           }
           /* RANGES, RANGE and ROW are matched as plain identifiers and validated in the action, so
              all three stay usable as table and column names — "range" and "rows" in particular are
@@ -867,6 +888,28 @@ evict_cache_stmt : TEVICT TIDENTIFIER TSTRING
                    $$.n = new(NodeType.EvictCacheAll, null, null, null, null, null, null, null, null);
                  }
                  ;
+
+/* FLUSH PRIVILEGES / FLUSH SESSIONS. "flush" and "sessions" stay plain identifiers and are validated
+   in the action, exactly as EVICT CACHE does above, so neither word is reserved. TPRIVILEGES is an
+   existing token, which is why the two forms have different token shapes and cannot conflict.
+
+   No other statement begins with a bare TIDENTIFIER, so admitting one at statement level costs
+   nothing elsewhere. */
+flush_stmt : TIDENTIFIER TPRIVILEGES
+           {
+             RequireFlushWord($1.s);
+             $$.n = new(NodeType.FlushPrivileges, null, null, null, null, null, null, null, null);
+           }
+           | TIDENTIFIER TIDENTIFIER
+           {
+             RequireFlushWord($1.s);
+             if (!string.Equals($2.s, "sessions", System.StringComparison.OrdinalIgnoreCase))
+                 throw new CamusDB.Core.CamusDBException(
+                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                     "Expected: FLUSH PRIVILEGES or FLUSH SESSIONS");
+             $$.n = new(NodeType.FlushSessions, null, null, null, null, null, null, null, null);
+           }
+           ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
                       | identifier_index { $$.n = $1.n; $$.s = $1.s; }

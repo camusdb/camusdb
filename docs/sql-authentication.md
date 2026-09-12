@@ -161,6 +161,49 @@ taking over, so exempting it would leave the largest hole open.
 A superuser changing **another** user's password presents no old secret. That is the recovery path,
 and requiring a secret nobody knows is what recovery exists to avoid.
 
+### Listing the accounts
+
+```sql
+SHOW USERS;
+SHOW USERS LIKE 'app_%';
+```
+
+One row per account, ordered by name:
+
+| column | type | meaning |
+| --- | --- | --- |
+| `user` | string | the account name, in the case it was created with |
+| `id` | string | the account's immutable id; `NULL` on an account created before ids existed |
+| `superuser` | bool | whether the account bypasses every privilege check |
+| `has_password` | bool | whether the account can log in at all |
+| `grants` | int64 | how many grant records the account holds |
+| `created_at` | string | UTC ISO-8601, to the millisecond |
+
+**No column carries any part of a credential** — not the hash, not the salt, not the iteration count,
+not the algorithm. `has_password` is a boolean because that is the whole question worth asking of a
+restored account: whether it can log in. The two internal revocation epochs are omitted for the same
+reason.
+
+The statement requires a **superuser**. Its output names every account on the server, and no
+per-database grant narrows it, so it is held to the bar `SHOW GRANTS FOR <other>` is held to.
+
+The listing is read from storage rather than from a cache, and it is complete or it fails. An operator
+taking an inventory would believe a short list, so a short list is never returned.
+
+### Listing every grant
+
+```sql
+SHOW GRANTS FOR *;
+```
+
+The same three columns `SHOW GRANTS` returns — `user`, `object`, `privileges` — for every account,
+ordered by account name and then by object, so the output is stable across calls. An account with no
+grants produces no row; `SHOW USERS` is where its existence shows. Superuser only, for the same reason.
+
+The spelling is `*` rather than `ALL` on purpose. `all` is a plain identifier, so `SHOW GRANTS FOR all`
+already means "the account named `all`", and giving that text a second meaning would change behaviour
+for anyone who has such an account.
+
 ## 4. Granting privileges
 
 ```sql
@@ -274,6 +317,56 @@ only fail later.
 A query naming one of them bypasses the query result cache: the cache is per node and shared between
 callers, so a cached `SELECT current_user()` would otherwise answer one caller with another's identity.
 
+## 5a. When a privilege change takes effect
+
+```sql
+FLUSH PRIVILEGES;   -- make an authorization change apply now
+FLUSH SESSIONS;     -- end every login session, so every client must log in again
+```
+
+Both require a **superuser**, and both return no rows.
+
+### The bound, without a flush
+
+Every node caches the authorization it resolved for a token, for at most
+`authentication_cache_ttl` (default 1 s). Within that window:
+
+- **On the node where the change was made, it applies to the very next request.** A `GRANT`, a
+  `REVOKE`, a `DROP USER` or a password rotation advances that account's epoch, and a cached
+  authorization decision built before it is discarded on sight. Nothing waits for the cache to expire.
+- **On another node, it applies within `authentication_cache_ttl`.** That node learns of the change
+  when a cached decision expires and it reads the catalog again. Setting the knob to 0 makes a
+  cross-node change immediate, at the cost of a catalog lookup on every request.
+
+That is the whole bound, and it covers every transport. Note that a long-lived gRPC batch stream is
+included: it re-resolves its own authorization on the same schedule, rather than keeping whatever was
+true when the stream opened.
+
+### What `FLUSH PRIVILEGES` adds
+
+It forces this node to re-read the user and grant catalog from storage, and to discard every
+authorization decision it had cached, whether or not anything it tracks says something changed. It also
+advances the durable coherence generation, which is replicated, so the other nodes drop what they
+derived from the older one as soon as they read the catalog again — within `authentication_cache_ttl`,
+as above. There is no node-to-node call, and it does not matter which node you run it on.
+
+Reach for it when a node's view is suspect and the ordinary path did not correct it. It is not needed
+after an ordinary `GRANT` or `REVOKE`.
+
+**It revokes nothing.** A client whose grants did not change keeps working across it, with no
+re-login.
+
+### What `FLUSH SESSIONS` costs
+
+It deletes **every** stored session, so every client of every node must log in again. Use it when the
+staleness is held somewhere this server cannot reach — a client that cached a refusal, for instance.
+It is deliberately not a side effect of `FLUSH PRIVILEGES`: an operator who wants one grant believed
+does not want a fleet logged out.
+
+A fresh login works immediately afterwards. On another node, an authorization decision cached before
+the flush stays usable until it expires, which is the same `authentication_cache_ttl` bound every
+revocation already carries.
+
 ## 6. Configuration knobs
 
 Beyond the environment variables in §1, these tune the security/performance trade-off (defaults shown):
@@ -281,7 +374,7 @@ Beyond the environment variables in §1, these tune the security/performance tra
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `AccessTokenTtl` | 15 min | Absolute token lifetime. |
-| `AuthenticationCacheTtl` | 1 s | Max staleness of a per-node authorization cache hit; a cross-node revoke takes effect within this window. Set to 0 for immediate revocation at a per-request lookup cost. |
+| `AuthenticationCacheTtl` | 1 s | Max staleness of a per-node authorization cache hit; a cross-node revoke takes effect within this window (§5a). A change made on the node itself applies to the next request regardless. Set to 0 for immediate cross-node revocation at a per-request lookup cost. |
 | `PasswordHashIterations` | 600,000 | PBKDF2-HMAC-SHA256 work factor (stored per credential, so raising it never breaks existing hashes). |
 | `LoginKdfMaxConcurrency` | 8 | Cap on concurrent password verifications, so a login flood cannot exhaust CPU. |
 | `LoginMaxAttemptsPerMinute` | 20 | Per-account login rate limit (`429` on exceed). |

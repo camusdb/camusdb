@@ -59,6 +59,8 @@ public static class PreparedStatementBinder
         NodeType.ShowIndexes or
         NodeType.ShowStatistics or
         NodeType.ShowGrants or
+        NodeType.ShowAllGrants or
+        NodeType.ShowUsers or
         NodeType.ShowViews or
         NodeType.ShowMaterializedViews or
         NodeType.ShowCreateView or

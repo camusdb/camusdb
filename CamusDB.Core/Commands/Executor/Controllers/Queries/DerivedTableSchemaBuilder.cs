@@ -155,11 +155,42 @@ internal static class DerivedTableSchemaBuilder
         new("comment", ColumnType.String),
     ];
 
+    /// <summary>
+    /// Serves <c>SHOW GRANTS</c>, <c>SHOW GRANTS FOR &lt;user&gt;</c> and <c>SHOW GRANTS FOR *</c>
+    /// alike. One schema for all three is what lets the all-account form arrive without any client
+    /// change: a client that decodes the per-account answer decodes this one unaltered.
+    /// </summary>
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowGrantsSchema =
     [
         new("user",       ColumnType.String),
         new("object",     ColumnType.String),
         new("privileges", ColumnType.String),
+    ];
+
+    /// <summary>
+    /// <c>SHOW USERS</c>: one row per account in the server-level authentication catalog.
+    ///
+    /// <para><b>No column carries any part of a credential</b> — not the hash, not the salt, not the
+    /// iteration count, not the algorithm. <c>has_password</c> is a boolean because that is the whole
+    /// question a caller has a reason to ask: whether a restored account can log in at all. A dump tool
+    /// learns that here rather than by probing each account, which is why it is on this row and not
+    /// behind a second statement.</para>
+    ///
+    /// <para>The two epochs are omitted as well. They are internal revocation levers, and publishing
+    /// them would invite tooling to depend on values whose only contract is "they move when something
+    /// changes".</para>
+    ///
+    /// <para><c>grants</c> counts the account's stored grant records, so "did I export everything?" is
+    /// answerable at a glance against <c>SHOW GRANTS FOR *</c>.</para>
+    /// </summary>
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowUsersSchema =
+    [
+        new("user",         ColumnType.String),
+        new("id",           ColumnType.String),
+        new("superuser",    ColumnType.Bool),
+        new("has_password", ColumnType.Bool),
+        new("grants",       ColumnType.Integer64),
+        new("created_at",   ColumnType.String),
     ];
 
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowBranchesSchema =

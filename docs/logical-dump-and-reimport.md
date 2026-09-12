@@ -53,6 +53,13 @@ statements for the rows. The `CREATE TABLE` text comes from `SHOW CREATE TABLE`,
 column defaults, `CHECK` constraints, `COMMENT` clauses, covering-index `INCLUDE` columns, and the
 row-level TTL configuration of the table.
 
+**A revision upgrade empties the user catalog.** Accounts, grants and sessions live in the same
+key-value store the rows do, under the same revision directory, so a `v2` server starting over a `v1`
+data directory starts with no accounts at all — it then seeds its bootstrap superuser and nothing else.
+Record the accounts and their grants **before** you upgrade, with `SHOW USERS` and
+`SHOW GRANTS FOR *`, and recreate them after the reimport. Passwords cannot be exported at all, so
+plan to set a new one for every account.
+
 The dump does **not** carry the objects below. Record them before the upgrade with the
 statements shown, and recreate them after the reimport.
 
@@ -60,8 +67,8 @@ statements shown, and recreate them after the reimport.
 | --- | --- | --- |
 | Views | `SHOW VIEWS;` then `SHOW CREATE VIEW name;` per view | Run the printed `CREATE VIEW` |
 | Materialized views | `SHOW MATERIALIZED VIEWS;` then `SHOW CREATE MATERIALIZED VIEW name;` | Run the printed statement, then `REFRESH MATERIALIZED VIEW name;` |
-| Users | Your own inventory; passwords cannot be exported | `CREATE USER name IDENTIFIED BY '…';` |
-| Grants | `SHOW GRANTS FOR name;` per user, as a superuser | `GRANT … ON … TO name;` |
+| Users | `SHOW USERS;` as a superuser; passwords cannot be exported | `CREATE USER name IDENTIFIED BY '…';` |
+| Grants | `SHOW GRANTS FOR *;` as a superuser | `GRANT … ON … TO name;` |
 | Cluster settings | `SHOW VARIABLES LIKE '%';` and keep the rows whose source is not the default | `SET CLUSTER SETTING name = value;` |
 | Table statistics | Nothing to record | `ANALYZE table;` per table after the rows are loaded |
 | Database branches | `SHOW BRANCHES FROM parent;` | See the note below |

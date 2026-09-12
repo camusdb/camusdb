@@ -217,6 +217,18 @@ internal sealed class ServerLevelStatementDispatcher
                 await userAdmin.Grant(sqlExecutor.CreateGrantTicket(ast)).ConfigureAwait(false);
                 return ServerLevelOutcome.Succeeded();
 
+            // The two flushes act on the same auth keyspace and on this node's own caches. They are
+            // dispatched here for the same reason the statements above are: they name no database, so
+            // opening one for them would be pure ceremony, and the transports skip the transaction on
+            // the strength of this routing.
+            case NodeType.FlushPrivileges:
+                await userAdmin.FlushPrivilegesAsync().ConfigureAwait(false);
+                return ServerLevelOutcome.Succeeded();
+
+            case NodeType.FlushSessions:
+                await userAdmin.FlushSessionsAsync().ConfigureAwait(false);
+                return ServerLevelOutcome.Succeeded();
+
             // The change validates against the resulting configuration, replicates through the
             // settings log (or applies locally in standalone mode), and opens no database and no
             // transaction.

@@ -154,8 +154,29 @@ public sealed class AuthCatalog
 
     private async Task LoadOnceAsync()
     {
-        usersByName.Clear();
-        grantsByUser.Clear();
+        (Dictionary<string, UserRecord> users, Dictionary<string, Dictionary<string, GrantRecord>> grants) =
+            await ScanAuthKeyspaceAsync().ConfigureAwait(false);
+
+        ReconcileFromScan(users, grants);
+    }
+
+    /// <summary>
+    /// Reads the whole authentication keyspace once and returns it as fresh maps. The caller decides
+    /// what to do with them; nothing here touches the live caches.
+    ///
+    /// <para><b>It returns a complete picture or it raises.</b> <c>LocateAndScanRange</c> fails the
+    /// scan — it does not end the stream — when a page answers anything but a successful read, when a
+    /// continuation cursor cannot be decoded, and when a page stays transient for its whole retry
+    /// budget. So an exhausted enumeration here means the range was read in full. That is what lets a
+    /// listing statement report this catalog without asking whether it saw everything, and it is why
+    /// the maps are built fresh: a scan that raises leaves the previous, complete caches in place
+    /// rather than a half-filled one.</para>
+    /// </summary>
+    private async Task<(Dictionary<string, UserRecord> Users, Dictionary<string, Dictionary<string, GrantRecord>> Grants)>
+        ScanAuthKeyspaceAsync()
+    {
+        Dictionary<string, UserRecord> users = new(StringComparer.Ordinal);
+        Dictionary<string, Dictionary<string, GrantRecord>> grants = new(StringComparer.Ordinal);
 
         KvTransaction tx = KvTransaction.CreateReadOnly();
 
@@ -180,20 +201,82 @@ public sealed class AuthCatalog
             if (key.StartsWith(UserKeyPrefix, StringComparison.Ordinal))
             {
                 UserRecord user = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.UserRecord);
-                usersByName[Normalize(user.Name)] = user;
+                users[Normalize(user.Name)] = user;
             }
             else if (key.StartsWith(GrantKeyPrefix, StringComparison.Ordinal))
             {
                 GrantRecord grant = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.GrantRecord);
-                GetOrCreateGrantMap(Normalize(grant.User))[grant.Scope.ScopeKey()] = grant;
+                string normalizedUser = Normalize(grant.User);
+
+                if (!grants.TryGetValue(normalizedUser, out Dictionary<string, GrantRecord>? map))
+                    grants[normalizedUser] = map = new Dictionary<string, GrantRecord>(StringComparer.Ordinal);
+
+                map[grant.Scope.ScopeKey()] = grant;
             }
         }
 
-        DropGrantsNamingARetiredUser();
+        DropGrantsNamingARetiredUser(users, grants);
+        return (users, grants);
     }
 
     /// <summary>
-    /// Removes every cached grant that names a user id other than the one the live record carries.
+    /// Brings the live caches to the state <paramref name="users"/> and <paramref name="grants"/>
+    /// describe: present keys are upserted, vanished ones removed. The caches are never cleared first,
+    /// so a lock-free reader never observes a transiently empty catalog.
+    /// </summary>
+    /// <param name="generation">
+    /// The generation the scan was taken under, published <b>after</b> the maps it describes. Null
+    /// leaves the generation alone, for the startup load that publishes it separately.
+    /// </param>
+    /// <remarks>
+    /// The publication order is load-bearing and every mutation in this class follows it too: update
+    /// the maps, then move the generation. A resolved-principal cache elsewhere in the process treats
+    /// a moved generation as "the maps have changed, re-read them", so a generation that became
+    /// visible ahead of its own maps would let a stale authorization snapshot certify itself as
+    /// current.
+    /// </remarks>
+    private void ReconcileFromScan(
+        Dictionary<string, UserRecord> users,
+        Dictionary<string, Dictionary<string, GrantRecord>> grants,
+        long? generation = null)
+    {
+        foreach ((string normalized, UserRecord user) in users)
+            usersByName[normalized] = user;
+
+        foreach ((string normalizedUser, Dictionary<string, GrantRecord> scanned) in grants)
+        {
+            ConcurrentDictionary<string, GrantRecord> live = GetOrCreateGrantMap(normalizedUser);
+
+            foreach ((string scopeKey, GrantRecord grant) in scanned)
+                live[scopeKey] = grant;
+        }
+
+        foreach (string normalized in usersByName.Keys.ToList())
+        {
+            if (!users.ContainsKey(normalized))
+            {
+                usersByName.TryRemove(normalized, out _);
+                grantsByUser.TryRemove(normalized, out _);
+            }
+        }
+
+        foreach ((string normalizedUser, ConcurrentDictionary<string, GrantRecord> live) in grantsByUser)
+        {
+            grants.TryGetValue(normalizedUser, out Dictionary<string, GrantRecord>? scanned);
+
+            foreach (string scopeKey in live.Keys.ToList())
+            {
+                if (scanned is null || !scanned.ContainsKey(scopeKey))
+                    live.TryRemove(scopeKey, out _);
+            }
+        }
+
+        if (generation.HasValue)
+            Volatile.Write(ref loadedGeneration, generation.Value);
+    }
+
+    /// <summary>
+    /// Removes every scanned grant that names a user id other than the one the live record carries.
     /// Such a grant belonged to an earlier account that held this name and outlived its own
     /// <c>DROP USER</c>; adopting it would hand the current account privileges nobody granted it.
     ///
@@ -204,17 +287,19 @@ public sealed class AuthCatalog
     /// <see cref="GrantRecord.UserId"/>. A grant whose user has no record at all is also kept: the
     /// user map is what decides whether an account exists, and it is rebuilt by this same scan.</para>
     /// </summary>
-    private void DropGrantsNamingARetiredUser()
+    private static void DropGrantsNamingARetiredUser(
+        Dictionary<string, UserRecord> users,
+        Dictionary<string, Dictionary<string, GrantRecord>> grants)
     {
-        foreach ((string normalizedUser, ConcurrentDictionary<string, GrantRecord> map) in grantsByUser)
+        foreach ((string normalizedUser, Dictionary<string, GrantRecord> map) in grants)
         {
-            if (!usersByName.TryGetValue(normalizedUser, out UserRecord? live) || live.Id is null)
+            if (!users.TryGetValue(normalizedUser, out UserRecord? live) || live.Id is null)
                 continue;
 
-            foreach ((string scopeKey, GrantRecord grant) in map)
+            foreach ((string scopeKey, GrantRecord grant) in map.ToList())
             {
                 if (grant.UserId is not null && !string.Equals(grant.UserId, live.Id, StringComparison.Ordinal))
-                    map.TryRemove(scopeKey, out _);
+                    map.Remove(scopeKey);
             }
         }
     }
@@ -249,6 +334,15 @@ public sealed class AuthCatalog
         return next;
     }
 
+    /// <summary>
+    /// Publishes a generation this node has already applied to its caches, never moving it backwards.
+    ///
+    /// <para><b>Call it after the maps it describes, never before.</b> A resolved-principal cache
+    /// elsewhere in the process reads <see cref="LocalGeneration"/> to decide whether the maps have
+    /// changed under it, and then re-reads the maps. A generation published ahead of its own maps would
+    /// send that check to the old data and let a stale authorization snapshot certify itself as
+    /// current. Every mutation in this class is written in that order for this reason.</para>
+    /// </summary>
     private void AdoptGeneration(long generation)
     {
         long current = Volatile.Read(ref loadedGeneration);
@@ -287,58 +381,10 @@ public sealed class AuthCatalog
         if (Volatile.Read(ref loadedGeneration) >= authoritativeGeneration)
             return; // another hit already reloaded to at least this generation
 
-        // Reconcile in place — upsert present keys and remove vanished ones — rather than clearing
-        // first, so a concurrent lock-free reader never observes a transiently empty cache.
-        HashSet<string> presentUsers = new(StringComparer.Ordinal);
-        HashSet<string> presentGrants = new(StringComparer.Ordinal);
+        (Dictionary<string, UserRecord> users, Dictionary<string, Dictionary<string, GrantRecord>> grants) =
+            await ScanAuthKeyspaceAsync().ConfigureAwait(false);
 
-        KvTransaction tx = KvTransaction.CreateReadOnly();
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-            tx.TransactionId, AuthBucket, null, true, null, true, 1000,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
-        {
-            if (entry.Value is null)
-                continue;
-
-            if (key.StartsWith(UserKeyPrefix, StringComparison.Ordinal))
-            {
-                UserRecord user = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.UserRecord);
-                string normalized = Normalize(user.Name);
-                usersByName[normalized] = user;
-                presentUsers.Add(normalized);
-            }
-            else if (key.StartsWith(GrantKeyPrefix, StringComparison.Ordinal))
-            {
-                GrantRecord grant = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.GrantRecord);
-                string normalizedUser = Normalize(grant.User);
-                string scopeKey = grant.Scope.ScopeKey();
-                GetOrCreateGrantMap(normalizedUser)[scopeKey] = grant;
-                presentGrants.Add($"{normalizedUser}/{scopeKey}");
-            }
-        }
-
-        foreach (string normalized in usersByName.Keys.ToList())
-        {
-            if (!presentUsers.Contains(normalized))
-            {
-                usersByName.TryRemove(normalized, out _);
-                grantsByUser.TryRemove(normalized, out _);
-            }
-        }
-
-        foreach ((string user, ConcurrentDictionary<string, GrantRecord> map) in grantsByUser)
-        {
-            foreach (string scopeKey in map.Keys.ToList())
-            {
-                if (!presentGrants.Contains($"{user}/{scopeKey}"))
-                    map.TryRemove(scopeKey, out _);
-            }
-        }
-
-        DropGrantsNamingARetiredUser();
-
-        Volatile.Write(ref loadedGeneration, authoritativeGeneration);
+        ReconcileFromScan(users, grants, authoritativeGeneration);
     }
 
     // -----------------------------------------------------------------------
@@ -357,10 +403,211 @@ public sealed class AuthCatalog
     public async Task<IReadOnlyList<GrantRecord>> ListGrantsAsync(string name)
     {
         await EnsureCoherentAsync().ConfigureAwait(false);
-        
+
         return grantsByUser.TryGetValue(Normalize(name), out ConcurrentDictionary<string, GrantRecord>? map)
             ? [.. map.Values]
             : [];
+    }
+
+    /// <summary>
+    /// The coherence generation this node's caches currently stand at. A plain read of a local field:
+    /// no storage access, no lock, and nothing to await.
+    ///
+    /// <para>It exists so a component that caches something <em>derived</em> from this catalog — a
+    /// resolved principal, say — can tell in constant time whether the catalog has moved underneath it,
+    /// and re-read only then. A change made on this node advances it the moment the change is visible
+    /// in the maps; a change made on another node advances it when this node next reconciles, which is
+    /// on its next coherent read.</para>
+    /// </summary>
+    public long LocalGeneration => Volatile.Read(ref loadedGeneration);
+
+    /// <summary>
+    /// Reads a user straight from the cache, with no coherence reconciliation.
+    ///
+    /// <para>For revalidating something already derived from this catalog at a known generation, never
+    /// for deciding whether an account exists. The record it returns belongs to
+    /// <see cref="LocalGeneration"/>, and a caller that compared it against a generation it read
+    /// earlier is comparing like with like. Use <see cref="TryGetUserAsync"/> for everything
+    /// else.</para>
+    /// </summary>
+    public UserRecord? TryGetUserCached(string name) => usersByName.GetValueOrDefault(Normalize(name));
+
+    /// <summary>
+    /// Takes a complete, ordered picture of the catalog from storage — not from the cache — and
+    /// brings the cache to it.
+    ///
+    /// <para><b>The listing statements are built on this rather than on the cache because they must
+    /// fail closed.</b> An operator inventorying accounts before a storage-revision upgrade would
+    /// believe a short list, so the underlying scan raises rather than returning one; this method
+    /// propagates that. A cache read could not make the same promise, because nothing tells it whether
+    /// the load that filled it saw everything.</para>
+    ///
+    /// <para>The generation is read <b>before</b> the scan. A mutation that commits on another node in
+    /// between therefore leaves the stamp behind the data rather than ahead of it, which costs one
+    /// redundant reconciliation later and never certifies unseen data as current.</para>
+    ///
+    /// <para>Serialized under the write semaphore, so no local mutation interleaves with the scan.
+    /// Listings are operator statements, so paying for that is cheaper than reasoning about a torn
+    /// picture.</para>
+    /// </summary>
+    public async Task<AuthCatalogSnapshot> SnapshotAsync()
+    {
+        await writeSem.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            long generation = await ReadGenerationAsync().ConfigureAwait(false);
+
+            (Dictionary<string, UserRecord> users, Dictionary<string, Dictionary<string, GrantRecord>> grants) =
+                await ScanAuthKeyspaceAsync().ConfigureAwait(false);
+
+            ReconcileFromScan(users, grants, generation);
+
+            List<AuthCatalogEntry> entries = new(users.Count);
+
+            foreach (string normalized in users.Keys.Order(StringComparer.Ordinal))
+            {
+                List<GrantRecord> ordered = [];
+
+                if (grants.TryGetValue(normalized, out Dictionary<string, GrantRecord>? map))
+                {
+                    foreach (string scopeKey in map.Keys.Order(StringComparer.Ordinal))
+                        ordered.Add(map[scopeKey]);
+                }
+
+                entries.Add(new AuthCatalogEntry(users[normalized], ordered));
+            }
+
+            return new AuthCatalogSnapshot(entries, generation);
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    /// <summary>
+    /// Advances the coherence generation and reloads this node's caches from storage authoritatively,
+    /// so an authorization change takes effect now instead of when a cached snapshot happens to expire.
+    ///
+    /// <para><b>The generation bump is how the flush reaches the other nodes.</b> That key is durable
+    /// and replicated, so every node observes the move on its next coherent read and discards what it
+    /// derived from the older one. There is no node-to-node call to add, and nothing here depends on
+    /// which node the operator happened to run the statement on.</para>
+    ///
+    /// <para>It revokes nothing. Sessions are untouched, so a client whose grants did not change keeps
+    /// working across it without logging in again — see <see cref="RevokeAllSessionsAsync"/> for the
+    /// statement that does log everyone out.</para>
+    /// </summary>
+    /// <returns>The new generation.</returns>
+    public async Task<long> FlushPrivilegesAsync()
+    {
+        await writeSem.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            long newGeneration = 0;
+
+            await RunInTransactionAsync(async tx =>
+            {
+                newGeneration = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            (Dictionary<string, UserRecord> users, Dictionary<string, Dictionary<string, GrantRecord>> grants) =
+                await ScanAuthKeyspaceAsync().ConfigureAwait(false);
+
+            ReconcileFromScan(users, grants, newGeneration);
+            return newGeneration;
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+    }
+
+    /// <summary>
+    /// Deletes every stored login session, so every client must authenticate again, and advances the
+    /// coherence generation once so nothing derived from a deleted session stays trusted.
+    ///
+    /// <para><b>A session this cannot delete fails the statement.</b> That is the opposite of
+    /// <see cref="ReapExpiredSessionsAsync"/>, which leaves a contended record for its next sweep, and
+    /// the difference is what each one promises. The reaper is housekeeping over records that already
+    /// cannot authenticate anyone. This is an operator saying "end every session", and reporting
+    /// success while one survives would leave them believing a revocation that did not happen. The
+    /// delete is idempotent, so running it again after a failure is the correct and safe response.</para>
+    ///
+    /// <para>The generation still moves, and the deletes that did succeed still count, even when one
+    /// fails — so the sessions that went are not left half-revoked while the caller handles the error.
+    /// One transaction per key, so one contended record does not undo the rest.</para>
+    ///
+    /// <para>The scan is taken first and the deletes follow it, rather than deleting inside the
+    /// iteration, because a locked delete against the range being scanned would contend with the
+    /// scan's own read of it.</para>
+    /// </summary>
+    /// <returns>How many sessions were deleted.</returns>
+    public async Task<int> RevokeAllSessionsAsync()
+    {
+        List<string> sessionKeys = [];
+
+        ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero,
+            AuthBucket,
+            null,
+            true,
+            null,
+            true,
+            1000,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None
+        ).ConfigureAwait(false);
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in cursor)
+        {
+            if (entry.Value is not null && key.StartsWith(SessionKeyPrefix, StringComparison.Ordinal))
+                sessionKeys.Add(key);
+        }
+
+        int revoked = 0;
+        Exception? firstFailure = null;
+
+        foreach (string key in sessionKeys)
+        {
+            try
+            {
+                await RunInTransactionAsync(tx => DeleteAuthKey(tx, key)).ConfigureAwait(false);
+                revoked++;
+            }
+            catch (Exception ex)
+            {
+                // Kept, not rethrown here: the remaining sessions must still go, and the caller must
+                // still learn that this one did not.
+                firstFailure ??= ex;
+            }
+        }
+
+        await writeSem.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            long newGeneration = 0;
+
+            await RunInTransactionAsync(async tx =>
+            {
+                newGeneration = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            AdoptGeneration(newGeneration);
+        }
+        finally
+        {
+            writeSem.Release();
+        }
+
+        if (firstFailure is not null)
+            throw firstFailure;
+
+        return revoked;
     }
 
     // -----------------------------------------------------------------------
