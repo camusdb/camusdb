@@ -20,6 +20,7 @@ using CamusDB.App.Services;
 using CommandLine;
 using CommandLine.Text;
 using Kahuna;
+using Kahuna.Server.Communication;
 using Kahuna.Communication.External.Grpc;
 using Kahuna.Server.Configuration;
 using Kommander;
@@ -457,6 +458,10 @@ builder.Services.AddHostedService<PreparedStatementReaper>();
 
 if (config.IsClusterMode)
 {
+    // Kahuna 1.8.1: the node-only gRPC surfaces (MapGrpcKahunaRoutes) are guarded by the same trust policy
+    // Raft applies; the gate must be registered or the route mapping fails at startup.
+    builder.Services.AddNodeTransportGate();
+
     builder.Services.AddSingleton<EmbeddedKahuna>(services =>
     {
         EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildCluster(config, camusOptions);

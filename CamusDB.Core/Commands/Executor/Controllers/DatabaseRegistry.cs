@@ -269,7 +269,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         (SequenceResponseType createType, _) = await RetryWhileMustRetryAsync(
             () => kahuna.LocateAndCreateSequence(
-                seqName, initialValue: 0, increment: 1, maxValue: null,
+                seqName, initialValue: 0, increment: 1, maxValue: null, blockSize: null,
                 SequenceDurability.Persistent, CancellationToken.None),
             elapsed
         ).ConfigureAwait(false);

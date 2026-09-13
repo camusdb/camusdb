@@ -112,6 +112,24 @@ public sealed class ConnectionSet : IAsyncDisposable
         return conn;
     }
 
+    /// <summary>
+    /// Opens the read-only connection the in-window scan probe uses against one gateway. Routing is
+    /// forced off so the aggregate runs on the gateway it was sent to — the probe's whole point is a
+    /// per-gateway answer, and learned routing would quietly move it elsewhere — and the request
+    /// deadline is the probe's own (<see cref="ConnectionSettings.RequestTimeoutSeconds"/> of
+    /// <paramref name="settings"/>), since a scan under load takes seconds where a point read takes
+    /// milliseconds.
+    /// </summary>
+    public static async Task<CamusConnection> OpenProbeAsync(
+        string endpoint, string database, string protocol, ConnectionSettings settings, CancellationToken ct)
+    {
+        ConnectionSettings pinned = settings with { RoutingMode = "Off", RoutingNodes = null };
+        string cs = $"Endpoint={endpoint};Database={database};Protocol={protocol};TransactionMode=ReadOnly{pinned.CommonSuffix()}";
+        CamusConnection conn = new(new CamusConnectionStringBuilder(cs));
+        await OpenWithRetryAsync(conn, ct).ConfigureAwait(false);
+        return conn;
+    }
+
     public CamusConnection NextRead()
         => _readConnections[(uint)Interlocked.Increment(ref _readCursor) % _readConnections.Length];
 

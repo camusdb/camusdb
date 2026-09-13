@@ -157,6 +157,40 @@ public static class ErrorClassifier
             || message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// One clause naming why an idempotent read failed, for the reconciliation give-up message. The
+    /// three shapes a reader has to tell apart: the client's per-request deadline expired (the
+    /// aggregate is slower than the deadline — a live cluster, a slow scan), the endpoint could not be
+    /// reached (a node that is down or restarting), or the server answered with a verdict (its code
+    /// leads). <paramref name="lastAttempt"/> is how long the failing attempt ran, which for a deadline
+    /// is the deadline itself.
+    /// </summary>
+    public static string DescribeReadFailure(Exception ex, TimeSpan lastAttempt)
+    {
+        string detail = $"{ex.GetType().Name}: {ex.Message}";
+
+        if (ex is CamusException camus)
+        {
+            if (!string.IsNullOrEmpty(camus.Code) && camus.Code != InternalUnmapped)
+                return $"the server answered {camus.Code} — {camus.Message}";
+            if (camus.Message.Contains("deadline", StringComparison.OrdinalIgnoreCase))
+                return $"the request exceeded the client's per-request deadline after {lastAttempt.TotalSeconds:F1}s " +
+                       "(the aggregate is slower than the deadline; the cluster answered other requests) — " + detail;
+            if (IsTransportFailure(camus) || camus.Code == InternalUnmapped)
+                return $"the endpoint could not be reached (connection refused / no route / transport dropped) — {detail}";
+            return detail;
+        }
+
+        if (ex is OperationCanceledException or TimeoutException)
+            return $"the request exceeded the client's per-request deadline after {lastAttempt.TotalSeconds:F1}s " +
+                   "(the aggregate is slower than the deadline; the cluster answered other requests) — " + detail;
+
+        if (ex is IOException or System.Net.Sockets.SocketException)
+            return $"the endpoint could not be reached (connection refused / no route / transport dropped) — {detail}";
+
+        return detail;
+    }
+
     public static (OperationStatus Status, string Code) Classify(Exception ex)
     {
         if (ex is CamusException camus)

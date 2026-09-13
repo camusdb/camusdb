@@ -675,9 +675,12 @@ public static class EmbeddedKahunaOptionsBuilder
     /// it to 2 GB on a 16 GB machine took the same workload from 24.5 to 119.6 tx/s at 8 clients
     /// (and resolved a pipelining collapse to 3.4 tx/s that was pure read-I/O queueing).
     ///
-    /// <para>Sizing policy, all against <see cref="GCMemoryInfo.TotalAvailableMemoryBytes"/> (which
-    /// respects container memory limits): RocksDB block cache = 10% of RAM; memtable budget = a
-    /// quarter of the block cache; key/value actor caches = 6.25% of RAM (at least 64 MB for the layer
+    /// <para>Sizing policy, all against <see cref="HostMemory.TotalBytes"/> — the container's cgroup
+    /// limit or the machine's physical memory, never the GC heap limit, because the block cache and the
+    /// memtables are native allocations outside the managed heap (a 60% heap limit on a 4 GiB node used
+    /// to shrink the memtable budget to 61 MB): RocksDB block cache = 10% of RAM; memtable budget = a
+    /// quarter of the block cache, floored at the Raft-log flush unit plus the store's own memtable when
+    /// the WAL is on RocksDB (see <see cref="RaftWalFlushUnitMb"/>); key/value actor caches = 6.25% of RAM (at least 64 MB for the layer
     /// as a whole) divided across the shard actors, with the per-actor entry cap derived at an assumed
     /// ~512 B/entry. Ceilings: 2 GB block cache, 1 GB memtables, 2 GB per actor, 4M entries. Roughly
     /// 16% of RAM across both cache layers at the defaults, and never more than 4 GB in total however
@@ -704,11 +707,45 @@ public static class EmbeddedKahunaOptionsBuilder
     /// </summary>
     private static void ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna)
     {
-        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        long totalRam = HostMemory.TotalBytes();
         if (totalRam <= 0)
             return; // Unknown memory size: keep the fixed baseline values.
 
         ApplyMemoryProportionalDefaults(baseline, kahuna, totalRam);
+    }
+
+    /// <summary>The Kahuna store's own RocksDB memtable, which shares the sub-budget with the Raft log.</summary>
+    internal const int KvStoreMemtableMb = 64;
+
+    /// <summary>
+    /// Whether the memtable sub-budget is floored at the Raft-log flush unit. Off until Kommander bounds its
+    /// write-ahead files: on the k182 probe (Kahuna 1.8.1 / Kommander 1.6.5) an unstarved budget let the
+    /// Raft-log RocksDB keep every write-ahead <c>.log</c> file for the life of the process — 2.7 GB in ten
+    /// minutes per node, growing linearly, against ~230 MB of live tables — because a column family that
+    /// never flushes pins them and nothing else ever forced it; the starved budget had been masking that by
+    /// flushing everything on its cadence. The gain was 2% of device bytes per operation; the cost was an
+    /// unbounded directory and a 4 s slower follower restart. Flip once Kommander sets
+    /// <c>max_total_wal_size</c> (or flushes the pinning family) — feature filed on the Kommander project.
+    /// Tests set it to exercise the floor.
+    /// </summary>
+    internal static bool RaftWalFlushUnitFloorEnabled = false;
+
+    /// <summary>Kommander's <c>RocksDbWalTuning</c> defaults, used when CamusDB passes no override.</summary>
+    internal const int DefaultWalShardWriteBufferMb = 64;
+
+    internal const int DefaultWalShardMinWriteBufferNumberToMerge = 2;
+
+    /// <summary>
+    /// The Raft-log flush unit plus headroom that Kommander checks the shared memtable budget against at
+    /// open: <c>write_buffer_size × (min_write_buffer_number_to_merge + 1)</c> — 192 MB at the shipped
+    /// defaults. Below it Kommander warns and RocksDB flushes the Raft log on the budget's cadence instead
+    /// of at the configured unit, so entries that would die in memory reach disk once.
+    /// </summary>
+    internal static int RaftWalFlushUnitMb(EmbeddedKahunaOptions baseline)
+    {
+        int writeBuffer = baseline.RaftWalShardWriteBufferSizeMb is int wb && wb > 0 ? wb : DefaultWalShardWriteBufferMb;
+        int merge = baseline.RaftWalShardMinWriteBufferNumberToMerge is int m && m > 0 ? m : DefaultWalShardMinWriteBufferNumberToMerge;
+        return writeBuffer * (merge + 1);
     }
 
     /// <summary>
@@ -725,8 +762,39 @@ public static class EmbeddedKahunaOptionsBuilder
                 totalRam / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
+        {
             baseline.RocksDbSharedMemtableBudgetMb = (int)ClampWithYieldingFloor(
                 baseline.RocksDbSharedMemoryBudgetMb / 4, historicFloor: 128, degenerateFloor: 16, ceiling: 1024);
+
+            // With the Raft log on RocksDB the sub-budget is shared by the store's memtable and the log's
+            // shard column family, and the log's flush unit is what Kommander sizes its layout around:
+            // starve it and every Raft-log flush is forced by the write-buffer manager at a few MB (349 of
+            // 349 on the k175 probe), which doubles the log's flushed bytes and trades a bounded memtable
+            // for device writes. Floor the derived value at the unit plus the store's memtable, within the
+            // ceiling; an explicit key still wins, and the total budget is raised below to contain it.
+            if (RaftWalFlushUnitFloorEnabled && baseline.WalStorage == "rocksdb")
+            {
+                // The floor yields like the others: never more than an eighth of the machine (a 1.5 GiB
+                // container gets 192 MB, a tiny one keeps its degenerate share), never above the ceiling,
+                // and never past a total the operator pinned explicitly — an explicit small total is a
+                // request for a small footprint, and an inverted pair would be rejected at build anyway.
+                int flushUnitFloor = (int)Math.Min(Math.Min(1024, RaftWalFlushUnitMb(baseline) + KvStoreMemtableMb), totalRam / 8 / OneMb);
+                if (kahuna.RocksdbSharedMemoryBudgetMb is not null && flushUnitFloor > baseline.RocksDbSharedMemoryBudgetMb)
+                    flushUnitFloor = 0;
+
+                if (baseline.RocksDbSharedMemtableBudgetMb < flushUnitFloor)
+                {
+                    baseline.RocksDbSharedMemtableBudgetMb = flushUnitFloor;
+
+                    // The sub-budget lives inside the cache budget (CreateWithUnifiedBudget rejects an
+                    // inversion): a floor that lifted it past the derived total lifts the total with it,
+                    // keeping a block-cache share of at least the degenerate floor.
+                    if (kahuna.RocksdbSharedMemoryBudgetMb is null
+                        && baseline.RocksDbSharedMemoryBudgetMb < baseline.RocksDbSharedMemtableBudgetMb + 64)
+                        baseline.RocksDbSharedMemoryBudgetMb = Math.Min(2048, baseline.RocksDbSharedMemtableBudgetMb + 64);
+                }
+            }
+        }
 
         int actorCount = EffectiveActorCount(baseline);
 

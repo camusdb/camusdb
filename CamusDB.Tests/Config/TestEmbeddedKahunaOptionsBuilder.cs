@@ -630,13 +630,23 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // builder reads, so the assertion holds on any machine — hardcoding the baseline is what
         // made this test machine-dependent before.
         const long OneMb = 1024L * 1024;
-        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        long totalRam = HostMemory.TotalBytes();
         Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
 
         int expectedBlockCacheMb = (int)(EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(
             totalRam / 10, 320 * OneMb, 64 * OneMb, 2048 * OneMb) / OneMb);
         int expectedMemtableMb = (int)EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(
             expectedBlockCacheMb / 4, 128, 16, 1024);
+        // With the Raft log on RocksDB the memtable sub-budget never goes below the log's flush unit plus
+        // the store's memtable (192 + 64 MB at Kommander's defaults), and the total is lifted to contain it.
+        int flushUnitFloor = (int)Math.Min(
+            Math.Min(1024, EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitMb(new EmbeddedKahunaOptions()) + EmbeddedKahunaOptionsBuilder.KvStoreMemtableMb),
+            totalRam / 8 / OneMb);
+        if (EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled && expectedMemtableMb < flushUnitFloor)
+        {
+            expectedMemtableMb = flushUnitFloor;
+            expectedBlockCacheMb = Math.Max(expectedBlockCacheMb, Math.Min(2048, expectedMemtableMb + 64));
+        }
 
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna, CamusDBOptions.Default);
@@ -648,6 +658,79 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // The derived pair must never invert, or the build-time cross-field check would reject its
         // own defaults on a machine whose RAM lands near a clamp boundary.
         Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.RocksDbSharedMemoryBudgetMb));
+    }
+
+    [Test]
+    public void MemtableBudget_IsFlooredAtTheRaftLogFlushUnit_UnderAHeapPinSizedMachine()
+    {
+        // The reference node: 4,096 MB container with a 60% GC heap limit. Sizing from the heap limit
+        // (2,458 MB) produced a 245 MB block cache and a 61 MB memtable budget — below the 192 MB Raft-log
+        // flush unit — so every Raft-log flush was forced by the write-buffer manager. Sizing must come
+        // from the container/host memory, and with a RocksDB WAL the memtable budget is floored at the
+        // flush unit plus the store's own memtable, with the total lifted to contain it.
+        const long OneMb = 1024L * 1024;
+        // The floor is gated off in the shipped defaults until Kommander bounds its write-ahead files (see the
+        // flag's doc); this test exercises the floor itself.
+        EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = true;
+        try
+        {
+        EmbeddedKahunaOptions baseline = new() { Storage = "rocksdb", WalStorage = "rocksdb" };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(baseline, new KahunaOptionsConfig(), 2458L * OneMb);
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitMb(baseline), Is.EqualTo(192));
+        Assert.That(baseline.RocksDbSharedMemtableBudgetMb, Is.EqualTo(256));
+        Assert.That(baseline.RocksDbSharedMemoryBudgetMb, Is.GreaterThanOrEqualTo(320));
+        Assert.That(baseline.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(baseline.RocksDbSharedMemoryBudgetMb));
+
+        // The floor follows the tuning the node will run with.
+        EmbeddedKahunaOptions tuned = new() { Storage = "rocksdb", WalStorage = "rocksdb", RaftWalShardWriteBufferSizeMb = 128, RaftWalShardMinWriteBufferNumberToMerge = 3 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(tuned, new KahunaOptionsConfig(), 2458L * OneMb);
+        Assert.That(EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitMb(tuned), Is.EqualTo(512));
+        // 512 + 64 = 576 would be more than an eighth of this machine (2,458 / 8 = 307): the floor yields.
+        Assert.That(tuned.RocksDbSharedMemtableBudgetMb, Is.EqualTo(307));
+        Assert.That(tuned.RocksDbSharedMemoryBudgetMb, Is.GreaterThanOrEqualTo(307 + 64));
+
+        // Same tuning on a 16 GiB host: the full unit fits (16,384 / 8 = 2,048).
+        EmbeddedKahunaOptions big = new() { Storage = "rocksdb", WalStorage = "rocksdb", RaftWalShardWriteBufferSizeMb = 128, RaftWalShardMinWriteBufferNumberToMerge = 3 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(big, new KahunaOptionsConfig(), 16384L * OneMb);
+        Assert.That(big.RocksDbSharedMemtableBudgetMb, Is.EqualTo(576));
+
+        // A small container keeps a small footprint: 1,024 MB / 8 = 128, above the derived 25 but far below 256.
+        EmbeddedKahunaOptions small = new() { Storage = "rocksdb", WalStorage = "rocksdb" };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(small, new KahunaOptionsConfig(), 1024L * OneMb);
+        Assert.That(small.RocksDbSharedMemtableBudgetMb, Is.EqualTo(128));
+        Assert.That(small.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(small.RocksDbSharedMemoryBudgetMb));
+
+        // A SQLite WAL shares no memtable budget with a Raft log: no floor.
+        EmbeddedKahunaOptions sqlite = new() { Storage = "rocksdb", WalStorage = "sqlite" };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(sqlite, new KahunaOptionsConfig(), 2458L * OneMb);
+        Assert.That(sqlite.RocksDbSharedMemtableBudgetMb, Is.EqualTo(61));
+
+        // An explicit memtable budget always wins over the floor.
+        EmbeddedKahunaOptions explicitMemtable = new() { Storage = "rocksdb", WalStorage = "rocksdb" };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(explicitMemtable, new KahunaOptionsConfig { RocksdbSharedMemtableBudgetMb = 100 }, 2458L * OneMb);
+        Assert.That(explicitMemtable.RocksDbSharedMemtableBudgetMb, Is.Not.EqualTo(256));
+        }
+        finally
+        {
+            EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = false;
+        }
+
+        // Shipped default: no floor — the heap-pin-sized machine still gets the proportional quarter.
+        EmbeddedKahunaOptions shipped = new() { Storage = "rocksdb", WalStorage = "rocksdb" };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(shipped, new KahunaOptionsConfig(), 2458L * OneMb);
+        Assert.That(shipped.RocksDbSharedMemtableBudgetMb, Is.EqualTo(61));
+    }
+
+    [Test]
+    public void HostMemory_PrefersTheContainerLimitOverTheHeapLimit()
+    {
+        // The seam the sizing reads: on this host it must be the machine or cgroup figure, which is never
+        // smaller than the GC's heap-limited number.
+        Assert.That(HostMemory.TotalBytes(), Is.GreaterThanOrEqualTo(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes));
+        HostMemory.Override = 1234L;
+        try { Assert.That(HostMemory.TotalBytes(), Is.EqualTo(1234L)); }
+        finally { HostMemory.Override = null; }
     }
 
     [Test]

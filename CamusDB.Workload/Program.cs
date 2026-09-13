@@ -251,6 +251,21 @@ public static class Program
             Console.Error.WriteLine($"--metrics-interval is not a duration (got '{o.MetricsInterval}').");
             return RunOutcome.Rejected;
         }
+        TimeSpan? scanProbeEvery = null;
+        if (!string.IsNullOrWhiteSpace(o.ScanProbeInterval)
+            && !o.ScanProbeInterval.Trim().Equals("off", StringComparison.OrdinalIgnoreCase)
+            && o.ScanProbeInterval.Trim() != "0")
+        {
+            try
+            {
+                scanProbeEvery = DurationParser.Parse(o.ScanProbeInterval);
+            }
+            catch (FormatException)
+            {
+                Console.Error.WriteLine($"--scan-probe-interval is not a duration or 'off' (got '{o.ScanProbeInterval}').");
+                return RunOutcome.Rejected;
+            }
+        }
         // An API base carries no default path: /v1/version and /v1/cluster/health are appended to it.
         if (!Reporting.NodeTarget.TryParseAll(o.NodeEndpoints, out List<Reporting.NodeTarget> nodeEndpoints, out string? nodeError, defaultPath: null))
         {
@@ -297,7 +312,7 @@ public static class Program
         // this run's increments, even when the dataset was already written by a previous run.
         long baselineVersionSum;
         long baselineBalanceSum = 0;
-        await using (CamusConnection setup = await OpenSingleAsync(o, ct).ConfigureAwait(false))
+        await using (CamusConnection setup = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false))
         {
             if (o.InitIfMissing)
             {
@@ -359,6 +374,24 @@ public static class Program
         // attributed to exact rows and moments; see TransferLedger. Only a transfer workload keeps one.
         Metrics.TransferLedger? transferLedger = transfers ? new Metrics.TransferLedger(attribution) : null;
 
+        // The in-window scan-visibility probe (see ScanProbe). Started here, before warm-up, and stopped
+        // after drain: a short count during warm-up is exactly as wrong as one inside the window. Its
+        // connections are its own — one per gateway, routing off, on the probe's deadline.
+        IReadOnlyList<string> probeGateways = ScanProbe.EndpointsOf(o.Endpoint);
+        ScanProbe? scanProbe = null;
+        if (scanProbeEvery is TimeSpan probeEvery)
+        {
+            Directory.CreateDirectory(o.Output);
+            scanProbe = new ScanProbe(
+                probeGateways, o.Database, o.Protocol,
+                new ConnectionSettings(NoAutoPrepare: o.NoAutoPrepare, RequestTimeoutSeconds: o.ScanProbeTimeout, ConnectionOptions: o.ConnectionOptions),
+                dataset, probeEvery, Path.Combine(o.Output, "scan-probe.csv"));
+            scanProbe.Start();
+            Console.WriteLine($"Scan probe: COUNT(*) on {probeGateways.Count} gateway(s) every " +
+                              $"{Math.Max(probeEvery.TotalSeconds, ScanProbe.MinInterval.TotalSeconds):F0}s for the whole run.");
+        }
+        await using ScanProbe? scanProbeLifetime = scanProbe;
+
         IWriteOperation writeOperation = transfers
             ? new TransferOperation(
                 connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable)
@@ -377,6 +410,7 @@ public static class Program
 
         RunMetrics metrics;
         IReadOnlyList<IntervalRow> intervals;
+        IReadOnlyList<ScanProbeSample> probeSamples = [];
 
         // The collector covers warm-up, measurement and drain. Warm-up is included on purpose: a
         // backlog that was already climbing before the measured window opened is the difference
@@ -420,7 +454,16 @@ public static class Program
             await clientResources.StopAsync().ConfigureAwait(false);
             if (sampler is not null)
                 samplerResult = await sampler.StopAsync().ConfigureAwait(false);
+            if (scanProbe is not null)
+                probeSamples = await scanProbe.StopAsync().ConfigureAwait(false);
         }
+
+        // The probe's verdict is computed once the window is known; it joins reconciliation below.
+        ScanProbeResult? scanProbeResult = scanProbe is null
+            ? null
+            : ScanProbe.Summarize(
+                probeSamples, metrics.MeasureStartUtc, measure.TotalSeconds, probeGateways.Count,
+                scanProbe.Interval, o.ExpectFaults, scanProbe.LoopFailure);
 
         // Write the measured artifacts FIRST, before reconciliation. The summary/intervals/errors are
         // the run's actual results and are always valid; reconciliation is a separate post-run check
@@ -479,7 +522,7 @@ public static class Program
             try
             {
                 Cluster.ClusterProbe probe = new(nodeEndpoints, o.Database);
-                await using CamusConnection rangeReader = await OpenSingleAsync(o, ct).ConfigureAwait(false);
+                await using CamusConnection rangeReader = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false);
                 Cluster.ClusterFacts facts = await probe.CaptureAsync(rangeReader, dataset.TableNames, ct).ConfigureAwait(false);
                 clusterFacts = facts;
 
@@ -533,21 +576,26 @@ public static class Program
         ReconciliationResult reconciliation;
         try
         {
-            await using CamusConnection verify = await OpenSingleAsync(o, ct).ConfigureAwait(false);
+            // The verification connection carries its own, long per-request deadline: an aggregate over a
+            // hot table takes seconds, and on the load deadline every attempt timed out and the verdict
+            // read "unavailable" for a cluster that was answering point reads the whole time.
+            await using CamusConnection verify = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false);
             reconciliation = await Reconciliation
                 .VerifyOrInconclusiveAsync(
                     verify, dataset, metrics, baselineVersionSum, writeOperation.CommittedRows,
                     writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
                     bankMode: transfers, baselineBalanceSum: baselineBalanceSum,
                     retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)),
-                    rowAttribution: attribution, rowAttributionSkip: attributionSkip)
+                    rowAttribution: attribution, rowAttributionSkip: attributionSkip,
+                    scanProbe: scanProbeResult)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             reconciliation = Reconciliation.Inconclusive(
-                $"{ex.GetType().Name}: {ex.Message}", writeOperation.IndeterminateTxns, metrics.Conflicts,
-                baselineBalanceSum, rowAttributionExpected: attribution is not null);
+                $"the reconciliation connection could not be opened — {ex.GetType().Name}: {ex.Message}",
+                writeOperation.IndeterminateTxns, metrics.Conflicts,
+                baselineBalanceSum, rowAttributionExpected: attribution is not null, scanProbe: scanProbeResult);
         }
 
         if (reconciliation.RowAttribution is RowAttributionResult rowResult)
@@ -791,10 +839,15 @@ public static class Program
         }
     }
 
-    private static Task<CamusConnection> OpenSingleAsync(CommonOptions o, CancellationToken ct)
+    /// <summary>
+    /// One connection for setup, verification or maintenance work. <paramref name="requestTimeout"/>
+    /// overrides the per-request deadline: the <c>run</c> verb passes its reconciliation deadline for
+    /// the connections that read aggregates and scan rows, which the load deadline is too short for.
+    /// </summary>
+    private static Task<CamusConnection> OpenSingleAsync(CommonOptions o, CancellationToken ct, int? requestTimeout = null)
         => ConnectionSet.OpenSingleAsync(
             o.Endpoint, o.Database, o.Protocol,
-            new ConnectionSettings(NoAutoPrepare: o.NoAutoPrepare, RequestTimeoutSeconds: o.RequestTimeout), ct);
+            new ConnectionSettings(NoAutoPrepare: o.NoAutoPrepare, RequestTimeoutSeconds: requestTimeout is > 0 ? requestTimeout : o.RequestTimeout), ct);
 
     /// <summary>Accepts the CLI spelling (snake_case, case-insensitive) for concurrency-control knobs.</summary>
     private static bool TryParseLocking(string value, out CamusLocking locking)
@@ -897,6 +950,9 @@ public static class Program
         Console.WriteLine($"  Indeterminate       : {s.Indeterminate}");
         Console.WriteLine($"  Reconciliation      : {(r.Passed ? "PASS" : "FAIL")}");
         Console.WriteLine($"  Row attribution     : {DescribeRowAttribution(r.RowAttribution)}");
+        Console.WriteLine($"  Scan probe          : {DescribeScanProbe(r.ScanProbe)}");
+        if (r.Aggregates is { Count: > 0 } reads)
+            Console.WriteLine($"  Aggregates          : " + string.Join("; ", reads.Select(a => $"{a.Sql} {a.ElapsedMs:F0} ms×{a.Attempts}")));
         foreach (string f in r.Failures)
             Console.WriteLine($"    ✗ {f}");
         Console.WriteLine($"  Run validity        : {(s.Valid ? "VALID" : "INVALID")}" +
@@ -914,6 +970,18 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine($"  Artifacts written to: {output}");
     }
+
+    /// <summary>One line for the in-window scan probe, present or not.</summary>
+    private static string DescribeScanProbe(ScanProbeResult? p) => p switch
+    {
+        null => "OFF (pass --scan-probe-interval to count rows on every gateway during the run)",
+        { Passed: true } =>
+            $"PASS ({p.Probes} COUNT(*) probe(s) on {p.Gateways} gateway(s), {p.InWindowProbes} in the window, " +
+            $"all exact; {p.MeanElapsedMs:F0} ms mean / {p.MaxElapsedMs:F0} ms max)",
+        _ =>
+            $"FAIL ({p.Short} short, {p.Errors} failed of {p.Probes} probe(s) on {p.Gateways} gateway(s); " +
+            $"lowest count {p.MinRows})",
+    };
 
     /// <summary>
     /// One line for the per-row verdict. It always prints for a transfer run, including when the check

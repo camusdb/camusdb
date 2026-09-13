@@ -383,9 +383,10 @@ internal sealed class KvBranchReader
         // page from this base id. Empty (default, and all ancestor snapshots) scans unregistered.
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
             txId, keys.RowBucketPrefix, startKey, startInclusive, endKey, endKey is null, KvStoreConstants.DefaultPageSize,
-            readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
+            readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
+            $"row scan of table {keys.DisplayTableName}", cancellationToken).ConfigureAwait(false))
         {
             // Per-entry on the fast path this is one volatile read and one tick comparison; the
             // renew round-trip happens at most once per refresh window. Checking as the scan
@@ -435,9 +436,10 @@ internal sealed class KvBranchReader
         // See ScanRowsRawAsync: non-empty coordinatorKey registers the index scan for read-set folding.
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
             txId, bucketPrefix, startKey, fromInclusive, endKey, toInclusive,
-            KvStoreConstants.DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId).ConfigureAwait(false))
+            KvStoreConstants.DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
+            $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false))
         {
             // See ScanRowsRawAsync: cheap per-entry check keeping every streamed page covered by a
             // snapshot-pin confirmation that postdates it.

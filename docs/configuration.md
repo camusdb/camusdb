@@ -210,7 +210,13 @@ combination rather than a conflict.
 
 Under `memory_profile: prod`, most unset keys keep Kahuna's own default, but the four cache-sizing
 knobs are an exception: when left unset they are computed at startup from the machine's available
-memory (container limits respected) rather than from a fixed constant. A fixed 320 MB block cache was measured forcing a
+memory (the container's cgroup limit when one is set, else physical RAM — never the GC heap hard limit,
+which describes the managed heap only while these caches are native) rather than from a fixed constant.
+With the Raft log on RocksDB, a memtable sub-budget below the log's flush unit (192 MiB at Kommander's
+defaults) makes Kommander flush the log on the budget's cadence and warn at open; raising
+`rocksdb_shared_memtable_budget_mb` past it is correct in principle but, on Kommander 1.6.5, lets the
+Raft-log store retain every write-ahead file for the life of the process (a rarely written column family
+pins them), so CamusDB does not floor the budget there until Kommander bounds its WAL size. A fixed 320 MB block cache was measured forcing a
 1.2 GB TPC-C working set through disk reads on nearly every statement; sizing it to the machine
 took the same workload from 24.5 to 119.6 tx/s at 8 clients.
 

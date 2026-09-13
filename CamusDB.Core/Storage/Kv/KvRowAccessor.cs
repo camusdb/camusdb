@@ -335,8 +335,14 @@ internal sealed class KvRowAccessor
             string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                tx.TransactionId,
+            // The identity the scan carries is a transaction property (KvTransaction.RangeScanIdentity):
+            // the transaction id only when the scan folds reads or must see this transaction's own
+            // writes, Zero otherwise. A tracked scan pins every visited key's revision in Kahuna, and a
+            // page retried after a transient then aborts the whole read as soon as one of those keys is
+            // overwritten — a read-only aggregate on a hot table under replication lag failed with a
+            // write-conflict code. An untracked scan serves each row's committed head and cannot abort.
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
+                tx.RangeScanIdentity,
                 keys.RowBucketPrefix,
                 scanStartKey, startInclusive,
                 // The upper bound is exclusive when there is one; with no end key the flag carries no
@@ -347,7 +353,7 @@ internal sealed class KvRowAccessor
                 KeyValueDurability.Persistent,
                 cancellationToken,
                 scanCoordinatorKey,
-                scanOperationId).ConfigureAwait(false))
+                scanOperationId), $"row scan of table {keys.DisplayTableName}", cancellationToken).ConfigureAwait(false))
             {
                 if (entry.Value is null)
                     continue;
@@ -387,7 +393,7 @@ internal sealed class KvRowAccessor
             // tombstone and the value it suppresses share a row id, so they are either both inside
             // the bounds or both outside — a bound can never admit one and drop the other.
             iters[0] = branch.ScanRowsRawAsync(
-                tx.TransactionId,
+                tx.RangeScanIdentity,
                 tx.ReadTimestamp,
                 startHex,
                 startInclusive,

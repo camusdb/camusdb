@@ -445,7 +445,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
         return new EmbeddedKahuna(
             options,
-            new GrpcInterNodeCommunication(kahunaConfig, grpcLogger),
+            // Kahuna 1.8.1: the inter-node transport dials with the same security options Kommander uses; the
+            // embedded options carry them (null = plaintext, no node authentication), exactly as EmbeddedKahunaNode does.
+            new GrpcInterNodeCommunication(kahunaConfig, options.TransportSecurity ?? new RaftTransportSecurityOptions(), grpcLogger),
             new GrpcCommunication(),
             new StaticDiscovery(peerNodes),
             loggerFactory

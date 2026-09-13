@@ -123,6 +123,15 @@ public sealed class RunOptions : CommonOptions
     [Option("reconcile-timeout", Default = 600, HelpText = "Seconds reconciliation keeps retrying its aggregate reads while the cluster is still settling, before reporting 'could not verify'. Post-measurement only; it never extends the measured window.")]
     public int ReconcileTimeout { get; set; }
 
+    [Option("reconcile-request-timeout", Default = 120, HelpText = "Per-request deadline in seconds for the setup and reconciliation connections (baseline reads, SUM/COUNT aggregates, the per-row scan). Separate from --request-timeout, which is tuned for the measured point operations: an aggregate over a hot table takes seconds, and reading it on the load deadline reported a live cluster as unavailable.")]
+    public int ReconcileRequestTimeout { get; set; }
+
+    [Option("scan-probe-interval", Default = "off", HelpText = "In-window scan-visibility probe: SELECT COUNT(*) on every gateway of --endpoint every interval (e.g. 5s) for the whole run, recorded to scan-probe.csv and judged in reconciliation — a count below the row count fails the run, and so does a failed read unless --expect-faults. 'off' (default) disables it.")]
+    public string ScanProbeInterval { get; set; } = "off";
+
+    [Option("scan-probe-timeout", Default = 60, HelpText = "Per-request deadline in seconds for the scan probe's own connections.")]
+    public int ScanProbeTimeout { get; set; }
+
     [Option("no-row-attribution", Default = false, HelpText = "Transfer workloads: skip the per-row balance/version check and judge atomicity on SUM(balance) alone. The aggregate cannot see leaked writes that cancel out, so a run started with this flag can report PASS while atomicity is broken. It costs one full scan before the run and one after; use it only when that scan is genuinely unaffordable.")]
     public bool NoRowAttribution { get; set; }
 

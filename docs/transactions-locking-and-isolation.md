@@ -418,6 +418,15 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   and a concurrent transaction may have changed or inserted rows in between.
 - ⚠️ **Write skew is possible.** Two transactions can each read a set, then write disjoint keys based on
   what they read, in a way no serial order would allow.
+- ⚠️ **A scanned row is not pinned.** A point read under a pessimistic Read Committed transaction records
+  the revision it saw, and a later write to that same key in the same transaction is refused if another
+  transaction committed in between (the read-modify-write guard). A *range scan* records nothing: while
+  the transaction folds no reads (pessimistic locking, no `TrackAndValidate`) and has written nothing
+  yet, its scans carry no transaction identity at all and simply return each row's latest committed
+  version. That is what keeps a read-only aggregate on a hot table from being answered with a
+  write-conflict error when a scan page has to be retried under replication lag, and it is the
+  non-repeatable read this level already permits. `UPDATE` and `DELETE` are unaffected: they re-read the
+  rows they modify under lock before writing.
 
 For invariants that must hold under concurrency at this level (e.g. "no two robots with the same
 serial"), lean on **unique constraints** (enforced at the key level) rather than read-then-decide logic.

@@ -4,6 +4,9 @@
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
 
 RUN rm -fr /src && mkdir -p /src
+# Package sources: nuget.org plus the repo-local pre-release feed (.localnuget/, see nuget.config).
+COPY nuget.config /src/
+COPY .localnuget /src/.localnuget/
 COPY CamusDB.Core /src/CamusDB.Core/
 COPY CamusDB.Grpc.Contracts /src/CamusDB.Grpc.Contracts/
 COPY CamusDB /src/CamusDB/

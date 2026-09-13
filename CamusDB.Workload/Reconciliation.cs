@@ -40,7 +40,9 @@ public sealed record ReconciliationResult(
     long BalanceBaseline = 0,
     long BalanceFinal = 0,
     bool VersionCheckWaived = false,
-    RowAttributionResult? RowAttribution = null)
+    RowAttributionResult? RowAttribution = null,
+    ScanProbeResult? ScanProbe = null,
+    IReadOnlyList<AggregateRead>? Aggregates = null)
 {
     // BalanceConserved is the bank-transfer atomicity invariant: SUM(balance) must be unchanged after a
     // transfer run. It is never waived — unlike conflicts, an atomicity break is a correctness failure a
@@ -59,10 +61,35 @@ public sealed record ReconciliationResult(
     // has the same blind spot for a row that gained an increment and another that lost one. The per-row
     // comparison has no such cancellation, and it is never waived: like BalanceConserved, it reports an
     // atomicity break, which is the failure a chaos run exists to catch rather than tolerate.
+    //
+    // ScanProbe is the in-window witness the post-run aggregates cannot be: they count rows on a quiet
+    // cluster, and a scan that drops rows only while writes are in flight passes them every time. Null
+    // when the run did not probe; when it did, a short count or (on a fault-free run) a failed read
+    // fails reconciliation exactly like a broken invariant.
+    //
+    // Aggregates records how each verification read went — value, client-observed time, attempts — so
+    // scan-time growth is visible run to run instead of surfacing only once a read crosses a deadline.
     public bool Passed => (VersionsMatch || VersionCheckWaived)
         && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived) && BalanceConserved
-        && (RowAttribution is null || RowAttribution.Passed);
+        && (RowAttribution is null || RowAttribution.Passed)
+        && (ScanProbe is null || ScanProbe.Passed);
 }
+
+/// <summary>
+/// How one reconciliation aggregate went. <see cref="ElapsedMs"/> is the client-observed round trip
+/// of the attempt that answered (the client library does not expose the server's own
+/// <c>serverTimeMs</c>), and <see cref="Attempts"/> how many tries it took — a read that needed
+/// several is a cluster that was still settling.
+/// </summary>
+public sealed record AggregateRead(string Sql, long Value, double ElapsedMs, int Attempts);
+
+/// <summary>
+/// A reconciliation read that gave up. The message names the cause — a per-request deadline the
+/// aggregate outgrew, an endpoint that could not be reached, a server verdict — because "the cluster
+/// stayed unavailable" was the one wording for all three, and on a live cluster whose aggregate had
+/// merely crossed the client deadline it sent the reader looking for an outage that never happened.
+/// </summary>
+public sealed class ReconciliationReadException(string message, Exception inner) : Exception(message, inner);
 
 /// <summary>
 /// Verifies at shutdown that the run was internally consistent, so a "fast" number that lost or
@@ -108,11 +135,17 @@ public static class Reconciliation
     /// slow (one node still draining) applies to every table equally.
     /// </summary>
     private static async Task<long> AggregateOverTablesAsync(
-        CamusConnection conn, Dataset dataset, string aggregate, CancellationToken ct, TimeSpan? retryBudget)
+        CamusConnection conn, Dataset dataset, string aggregate, CancellationToken ct, TimeSpan? retryBudget,
+        List<AggregateRead>? reads = null)
     {
         long total = 0;
         foreach (string table in dataset.TableNames)
-            total += await ScalarAsync(conn, $"SELECT {aggregate} FROM {table}", ct, retryBudget).ConfigureAwait(false);
+        {
+            string sql = $"SELECT {aggregate} FROM {table}";
+            (long value, double elapsedMs, int attempts) = await ScalarTimedAsync(conn, sql, ct, retryBudget).ConfigureAwait(false);
+            reads?.Add(new AggregateRead(sql, value, elapsedMs, attempts));
+            total += value;
+        }
         return total;
     }
 
@@ -165,10 +198,12 @@ public static class Reconciliation
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct,
         bool bankMode = false, long baselineBalanceSum = 0, TimeSpan? retryBudget = null,
-        Metrics.RowAttribution? rowAttribution = null, RowAttributionResult? rowAttributionSkip = null)
+        Metrics.RowAttribution? rowAttribution = null, RowAttributionResult? rowAttributionSkip = null,
+        ScanProbeResult? scanProbe = null)
     {
-        long persistedSum = await AggregateOverTablesAsync(conn, dataset, "SUM(version)", ct, retryBudget).ConfigureAwait(false);
-        long rowCount = await AggregateOverTablesAsync(conn, dataset, "COUNT(*)", ct, retryBudget).ConfigureAwait(false);
+        List<AggregateRead> reads = [];
+        long persistedSum = await AggregateOverTablesAsync(conn, dataset, "SUM(version)", ct, retryBudget, reads).ConfigureAwait(false);
+        long rowCount = await AggregateOverTablesAsync(conn, dataset, "COUNT(*)", ct, retryBudget, reads).ConfigureAwait(false);
 
         long persistedDelta = persistedSum - baselineVersionSum;
         (long expectedMin, long expectedMax) = VersionDeltaBand(committedRowWrites, indeterminateTxns, writesPerTransaction);
@@ -184,7 +219,7 @@ public static class Reconciliation
         // commits (an atomic transfer applies both legs or neither), so a changed sum is a genuine
         // atomicity break — never waived. In accounts mode balances change by design, so it is skipped.
         long balanceFinal = bankMode
-            ? await AggregateOverTablesAsync(conn, dataset, "SUM(balance)", ct, retryBudget).ConfigureAwait(false)
+            ? await AggregateOverTablesAsync(conn, dataset, "SUM(balance)", ct, retryBudget, reads).ConfigureAwait(false)
             : 0;
         bool balanceConserved = !bankMode || balanceFinal == baselineBalanceSum;
 
@@ -207,12 +242,14 @@ public static class Reconciliation
             failures.Add($"SUM(balance) changed from {baselineBalanceSum} to {balanceFinal} " +
                          $"(delta {balanceFinal - baselineBalanceSum}) — a bank transfer broke atomicity.");
         failures.AddRange(DescribeRowAttribution(rowResult));
+        if (scanProbe is { Passed: false })
+            failures.AddRange(scanProbe.Failures);
 
         return new ReconciliationResult(
             expectedMin, expectedMax, persistedDelta, indeterminateTxns,
             versionsMatch, rowCount, rowCountMatches, accounting, noConflicts, expectFaults && !noConflicts, failures,
             balanceConserved, baselineBalanceSum, balanceFinal, VersionCheckWaived: bankMode,
-            RowAttribution: rowResult);
+            RowAttribution: rowResult, ScanProbe: scanProbe, Aggregates: reads);
     }
 
     /// <summary>
@@ -327,19 +364,28 @@ public static class Reconciliation
 
     private static async Task<long> ScalarAsync(
         CamusConnection conn, string sql, CancellationToken ct, TimeSpan? retryBudget = null)
+        => (await ScalarTimedAsync(conn, sql, ct, retryBudget).ConfigureAwait(false)).Value;
+
+    /// <summary>
+    /// One aggregate with its provenance: the value, the round trip of the attempt that answered, and
+    /// how many attempts it took. Gives up with a <see cref="ReconciliationReadException"/> whose
+    /// message says <em>why</em> — see <see cref="DescribeGiveUp"/>.
+    /// </summary>
+    private static async Task<(long Value, double ElapsedMs, int Attempts)> ScalarTimedAsync(
+        CamusConnection conn, string sql, CancellationToken ct, TimeSpan? retryBudget = null)
     {
         TimeSpan budget = retryBudget ?? DefaultRetryBudget;
         long startedAt = Stopwatch.GetTimestamp();
 
         for (int attempt = 1; ; attempt++)
         {
+            long attemptStart = Stopwatch.GetTimestamp();
             try
             {
                 using CamusCommand cmd = conn.CreateCamusCommand(sql);
                 using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                if (!await reader.ReadAsync(ct).ConfigureAwait(false) || reader.IsDBNull(0))
-                    return 0;
-                return reader.GetInt64(0);
+                long value = !await reader.ReadAsync(ct).ConfigureAwait(false) || reader.IsDBNull(0) ? 0 : reader.GetInt64(0);
+                return (value, Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds, attempt);
             }
             catch (Exception ex)
             {
@@ -348,12 +394,36 @@ public static class Reconciliation
                 // attempt. See ErrorClassifier.IsRetryableForIdempotentRead.
                 bool retryable = Operations.ErrorClassifier.IsRetryableForIdempotentRead(ex);
                 bool budgetSpent = Stopwatch.GetElapsedTime(startedAt) >= budget;
-                if (!retryable || budgetSpent || attempt >= MaxScalarAttempts || ct.IsCancellationRequested)
+                if (ct.IsCancellationRequested)
                     throw;
+                if (!retryable || budgetSpent || attempt >= MaxScalarAttempts)
+                    throw new ReconciliationReadException(
+                        DescribeGiveUp(sql, ex, attempt, Stopwatch.GetElapsedTime(startedAt), Stopwatch.GetElapsedTime(attemptStart), retryable, budgetSpent),
+                        ex);
 
                 await Task.Delay(Math.Min(200 * attempt, 2000), ct).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// The give-up message, worded by cause. Three failures used to share one sentence, and they call
+    /// for three different responses: a read that keeps crossing the client's per-request deadline is
+    /// a slow aggregate on a live cluster (raise <c>--reconcile-request-timeout</c>, or look at scan
+    /// cost); a connection that is refused is an endpoint that is down; a server verdict is an
+    /// answer, and its code is the lead.
+    /// </summary>
+    public static string DescribeGiveUp(
+        string sql, Exception last, int attempts, TimeSpan waited, TimeSpan lastAttempt, bool retryable, bool budgetSpent)
+    {
+        string tail = budgetSpent
+            ? $"after {attempts} attempt(s) over {waited.TotalSeconds:F0}s (retry budget spent)"
+            : retryable
+                ? $"after {attempts} attempt(s) over {waited.TotalSeconds:F0}s"
+                : $"on attempt {attempts} (not retryable)";
+
+        string cause = Operations.ErrorClassifier.DescribeReadFailure(last, lastAttempt);
+        return $"{sql} did not complete {tail}: {cause}";
     }
 
     /// <summary>
@@ -368,25 +438,28 @@ public static class Reconciliation
         long indeterminateTxns, int writesPerTransaction, bool expectFaults,
         long expectedRows, CancellationToken ct, bool bankMode, long baselineBalanceSum,
         TimeSpan? retryBudget = null,
-        Metrics.RowAttribution? rowAttribution = null, RowAttributionResult? rowAttributionSkip = null)
+        Metrics.RowAttribution? rowAttribution = null, RowAttributionResult? rowAttributionSkip = null,
+        ScanProbeResult? scanProbe = null)
     {
         long startedAt = Stopwatch.GetTimestamp();
         try
         {
             return await VerifyAsync(conn, dataset, metrics, baselineVersionSum, committedRowWrites, indeterminateTxns,
                 writesPerTransaction, expectFaults, expectedRows, ct, bankMode, baselineBalanceSum,
-                retryBudget, rowAttribution, rowAttributionSkip).ConfigureAwait(false);
+                retryBudget, rowAttribution, rowAttributionSkip, scanProbe).ConfigureAwait(false);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // Say how long it actually waited. "Unavailable" reads as a dead cluster; a run that gave
-            // up after N seconds of a still-draining cluster is a different diagnosis, and the reader
-            // cannot tell them apart without this number.
+            // Say how long it actually waited and why it stopped. A ReconciliationReadException already
+            // names its cause (deadline / unreachable / server verdict); anything else is reported as
+            // what it is. "Unavailable" is no longer assumed: a run that gave up on an aggregate that
+            // kept outgrowing the client deadline is a different diagnosis from a dead cluster.
             TimeSpan waited = Stopwatch.GetElapsedTime(startedAt);
+            string reason = ex is ReconciliationReadException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}";
             return Inconclusive(
-                $"{ex.GetType().Name}: {ex.Message} (retried for {waited.TotalSeconds:F0}s of a " +
+                $"{reason} (reconciliation ran for {waited.TotalSeconds:F0}s of a " +
                 $"{(retryBudget ?? DefaultRetryBudget).TotalSeconds:F0}s budget)",
-                indeterminateTxns, metrics.Conflicts, baselineBalanceSum, rowAttribution is not null);
+                indeterminateTxns, metrics.Conflicts, baselineBalanceSum, rowAttribution is not null, scanProbe);
         }
     }
 
@@ -394,14 +467,23 @@ public static class Reconciliation
     /// verification cannot run at all (the reconciliation connection could not even be opened).</summary>
     public static ReconciliationResult Inconclusive(
         string reason, long indeterminateTxns, long conflicts, long baselineBalanceSum,
-        bool rowAttributionExpected = false)
-        => new(
+        bool rowAttributionExpected = false, ScanProbeResult? scanProbe = null)
+    {
+        // The probe's verdict stands on its own evidence: a short count seen during the window is a
+        // finding whether or not the post-run aggregates could be read afterwards.
+        List<string> failures = [$"reconciliation could not complete: {reason}"];
+        if (scanProbe is { Passed: false })
+            failures.AddRange(scanProbe.Failures);
+
+        return new(
             0, 0, 0, indeterminateTxns,
             VersionsMatch: false, RowCount: -1, RowCountMatches: false, AccountingBalances: false,
             NoConflicts: conflicts == 0, ConflictsWaived: false,
-            Failures: [$"reconciliation could not complete (the cluster stayed unavailable after the fault): {reason}"],
+            Failures: failures,
             BalanceConserved: false, BalanceBaseline: baselineBalanceSum, BalanceFinal: 0, VersionCheckWaived: false,
             RowAttribution: rowAttributionExpected
-                ? RowAttributionResult.Unavailable("reconciliation could not reach the cluster: " + reason)
-                : null);
+                ? RowAttributionResult.Unavailable("reconciliation could not complete: " + reason)
+                : null,
+            ScanProbe: scanProbe);
+    }
 }

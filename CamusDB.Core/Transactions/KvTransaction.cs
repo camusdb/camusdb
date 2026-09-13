@@ -279,6 +279,50 @@ public sealed class KvTransaction
          ReadValidation == ReadValidation.TrackAndValidate);
 
     /// <summary>
+    /// The Kahuna identity a <b>range scan</b> issued by this transaction carries: the
+    /// <see cref="TransactionId"/> when the scan has something to observe through it, otherwise
+    /// <see cref="HLCTimestamp.Zero"/>, which makes the scan an untracked read of committed state.
+    ///
+    /// <para>Kahuna treats any read that carries a transaction id as transactional MVCC: for every
+    /// key the scan visits it pins the revision first observed by the transaction, and any later
+    /// evaluation of the same key under the same id answers <c>Aborted</c> once the committed head
+    /// has moved past that pin. A paged scan re-evaluates its keys whenever a page is retried after a
+    /// transient (<c>WaitingForReplication</c> / <c>MustRetry</c> — replication lag, a settling
+    /// intent), so on a hot table a read-only <c>COUNT(*)</c> that carried the id failed with a
+    /// write-conflict code as soon as one of the page's keys was overwritten between the attempts —
+    /// 365 of 399 in-window probes on a lagging cluster. It also charged the server one MVCC entry
+    /// per scanned key for the life of the session.</para>
+    ///
+    /// <para>The id is only meaningful to a scan in two cases, and it is carried exactly then:
+    /// <list type="bullet">
+    ///   <item><see cref="FoldReads"/> — the transaction wants its observations folded into the
+    ///   commit-time read set (optimistic locking, <see cref="ReadValidation.TrackAndValidate"/>); the
+    ///   pin is then the conflict detection the transaction asked for.</item>
+    ///   <item><see cref="HasPendingWrites"/> — the transaction owns live write intents and must read
+    ///   its own uncommitted rows (and not the rows it deleted) through the scan.</item>
+    /// </list>
+    /// A read-committed statement that has written nothing yet — every autocommit <c>SELECT</c>, every
+    /// aggregate, the harness's probes and reconciliation — matches neither, so its scan carries no
+    /// id and can never be answered with a transaction abort; it serves each row's committed head
+    /// exactly as a point read without a timestamp does.</para>
+    ///
+    /// <para><b>What this does not change.</b> Point reads keep the transaction id: they are the
+    /// read-modify-write shape, and the pin they record is what makes a later write to the same key
+    /// under pessimistic locking abort instead of overwriting a value another transaction committed in
+    /// between. Update and delete statements re-read the rows they modify under lock
+    /// (<c>GetRowsBatchLockedForMutation</c>) before writing, so the rows their locating scan yielded
+    /// are validated by that locked read, never by the scan. Under Read Committed a row a scan
+    /// returned is therefore not pinned for the rest of the transaction, which is precisely the
+    /// non-repeatable read that level permits (see §9.2 of the isolation guide).</para>
+    ///
+    /// <para>Evaluate after <see cref="EnsureSessionStartedAsync"/>: a deferred transaction that folds
+    /// reads has a Zero <see cref="TransactionId"/> — hence <see cref="FoldReads"/> false — until its
+    /// session opens.</para>
+    /// </summary>
+    public HLCTimestamp RangeScanIdentity =>
+        FoldReads || HasPendingWrites ? TransactionId : HLCTimestamp.Zero;
+
+    /// <summary>
     /// Monotonic elapsed-time counter started when the Kahuna coordinator session begins. Used to
     /// enforce <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/> — immune to NTP
     /// wall-clock jumps, consistent with the monotonic lock-wait deadline used elsewhere in the

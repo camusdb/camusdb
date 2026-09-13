@@ -105,6 +105,9 @@ internal sealed class KvKeyBuilder
     /// </summary>
     internal string TableKeyPrefix { get; }
 
+    /// <summary>The table's SQL name for messages, or its key prefix when the builder has no name.</summary>
+    internal string DisplayTableName => string.IsNullOrEmpty(TableName) ? TableKeyPrefix : TableName;
+
     /// <summary><c>{dbId}:{tableId}|r</c> — the bucket prefix (no trailing slash) for row scans and row range locks.</summary>
     internal string RowBucketPrefix { get; }
 

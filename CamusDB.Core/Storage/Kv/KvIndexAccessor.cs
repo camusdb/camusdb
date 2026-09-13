@@ -280,8 +280,10 @@ internal sealed class KvIndexAccessor
             string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-            await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
-                tx.TransactionId,
+            // Identity per KvTransaction.RangeScanIdentity — see KvRowAccessor.ScanRows for why an
+            // untracked scan is the only kind that cannot be aborted on a page retry.
+            await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
+                tx.RangeScanIdentity,
                 bucketPrefix,
                 startKey, fromInclusive,
                 endKey, toInclusive,
@@ -290,7 +292,7 @@ internal sealed class KvIndexAccessor
                 KeyValueDurability.Persistent,
                 cancellationToken,
                 scanCoordinatorKey,
-                scanOperationId).ConfigureAwait(false))
+                scanOperationId), $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false))
             {
                 if (entry.Value is null)
                     continue;
@@ -374,7 +376,7 @@ internal sealed class KvIndexAccessor
             int levelCount = 1 + levels.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = branch.ScanIndexRawAsync(tx.TransactionId, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound).GetAsyncEnumerator(cancellationToken);
+            iters[0] = branch.ScanIndexRawAsync(tx.RangeScanIdentity, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound).GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < levels.Length; ai++)
             {
                 (KvKeyBuilder _, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) = levels[ai];

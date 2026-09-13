@@ -74,12 +74,12 @@ internal sealed class TestSequenceAllocationUnderLeadershipBlips : BaseTest
             => Interlocked.Decrement(ref remaining) >= 0;
 
         public override Task<(SequenceResponseType, long)> LocateAndCreateSequence(
-            string name, long initialValue, long increment, long? maxValue,
+            string name, long initialValue, long increment, long? maxValue, int? blockSize,
             SequenceDurability durability, CancellationToken cancellationToken)
         {
             if (!string.Equals(name, sequenceName, StringComparison.Ordinal))
                 return base.LocateAndCreateSequence(
-                    name, initialValue, increment, maxValue, durability, cancellationToken);
+                    name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
 
             Interlocked.Increment(ref CreateCalls);
 
@@ -87,7 +87,7 @@ internal sealed class TestSequenceAllocationUnderLeadershipBlips : BaseTest
                 return Task.FromResult((SequenceResponseType.MustRetry, -1L));
 
             return base.LocateAndCreateSequence(
-                name, initialValue, increment, maxValue, durability, cancellationToken);
+                name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
         }
 
         public override async Task<(SequenceResponseType, SequenceAllocation)> LocateAndNextSequenceValue(
