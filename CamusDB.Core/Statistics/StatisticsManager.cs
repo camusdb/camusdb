@@ -1959,6 +1959,14 @@ public sealed class StatisticsManager
     internal bool ForceNestedLoopForTesting { get; set; }
 
     /// <summary>
+    /// When true, the join planner emits <c>IndexNestedLoopJoinNode</c> for any inner join whose
+    /// right side has a usable index, instead of the normal cost-based choice between merge, hash
+    /// and index nested-loop. A join with no index match is unaffected. Intended for tests that
+    /// must exercise the correlated index probe regardless of what the cost model would pick.
+    /// </summary>
+    internal bool ForceIndexNestedLoopForTesting { get; set; }
+
+    /// <summary>
     /// Counts how many times the Grace hash join has fallen back to nested-loop for a single
     /// skewed partition that could not be split below the threshold within the recursion depth
     /// limit. Incremented by <c>QueryJoinExecutor.JoinPartitionAsync</c>. Test-only; not thread-safe.

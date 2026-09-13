@@ -283,7 +283,7 @@ internal sealed class JoinQueryPlanner
                     //            side is large (scanning in index order wins over per-row lookups).
                     //   Hash   — outer side large relative to inner indexed side.
                     //   INLJ   — outer side small (few point lookups; default when stats absent).
-                    if (hasEquiKeys && stats is not null)
+                    if (hasEquiKeys && stats is not null && !stats.ForceIndexNestedLoopForTesting)
                     {
                         long leftRows = EstimatePhysicalNodeRows(left, database, stats);
 

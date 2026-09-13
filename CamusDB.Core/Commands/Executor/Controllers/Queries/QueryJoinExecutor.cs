@@ -270,6 +270,14 @@ internal sealed class QueryJoinExecutor
         Dictionary<string, int>? rightOrdinalMap = null;
         RightDecodeState rightDecodeState = new();
 
+        // A non-unique probe pages its primary-row fetches through one buffer that lives for the whole
+        // join, not one per outer row: the buffer and its decode plan would otherwise be rebuilt for
+        // every probe, which is pure overhead for the common one-match probe. The page shares
+        // rightDecodeState so the join owns exactly one decode plan and one qualified layout.
+        JoinLeafRowPage? probePage = joinNode.UseUniqueLookup
+            ? null
+            : new JoinLeafRowPage(this, plan, joinNode.RightSource, joinNode.RightExecutionFilter, rightDecodeState);
+
         await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
         {
             // Qualify the left row: reuse the source Values array when it is a QueryRow to avoid
@@ -299,7 +307,8 @@ internal sealed class QueryJoinExecutor
                 joinNode,
                 lookupKey,
                 plan,
-                rightDecodeState).ConfigureAwait(false))
+                rightDecodeState,
+                probePage).ConfigureAwait(false))
             {
                 joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
                 rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
@@ -354,11 +363,18 @@ internal sealed class QueryJoinExecutor
         }
     }
 
+    /// <summary>
+    /// Resolves the right-side rows for one outer row. A unique index answers with at most one row
+    /// through <see cref="LookupUniqueRightRow"/>; a non-unique index walks its equality range through
+    /// <see cref="ScanMultiIndexRightRows"/>, which needs the join-wide <paramref name="probePage"/>
+    /// (never null for a non-unique probe, see <see cref="ExecuteIndexNestedLoopJoin"/>).
+    /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ProbeRightIndex(
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
         QueryPlan plan,
-        RightDecodeState decodeState)
+        RightDecodeState decodeState,
+        JoinLeafRowPage? probePage)
     {
         if (joinNode.UseUniqueLookup)
         {
@@ -368,7 +384,14 @@ internal sealed class QueryJoinExecutor
             yield break;
         }
 
-        await foreach (QueryResultRow row in ScanMultiIndexRightRows(joinNode, lookupKey, plan, decodeState).ConfigureAwait(false))
+        if (probePage is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A non-unique index nested-loop probe requires a row page");
+        }
+
+        await foreach (QueryResultRow row in ScanMultiIndexRightRows(joinNode, lookupKey, plan, probePage).ConfigureAwait(false))
             yield return row;
     }
 
@@ -402,23 +425,44 @@ internal sealed class QueryJoinExecutor
             yield return loadedRow;
     }
 
+    /// <summary>
+    /// Non-unique index probe for one outer row: walks the index equality range for the lookup key
+    /// and fetches the matching primary rows one page at a time through <paramref name="probePage"/>
+    /// instead of one round trip per index entry.
+    /// <para>
+    /// The page is owned by the whole join execution, but it is flushed before this method returns,
+    /// so a page never spans two outer rows and the rows of one outer row still stream in index order.
+    /// The first-key comparison and the ASC/DESC stop rule run before an id is buffered, and the row
+    /// point dependency is recorded before the fetch, exactly as the per-entry fetch did.
+    /// </para>
+    /// <para>
+    /// Cancellation is checked on every index entry here and on every row inside the page flush,
+    /// because the storage enumerator does not observe the token on its own.
+    /// </para>
+    /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ScanMultiIndexRightRows(
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
         QueryPlan plan,
-        RightDecodeState decodeState)
+        JoinLeafRowPage probePage)
     {
         BoundTableSource source = joinNode.RightSource;
         TableDescriptor table = source.Table;
-        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, joinNode.Index);
         ColumnValue lookupValue = lookupKey.Values[0];
         QueryDependencyCollector? deps = plan.DepCollector;
+        CancellationToken cancellationToken = plan.Ticket.CancellationToken;
 
         // Non-unique index equality probe: the index bucket range catches phantom inserts for
-        // this key. Per-row point deps are recorded below as each row is fetched.
+        // this key. Per-row point deps are recorded below as each row id is buffered.
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
+
+        // The probe reads its stop rule from the index's DECODED order: an ascending first column
+        // streams ascending (past = greater), a descending one streams descending (past = smaller).
+        // Breaking on `> 0` for a DESC column would never fire, silently downgrading every probe to
+        // a full index-tail walk.
+        bool firstColumnDescending = joinNode.Index.DirectionAt(0) == OrderType.Descending;
 
         await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -426,27 +470,37 @@ internal sealed class QueryJoinExecutor
             keyTypes,
             lookupKey,
             to: null,
-            unique: false, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
+            unique: false, cancellationToken: cancellationToken).ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             int cmp = key.Values[0].CompareTo(lookupValue);
 
-            // Early-exit past the probe value in the index's DECODED order: an ascending first
-            // column streams ascending (past = greater), a descending one streams descending
-            // (past = smaller). Breaking on `> 0` for a DESC column would never fire, silently
-            // downgrading every probe to a full index-tail walk.
-            bool firstColumnDescending = joinNode.Index.DirectionAt(0) == OrderType.Descending;
             if (firstColumnDescending ? cmp < 0 : cmp > 0)
                 break;
 
             if (cmp != 0)
                 continue;
 
+            // Recorded before the fetch, per row id: a later update to a non-indexed projected column
+            // must invalidate this result even if the residual filter later rejects the row.
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            QueryResultRow? row = await LoadRightRow(source, rowId, joinNode.RightExecutionFilter, plan, decodeState).ConfigureAwait(false);
+            probePage.Add(rowId);
 
-            if (row is QueryResultRow loadedRow)
-                yield return loadedRow;
+            if (!probePage.IsFull)
+                continue;
+
+            await foreach (QueryResultRow row in probePage.FlushAsync(cancellationToken).ConfigureAwait(false))
+                yield return row;
+        }
+
+        // The tail of this outer row's matches. Flushing here, not on the next probe, is what keeps a
+        // page from spanning two outer rows.
+        if (probePage.Count > 0)
+        {
+            await foreach (QueryResultRow row in probePage.FlushAsync(cancellationToken).ConfigureAwait(false))
+                yield return row;
         }
     }
 
@@ -893,8 +947,9 @@ internal sealed class QueryJoinExecutor
     }
 
     /// <summary>
-    /// Buffers the row ids a join leaf's index scan produces and resolves each full page with one
-    /// batch fetch, instead of one round trip per index entry.
+    /// Buffers the row ids an index walk produces and resolves each full page with one batch fetch,
+    /// instead of one round trip per index entry. Used by the three join leaf scans and by the
+    /// non-unique probe of an index nested-loop join (<see cref="ScanMultiIndexRightRows"/>).
     /// <para>
     /// Index order survives the paging: the page is filled in scan order and the batch result is read
     /// positionally, so rows decode and yield in scan order, and a row the batch reports as absent is
@@ -908,6 +963,22 @@ internal sealed class QueryJoinExecutor
     /// and that lock set must stay exactly what it was. Under every other isolation level and mode
     /// that helper acquires nothing, so a page costs one round trip.
     /// </para>
+    /// <para>
+    /// Lock timing under Serializable read-write: the per-entry read locked a row the moment the
+    /// consumer asked for it; a page locks every row it holds when it is flushed. After a fully
+    /// consumed scan the lock set is identical. When the consumer stops early (LIMIT, cancellation)
+    /// the page can hold up to page-size minus one shared point locks on rows the consumer never
+    /// saw. This is accepted rather than gated: the extra locks sit only on rows the index matched
+    /// for this scan, never on unrelated keys; a shared lock blocks no reader and only forces a
+    /// concurrent writer of those rows to retry; and every other isolation level and mode locks
+    /// nothing, so the exposure is bounded by <see cref="CamusDBOptions.IndexScanFetchBatchSize"/>
+    /// and limited to the one mode that already holds every row it reads until commit.
+    /// </para>
+    /// <para>
+    /// The buffer is emptied on every exit from <see cref="FlushAsync"/>, including an abandoned or
+    /// faulted enumeration, so a page reused across probes can never carry a stale id into the next
+    /// outer row.
+    /// </para>
     /// </summary>
     private sealed class JoinLeafRowPage
     {
@@ -919,18 +990,27 @@ internal sealed class QueryJoinExecutor
         private readonly int schemaVersion;
         private readonly HLCTimestamp txId;
         private readonly CamusDBOptions options;
-        private readonly RowEncoder.RowDecodeState decodeState = new();
+        private readonly RightDecodeState decode;
         private readonly List<ObjectIdValue> rowIds;
         private readonly int pageSize;
 
-        private RowLayout? qualifiedLayout;
-
-        internal JoinLeafRowPage(QueryJoinExecutor executor, QueryPlan plan, BoundTableSource source, NodeAst? executionFilter)
+        /// <param name="decode">
+        /// The decode plan and alias-qualified layout to use. A caller that also decodes right rows
+        /// elsewhere passes its own state so the join builds one plan and one layout, not two; a
+        /// leaf scan passes nothing and the page owns a fresh one.
+        /// </param>
+        internal JoinLeafRowPage(
+            QueryJoinExecutor executor,
+            QueryPlan plan,
+            BoundTableSource source,
+            NodeAst? executionFilter,
+            RightDecodeState? decode = null)
         {
             this.executor = executor;
             this.plan = plan;
             this.source = source;
             this.executionFilter = executionFilter;
+            this.decode = decode ?? new RightDecodeState();
 
             // Pinned once for the whole scan, like every other reader of the published options record.
             options = executor._options;
@@ -951,51 +1031,57 @@ internal sealed class QueryJoinExecutor
 
         /// <summary>
         /// Fetches the buffered page in one call, then yields the rows that survive the residual
-        /// filter, in page order. The buffer is emptied once the page is fully consumed.
+        /// filter, in page order. The buffer is emptied when the enumeration ends for any reason:
+        /// full consumption, early disposal by the consumer, or a fault in the fetch or decode.
         /// </summary>
         internal async IAsyncEnumerable<QueryResultRow> FlushAsync([EnumeratorCancellation] CancellationToken cancellationToken)
         {
             if (rowIds.Count == 0)
                 yield break;
 
-            TableDescriptor table = source.Table;
-
-            ReadOnlyMemory<byte>?[] batch = await table.Store.GetRowsBatchLockedForMutation(
-                plan.Ticket.TxnState, rowIds, cancellationToken).ConfigureAwait(false);
-
-            for (int i = 0; i < rowIds.Count; i++)
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                TableDescriptor table = source.Table;
 
-                ObjectIdValue rowId = rowIds[i];
-                ReadOnlyMemory<byte>? dataOpt = batch[i];
+                ReadOnlyMemory<byte>?[] batch = await table.Store.GetRowsBatchLockedForMutation(
+                    plan.Ticket.TxnState, rowIds, cancellationToken).ConfigureAwait(false);
 
-                if (dataOpt is null || dataOpt.Value.Length == 0)
-                    continue;
-
-                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                    table.Schema,
-                    txId,
-                    rowId,
-                    dataOpt.Value,
-                    options,
-                    required,
-                    schemaVersion,
-                    decodeState).ConfigureAwait(false);
-
-                if (executionFilter is not null)
+                for (int i = 0; i < rowIds.Count; i++)
                 {
-                    qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
-                    IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout);
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                    if (!await executor.queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                    ObjectIdValue rowId = rowIds[i];
+                    ReadOnlyMemory<byte>? dataOpt = batch[i];
+
+                    if (dataOpt is null || dataOpt.Value.Length == 0)
                         continue;
+
+                    QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema,
+                        txId,
+                        rowId,
+                        dataOpt.Value,
+                        options,
+                        required,
+                        schemaVersion,
+                        decode.DecodeState).ConfigureAwait(false);
+
+                    if (executionFilter is not null)
+                    {
+                        decode.QualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+                        IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, decode.QualifiedLayout);
+
+                        if (!await executor.queryFilterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                            continue;
+                    }
+
+                    yield return new QueryResultRow(rowId, row);
                 }
-
-                yield return new QueryResultRow(rowId, row);
             }
-
-            rowIds.Clear();
+            finally
+            {
+                rowIds.Clear();
+            }
         }
     }
 
@@ -2621,6 +2707,12 @@ internal sealed class QueryJoinExecutor
     /// </list>
     /// One instance is created per <see cref="ExecuteIndexNestedLoopJoin"/> call and passed
     /// through <see cref="ProbeRightIndex"/> into <see cref="LoadRightRow"/>.
+    /// </summary>
+    /// <summary>
+    /// The per-join decode plan and alias-qualified layout for right-side rows. One instance serves
+    /// every right row of one join node, whether it is loaded one at a time
+    /// (<see cref="LoadRightRow"/>) or through a <see cref="JoinLeafRowPage"/>, so the row-decode
+    /// plan and the qualified layout are built once per join node, not once per fetch path.
     /// </summary>
     private sealed class RightDecodeState
     {

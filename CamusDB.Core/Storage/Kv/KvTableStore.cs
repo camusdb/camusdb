@@ -299,6 +299,12 @@ public sealed partial class KvTableStore
     // Primary row operations
     // -----------------------------------------------------------------------
 
+    /// <inheritdoc cref="KvRowAccessor.PointReadCalls"/>
+    internal long PrimaryRowPointReadCalls => rows.PointReadCalls;
+
+    /// <inheritdoc cref="KvRowAccessor.BatchReadCalls"/>
+    internal long PrimaryRowBatchReadCalls => rows.BatchReadCalls;
+
     /// <inheritdoc cref="KvRowAccessor.GetRow"/>
     public Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
         => rows.GetRow(tx, rowId, cancellationToken);

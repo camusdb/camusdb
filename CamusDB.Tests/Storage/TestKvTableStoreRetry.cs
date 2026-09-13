@@ -117,10 +117,21 @@ public sealed class TestKvTableStoreRetry
         // ---- intercepted: batch get, per-key non-confirmed answer ----
         public int InjectGetManyErroredFaults;
 
+        // ---- intercepted: batch get, whole batch transiently MustRetry ----
+        public int InjectGetManyMustRetryFaults;
+        public int GetManyCalls;
+
         public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
             HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys,
             CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default)
         {
+            GetManyCalls++;
+
+            if (InjectGetManyMustRetryFaults-- > 0)
+                return Task.FromResult(keys
+                    .Select(k => (KeyValueResponseType.MustRetry, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))
+                    .ToList());
+
             if (InjectGetManyErroredFaults-- > 0)
                 return Task.FromResult(keys
                     .Select(k => (KeyValueResponseType.Errored, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))
@@ -461,6 +472,46 @@ public sealed class TestKvTableStoreRetry
 
         Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code,
             "a per-key Errored batch answer must surface as a retryable failure, not as a missing row");
+
+        await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// The lock-acquiring batch read a paged join probe uses must absorb a transient
+    /// <c>MustRetry</c> on the batch get: the page resolves after the retry, every position is
+    /// still answered, and the caller sees exactly one batched read. The injection count is one,
+    /// deliberately far below the retry bound, so the test proves the retry happens and not that a
+    /// bound is exhausted.
+    /// </summary>
+    [Test]
+    public async Task GetRowsBatchLockedForMutation_SurvivesTransientMustRetry()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_batch_locked_retry");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue first = Generate();
+        ObjectIdValue second = Generate();
+        ObjectIdValue absent = Generate();
+
+        KvTransaction writeTx = await BeginTransaction(stub, "batch_locked_w");
+        await store.InsertRow(writeTx, first, [1, 2, 3]);
+        await store.InsertRow(writeTx, second, [4, 5]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.InjectGetManyMustRetryFaults = 1;
+
+        KvTransaction readTx = await BeginTransaction(stub, "batch_locked_r");
+
+        ReadOnlyMemory<byte>?[] page = await store.GetRowsBatchLockedForMutation(readTx, [first, absent, second]);
+
+        Assert.AreEqual(3, page.Length, "one answer per requested position");
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, page[0]!.Value.ToArray());
+        Assert.IsNull(page[1], "an absent id stays a confirmed miss after the retry");
+        CollectionAssert.AreEqual(new byte[] { 4, 5 }, page[2]!.Value.ToArray());
+
+        Assert.AreEqual(2, stub.GetManyCalls, "the faulted batch get must be resent once");
+        Assert.AreEqual(1, store.PrimaryRowBatchReadCalls, "the retry is internal: the caller issued one batched read");
+        Assert.AreEqual(0, store.PrimaryRowPointReadCalls);
 
         await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
     }

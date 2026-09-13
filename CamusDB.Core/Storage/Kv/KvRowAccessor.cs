@@ -49,6 +49,25 @@ internal sealed class KvRowAccessor
     private readonly KvBranchReader branch;
     private readonly KahunaRetryPolicy retry;
 
+    private long pointReadCalls;
+    private long batchReadCalls;
+
+    /// <summary>
+    /// How many single-row primary reads (<see cref="GetRow"/>) this accessor issued since it was
+    /// built. An observability counter for the fetch shape of a query path; it counts calls, not
+    /// Kahuna round trips, so a retried read still counts once. Read it together with
+    /// <see cref="BatchReadCalls"/> to see how a reader pages its fetches.
+    /// </summary>
+    internal long PointReadCalls => Interlocked.Read(ref pointReadCalls);
+
+    /// <summary>
+    /// How many batched primary reads (<see cref="GetRowsBatch"/> and
+    /// <see cref="GetRowsBatchLockedForMutation"/>) this accessor issued since it was built. One call
+    /// resolves a whole page of row ids, so a paged reader over M matches at page size B adds
+    /// ceil(M / B) here and nothing to <see cref="PointReadCalls"/>. An empty batch is not counted.
+    /// </summary>
+    internal long BatchReadCalls => Interlocked.Read(ref batchReadCalls);
+
     internal KvRowAccessor(
         IKahuna kahuna,
         KvKeyBuilder keys,
@@ -69,6 +88,8 @@ internal sealed class KvRowAccessor
     /// </summary>
     internal async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref pointReadCalls);
+
         // Serializable+RW acquires a shared point lock: the session must be open first.
         // For all other transaction types this is a no-op (zero-snapshot reads proceed without a session).
         await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
@@ -132,6 +153,8 @@ internal sealed class KvRowAccessor
     {
         if (rowIds.Count == 0)
             return [];
+
+        Interlocked.Increment(ref batchReadCalls);
 
         // Build the Kahuna key list in input order.
         string[] rowKeys = new string[rowIds.Count];
