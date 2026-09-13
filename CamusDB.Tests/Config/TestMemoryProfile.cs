@@ -143,6 +143,172 @@ public sealed class TestMemoryProfile
     }
 
     [Test]
+    public void HeapLimitNoLongerShrinksTheNativeRocksDbBudgets()
+    {
+        // The reference node: a 4,096 MiB container with DOTNET_GCHeapHardLimitPercent at 60%, so the
+        // GC reports a 2,458 MiB budget. Sized from that figure the memtable budget was 61 MiB, below
+        // the Raft log's 192 MiB flush unit, and every Raft-log flush was forced by the shared
+        // WriteBufferManager. The native pair now comes from the container and the managed actor
+        // caches from the heap.
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-heap-limit");
+        options.KeyValueWorkers = 32;
+
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
+            options, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb, raftLogFlushUnitFloor: true);
+
+        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(409));   // 10% of the container
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(192)); // the flush unit, not 102 or 61
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 / 32)); // 6.25% of the HEAP, split
+
+        // The exact comparison Kommander's RocksDbWAL makes at open; below it, it logs the warning.
+        Assert.That((long)options.RocksDbSharedMemtableBudgetMb * OneMb,
+            Is.GreaterThanOrEqualTo(EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(options)));
+    }
+
+    [Test]
+    public void ShippedDefaultsKeepTheFlushUnitFloorOff()
+    {
+        // The floor is gated off (EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled) until
+        // Kommander bounds its write-ahead files: on Kahuna 1.8.1 / Kommander 1.6.5 an unstarved budget
+        // let the Raft-log RocksDB pin every .log file for the life of the process (443 -> 2,709 MiB in
+        // ten minutes). Until then the reference node gets the proportional quarter, and a heap-limit
+        // sized input still yields 61 — Kommander warns at open, and the startup line says NOT covered.
+        Assert.That(EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled, Is.False);
+
+        EmbeddedKahunaOptions reference = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-ref");
+        reference.KeyValueWorkers = 32;
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
+            reference, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb);
+        Assert.That(reference.RocksDbSharedMemoryBudgetMb, Is.EqualTo(409));
+        Assert.That(reference.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+
+        EmbeddedKahunaOptions heapOnly = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-heap");
+        heapOnly.KeyValueWorkers = 32;
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(heapOnly, new KahunaOptionsConfig(), 2458 * OneMb);
+        Assert.That(heapOnly.RocksDbSharedMemtableBudgetMb, Is.EqualTo(61));
+
+        // The floor itself is still computed, so the startup log can report what it would have been.
+        Assert.That(EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitFloorMb(reference), Is.EqualTo(192));
+    }
+
+    [Test]
+    public void AHeapSizedInputNoLongerProducesA61MiBMemtable()
+    {
+        // Even when the only size known is the 2,458 MiB heap figure (the GC fallback on a platform
+        // with no readable machine size), the flush-unit floor lifts the memtable budget to half the
+        // 245 MiB total instead of leaving it at a quarter.
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-heap-only");
+        options.KeyValueWorkers = 32;
+
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 2458 * OneMb, raftLogFlushUnitFloor: true);
+
+        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(245));
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(122));
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.Not.EqualTo(61));
+    }
+
+    [Test]
+    public void FlushUnitFloorYieldsToHalfTheTotalOnASmallNode()
+    {
+        // 1536 MiB: a 153 MiB total cannot hold the 192 MiB unit. The floor stops at half the total so
+        // the block cache keeps a read share under write load; this node keeps a budget-forced flush
+        // cadence, which the docs state.
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-small-floor");
+        options.KeyValueWorkers = 32;
+
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 1536 * OneMb, raftLogFlushUnitFloor: true);
+
+        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(153));
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(76));
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(options.RocksDbSharedMemoryBudgetMb));
+    }
+
+    [Test]
+    public void FlushUnitFloorFollowsTheEffectiveShardTuning()
+    {
+        // The floor is Kommander's own formula over the tuning the WAL will run: write_buffer_size x
+        // (merge + 1). A narrower unit lowers it; a wider one is still capped at half the total.
+        EmbeddedKahunaOptions narrow = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-narrow");
+        narrow.RaftWalShardWriteBufferSizeMb = 32;
+        narrow.RaftWalShardMinWriteBufferNumberToMerge = 3;
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(narrow, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
+        Assert.That(narrow.RocksDbSharedMemtableBudgetMb, Is.EqualTo(128)); // 32 x 4
+
+        EmbeddedKahunaOptions wide = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-wide");
+        wide.RaftWalShardWriteBufferSizeMb = 128;
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(wide, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
+        Assert.That(wide.RocksDbSharedMemtableBudgetMb, Is.EqualTo(204));   // 384 wanted, half of 409 allowed
+
+        // Where the proportional share already covers the unit, the floor is inert.
+        EmbeddedKahunaOptions large = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-large");
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(large, new KahunaOptionsConfig(), 16L * 1024 * OneMb, raftLogFlushUnitFloor: true);
+        Assert.That(large.RocksDbSharedMemtableBudgetMb, Is.EqualTo(409));  // a quarter of 1638
+    }
+
+    [Test]
+    public void FlushUnitFloorAppliesOnlyToASharedWriteBufferManager()
+    {
+        // With the WAL on SQLite, or with sharing off, Kahuna builds no shared bundle and the memtable
+        // budget is ignored, so there is nothing to floor: the quarter-of-the-cache default stands.
+        EmbeddedKahunaOptions sqlite = EmbeddedKahunaOptionsBuilder.StandaloneBaseline("/tmp/mem-floor-sqlite");
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(sqlite, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
+        Assert.That(sqlite.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+
+        EmbeddedKahunaOptions unshared = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-unshared");
+        unshared.RocksDbSharedMemoryEnabled = false;
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(unshared, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
+        Assert.That(unshared.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+    }
+
+    [Test]
+    public void ExplicitMemtableBudgetBeatsTheFlushUnitFloor()
+    {
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-explicit");
+        options.RocksDbSharedMemtableBudgetMb = 64;
+
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
+            options, new KahunaOptionsConfig { RocksdbSharedMemtableBudgetMb = 64 }, 4096 * OneMb, raftLogFlushUnitFloor: true);
+
+        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(64));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public void ClusterBuildOnThisMachineCoversTheFlushUnitWhenTheTotalAllows()
+    {
+        // End to end through the real memory probe with the floor gated on: the built pair is
+        // consistent, and wherever half the total can hold the flush unit, the memtable budget holds
+        // it. The gate is a process-wide static, hence NonParallelizable and restored in finally.
+        EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = true;
+        try
+        {
+            EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildCluster(
+                new ConfigDefinition { DataDir = "/tmp/mem-floor-cluster" }, CamusDBOptions.Default);
+
+            long unit = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(built);
+            Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.RocksDbSharedMemoryBudgetMb));
+
+            if (built.RocksDbSharedMemoryBudgetMb / 2 * OneMb >= unit)
+                Assert.That((long)built.RocksDbSharedMemtableBudgetMb * OneMb, Is.GreaterThanOrEqualTo(unit));
+        }
+        finally
+        {
+            EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = false;
+        }
+    }
+
+    [Test]
+    public void DevProfileKeepsItsFixedMemtableBudget()
+    {
+        // The dev profile promises a small fixed footprint on any machine, so the flush-unit floor does
+        // not apply to it; its Raft-log flushes are budget-forced by design.
+        EmbeddedKahunaOptions dev = EmbeddedKahunaOptionsBuilder.BuildCluster(
+            new ConfigDefinition { DataDir = "/tmp/mem-floor-dev" }, CamusDBOptions.Default with { MemoryProfile = MemoryProfile.Dev });
+
+        Assert.That(dev.RocksDbSharedMemtableBudgetMb, Is.EqualTo(16));
+    }
+
+    [Test]
     public void ActorSplitAnticipatesKahunasWorkerDefault()
     {
         // key_value_workers unset: Kahuna fills its 32+ default only after these options reach it.

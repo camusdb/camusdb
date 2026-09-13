@@ -106,6 +106,43 @@ internal sealed class TestSlowQueryLog
         Assert.IsTrue(entry.SqlTruncated);
     }
 
+    /// <summary>
+    /// A password must not survive into the ring. The ring is the one write path every recording site
+    /// goes through, so the redaction lives there rather than in each caller.
+    /// </summary>
+    [Test]
+    public void CredentialLiteralsAreRedactedBeforeTheyAreStored()
+    {
+        SlowQueryLog log = new(capacity: 8, maxSqlLength: 512);
+
+        SlowQueryEntry created = Record(log, "CREATE USER app IDENTIFIED BY 'super-secret'");
+        Assert.That(created.Sql, Does.Not.Contain("super-secret"));
+        Assert.That(created.Sql, Does.Contain("'***'"));
+
+        // ALTER USER carries two: the new password and the current one.
+        SlowQueryEntry altered = Record(log, "ALTER USER app IDENTIFIED BY 'new-secret' REPLACE 'old-secret'");
+        Assert.That(altered.Sql, Does.Not.Contain("new-secret"));
+        Assert.That(altered.Sql, Does.Not.Contain("old-secret"));
+
+        // An ordinary statement is stored exactly as it ran.
+        Assert.AreEqual("SELECT name FROM robots", Record(log, "SELECT name FROM robots").Sql);
+    }
+
+    /// <summary>
+    /// Redaction runs before truncation. The other order can cut a masked statement short and leave the
+    /// first characters of the password in the ring.
+    /// </summary>
+    [Test]
+    public void RedactionHappensBeforeTruncation()
+    {
+        SlowQueryLog log = new(capacity: 4, maxSqlLength: 32);
+
+        SlowQueryEntry entry = Record(log, "CREATE USER app IDENTIFIED BY 'super-secret-password-value'");
+
+        Assert.IsTrue(entry.SqlTruncated);
+        Assert.That(entry.Sql, Does.Not.Contain("super"));
+    }
+
     [Test]
     public void SqlThatFitsIsNotMarkedTruncated()
     {

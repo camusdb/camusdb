@@ -76,13 +76,21 @@ internal sealed class ExplainExecutor
     }
 
     /// <summary>
-    /// Builds the query plan for the given SELECT AST and yields one result row per node.
+    /// Builds the query plan for the given SELECT AST and returns one result row per node.
+    ///
+    /// <para><b>The plan is built before this method returns, and that is an authorization
+    /// requirement, not a style choice.</b> Building the plan resolves every table the query reads,
+    /// and each resolution is where the caller's privilege on that table is checked. The statement's
+    /// authorization scope exists only in the flow that runs the statement; a cursor enumerated later
+    /// by the transport runs outside it. A plan built lazily inside the returned cursor was therefore
+    /// never checked against the caller — and it also executes scalar subqueries, whose results the
+    /// rendered plan prints. Only rendering is deferred.</para>
     /// </summary>
     /// <param name="database">Open database descriptor.</param>
     /// <param name="selectAst">The inner SELECT AST wrapped by the EXPLAIN node.</param>
     /// <param name="ticket">The originating execution ticket (provides parameters and txn).</param>
     /// <param name="stage">The stage label to emit in each row ("physical" or "logical").</param>
-    public async IAsyncEnumerable<QueryResultRow> ExplainQuery(
+    public async Task<IAsyncEnumerable<QueryResultRow>> ExplainQueryAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         ExecuteSQLTicket ticket,
@@ -93,14 +101,16 @@ internal sealed class ExplainExecutor
         // constant-source → project shape instead. Projection subqueries are left symbolic here
         // (their names only) — unlike a real query, EXPLAIN does not pre-materialize them.
         if (selectAst.rightAst is null)
-        {
-            foreach (QueryResultRow row in RenderFromlessPlan(selectAst, stage))
-                yield return row;
-            yield break;
-        }
+            return RenderFromlessPlan(selectAst, stage).ToAsyncEnumerable();
 
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
 
+        return RenderPlan(plan, stage).ToAsyncEnumerable();
+    }
+
+    /// <summary>Renders one result row per plan node, plus the trailing plan-info, distribution and cache rows.</summary>
+    private IEnumerable<QueryResultRow> RenderPlan(QueryPlan plan, string stage)
+    {
         // Zip rendered (name, detail) pairs with plan nodes so we can emit cost estimates.
         List<PhysicalPlanNode> orderedNodes = WalkNodesOrdered(plan.Root);
         List<(string Name, string Detail)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
@@ -222,8 +232,13 @@ internal sealed class ExplainExecutor
     /// carry per-node runtime stats. Rather than produce misleading stats, this method throws
     /// for join queries.
     /// Full join instrumentation requires carrying stats through QueryJoinExecutor (deferred).
+    ///
+    /// <para>Every check and the plan itself are done before this method returns, for the reason given
+    /// on <see cref="ExplainQueryAsync"/>: the tables are resolved, and so authorized, in the flow that
+    /// runs the statement. Only the execution and the rendering are deferred to the cursor, and neither
+    /// resolves a table.</para>
     /// </summary>
-    public async IAsyncEnumerable<QueryResultRow> ExplainAnalyzeQuery(
+    public async Task<IAsyncEnumerable<QueryResultRow>> ExplainAnalyzeQueryAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         ExecuteSQLTicket ticket)
@@ -245,6 +260,15 @@ internal sealed class ExplainExecutor
                 "EXPLAIN (ANALYZE) is not yet supported for JOIN queries. " +
                 "Use plain EXPLAIN to inspect the join plan.");
 
+        return RunAnalyzedPlan(plan);
+    }
+
+    /// <summary>
+    /// Executes an already-built plan to completion with runtime stats on, then yields one row per
+    /// node. The plan carries its resolved tables, so nothing here resolves one.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> RunAnalyzedPlan(QueryPlan plan)
+    {
         plan.CollectRuntimeStats = true;
 
         IAsyncEnumerable<QueryResultRow> cursor = queryExecutor.ExecuteQueryPlan(plan);

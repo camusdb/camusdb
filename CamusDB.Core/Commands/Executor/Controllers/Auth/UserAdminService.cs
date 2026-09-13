@@ -330,7 +330,12 @@ internal sealed class UserAdminService
                             TableName = grantedView.Name ?? "",
                         };
 
-                    TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+                    // Opened only to learn the table's id; no row is read. GRANT carries no per-table
+                    // privilege of its own — the statement gate already required user administration —
+                    // so the per-table check is suspended rather than handed a requirement nobody set.
+                    TableDescriptor table;
+                    using (AuthorizationContext.SuspendTableCheck())
+                        table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
                     return new GrantScope
                     {

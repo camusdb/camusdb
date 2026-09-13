@@ -77,7 +77,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// Autocommit with Serializable retry when the resolved isolation level demands it.
     /// </summary>
     public override Task<NonQueryReply> InsertRow(InsertRowRequest request, ServerCallContext context)
-        => InvokeAsync(async () =>
+        => InvokeAsync(context, Privilege.Insert, async () =>
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
@@ -161,7 +161,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         RowQueryRequest request,
         IServerStreamWriter<QueryStreamMessage> responseStream,
         ServerCallContext context)
-        => InvokeStreamingAsync(async () =>
+        => InvokeStreamingAsync(context, Privilege.Select, async () =>
         {
             CancellationToken ct = context.CancellationToken;
             List<EngineQueryFilter>? filters = ToFilters(request.Filters);
@@ -228,7 +228,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         RowByIdRequest request,
         IServerStreamWriter<QueryStreamMessage> responseStream,
         ServerCallContext context)
-        => InvokeStreamingAsync(async () =>
+        => InvokeStreamingAsync(context, Privilege.Select, async () =>
         {
             CancellationToken ct = context.CancellationToken;
 
@@ -300,7 +300,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// using plain (non-expression) values and filter-based row selection.
     /// </summary>
     public override Task<NonQueryReply> UpdateRows(UpdateRowsRequest request, ServerCallContext context)
-        => InvokeAsync(async () =>
+        => InvokeAsync(context, Privilege.Update, async () =>
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
@@ -386,7 +386,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// single filter targeting the row's id.
     /// </summary>
     public override Task<NonQueryReply> UpdateById(UpdateByIdRequest request, ServerCallContext context)
-        => InvokeAsync(async () =>
+        => InvokeAsync(context, Privilege.Update, async () =>
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
@@ -471,7 +471,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// Deletes rows matching the supplied filters. Mirrors <c>DeleteController.Delete</c> exactly.
     /// </summary>
     public override Task<NonQueryReply> DeleteRows(DeleteRowsRequest request, ServerCallContext context)
-        => InvokeAsync(async () =>
+        => InvokeAsync(context, Privilege.Delete, async () =>
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
@@ -549,7 +549,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// on the <c>id</c> column. Equivalent to <see cref="DeleteRows"/> with a single filter.
     /// </summary>
     public override Task<NonQueryReply> DeleteById(RowByIdRequest request, ServerCallContext context)
-        => InvokeAsync(async () =>
+        => InvokeAsync(context, Privilege.Delete, async () =>
         {
             CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
@@ -663,10 +663,37 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
 
     // ─── RPC boundary ─────────────────────────────────────────────────────────
 
-    private async Task<T> InvokeAsync<T>(Func<Task<T>> body)
+    /// <summary>
+    /// Runs one RPC body under the caller's authorization and translates domain failures to gRPC
+    /// status codes.
+    ///
+    /// <para><b>Every RPC must name the privilege it needs.</b> The rows API has no SQL statement, so
+    /// the statement gate never publishes a privilege for it, and the authentication middleware maps
+    /// none for a <c>/CamusRows/*</c> path. This wrapper is therefore the only place the per-table check
+    /// in <c>TableOpener.Open</c> learns what to require. The mapping matches SQL: a filtered update or
+    /// delete needs Update or Delete only, as <c>UPDATE … WHERE</c> does.</para>
+    ///
+    /// <para>The scope is written here, in the method that then calls <paramref name="body"/>, because an
+    /// <see cref="AsyncLocal{T}"/> write flows down into callees but never back out of an awaited
+    /// helper. It is published before the body opens the table for the result schema, so a refused
+    /// caller receives neither rows nor column definitions.</para>
+    /// </summary>
+    private async Task<T> InvokeAsync<T>(ServerCallContext context, Privilege required, Func<Task<T>> body)
     {
         try
         {
+            if (options.AuthenticationEnabled)
+            {
+                Principal principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
+                AuthorizationContext.Current = new AuthorizationScope(principal, required);
+            }
+            else if (AuthorizationContext.Current != default)
+            {
+                // Writing an AsyncLocal clones the execution context for every later await, so only
+                // pay for it when a stale scope from a pooled context actually needs clearing.
+                AuthorizationContext.Current = default;
+            }
+
             return await body().ConfigureAwait(false);
         }
         catch (RpcException)
@@ -689,8 +716,27 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         }
     }
 
-    private Task InvokeStreamingAsync(Func<Task> body)
-        => InvokeAsync(async () => { await body().ConfigureAwait(false); return true; });
+    private Task InvokeStreamingAsync(ServerCallContext context, Privilege required, Func<Task> body)
+        => InvokeAsync(context, required, async () => { await body().ConfigureAwait(false); return true; });
+
+    /// <summary>
+    /// Resolves the caller from the <c>authorization</c> metadata, the same way
+    /// <see cref="CamusSqlService"/> does. Only called when authentication is on; a missing, invalid or
+    /// expired token throws <see cref="CamusDBErrorCodes.AuthenticationFailed"/>, so no RPC body runs
+    /// without a principal.
+    /// </summary>
+    private async Task<Principal> ResolvePrincipalAsync(ServerCallContext context)
+    {
+        GrpcTransportSecurity.EnsureSecureTransport(context, options);
+
+        string? authorization = context.RequestHeaders.GetValue("authorization");
+        string? bearer = authorization is not null
+                         && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? authorization["Bearer ".Length..].Trim()
+            : null;
+
+        return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
+    }
 
     // ─── Schema / primary-key helpers ─────────────────────────────────────────
 

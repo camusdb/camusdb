@@ -260,8 +260,24 @@ With auth enabled, every statement is checked before it runs:
   `EXPLAIN` all require the privilege on **each** referenced table — a `db.orders`-only grant authorizes
   `orders` and nothing else. A broader `db.*` or global grant, or superuser, satisfies any table in
   scope. A denial is `403 Insufficient privilege`.
+- **The typed gRPC rows API** (`CamusRows`) is checked the same way, on the table the request names:
+  `InsertRow` needs `INSERT`, `Query` and `QueryById` need `SELECT`, `UpdateRows` and `UpdateById`
+  need `UPDATE`, and `DeleteRows` and `DeleteById` need `DELETE`. A filtered update or delete needs
+  only the write privilege, as `UPDATE … WHERE` does in SQL.
+- **Every table access must declare its privilege.** A request that reaches a table without one is
+  refused with `403 Insufficient privilege` — superusers included — rather than allowed unchecked.
+  If you see that error with the message "the request did not declare which privilege it needs", it
+  is a server defect, not a missing grant; please report it.
 - **User / database administration** — `CREATE/ALTER/DROP USER`, `GRANT`/`REVOKE`, and database
-  lifecycle DDL require superuser.
+  lifecycle DDL require superuser. So do the HTTP routes `/create-db`, `/drop-db` and `/close-db`.
+  Closing is in that list because it rolls back every transaction still active in that database on
+  the node.
+- **Cluster routes** — `/v1/cluster/health` answers without a credential so that an orchestrator
+  probe works, but only a superuser sees its `localRole`, `hostedPartitions` and `stalledPartitions`
+  fields. `/v1/cluster/membership`, `/v1/cluster/placement`, `/v1/cluster/backfill-status` and
+  `/v1/cluster/snapshot-status` require a superuser, because they name peer endpoints, partitions and
+  leaders. `/v1/cluster/leave` and `/v1/cluster/replication-factor` require a superuser, and are
+  loopback-only when authentication is off.
 - **Catalog visibility** — `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES` and `SHOW ANCESTORS` are
   *filtered*, not rejected: they list only the objects the caller can reach, so a name is never
   disclosed to someone who holds no grant on it. A caller with no grants gets an empty result rather

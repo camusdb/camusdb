@@ -85,7 +85,7 @@ evicted by the fast ones that followed it. Use `0` only on an idle node while re
 | `outcome` | `STRING` | `completed`, `abandoned` or `failed`. |
 | `error_code` | `STRING` | Engine error code when `outcome` is `failed`, `NULL` otherwise. |
 | `truncated` | `BOOL` | The stored `sql` is shorter than the statement that ran. |
-| `sql` | `STRING` | The statement text as the client sent it, truncated to the configured length. |
+| `sql` | `STRING` | The statement text as the client sent it, with any password literal in `CREATE USER` / `ALTER USER` replaced by `'***'`, then truncated to the configured length. |
 
 Rows come back newest first, so a bare `SHOW SLOW QUERIES` answers "what just happened" without an
 `ORDER BY`.
@@ -156,6 +156,11 @@ one more reason `0` belongs on an idle node while reproducing something, and not
 The reason is sharper here than for either of those: the rows carry the literal SQL text of
 statements other users ran, so a predicate value from a table the caller holds no grant on can appear
 verbatim in the output. No per-database grant scopes that down.
+
+Passwords are the exception to "literal". The password in `CREATE USER … IDENTIFIED BY '…'` and both
+passwords in `ALTER USER … IDENTIFIED BY '…' REPLACE '…'` are replaced with `'***'` before an entry is
+stored, so a slow or failed account statement never keeps a credential in the log. A password passed
+as a bound parameter never appears in the statement text in the first place.
 
 ## Limits
 

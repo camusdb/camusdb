@@ -42,16 +42,22 @@ public sealed class AuthenticationMiddleware
     // The gRPC entries are the CamusAuth service's method paths — this middleware sits in front of the
     // gRPC endpoints too, so without them a client could never obtain the token those endpoints demand.
     // The proto declares no package, so a method path is "/{service}/{method}".
+    //
+    // The cluster readiness probe is here because an orchestrator probe carries no credential. The
+    // controller withholds its topology fields from any caller who is not a superuser.
     private static readonly HashSet<string> Exempt = new(StringComparer.OrdinalIgnoreCase)
     {
         "/ping", "/health", "/login", "/logout",
         "/CamusAuth/Login", "/CamusAuth/Logout",
+        "/v1/cluster/health",
     };
 
-    // Database lifecycle requires the superuser attribute.
+    // Database lifecycle requires the superuser attribute. Closing belongs here with create and drop: a
+    // close tears down the node's descriptor and rolls back every transaction still active in that
+    // database, so any caller who could close one could abort every other user's work in it at will.
     private static readonly HashSet<string> SuperuserRoutes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "/create-db", "/drop-db",
+        "/create-db", "/drop-db", "/close-db",
     };
 
     // Legacy data routes → the privilege the per-table check must require (enforced at TableOpener).
@@ -142,8 +148,10 @@ public sealed class AuthenticationMiddleware
             return;
         }
 
-        // Publish the principal + the route's privilege so TableOpener enforces per table. SQL routes
-        // pass Privilege.None here and set their own precise privilege from the parsed statement.
+        // Publish the principal + the route's privilege so TableOpener enforces per table. Every other
+        // route publishes no privilege: the SQL entry points and the gRPC rows service set their own
+        // precise one, and a route that opens a table without doing so is refused by the fail-closed
+        // per-table check rather than let through.
         Privilege? routePrivilege = DataRoutes.TryGetValue(path, out Privilege p) ? p : null;
         AuthorizationContext.Current = new AuthorizationScope(principal, routePrivilege);
         context.Items["camus.principal"] = principal;

@@ -298,7 +298,7 @@ internal static class DerivedTableSchemaBuilder
     ];
 
     // EXPLAIN / EXPLAIN (LOGICAL|PHYSICAL): one row per plan node. Column order and names/types must
-    // match the dictionary keys emitted by ExplainExecutor.ExplainQuery so the positional response
+    // match the dictionary keys emitted by ExplainExecutor.ExplainQueryAsync so the positional response
     // resolves each cell by name. Trailing rows (plan-info, cache) omit the metric columns; the
     // positional writer maps a missing key to null, so a shorter row is fine.
     internal static readonly IReadOnlyList<DerivedColumnSchema> ExplainSchema =

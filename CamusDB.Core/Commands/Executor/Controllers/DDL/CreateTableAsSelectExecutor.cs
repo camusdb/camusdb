@@ -272,7 +272,7 @@ internal sealed class CreateTableAsSelectExecutor
         if (validate)
             context.Validator.Validate(ticket);
 
-        using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(null);
+        using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.SuspendTableCheck();
 
         return await schemaDdl.ExecuteDdlInTransaction(database, tx =>
             tableCreator.Create(queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId))
@@ -291,7 +291,7 @@ internal sealed class CreateTableAsSelectExecutor
     /// </summary>
     internal async Task DropStagingRelationAsync(DatabaseDescriptor database, string relationName)
     {
-        using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(null);
+        using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.SuspendTableCheck();
 
         await schemaDdl.DropTable(new DropTableTicket(database.Name, relationName, ifExists: true, force: true))
             .ConfigureAwait(false);
@@ -324,7 +324,7 @@ internal sealed class CreateTableAsSelectExecutor
 
         try
         {
-            using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.WithRequiredPrivilege(null);
+            using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.SuspendTableCheck();
 
             TableDescriptor staging = await context.TableOpener.Open(database, relationName).ConfigureAwait(false);
 

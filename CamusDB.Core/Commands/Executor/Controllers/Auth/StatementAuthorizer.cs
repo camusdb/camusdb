@@ -329,6 +329,12 @@ internal sealed class StatementAuthorizer
     internal static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
     {
         NodeType.Select => Privilege.Select,
+        // Every EXPLAIN form reads the tables it names, so it needs what a SELECT over them needs. Plan
+        // output is not metadata only: preparing the plan runs scalar and IN subqueries against storage
+        // and folds their results into literals that the rendered plan prints, and ANALYZE runs the whole
+        // query. Select is the complete requirement because the grammar only accepts a SELECT here.
+        NodeType.Explain or NodeType.ExplainLogical or NodeType.ExplainPhysical
+            or NodeType.ExplainAnalyze => Privilege.Select,
         // INSERT … SELECT maps to the privilege for its TARGET. Its source tables are resolved under
         // a narrowed Select requirement while the source query is built, so this never demands Insert
         // on a table the statement only reads.

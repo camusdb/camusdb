@@ -298,7 +298,7 @@
     panels.push(metricsPanel);
 
     var clusterPanel = new Panel({
-      url: '/v1/cluster/membership',
+      url: '/v1/dashboard/cluster',
       intervalMs: 10000,
       element: document.getElementById('cluster-body'),
       render: renderCluster,

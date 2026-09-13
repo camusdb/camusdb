@@ -191,7 +191,7 @@ observe other than how often a read is served from cache instead of disk.
 
 | Profile | Block cache | Memtable sub-budget | Actor caches | Total |
 |---------|-------------|---------------------|--------------|-------|
-| `prod` (default) | 10% of RAM, `[320 MiB, 2 GiB]` | ¼ of it, `[128 MiB, 1 GiB]` | 6.25% of RAM, ≥ 64 MiB | ~16% of RAM (~1.5 GiB on an 8 GiB box) |
+| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, ≤ 1 GiB (the Raft-log flush-unit floor is built but gated off, see below) | 6.25% of the managed heap budget, ≥ 64 MiB | ~16% of memory (~1.5 GiB on an 8 GiB box) |
 | `dev` | 64 MiB | 16 MiB | 32 MiB | ~96 MiB, on any machine |
 
 `dev` is for a node sharing a developer machine with the application being built against it: the
@@ -209,30 +209,79 @@ combination rather than a conflict.
 ### Memory-proportional cache defaults
 
 Under `memory_profile: prod`, most unset keys keep Kahuna's own default, but the four cache-sizing
-knobs are an exception: when left unset they are computed at startup from the machine's available
-memory (the container's cgroup limit when one is set, else physical RAM — never the GC heap hard limit,
-which describes the managed heap only while these caches are native) rather than from a fixed constant.
-With the Raft log on RocksDB, a memtable sub-budget below the log's flush unit (192 MiB at Kommander's
-defaults) makes Kommander flush the log on the budget's cadence and warn at open; raising
-`rocksdb_shared_memtable_budget_mb` past it is correct in principle but, on Kommander 1.6.5, lets the
-Raft-log store retain every write-ahead file for the life of the process (a rarely written column family
-pins them), so CamusDB does not floor the budget there until Kommander bounds its WAL size. A fixed 320 MB block cache was measured forcing a
-1.2 GB TPC-C working set through disk reads on nearly every statement; sizing it to the machine
-took the same workload from 24.5 to 119.6 tx/s at 8 clients.
+knobs are an exception: when left unset they are computed at startup from the node's memory rather
+than from a fixed constant. A fixed 320 MB block cache was measured forcing a 1.2 GB TPC-C working set
+through disk reads on nearly every statement; sizing it to the machine took the same workload from
+24.5 to 119.6 tx/s at 8 clients.
+
+Two different memory sizes feed the computation, one for each kind of cache:
+
+- **Machine memory** sizes the RocksDB pair. It is the container's cgroup memory limit when one is
+  set, else the machine's physical RAM. RocksDB's block cache and memtables are native allocations,
+  so they are never sized from the .NET heap limit.
+- **Managed heap budget** sizes the actor caches, which live in the managed heap. It is what the GC
+  reports: the heap hard limit when one is in force (`DOTNET_GCHeapHardLimit`,
+  `DOTNET_GCHeapHardLimitPercent`, or the runtime's own 75% default inside a memory-limited
+  container), else the machine memory.
+
+With no heap limit the two sizes are the same. With a heap limit they differ, and the difference
+matters: the RocksDB budgets sit **outside** the heap limit and count against the container beside it.
+On a 4,096 MiB container with `DOTNET_GCHeapHardLimitPercent=3C` (60%, the value is hexadecimal), the
+heap budget is 2,457 MiB but RocksDB is sized from 4,096 MiB. Leave room for both when you pick the
+heap percentage.
 
 | Key | Computed when unset | Clamp |
 |-----|---------------------|-------|
-| `rocksdb_shared_memory_budget_mb` | 10% of RAM | 320 MiB – 2 GiB |
-| `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache | 128 MiB – 1 GiB |
-| `max_bytes_per_actor` | 6.25% of RAM (≥ 64 MiB for the layer) ÷ `key_value_workers` | 8 MiB – 2 GiB per actor |
-| `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 10k – 4M |
+| `rocksdb_shared_memory_budget_mb` | 10% of machine memory | 64 MiB – 2 GiB (320 MiB floor only when 10% reaches it) |
+| `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache (the Raft-log flush-unit floor below is gated off) | 16 MiB – 1 GiB (128 MiB floor only when a quarter reaches it) |
+| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ `key_value_workers` | 1 MiB – 2 GiB per actor (8 MiB floor only when the share reaches it) |
+| `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 2k – 4M (10k floor only when the share reaches it) |
 
-That is roughly 16% of RAM across both cache layers, and never more than 4 GiB in total however
+The floors in parentheses yield on a small node: below them the percentage governs, down to the lower
+bound of the clamp. A fixed floor on a small container used to claim several times its share of memory.
+
+**The memtable flush-unit floor (gated off).** When the KV store and the Raft WAL share one
+WriteBufferManager (`rocksdb_shared_memory` on, `storage` and `wal_storage` both `rocksdb`), the Raft
+log flushes at its flush unit plus headroom: `wal_shard_write_buffer_size_mb` ×
+(`wal_shard_min_write_buffer_number_to_merge` + 1), which is 192 MiB at Kommander's defaults. Kommander
+checks the same figure when it opens the WAL. Below it, RocksDB flushes the Raft log whenever the
+shared budget fills, not at its own 128 MiB unit, and it logs this warning:
+
+```text
+the shared memtable budget (61 MB) is below the shard flush unit plus headroom (192 MB)
+```
+
+In a 10-minute write probe at a 61 MiB budget, all 349 Raft-log flushes were forced by the budget, at
+about 6 MiB each. CamusDB can raise the computed memtable budget to that unit (taking at most **half**
+of the block-cache budget, because the memtables are charged inside that budget and reads need the
+rest), but the floor **ships disabled** and the computed budget stays at a quarter of the cache.
+Raising the budget past the unit is correct in principle, but on Kommander 1.6.5 it lets the Raft-log
+store retain every write-ahead `.log` file for the life of the process: a rarely written column family
+(the meta partition's shard) never flushes without budget starvation, so nothing releases the files
+(443 MiB to 2,709 MiB in ten minutes per node, growing linearly, against ~230 MB of live tables). The
+gain was 2% of device bytes per operation, the cost an unbounded directory and a follower restart 4 s
+slower (a wider flush unit is a wider replay unit). The floor turns on once Kommander bounds its WAL
+size (`max_total_wal_size`, filed on the Kommander project); it is the
+`RaftWalFlushUnitFloorEnabled` constant in `EmbeddedKahunaOptionsBuilder`. Until then a node that
+wants the unit covered sets `rocksdb_shared_memtable_budget_mb` explicitly, and the warning above is
+expected on the default sizing. An explicit `rocksdb_shared_memtable_budget_mb` always wins, and the
+`dev` profile never applies the floor.
+
+At startup the node logs the values it uses, once, before RocksDB opens:
+
+```text
+RocksDB shared memory: block cache 409 MiB, memtable budget 102 MiB; Raft-log flush unit plus headroom 192 MiB (NOT covered: Raft-log flushes will be budget-forced). Native budgets sit outside the managed heap: machine memory 4096 MiB (cgroup), managed heap budget 2457 MiB.
+```
+
+The machine-memory source is `cgroup`, `meminfo` (Linux RAM), `sysctl` (macOS RAM), or `gc` (no
+readable machine size, so the GC figure is used).
+
+That is roughly 16% of memory across both cache layers, and never more than 4 GiB in total however
 large the machine is. The fractions and the ceilings are deliberately modest: an unconfigured node
 is far more often a developer workstation or a CI container sharing the box with a compiler and an
 IDE than a dedicated database server. An explicit value always wins over the computed one. On an
-8 GiB, 8-core machine with none of them set: 819 MiB block cache, 204 MiB memtable sub-budget, and
-64 MiB × 8 = 512 MiB of actor caches — about 1.5 GiB.
+8 GiB, 8-core machine with no heap limit and none of them set: 819 MiB block cache, 204 MiB memtable
+sub-budget (above the 192 MiB flush unit without any floor), and 64 MiB × 8 = 512 MiB of actor caches — about 1.5 GiB.
 
 A dedicated server should raise all four explicitly; the sizing above is a floor to build from, not
 a recommendation for a machine whose only job is CamusDB.
@@ -247,8 +296,8 @@ The RocksDB pair is shared: `rocksdb_shared_memory` (default on, and a no-op unl
 KV store and the Raft WAL. The memtable sub-budget is charged **inside** the total block-cache
 budget, not added to it, and must be ≤ it. That comparison is made against the *effective*
 post-merge pair, so overriding only one of the two can produce an inconsistent pair — a 100 MiB
-total against a computed 512 MiB memtable — and fails startup with `InvalidConfig`. Set both
-together. Likewise `max_bytes_per_actor` is **per actor**: multiply by `key_value_workers` (default:
+total against an explicit 512 MiB memtable — and fails startup with `InvalidConfig`. The computed
+memtable default never exceeds the total, with or without the flush-unit floor. Set both together. Likewise `max_bytes_per_actor` is **per actor**: multiply by `key_value_workers` (default:
 one per CPU) to get the total.
 
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
@@ -311,7 +360,9 @@ Three cautions apply to the whole group.
   `wal_shard_max_write_buffer_number` — 256 MB at the defaults. That competes with
   `kahuna.rocksdb_shared_memory_budget_mb` on a small node. Under the shared WriteBufferManager an
   over-budget node flushes early, which quietly returns the flush unit to its old size rather than
-  growing memory, so raising the memtable knobs without raising the budget can buy nothing.
+  growing memory, so raising the memtable knobs without raising the budget can buy nothing. The
+  computed memtable budget does not follow these two keys while the flush-unit floor above is gated
+  off; raise `kahuna.rocksdb_shared_memtable_budget_mb` alongside them.
 - **Restart.** A wider flush unit is a wider WAL-replay unit. A restart re-reads more before the node
   reports ready; measure that, not only the bytes written.
 - **Universal makes the level size inert.** Setting `wal_shard_universal_compaction: true` together with

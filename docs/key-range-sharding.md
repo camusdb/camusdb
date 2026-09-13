@@ -230,6 +230,25 @@ sharding is useful on its own.
 If you enable one, decide about the other at the same time rather than letting the defaults drift
 apart. See [query-planner.md](query-planner.md) for what fragmentation is eligible today.
 
+### How a fragment crosses the wire
+
+A coordinator sends each remote fragment as a `POST` to the peer's `/internal/query-fragment`
+endpoint, authenticated by the node secret. The peer streams the surviving rows back one frame at
+a time, in one of two encodings that the two nodes negotiate per request:
+
+- **NDJSON** (`application/x-ndjson`) — one JSON object per line, row bytes as base64. Every node
+  can read and write it, and it is what a node on an older build sends and expects.
+- **Binary** (`application/x-camus-query-fragment-v1`) — length-prefixed frames with the row bytes
+  verbatim. A coordinator asks for it in `Accept`; a peer that understands it answers with that
+  `Content-Type`, and the coordinator picks its decoder from the `Content-Type` it gets back.
+
+The negotiation makes a rolling upgrade safe in both directions. An older peer ignores the unknown
+media type and streams NDJSON; an older coordinator never asks, so a newer peer streams NDJSON to
+it. Frames are flushed one at a time in both encodings, so the first row leaves the peer as soon as
+it survives the filter regardless of the format chosen. Base64 costs a third more bytes per row than
+the binary path and a decode pass on the coordinator; the binary path exists to remove that cost on
+row-heavy scans, not to change what a fragment carries.
+
 ---
 
 ## Seeing where the data actually went

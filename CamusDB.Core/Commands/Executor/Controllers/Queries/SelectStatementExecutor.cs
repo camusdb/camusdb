@@ -670,21 +670,21 @@ internal sealed class SelectStatementExecutor
                 {
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ExplainSchema;
-                    return (database, explainExecutor.ExplainQuery(database, ast.leftAst!, ticket, "physical"));
+                    return (database, await explainExecutor.ExplainQueryAsync(database, ast.leftAst!, ticket, "physical").ConfigureAwait(false));
                 }
 
             case NodeType.ExplainLogical:
                 {
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ExplainSchema;
-                    return (database, explainExecutor.ExplainQuery(database, ast.leftAst!, ticket, "logical"));
+                    return (database, await explainExecutor.ExplainQueryAsync(database, ast.leftAst!, ticket, "logical").ConfigureAwait(false));
                 }
 
             case NodeType.ExplainAnalyze:
                 {
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ExplainAnalyzeSchema;
-                    return (database, explainExecutor.ExplainAnalyzeQuery(database, ast.leftAst!, ticket));
+                    return (database, await explainExecutor.ExplainAnalyzeQueryAsync(database, ast.leftAst!, ticket).ConfigureAwait(false));
                 }
 
             case NodeType.AnalyzeTable:

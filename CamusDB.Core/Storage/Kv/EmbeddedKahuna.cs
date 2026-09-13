@@ -403,6 +403,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         Options = options;
         logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
+        LogRocksDbMemoryBudgets();
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
         WireWalRestoreBuffer();
@@ -423,6 +424,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         Options = options;
         logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
+        LogRocksDbMemoryBudgets();
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
         WireWalRestoreBuffer();
@@ -506,6 +508,36 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         }
 
         startedSignal.TrySetResult();
+    }
+
+    /// <summary>
+    /// Logs, once per node and before the node opens RocksDB, the shared RocksDB memory budgets the
+    /// node will run with and the Raft-log flush unit they were checked against, plus the two memory
+    /// sizes the defaults are derived from. Kommander warns at WAL open when the memtable budget is
+    /// below that unit; this line puts the numbers the warning is about (and whether the native
+    /// budgets came from a cgroup limit or from RAM) next to it. Logged only when the store and the
+    /// WAL share one WriteBufferManager, since the budgets are ignored otherwise.
+    /// </summary>
+    private void LogRocksDbMemoryBudgets()
+    {
+        if (logger is null || !logger.IsEnabled(LogLevel.Information) || !EmbeddedKahunaOptionsBuilder.SharesRocksDbMemory(Options))
+            return;
+
+        const long OneMb = 1024L * 1024;
+        (long machineBytes, string machineSource) = MachineMemory.ReadTotal();
+        long flushUnitHeadroomBytes = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(Options);
+        bool coversFlushUnit = (long)Options.RocksDbSharedMemtableBudgetMb * OneMb >= flushUnitHeadroomBytes;
+
+        logger.LogInformation(
+            "RocksDB shared memory: block cache {BlockCacheMb} MiB, memtable budget {MemtableMb} MiB; Raft-log flush unit plus headroom {FlushUnitMb} MiB ({Fit}). " +
+            "Native budgets sit outside the managed heap: machine memory {MachineMb} MiB ({MachineSource}), managed heap budget {HeapMb} MiB.",
+            Options.RocksDbSharedMemoryBudgetMb,
+            Options.RocksDbSharedMemtableBudgetMb,
+            flushUnitHeadroomBytes / OneMb,
+            coversFlushUnit ? "covered" : "NOT covered: Raft-log flushes will be budget-forced",
+            machineBytes / OneMb,
+            machineSource,
+            MachineMemory.ManagedHeapBytes() / OneMb);
     }
 
     /// <summary>

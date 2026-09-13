@@ -28,10 +28,18 @@ namespace CamusDB.App.Controllers;
 /// Kahuna's server exposes — so an external orchestrator (health probes, a chaos/reliability
 /// harness, a scale-down script) can observe and steer the cluster without in-process access.
 ///
-/// <para>Reads are unauthenticated like <c>/ping</c>: probes must work before credentials exist,
-/// and the roster/placement expose operational metadata only. The two mutations (leave,
-/// replication-factor) follow the backup admin gate: superuser when authentication is enabled,
-/// loopback-only otherwise, and never a credential over plaintext.</para>
+/// <para><b>Who may read what.</b> The readiness probe answers without a credential, because an
+/// orchestrator probe has none, but with authentication on it tells an anonymous or non-superuser
+/// caller only whether the node serves: its role, hosted-partition count and stalled partition ids
+/// are withheld. The four detail reads — membership, placement, backfill status, snapshot status —
+/// name peer endpoints, partition ids, leaders and commit indexes, which is the cluster topology
+/// <c>SHOW ENGINE STATS</c> is superuser-gated for; they follow that statement's bar: superuser when
+/// authentication is on. With authentication off they stay open, exactly as that statement does, since
+/// any client that reaches the port can already run every statement.</para>
+///
+/// <para>The two mutations (leave, replication-factor) are held higher: superuser when authentication
+/// is enabled, loopback-only otherwise, and never a credential over plaintext. Unlike a read, one
+/// unauthenticated call can take a node out of the cluster.</para>
 /// </summary>
 [ApiController]
 public sealed class ClusterController : CommandsController
@@ -49,12 +57,27 @@ public sealed class ClusterController : CommandsController
     /// Readiness probe. 200 when the node can serve key/value requests, 503 while it cannot — a
     /// node answers HTTP (and membership queries) long before cluster initialization completes, so
     /// <c>/ping</c> alone cannot distinguish "up" from "able to serve".
+    ///
+    /// <para>Exempt from authentication, because a probe has no credential. With authentication on,
+    /// only a superuser sees <c>LocalRole</c>, <c>HostedPartitions</c> and <c>StalledPartitions</c>;
+    /// everyone else gets the status code, <c>Ready</c>, <c>Initialized</c> and <c>CommitStalled</c>.
+    /// The stalled bit stays public on purpose: it is the one signal a monitor alarms on, and it names
+    /// no partition, peer or endpoint.</para>
     /// </summary>
     [HttpGet]
     [Route("/v1/cluster/health")]
-    public JsonResult GetHealth()
+    public async Task<JsonResult> GetHealth()
     {
         ClusterHealthResponse health = BuildHealth(kahuna.Raft);
+
+        if (!await CanReadTopologyQuietlyAsync().ConfigureAwait(false))
+            health = new ClusterHealthResponse
+            {
+                Ready = health.Ready,
+                Initialized = health.Initialized,
+                CommitStalled = health.CommitStalled,
+            };
+
         return new JsonResult(health)
         {
             StatusCode = health.Ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable,
@@ -69,8 +92,12 @@ public sealed class ClusterController : CommandsController
     /// </summary>
     [HttpGet]
     [Route("/v1/cluster/backfill-status")]
-    public JsonResult GetBackfillStatus()
+    public async Task<JsonResult> GetBackfillStatus()
     {
+        JsonResult? refusal = await RefuseTopologyReadAsync().ConfigureAwait(false);
+        if (refusal is not null)
+            return refusal;
+
         IRaft raft = kahuna.Raft;
 
         ClusterBackfillStatusResponse response = new()
@@ -118,8 +145,12 @@ public sealed class ClusterController : CommandsController
     /// </summary>
     [HttpGet]
     [Route("/v1/cluster/snapshot-status")]
-    public JsonResult GetSnapshotStatus()
+    public async Task<JsonResult> GetSnapshotStatus()
     {
+        JsonResult? refusal = await RefuseTopologyReadAsync().ConfigureAwait(false);
+        if (refusal is not null)
+            return refusal;
+
         IRaft raft = kahuna.Raft;
 
         ClusterSnapshotStatusResponse response = new()
@@ -162,10 +193,22 @@ public sealed class ClusterController : CommandsController
 
     [HttpGet]
     [Route("/v1/cluster/membership")]
-    public JsonResult GetMembership()
+    public async Task<JsonResult> GetMembership()
     {
-        IRaft raft = kahuna.Raft;
+        JsonResult? refusal = await RefuseTopologyReadAsync().ConfigureAwait(false);
+        if (refusal is not null)
+            return refusal;
 
+        return new JsonResult(BuildMembership(kahuna.Raft));
+    }
+
+    /// <summary>
+    /// The committed membership roster as this node sees it. Internal so the dashboard's cluster
+    /// panel serves the same answer from its own route, which accepts the dashboard session: the
+    /// browser cannot authenticate to this controller, whose routes take the bearer header only.
+    /// </summary>
+    internal static ClusterMembershipResponse BuildMembership(IRaft raft)
+    {
         ClusterMembership membership = raft.GetMembership();
         string localEndpoint = raft.GetLocalEndpoint();
 
@@ -190,13 +233,17 @@ public sealed class ClusterController : CommandsController
                 response.LocalRole = member.Role.ToString();
         }
 
-        return new JsonResult(response);
+        return response;
     }
 
     [HttpGet]
     [Route("/v1/cluster/placement")]
     public async Task<JsonResult> GetPlacement()
     {
+        JsonResult? refusal = await RefuseTopologyReadAsync().ConfigureAwait(false);
+        if (refusal is not null)
+            return refusal;
+
         IRaft raft = kahuna.Raft;
 
         ClusterPlacementResponse response = new()
@@ -524,6 +571,58 @@ public sealed class ClusterController : CommandsController
         else if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Cluster admin audit: op={Operation} user={User} remote={Remote} outcome={Outcome}",
                 operation, user, remote, outcome);
+    }
+
+    /// <summary>
+    /// Refuses a topology read to a caller who is not a superuser while authentication is on, and
+    /// returns null when the read may proceed. See the class summary for why the bar sits here.
+    /// </summary>
+    private async Task<JsonResult?> RefuseTopologyReadAsync()
+    {
+        if (!options.AuthenticationEnabled)
+            return null;
+
+        try
+        {
+            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            if (principal is not null && principal.IsSuperuser)
+                return null;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege, "Cluster topology requires a superuser");
+        }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return new JsonResult(new { status = "failed", code = e.Code, message = e.Message })
+            {
+                StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code),
+            };
+        }
+    }
+
+    /// <summary>
+    /// Whether the readiness probe may include topology detail for this caller. Never throws: the
+    /// probe route is exempt from authentication, so a missing, invalid or plaintext credential only
+    /// narrows the answer — failing the probe over it would report a healthy node as down.
+    /// </summary>
+    private async Task<bool> CanReadTopologyQuietlyAsync()
+    {
+        if (!options.AuthenticationEnabled)
+            return true;
+
+        if (string.IsNullOrEmpty(Request.Headers.Authorization.ToString()))
+            return false;
+
+        try
+        {
+            Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+            return principal is not null && principal.IsSuperuser;
+        }
+        catch (CamusDBException)
+        {
+            return false;
+        }
     }
 
     private static JsonResult Failure(CamusDBException e) => new(new ClusterLeaveResponse
