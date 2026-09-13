@@ -190,10 +190,12 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     /// <summary>
     /// In-process <see cref="IQueryFragmentTransport"/>: resolves the target node by its Raft
     /// endpoint and executes the fragment on that node's <see cref="CommandExecutor"/>. Every
-    /// request and every returned row is deliberately round-tripped through the JSON wire
-    /// encoding, so cluster tests exercise the same serialization the HTTP transport uses —
-    /// an in-process shortcut that skipped the codec would leave it untested.
-    /// Records executed requests and supports injecting failures for fallback coverage.
+    /// request is round-tripped through the UTF-8 JSON encoding and every returned frame
+    /// through <b>both</b> wire codecs of <see cref="QueryFragmentWireCodec"/> (binary, then
+    /// NDJSON), so cluster tests exercise exactly the serialization the HTTP transport and the
+    /// fragment controller use — an in-process shortcut that skipped the codecs would leave
+    /// them untested. Records executed requests and supports injecting failures for fallback
+    /// coverage.
     /// </summary>
     internal sealed class InProcessFragmentTransport : IQueryFragmentTransport
     {
@@ -235,7 +237,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 ?? throw new InvalidOperationException($"No cluster node has endpoint '{targetRaftEndpoint}'");
 
             // Wire round-trip on purpose (see class doc).
-            string requestJson = System.Text.Json.JsonSerializer.Serialize(request);
+            byte[] requestJson = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request);
             CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest decoded =
                 System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest>(requestJson)!;
 
@@ -255,9 +257,37 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 if (row.Stats is null)
                     Interlocked.Increment(ref rowsReturned);
 
-                string rowJson = System.Text.Json.JsonSerializer.Serialize(row);
-                yield return System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow>(rowJson)!;
+                yield return RoundTripThroughWire(row, targetRaftEndpoint);
             }
+        }
+
+        /// <summary>
+        /// Encodes and decodes one frame through the binary codec and then through the NDJSON
+        /// codec, returning the twice-decoded row. Either codec dropping or mangling a member
+        /// (row id, bytes, cells, match indices, stats) surfaces as a wrong query result.
+        /// </summary>
+        private static CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow RoundTripThroughWire(
+            CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row, string peer)
+        {
+            System.Buffers.ArrayBufferWriter<byte> binary = new();
+            QueryFragmentWireCodec.WriteBinaryFrame(binary, row);
+            System.Buffers.ReadOnlySequence<byte> binaryBytes = new(binary.WrittenMemory);
+
+            if (!QueryFragmentWireCodec.TryReadBinaryFrame(ref binaryBytes, peer, out QueryFragmentWireFrame fromBinary)
+                || !binaryBytes.IsEmpty || fromBinary.Row is null)
+                throw new InvalidOperationException("Binary fragment frame did not round-trip");
+
+            System.Buffers.ArrayBufferWriter<byte> ndjson = new();
+            using (System.Text.Json.Utf8JsonWriter writer = new(ndjson))
+            {
+                QueryFragmentWireCodec.WriteNdjsonFrame(writer, fromBinary.Row);
+                writer.Flush();
+            }
+
+            QueryFragmentWireFrame fromNdjson = QueryFragmentWireCodec.ReadNdjsonFrame(
+                new System.Buffers.ReadOnlySequence<byte>(ndjson.WrittenMemory), peer);
+
+            return fromNdjson.Row ?? throw new InvalidOperationException("NDJSON fragment frame did not round-trip");
         }
     }
 

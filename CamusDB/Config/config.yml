@@ -487,9 +487,11 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # a no-op otherwise). One block cache + one write-buffer manager serve both databases,
 #   # bounding total RocksDB memory with a single budget instead of two.
 #   rocksdb_shared_memory: true                 # set false to give each database its own budget
-#   rocksdb_shared_memory_budget_mb: 2048       # total shared block-cache budget (MiB); unset => 10% of RAM
+#   rocksdb_shared_memory_budget_mb: 2048       # total shared block-cache budget (MiB); unset => 10% of machine memory
 #   rocksdb_shared_memtable_budget_mb: 512      # memtable sub-budget (MiB), charged INSIDE the total budget
-#                                               # (not added to it); must be <= the total. Unset => a quarter of it
+#                                               # (not added to it); must be <= the total. Unset => a quarter of it,
+#                                               # raised to the Raft-log flush unit (192 MiB at the wal_shard_* defaults)
+#                                               # but never past half of the total
 #
 #   # SST read path. Kahuna's own default is direct I/O (block cache is the only read cache; misses go
 #   # to the device). CamusDB defaults it OFF: on a node whose disk is already busy with the Raft WAL's
@@ -512,17 +514,31 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   key_value_write_max_batch_items: 512
 #
 #   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized
-#   # from the machine's available memory at startup (container limits respected), not left at a fixed
-#   # value: block cache = 10% of RAM clamped to [320 MiB, 2 GiB]; memtable sub-budget = a quarter of
-#   # the block cache clamped to [128 MiB, 1 GiB]; the key/value actor caches together take 6.25% of
-#   # RAM (at least 64 MiB for the layer), split across kahuna.key_value_workers actors (default: one
-#   # per CPU) and clamped to [8 MiB, 2 GiB] each -- adding cores splits that budget further rather
-#   # than growing it -- with max_entries_per_actor derived at ~512 B/entry, clamped to [10k, 4M].
+#   # at startup, not left at a fixed value. Two sizes feed it:
+#   #   machine memory      = the container's cgroup limit, else physical RAM. Sizes the RocksDB pair,
+#   #                         which is native memory.
+#   #   managed heap budget = what the .NET GC reports: the heap hard limit when one is set
+#   #                         (DOTNET_GCHeapHardLimitPercent, or the runtime's 75% default in a
+#   #                         memory-limited container), else machine memory. Sizes the actor caches.
+#   # The RocksDB budgets therefore sit OUTSIDE a heap limit and count against the container beside it:
+#   # a 4096 MiB container with DOTNET_GCHeapHardLimitPercent=3C (60%, hexadecimal) gets a 2457 MiB heap
+#   # AND a 409 MiB block cache sized from the full 4096 MiB. Leave room for both.
+#   # Block cache = 10% of machine memory, at most 2 GiB (the 320 MiB floor yields on a small node);
+#   # memtable sub-budget = a quarter of the block cache, at most 1 GiB (the 128 MiB floor yields),
+#   # raised to the Raft-log flush unit plus headroom (wal_shard_write_buffer_size_mb x
+#   # (wal_shard_min_write_buffer_number_to_merge + 1) = 192 MiB) when storage and wal_storage are both
+#   # rocksdb, but never past half of the block cache -- below ~3.75 GiB of machine memory the unit does
+#   # not fit and Kommander logs "shared memtable budget ... is below the shard flush unit" at startup;
+#   # the key/value actor caches together take 6.25% of the managed heap budget (at least 64 MiB for
+#   # the layer), split across kahuna.key_value_workers actors (default: one per CPU), at most 2 GiB
+#   # each -- adding cores splits that budget further rather than growing it -- with
+#   # max_entries_per_actor derived at ~512 B/entry, clamped to [2k, 4M]. The node logs the values it
+#   # chose once at startup ("RocksDB shared memory: block cache ... MiB, memtable budget ... MiB").
 #   # That is roughly 16% of RAM across both cache layers, and never more than 4 GiB in total however
 #   # large the machine is -- the defaults assume a shared developer workstation or CI container, not a
 #   # dedicated server. Setting a key explicitly always wins over the computed value.
 #   #
-#   # Worked example, 8 GiB / 8-core machine, nothing set: block cache 819 MiB, memtable 204 MiB, actor
+#   # Worked example, 8 GiB / 8-core machine, no heap limit, nothing set: block cache 819 MiB, memtable 204 MiB, actor
 #   # caches 64 MiB x 8 = 512 MiB => ~1.5 GiB. The same 8 GiB box with 32 cores still spends 512 MiB on
 #   # actor caches, at 16 MiB each. A dedicated database server should raise all four. To hand most of an
 #   # 8 GiB machine to CamusDB, set them together and keep ~2.5 GiB for the CLR heap, RocksDB overhead
@@ -534,7 +550,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   #
 #   # Trap: rocksdb_shared_memtable_budget_mb must be <= rocksdb_shared_memory_budget_mb, and the two
 #   # are validated AFTER merging with the computed defaults. Overriding only one of the pair can make
-#   # the effective pair inconsistent (e.g. a 100 MiB total against a computed 512 MiB memtable) and
+#   # the effective pair inconsistent (e.g. a 100 MiB total against an explicit 512 MiB memtable) and
 #   # fails startup with InvalidConfig. Always set both together.
 #
 #   # Backups & point-in-time recovery (opt-in; off unless backup_dir is set).

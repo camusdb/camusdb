@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Auth;
+
 namespace CamusDB.Core.Diagnostics;
 
 /// <summary>
@@ -81,6 +83,13 @@ public sealed class SlowQueryLog
     /// not re-check the threshold, because the threshold belongs to the recording site — which knows
     /// which configuration snapshot the statement ran under — and re-checking here against a
     /// possibly newer snapshot would silently drop entries the caller believed it had stored.</para>
+    ///
+    /// <para><b>The statement text is redacted here, not by the callers.</b> A slow or failed
+    /// <c>CREATE USER … IDENTIFIED BY '…'</c> would otherwise keep a cleartext password in the ring,
+    /// where <c>SHOW SLOW QUERIES</c> and the dashboard show it. This is the ring's only write path, so
+    /// a statement entry point added later cannot forget the step. Redaction runs before truncation, so
+    /// a cut can never leave the start of a password behind; and only statements already judged slow
+    /// pay for it.</para>
     /// </summary>
     public SlowQueryEntry Record(
         DateTime startedAtUtc,
@@ -96,6 +105,8 @@ public sealed class SlowQueryLog
         SlowQueryOutcome outcome,
         string? errorCode)
     {
+        sql = SqlCredentialRedactor.Redact(sql);
+
         int limit = maxSqlLength;
         bool truncated = sql.Length > limit;
 

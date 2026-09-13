@@ -203,6 +203,45 @@ public sealed class DashboardController : CommandsController
     }
 
     /// <summary>
+    /// The committed membership roster, for the cluster panel.
+    ///
+    /// <para>It exists because the browser cannot read <c>/v1/cluster/membership</c>: that route takes
+    /// the bearer header only, and the page authenticates with the session cookie, which is accepted on
+    /// dashboard routes alone so that no write route can be forged cross-site. Both routes build the
+    /// same answer and hold it to the same bar — superuser when authentication is on — because the
+    /// roster names every peer endpoint in the cluster.</para>
+    /// </summary>
+    [HttpGet]
+    [Route("/v1/dashboard/cluster")]
+    public async Task<IActionResult> GetCluster()
+    {
+        IActionResult? refusal = RefuseIfUnavailable();
+        if (refusal is not null)
+            return refusal;
+
+        try
+        {
+            if (options.AuthenticationEnabled)
+            {
+                Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
+                if (principal is null || !principal.IsSuperuser)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InsufficientPrivilege, "Cluster topology requires a superuser");
+            }
+
+            return new JsonResult(ClusterController.BuildMembership(kahuna.Raft));
+        }
+        catch (CamusDBException e)
+        {
+            return Failure(e);
+        }
+        catch (Exception e)
+        {
+            return Unexpected(e);
+        }
+    }
+
+    /// <summary>
     /// The curated instrument set, as raw cumulative values.
     ///
     /// <para>No rate is computed here. The collector accumulates from process start and never resets,

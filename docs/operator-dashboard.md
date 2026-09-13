@@ -99,14 +99,16 @@ Polling this card does not disturb what it shows: `SHOW SLOW QUERIES` is never i
 
 ## What a non-superuser sees
 
-Three cards need a superuser, because the statements behind them do: **Engine** runs
-`SHOW ENGINE STATS`, **Configuration** runs `SHOW VARIABLES` and `SHOW CLUSTER SETTINGS`, and
-**Slow queries** runs `SHOW SLOW QUERIES`. Those outputs describe the node's whole security posture,
-limits and workload volume, which no per-database grant scopes down — and the slow-query rows carry
-the literal SQL text of statements other users ran, which can hold values from tables the reader has
-no grant on.
+Four cards need a superuser. Three of them need one because the statements behind them do:
+**Engine** runs `SHOW ENGINE STATS`, **Configuration** runs `SHOW VARIABLES` and
+`SHOW CLUSTER SETTINGS`, and **Slow queries** runs `SHOW SLOW QUERIES`. Those outputs describe the
+node's whole security posture, limits and workload volume, which no per-database grant scopes down —
+and the slow-query rows carry the literal SQL text of statements other users ran, which can hold
+values from tables the reader has no grant on. The fourth, **Cluster**, names every peer endpoint,
+which is the same kind of topology `SHOW ENGINE STATS` is gated for; its data comes from
+`/v1/dashboard/cluster`, which holds it to the same bar as `/v1/cluster/membership`.
 
-Any other authenticated user sees a complete page with those three cards replaced by one line of
+Any other authenticated user sees a complete page with those four cards replaced by one line of
 explanation. The database list is filtered to the databases that user may already reach.
 
 ## Settings

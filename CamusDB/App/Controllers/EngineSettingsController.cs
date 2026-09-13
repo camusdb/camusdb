@@ -20,9 +20,11 @@ namespace CamusDB.App.Controllers;
 /// key nobody set reads as unset there — while CamusDB's mode-specific baseline underneath it is
 /// where the durability knobs actually come from.</para>
 ///
-/// <para>Unauthenticated, on the same footing as <c>/ping</c>, <c>/v1/version</c> and
-/// <c>/v1/cluster/health</c>. The response is operational configuration, not data, and the one
-/// credential-shaped option is redacted. Keep it on a trusted interface like the rest of that family.</para>
+/// <para>Needs no credential when authentication is off. With authentication on, the authentication
+/// middleware requires a valid bearer token here, as on every route outside its exempt list — only
+/// <c>/ping</c>, <c>/health</c> and <c>/v1/cluster/health</c> answer without one. The response is
+/// operational configuration, not data, and the one credential-shaped option is redacted. Keep it on a
+/// trusted interface.</para>
 /// </summary>
 [ApiController]
 public sealed class EngineSettingsController : ControllerBase

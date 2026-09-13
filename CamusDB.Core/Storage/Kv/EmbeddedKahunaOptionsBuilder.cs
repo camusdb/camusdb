@@ -585,7 +585,7 @@ public static class EmbeddedKahunaOptionsBuilder
         // the fully-merged pair — after the sizing defaults, not before them — is what makes the check
         // see the values the node will actually be built with, and it fails fast with a clear config
         // error instead.
-        if (baseline is { RocksDbSharedMemoryEnabled: true, Storage: "rocksdb", WalStorage: "rocksdb" }
+        if (SharesRocksDbMemory(baseline)
             && baseline.RocksDbSharedMemtableBudgetMb > baseline.RocksDbSharedMemoryBudgetMb)
         {
             throw new CamusDBException(
@@ -675,18 +675,28 @@ public static class EmbeddedKahunaOptionsBuilder
     /// it to 2 GB on a 16 GB machine took the same workload from 24.5 to 119.6 tx/s at 8 clients
     /// (and resolved a pipelining collapse to 3.4 tx/s that was pure read-I/O queueing).
     ///
-    /// <para>Sizing policy, all against <see cref="GCMemoryInfo.TotalAvailableMemoryBytes"/> (which
-    /// respects container memory limits): RocksDB block cache = 10% of RAM; memtable budget = a
-    /// quarter of the block cache; key/value actor caches = 6.25% of RAM (at least 64 MB for the layer
-    /// as a whole) divided across the shard actors, with the per-actor entry cap derived at an assumed
-    /// ~512 B/entry. Ceilings: 2 GB block cache, 1 GB memtables, 2 GB per actor, 4M entries. Roughly
-    /// 16% of RAM across both cache layers at the defaults, and never more than 4 GB in total however
-    /// large the machine is. The fractions and the ceilings are deliberately modest: an unconfigured
-    /// node is far more often a developer workstation or a CI container sharing the box with a
-    /// compiler and an IDE than a dedicated database server, and an over-eager default there costs
-    /// the whole machine. A dedicated server should raise all four keys explicitly — see the worked
-    /// example in <c>config.yml</c>. Every value remains overridable via the corresponding
-    /// <c>kahuna.*</c> key.</para>
+    /// <para><b>Two memory sizes, one per kind of cache.</b> The RocksDB block cache and memtables are
+    /// native allocations, so they are sized from the memory the whole process may use
+    /// (<see cref="MachineMemory.ReadTotal"/>: the container's cgroup limit, else physical RAM). The
+    /// key/value actor caches live in the managed heap, so they are sized from the heap's budget
+    /// (<see cref="MachineMemory.ManagedHeapBytes"/>). The two differ whenever a GC heap limit is in
+    /// force, and sizing the native pair from the heap limit is the mistake this split corrects: a
+    /// 4,096 MB container with <c>GCHeapHardLimitPercent</c> 60% reported 2,458 MB, which gave a
+    /// 245 MB block cache and a 61 MB memtable budget. Under a heap limit the RocksDB budgets therefore
+    /// sit <i>outside</i> it and count against the container beside it.</para>
+    ///
+    /// <para>Sizing policy: RocksDB block cache = 10% of machine memory; memtable budget = a quarter of
+    /// the block cache, raised to the Raft log's flush unit where the two databases share one
+    /// WriteBufferManager (<see cref="RaftLogFlushUnitFloorMb"/>); key/value actor caches = 6.25% of
+    /// the managed heap budget (at least 64 MB for the layer as a whole) divided across the shard
+    /// actors, with the per-actor entry cap derived at an assumed ~512 B/entry. Ceilings: 2 GB block
+    /// cache, 1 GB memtables, 2 GB per actor, 4M entries. Roughly 16% of memory across both cache
+    /// layers at the defaults, and never more than 4 GB in total however large the machine is. The
+    /// fractions and the ceilings are deliberately modest: an unconfigured node is far more often a
+    /// developer workstation or a CI container sharing the box with a compiler and an IDE than a
+    /// dedicated database server, and an over-eager default there costs the whole machine. A dedicated
+    /// server should raise all four keys explicitly — see the worked example in <c>config.yml</c>.
+    /// Every value remains overridable via the corresponding <c>kahuna.*</c> key.</para>
     ///
     /// <para>Floors yield on small machines (<see cref="ClampWithYieldingFloor"/>). The historic
     /// floors — 320 MB block cache, 128 MB memtables, 8 MB per actor, 10k entries — apply only while
@@ -699,34 +709,62 @@ public static class EmbeddedKahunaOptionsBuilder
     ///
     /// <para>Runs after every explicit override has been applied, and touches only knobs whose
     /// config value is null — an operator's explicit setting always wins. Must also run after the
-    /// <c>key_value_workers</c> override, since the per-actor split divides by the final actor count
-    /// (<see cref="EffectiveActorCount"/>).</para>
+    /// <c>key_value_workers</c>, <c>storage</c>, <c>wal_storage</c> and <c>wal_shard_*</c> overrides,
+    /// since the per-actor split divides by the final actor count (<see cref="EffectiveActorCount"/>)
+    /// and the memtable floor reads the final WAL backend and shard tuning.</para>
     /// </summary>
     private static void ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna)
     {
-        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        if (totalRam <= 0)
-            return; // Unknown memory size: keep the fixed baseline values.
+        long machineBytes = MachineMemory.ReadTotal().Bytes;
+        long managedHeapBytes = MachineMemory.ManagedHeapBytes();
 
-        ApplyMemoryProportionalDefaults(baseline, kahuna, totalRam);
+        // Each size stands in for the other when only one is known; neither known keeps the fixed
+        // baseline values.
+        if (machineBytes <= 0)
+            machineBytes = managedHeapBytes;
+
+        if (managedHeapBytes <= 0)
+            managedHeapBytes = machineBytes;
+
+        if (machineBytes <= 0)
+            return;
+
+        ApplyMemoryProportionalDefaults(baseline, kahuna, machineBytes, managedHeapBytes);
     }
 
     /// <summary>
-    /// Core of the proportional sizing, driven by an explicit memory size. Split out (internal) so
-    /// tests can assert the floor behavior at container sizes the test machine does not have; the
-    /// public path above always passes the machine's real, limit-aware total.
+    /// Core of the proportional sizing for a machine with no GC heap limit, where the native and the
+    /// managed sizes are the same number. Test seam; see the four-argument overload.
     /// </summary>
     internal static void ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna, long totalRam)
+        => ApplyMemoryProportionalDefaults(baseline, kahuna, totalRam, totalRam);
+
+    /// <summary>
+    /// Core of the proportional sizing, driven by explicit memory sizes. Split out (internal) so
+    /// tests can assert the floor behavior at container and heap-limit sizes the test machine does
+    /// not have; the private path above always passes the real sizes.
+    /// <paramref name="machineMemoryBytes"/> sizes the native RocksDB budgets and
+    /// <paramref name="managedHeapBytes"/> sizes the managed actor caches.
+    /// </summary>
+    internal static void ApplyMemoryProportionalDefaults(
+        EmbeddedKahunaOptions baseline,
+        KahunaOptionsConfig kahuna,
+        long machineMemoryBytes,
+        long managedHeapBytes)
     {
         const long OneMb = 1024L * 1024;
 
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
             baseline.RocksDbSharedMemoryBudgetMb = (int)(ClampWithYieldingFloor(
-                totalRam / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
+                machineMemoryBytes / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
-            baseline.RocksDbSharedMemtableBudgetMb = (int)ClampWithYieldingFloor(
+        {
+            int proportionalMb = (int)ClampWithYieldingFloor(
                 baseline.RocksDbSharedMemoryBudgetMb / 4, historicFloor: 128, degenerateFloor: 16, ceiling: 1024);
+
+            baseline.RocksDbSharedMemtableBudgetMb = Math.Max(proportionalMb, RaftLogFlushUnitFloorMb(baseline));
+        }
 
         int actorCount = EffectiveActorCount(baseline);
 
@@ -740,7 +778,7 @@ public static class EmbeddedKahunaOptionsBuilder
             // 6.25%. The floor therefore applies to the whole layer; the per-actor floor yields to
             // the split, down to a 1 MiB minimum that keeps an individual cache from shrinking to a
             // size that cannot hold a useful working set at all.
-            long actorLayerBytes = Math.Max(totalRam / 16, 64L * OneMb);
+            long actorLayerBytes = Math.Max(managedHeapBytes / 16, 64L * OneMb);
             baseline.MaxBytesPerActor = ClampWithYieldingFloor(
                 actorLayerBytes / actorCount, historicFloor: 8L * OneMb, degenerateFloor: OneMb, ceiling: 2048L * OneMb);
         }
@@ -765,6 +803,76 @@ public static class EmbeddedKahunaOptionsBuilder
     /// </summary>
     internal static int EffectiveActorCount(EmbeddedKahunaOptions baseline) =>
         baseline.KeyValueWorkers > 0 ? baseline.KeyValueWorkers : Math.Max(32, Environment.ProcessorCount * 4);
+
+    /// <summary>
+    /// True when Kahuna will build one shared block cache and WriteBufferManager for the key/value
+    /// store and the Raft WAL. That happens only with sharing on and both databases on RocksDB;
+    /// otherwise the two budget knobs are ignored (see <c>EmbeddedKahunaNode.CreateSharedResources</c>).
+    /// </summary>
+    internal static bool SharesRocksDbMemory(EmbeddedKahunaOptions options) =>
+        options is { RocksDbSharedMemoryEnabled: true, Storage: "rocksdb", WalStorage: "rocksdb" };
+
+    /// <summary>
+    /// The shared memtable budget below which the Raft log cannot flush at its own flush unit: one
+    /// flush unit for a single active shard (<c>write_buffer_size × min_write_buffer_number_to_merge</c>)
+    /// plus one memtable of headroom for whatever shares the budget — 192 MiB at Kommander's defaults.
+    /// This is the exact figure Kommander's <c>RocksDbWAL</c> checks at open, and it warns when the
+    /// budget is smaller.
+    ///
+    /// <para>Why it matters: RocksDB flushes the oldest memtable of whichever database trips an
+    /// over-budget WriteBufferManager, and the WAL trips it on nearly every Raft batch. An undersized
+    /// budget therefore replaces the configured 128 MiB flush unit with a few-MiB one (every one of
+    /// 349 flushes in a 10-minute write probe at a 61 MiB budget was budget-forced), and log entries
+    /// that would have died in the memtable reach disk once.</para>
+    ///
+    /// <para>Unset <c>wal_shard_*</c> fields take <see cref="Kommander.WAL.RocksDbWalTuning.Default"/>,
+    /// read from Kommander rather than copied, so a Kommander retune moves this floor with it.</para>
+    /// </summary>
+    internal static long RaftLogFlushUnitHeadroomBytes(EmbeddedKahunaOptions options)
+    {
+        Kommander.WAL.RocksDbWalTuning defaults = Kommander.WAL.RocksDbWalTuning.Default;
+
+        long writeBufferBytes = options.RaftWalShardWriteBufferSizeMb is int writeBufferMb
+            ? writeBufferMb * 1024L * 1024
+            : defaults.ShardWriteBufferSizeBytes;
+
+        int merge = options.RaftWalShardMinWriteBufferNumberToMerge ?? defaults.ShardMinWriteBufferNumberToMerge;
+
+        return writeBufferBytes * merge + writeBufferBytes;
+    }
+
+    /// <summary>
+    /// The smallest memtable budget the proportional sizing may choose: the Raft log's flush unit plus
+    /// headroom (<see cref="RaftLogFlushUnitHeadroomBytes"/>) when the store and the WAL share one
+    /// WriteBufferManager, else 0 (no floor — an unshared WAL has its own memtables and ignores the
+    /// budget).
+    ///
+    /// <para>The floor yields to <b>half of the total budget</b>. The memtable budget is charged inside
+    /// the block cache, so a memtable floor that took the whole cache would leave no read cache under
+    /// write load. Half is the largest share that still leaves reads a real cache, and it is enough
+    /// for the reference node: a 4,096 MB container has a 409 MiB total, whose half holds the
+    /// 192 MiB unit. A smaller node (below about 3.75 GiB at Kommander's defaults) keeps a
+    /// budget-forced flush cadence and Kommander's warning; raise both budgets or lower the shard
+    /// tuning there.</para>
+    ///
+    /// <para>The trade-off was taken knowingly: a follower restart took 13.2 s at a 61 MiB budget and
+    /// 18.4 s with a budget that fits the flush unit, because a wider flush unit is a wider replay
+    /// unit (measured on Kommander 1.6.0, before its reclaim fix).</para>
+    ///
+    /// <para>Applied only by the <see cref="MemoryProfile.Prod"/> sizing, and only when the memtable
+    /// key is unset; the <see cref="MemoryProfile.Dev"/> profile promises a fixed small footprint and
+    /// keeps its 16 MiB budget.</para>
+    /// </summary>
+    internal static int RaftLogFlushUnitFloorMb(EmbeddedKahunaOptions options)
+    {
+        if (!SharesRocksDbMemory(options))
+            return 0;
+
+        const long OneMb = 1024L * 1024;
+        long neededMb = (RaftLogFlushUnitHeadroomBytes(options) + OneMb - 1) / OneMb;
+
+        return (int)Math.Min(neededMb, options.RocksDbSharedMemoryBudgetMb / 2);
+    }
 
     /// <summary>
     /// Clamps a proportionally-sized budget between a floor and a ceiling, with a floor that yields

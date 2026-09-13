@@ -16,10 +16,11 @@ namespace CamusDB.App.Controllers;
 /// running, so a benchmark harness can record what the image actually loaded instead of what a
 /// project file says it should have.
 ///
-/// <para>Unauthenticated, on the same footing as <c>/ping</c> and <c>/v1/cluster/health</c>: a probe
-/// has to work before credentials exist, and the response carries version metadata only — no
-/// configuration, no data, and no topology. Treat it like the rest of that surface and keep it on a
-/// trusted interface.</para>
+/// <para>Needs no credential when authentication is off. With authentication on, the authentication
+/// middleware requires a valid bearer token here, as on every route outside its exempt list — only
+/// <c>/ping</c>, <c>/health</c> and <c>/v1/cluster/health</c> answer without one. The response carries
+/// version metadata only — no configuration, no data, and no topology. Keep it on a trusted
+/// interface.</para>
 ///
 /// <para>The answer is computed once and cached. Enumerating loaded assemblies is cheap but not free,
 /// and the set cannot change in a way this endpoint reports differently: an assembly loaded later

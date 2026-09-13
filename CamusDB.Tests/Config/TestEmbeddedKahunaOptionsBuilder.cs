@@ -622,21 +622,25 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     [Test]
     public void UnsetSharedMemoryFields_SizeProportionallyToMachineMemory()
     {
-        // Unset shared-memory knobs are sized against the machine (respecting container limits)
-        // rather than left at the fixed baseline: block cache = 10% of RAM, memtable budget = a
-        // quarter of that, both with floors that yield below their proportional share (the exact
-        // small-container values are pinned in TestMemoryProfile, which drives the sizing with
-        // synthetic RAM sizes). The expected values are recomputed here from the same input the
-        // builder reads, so the assertion holds on any machine — hardcoding the baseline is what
-        // made this test machine-dependent before.
+        // Unset shared-memory knobs are sized against the memory the whole process may use (the
+        // cgroup limit, else RAM — never the GC heap limit, since RocksDB memory is native) rather
+        // than left at the fixed baseline: block cache = 10% of that, memtable budget = a quarter of
+        // the cache raised to the Raft log's flush unit (capped at half the cache) because this
+        // baseline shares one WriteBufferManager between the store and the WAL. The exact
+        // small-container and heap-limit values are pinned in TestMemoryProfile, which drives the
+        // sizing with synthetic sizes. The expected values are recomputed here from the same input
+        // the builder reads, so the assertion holds on any machine.
         const long OneMb = 1024L * 1024;
-        long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        long totalRam = MachineMemory.ReadTotal().Bytes;
         Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
 
         int expectedBlockCacheMb = (int)(EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(
             totalRam / 10, 320 * OneMb, 64 * OneMb, 2048 * OneMb) / OneMb);
-        int expectedMemtableMb = (int)EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(
-            expectedBlockCacheMb / 4, 128, 16, 1024);
+        long flushUnitMb = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(
+            EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/sm-defaults")) / OneMb;
+        int expectedMemtableMb = Math.Max(
+            (int)EmbeddedKahunaOptionsBuilder.ClampWithYieldingFloor(expectedBlockCacheMb / 4, 128, 16, 1024),
+            (int)Math.Min(flushUnitMb, expectedBlockCacheMb / 2));
 
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna, CamusDBOptions.Default);
@@ -743,17 +747,18 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void LoweringOnlyTotalBudget_ScalesTheMemtableDefaultWithIt()
     {
         // Only the total budget is overridden, to below the historic 128 MB memtable floor. The
-        // derived memtable default is a quarter of the effective total with a floor that yields, so
-        // it follows the operator's total down (100 -> 25) instead of staying pinned at 128 and
-        // inverting the pair — an inversion Kahuna would reject with a raw
-        // ArgumentOutOfRangeException at node startup.
+        // derived memtable default follows the operator's total down instead of staying pinned at
+        // 128 and inverting the pair — an inversion Kahuna would reject with a raw
+        // ArgumentOutOfRangeException at node startup. On this shared-WriteBufferManager baseline the
+        // Raft log's 192 MiB flush-unit floor lifts it from a quarter of the total (25) to the half
+        // the floor may take (50), never past it.
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemoryBudgetMb = 100 };
 
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/sm-merge-total", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(100));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(25));
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(50));
     }
 
     [Test]

@@ -78,15 +78,27 @@ internal sealed class TableOpener
         // — so the check must live in Open (which runs on every access), not LoadTable (cache miss only).
         // The required privilege and principal ride the ambient AuthorizationContext set by the request
         // entry point. A superuser and any broader-scope (global / db.*) grant pass via HasPrivilege.
+        //
+        // The check fails closed. A user's request that arrives here with no required privilege comes
+        // from an entry point that forgot to publish one, and is refused — superusers included, so the
+        // omission surfaces in the first test that exercises the path instead of shipping as a silent
+        // bypass. A scope with no principal is engine work and is not checked; a deliberate exception
+        // is marked with AuthorizationContext.SuspendTableCheck.
         if (database.Options.AuthenticationEnabled)
         {
             AuthorizationScope scope = AuthorizationContext.Current;
-            if (scope.Principal is not null && scope.RequiredPrivilege is { } required
-                && !scope.Principal.HasPrivilege(required, database.Id, tableSchema.Id))
+            if (scope.Principal is not null && !scope.TableCheckSuspended)
             {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InsufficientPrivilege,
-                    $"Missing {required} privilege on table '{database.Name}.{tableName}'");
+                if (scope.RequiredPrivilege is not { } required)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InsufficientPrivilege,
+                        $"Access to table '{database.Name}.{tableName}' was refused: the request did not declare " +
+                        "which privilege it needs, so it cannot be authorized");
+
+                if (!scope.Principal.HasPrivilege(required, database.Id, tableSchema.Id))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InsufficientPrivilege,
+                        $"Missing {required} privilege on table '{database.Name}.{tableName}'");
             }
         }
 

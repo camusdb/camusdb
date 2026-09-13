@@ -452,6 +452,44 @@ internal sealed class TestSlowQueryLogStatements : BaseTest
     }
 
     /// <summary>
+    /// An account statement's password never reaches the log, whether the statement succeeded or
+    /// failed. The log is read by a superuser and shown on the dashboard, so a credential stored here
+    /// would outlive the request that carried it.
+    /// </summary>
+    [Test]
+    public async Task PasswordsAreMaskedInTheRecordedStatement()
+    {
+        (string dbname, _, CommandExecutor executor) = await SetupRobots(Logging(Options), rows: 2);
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: "", sql: "CREATE USER logged IDENTIFIED BY 'top-secret-password'", parameters: null));
+
+        // A statement that fails is recorded too, and it carries a password just the same.
+        try
+        {
+            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+                txnState: null!, database: "",
+                sql: "ALTER USER absent IDENTIFIED BY 'new-secret' REPLACE 'old-secret'", parameters: null));
+        }
+        catch (CamusDBException)
+        {
+            // The refusal is the point of this arm; the entry it leaves behind is what is asserted.
+        }
+
+        List<QueryResultRow> entries = await ShowSlowQueriesAsync(executor, dbname);
+        string recorded = string.Join("\n", entries.Select(row => Text(row, "sql")));
+
+        Assert.That(recorded, Does.Contain("CREATE USER logged IDENTIFIED BY '***'"));
+        Assert.That(recorded, Does.Not.Contain("top-secret-password"));
+        Assert.That(recorded, Does.Not.Contain("new-secret"));
+        Assert.That(recorded, Does.Not.Contain("old-secret"));
+
+        // An ordinary statement is still stored in full: redaction must not blunt the log.
+        await QueryAsync(executor, dbname, "SELECT name FROM robots WHERE year > 1000");
+        Assert.IsNotNull(FirstWithSql(await ShowSlowQueriesAsync(executor, dbname), "SELECT name FROM robots WHERE year > 1000"));
+    }
+
+    /// <summary>
     /// The log is per process, so the statement resolves without opening a database and without a
     /// transaction — the same contract <c>SHOW ENGINE STATS</c> has.
     /// </summary>
