@@ -591,7 +591,34 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-unset", unset, CamusDBOptions.Default);
         Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
         Assert.That(defaults.KeyValueWriteMaxBatchItems, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteMaxBatchItems));
-        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
+        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs));
+    }
+
+    // ── Post-completion hold ─────────────────────────────────────────────────
+
+    [Test]
+    public void Baselines_HoldTwoMsAfterABatchCompletes_ByDefault()
+    {
+        // Kahuna's own default is 0 (dispatch the next batch the instant one completes); CamusDB ships
+        // 2 ms so a fully occupied aggregator packs more items per Raft round (+6% at 128 workers with a
+        // lower write p50, free at low load — Kahuna fac7be26, 51311414 item 5). Every baseline carries it.
+        string dataPath = "/tmp/hold-test";
+        ConfigDefinition config = new() { DataDir = dataPath };
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
+        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
+        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
+        Assert.That(new EmbeddedKahunaOptions().KeyValueWritePostCompletionHoldMs, Is.EqualTo(0), "the Kahuna default this baseline deliberately departs from");
+    }
+
+    [Test]
+    public void PostCompletionHold_ExplicitZero_RestoresImmediateDispatch()
+    {
+        // An operator who wants Kahuna's dispatch-at-once behaviour sets the key to 0 explicitly; 0 is a
+        // value, not "unset", so it must not be replaced by the shipped 2.
+        KahunaOptionsConfig zero = new() { KeyValueWritePostCompletionHoldMs = 0 };
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hold-zero", zero, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
     }
 
     [Test]
@@ -625,9 +652,9 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // Unset shared-memory knobs are sized against the memory the whole process may use (the
         // cgroup limit, else RAM — never the GC heap limit, since RocksDB memory is native) rather
         // than left at the fixed baseline: block cache = 10% of that, memtable budget = a quarter of
-        // the cache, raised to the Raft log's flush unit (capped at half the cache) only while the
-        // flush-unit floor is gated on — it ships off (RaftWalFlushUnitFloorEnabled), so the expected
-        // value follows the gate. The exact small-container and heap-limit values are pinned in
+        // the cache, raised to the Raft log's flush unit (capped at half the cache) while the
+        // flush-unit floor is gated on — it ships on since Kommander 1.6.6 (RaftWalFlushUnitFloorEnabled);
+        // the expected value follows the gate. The exact small-container and heap-limit values are pinned in
         // TestMemoryProfile, which drives the sizing with synthetic sizes. The expected values are
         // recomputed here from the same input the builder reads, so the assertion holds on any machine.
         const long OneMb = 1024L * 1024;
@@ -750,14 +777,15 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // derived memtable default follows the operator's total down instead of staying pinned at
         // 128 and inverting the pair — an inversion Kahuna would reject with a raw
         // ArgumentOutOfRangeException at node startup. With the shipped defaults (flush-unit floor
-        // gated off) that is a quarter of the total: 25.
+        // on since Kommander 1.6.6) the Raft log's 192 MiB unit lifts a quarter of the total (25) to
+        // the half the floor may take: 50, never past it.
         KahunaOptionsConfig kahuna = new() { RocksdbSharedMemoryBudgetMb = 100 };
 
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/sm-merge-total", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(100));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(25));
+        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(50));
 
         // With the floor on, the Raft log's 192 MiB flush unit lifts it from a quarter of the total
         // (25) to the half the floor may take (50), never past it — still never inverting the pair.

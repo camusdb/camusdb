@@ -509,8 +509,9 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   # one partition (the round costs ~1.4 ms fixed + ~18 us/item); the linger adds that much write latency.
 #   key_value_write_linger_ms: 1
 #   # Hold after a batch completes before dispatching the next (ms); adds batch density at full occupancy
-#   # where the linger cannot, at the cost of that much write latency. 0 = dispatch at once.
-#   key_value_write_post_completion_hold_ms: 0
+#   # where the linger cannot, at the cost of that much write latency. CamusDB ships 2 (Kahuna's own
+#   # default is 0): +6% at 128 workers with a lower write p50, free at low load. 0 = dispatch at once.
+#   key_value_write_post_completion_hold_ms: 2
 #   key_value_write_max_batch_items: 512
 #
 #   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized

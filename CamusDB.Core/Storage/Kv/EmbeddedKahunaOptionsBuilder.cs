@@ -114,6 +114,12 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
+            // Hold 2 ms after a batch completes before dispatching the next (Kahuna's default is 0).
+            // At full occupancy the aggregator keeps one Raft round in flight and re-dispatches the
+            // instant it completes, so batches stay thin; the hold lets more items accumulate per
+            // round. Measured +6% at 128 workers with a lower write p50, free at low load (Kahuna
+            // fac7be26 / 51311414 item 5). Override with kahuna.key_value_write_post_completion_hold_ms.
+            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
             // With join_existing the peer list is the SEED list of the running cluster rather than
             // the founding roster: the node contacts a seed, enters the committed roster as a
             // learner, and is promoted once caught up. ConfigDefinition.Validate has already
@@ -167,6 +173,12 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
+            // Hold 2 ms after a batch completes before dispatching the next (Kahuna's default is 0).
+            // At full occupancy the aggregator keeps one Raft round in flight and re-dispatches the
+            // instant it completes, so batches stay thin; the hold lets more items accumulate per
+            // round. Measured +6% at 128 workers with a lower write p50, free at low load (Kahuna
+            // fac7be26 / 51311414 item 5). Override with kahuna.key_value_write_post_completion_hold_ms.
+            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
         };
     }
 
@@ -221,6 +233,12 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
+            // Hold 2 ms after a batch completes before dispatching the next (Kahuna's default is 0).
+            // At full occupancy the aggregator keeps one Raft round in flight and re-dispatches the
+            // instant it completes, so batches stay thin; the hold lets more items accumulate per
+            // round. Measured +6% at 128 workers with a lower write p50, free at low load (Kahuna
+            // fac7be26 / 51311414 item 5). Override with kahuna.key_value_write_post_completion_hold_ms.
+            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
         };
     }
 
@@ -687,8 +705,8 @@ public static class EmbeddedKahunaOptionsBuilder
     ///
     /// <para>Sizing policy: RocksDB block cache = 10% of machine memory; memtable budget = a quarter of
     /// the block cache, raised to the Raft log's flush unit where the two databases share one
-    /// WriteBufferManager (<see cref="RaftLogFlushUnitFloorMb"/>, gated off in the shipped defaults by
-    /// <see cref="RaftWalFlushUnitFloorEnabled"/>); key/value actor caches = 6.25% of
+    /// WriteBufferManager (<see cref="RaftLogFlushUnitFloorMb"/>, gated by
+    /// <see cref="RaftWalFlushUnitFloorEnabled"/>, on since Kommander 1.6.6); key/value actor caches = 6.25% of
     /// the managed heap budget (at least 64 MB for the layer as a whole) divided across the shard
     /// actors, with the per-actor entry cap derived at an assumed ~512 B/entry. Ceilings: 2 GB block
     /// cache, 1 GB memtables, 2 GB per actor, 4M entries. Roughly 16% of memory across both cache
@@ -735,21 +753,32 @@ public static class EmbeddedKahunaOptionsBuilder
 
     /// <summary>
     /// Whether the memtable sub-budget is floored at the Raft-log flush unit (<see cref="RaftLogFlushUnitFloorMb"/>).
-    /// Off until Kommander bounds its write-ahead files: on the k182 probe (Kahuna 1.8.1 / Kommander 1.6.5) an
-    /// unstarved budget let the Raft-log RocksDB keep every write-ahead <c>.log</c> file for the life of the
-    /// process — 443 MiB to 2,709 MiB in ten minutes per node, growing linearly, against ~230 MB of live
-    /// tables — because a column family that never flushes (the meta partition's shard) pins them and nothing
-    /// else ever forced it; the starved budget had been masking that by flushing everything on its cadence.
-    /// The gain was 2% of device bytes per operation (13.7 vs 14.0 KB/op, Kommander's warning gone, zero
-    /// budget-forced flushes); the cost was an unbounded directory and a 4 s slower follower restart (16.7 vs
-    /// 12.7 s). Flip once Kommander sets <c>max_total_wal_size</c> (or flushes the pinning family) — feature
-    /// filed on the Kommander project.
+    /// On since Kommander 1.6.6. It shipped off on Kommander 1.6.5 because an unstarved budget let the Raft-log
+    /// RocksDB keep every write-ahead <c>.log</c> file for the life of the process (k182 probe, Kahuna 1.8.1:
+    /// 443 MiB to 2,709 MiB in ten minutes per node, growing linearly, against ~230 MB of live tables) — a column
+    /// family that never flushes (the meta partition's shard) pinned them and nothing else ever forced it; the
+    /// starved budget had been masking that by flushing everything on its cadence. Kommander 1.6.6 bounds the
+    /// write-ahead files, so the floor's gain (no budget-forced Raft-log flushes, Kommander's open-time warning
+    /// gone, ~2% fewer device bytes per operation) no longer comes with an unbounded directory.
     ///
     /// <para>Test seam: the internal <see cref="ApplyMemoryProportionalDefaults(EmbeddedKahunaOptions, KahunaOptionsConfig, long, long, bool?)"/>
-    /// overload takes the gate as a parameter so unit tests exercise the floor without mutating this static;
+    /// overload takes the gate as a parameter so unit tests exercise both states without mutating this static;
     /// only a <c>[NonParallelizable]</c> end-to-end test may flip it, and must restore it.</para>
     /// </summary>
-    internal static bool RaftWalFlushUnitFloorEnabled = false;
+    internal static bool RaftWalFlushUnitFloorEnabled = true;
+
+    /// <summary>
+    /// CamusDB's shipped post-completion hold for Kahuna's key/value write aggregator, in
+    /// milliseconds (Kahuna's own default is 0). The aggregator keeps exactly one Raft batch in
+    /// flight per partition and re-dispatches the moment a batch completes, so at full occupancy
+    /// batches carry whatever arrived during one ~2.4 ms round; holding 2 ms before the next dispatch
+    /// roughly doubles the items per round (110 vs 51 at 128 workers on the bank shape) for
+    /// +6% throughput and a lower write p50, and costs nothing at low load because an idle
+    /// aggregator dispatches on arrival. Qualified in Kahuna fac7be26; the default flip is item 5
+    /// of Kahuna 51311414. An explicit <c>kahuna.key_value_write_post_completion_hold_ms</c>
+    /// (including 0) always wins.
+    /// </summary>
+    internal const int DefaultKeyValueWritePostCompletionHoldMs = 2;
 
     /// <summary>
     /// Core of the proportional sizing for a machine with no GC heap limit, where the native and the
@@ -887,9 +916,8 @@ public static class EmbeddedKahunaOptionsBuilder
     /// unit (measured on Kommander 1.6.0, before its reclaim fix).</para>
     ///
     /// <para>Applied only by the <see cref="MemoryProfile.Prod"/> sizing, only when the memtable
-    /// key is unset, and only while <see cref="RaftWalFlushUnitFloorEnabled"/> is set — it is off in
-    /// the shipped defaults because an unstarved budget leaves the Raft-log write-ahead files
-    /// unbounded on Kommander 1.6.5 (see the flag). The <see cref="MemoryProfile.Dev"/> profile
+    /// key is unset, and only while <see cref="RaftWalFlushUnitFloorEnabled"/> is set — on since
+    /// Kommander 1.6.6 bounded the Raft-log write-ahead files (see the flag). The <see cref="MemoryProfile.Dev"/> profile
     /// promises a fixed small footprint and keeps its 16 MiB budget. This method computes the floor
     /// itself, regardless of the gate; the caller applies the gate.</para>
     /// </summary>

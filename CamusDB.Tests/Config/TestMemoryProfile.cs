@@ -166,28 +166,35 @@ public sealed class TestMemoryProfile
     }
 
     [Test]
-    public void ShippedDefaultsKeepTheFlushUnitFloorOff()
+    public void ShippedDefaultsApplyTheFlushUnitFloor()
     {
-        // The floor is gated off (EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled) until
-        // Kommander bounds its write-ahead files: on Kahuna 1.8.1 / Kommander 1.6.5 an unstarved budget
-        // let the Raft-log RocksDB pin every .log file for the life of the process (443 -> 2,709 MiB in
-        // ten minutes). Until then the reference node gets the proportional quarter, and a heap-limit
-        // sized input still yields 61 — Kommander warns at open, and the startup line says NOT covered.
-        Assert.That(EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled, Is.False);
+        // The floor ships ON (EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled) since Kommander
+        // 1.6.6 bounds the Raft-log write-ahead files. It was gated off on Kommander 1.6.5, where an
+        // unstarved budget let the Raft-log RocksDB pin every .log file for the life of the process
+        // (443 -> 2,709 MiB in ten minutes). With the gate on, the reference node's memtable budget is
+        // the flush unit (192) rather than the proportional quarter (102), and a heap-limit sized input
+        // yields half its 245 MiB cache (122) rather than 61 — Kommander's open-time warning is gone.
+        Assert.That(EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled, Is.True);
 
         EmbeddedKahunaOptions reference = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-ref");
         reference.KeyValueWorkers = 32;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             reference, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb);
         Assert.That(reference.RocksDbSharedMemoryBudgetMb, Is.EqualTo(409));
-        Assert.That(reference.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+        Assert.That(reference.RocksDbSharedMemtableBudgetMb, Is.EqualTo(192));
+
+        // The gate can still be turned off per call (the test seam), which restores the quarter.
+        EmbeddedKahunaOptions gatedOff = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-off");
+        gatedOff.KeyValueWorkers = 32;
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
+            gatedOff, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb, raftLogFlushUnitFloor: false);
+        Assert.That(gatedOff.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
 
         EmbeddedKahunaOptions heapOnly = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-heap");
         heapOnly.KeyValueWorkers = 32;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(heapOnly, new KahunaOptionsConfig(), 2458 * OneMb);
-        Assert.That(heapOnly.RocksDbSharedMemtableBudgetMb, Is.EqualTo(61));
+        Assert.That(heapOnly.RocksDbSharedMemtableBudgetMb, Is.EqualTo(122));
 
-        // The floor itself is still computed, so the startup log can report what it would have been.
         Assert.That(EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitFloorMb(reference), Is.EqualTo(192));
     }
 
@@ -278,7 +285,7 @@ public sealed class TestMemoryProfile
     {
         // End to end through the real memory probe with the floor gated on: the built pair is
         // consistent, and wherever half the total can hold the flush unit, the memtable budget holds
-        // it. The gate is a process-wide static, hence NonParallelizable and restored in finally.
+        // it. The gate is a process-wide static (shipped on), hence NonParallelizable and restored in finally.
         EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = true;
         try
         {
@@ -293,7 +300,7 @@ public sealed class TestMemoryProfile
         }
         finally
         {
-            EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = false;
+            EmbeddedKahunaOptionsBuilder.RaftWalFlushUnitFloorEnabled = true;
         }
     }
 

@@ -191,7 +191,7 @@ observe other than how often a read is served from cache instead of disk.
 
 | Profile | Block cache | Memtable sub-budget | Actor caches | Total |
 |---------|-------------|---------------------|--------------|-------|
-| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, ≤ 1 GiB (the Raft-log flush-unit floor is built but gated off, see below) | 6.25% of the managed heap budget, ≥ 64 MiB | ~16% of memory (~1.5 GiB on an 8 GiB box) |
+| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, raised to the Raft-log flush unit (≤ half the cache), ≤ 1 GiB — see below | 6.25% of the managed heap budget, ≥ 64 MiB | ~16% of memory (~1.5 GiB on an 8 GiB box) |
 | `dev` | 64 MiB | 16 MiB | 32 MiB | ~96 MiB, on any machine |
 
 `dev` is for a node sharing a developer machine with the application being built against it: the
@@ -233,14 +233,14 @@ heap percentage.
 | Key | Computed when unset | Clamp |
 |-----|---------------------|-------|
 | `rocksdb_shared_memory_budget_mb` | 10% of machine memory | 64 MiB – 2 GiB (320 MiB floor only when 10% reaches it) |
-| `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache (the Raft-log flush-unit floor below is gated off) | 16 MiB – 1 GiB (128 MiB floor only when a quarter reaches it) |
+| `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache, raised to the Raft-log flush unit (never past half the cache) | 16 MiB – 1 GiB (128 MiB floor only when a quarter reaches it) |
 | `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ `key_value_workers` | 1 MiB – 2 GiB per actor (8 MiB floor only when the share reaches it) |
 | `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 2k – 4M (10k floor only when the share reaches it) |
 
 The floors in parentheses yield on a small node: below them the percentage governs, down to the lower
 bound of the clamp. A fixed floor on a small container used to claim several times its share of memory.
 
-**The memtable flush-unit floor (gated off).** When the KV store and the Raft WAL share one
+**The memtable flush-unit floor.** When the KV store and the Raft WAL share one
 WriteBufferManager (`rocksdb_shared_memory` on, `storage` and `wal_storage` both `rocksdb`), the Raft
 log flushes at its flush unit plus headroom: `wal_shard_write_buffer_size_mb` ×
 (`wal_shard_min_write_buffer_number_to_merge` + 1), which is 192 MiB at Kommander's defaults. Kommander
@@ -252,25 +252,25 @@ the shared memtable budget (61 MB) is below the shard flush unit plus headroom (
 ```
 
 In a 10-minute write probe at a 61 MiB budget, all 349 Raft-log flushes were forced by the budget, at
-about 6 MiB each. CamusDB can raise the computed memtable budget to that unit (taking at most **half**
-of the block-cache budget, because the memtables are charged inside that budget and reads need the
-rest), but the floor **ships disabled** and the computed budget stays at a quarter of the cache.
-Raising the budget past the unit is correct in principle, but on Kommander 1.6.5 it lets the Raft-log
-store retain every write-ahead `.log` file for the life of the process: a rarely written column family
-(the meta partition's shard) never flushes without budget starvation, so nothing releases the files
-(443 MiB to 2,709 MiB in ten minutes per node, growing linearly, against ~230 MB of live tables). The
-gain was 2% of device bytes per operation, the cost an unbounded directory and a follower restart 4 s
-slower (a wider flush unit is a wider replay unit). The floor turns on once Kommander bounds its WAL
-size (`max_total_wal_size`, filed on the Kommander project); it is the
-`RaftWalFlushUnitFloorEnabled` constant in `EmbeddedKahunaOptionsBuilder`. Until then a node that
-wants the unit covered sets `rocksdb_shared_memtable_budget_mb` explicitly, and the warning above is
-expected on the default sizing. An explicit `rocksdb_shared_memtable_budget_mb` always wins, and the
-`dev` profile never applies the floor.
+about 6 MiB each. CamusDB therefore raises the computed memtable budget to that unit, taking at most
+**half** of the block-cache budget (the memtables are charged inside that budget and reads need the
+rest): a 4,096 MiB node gets a 409 MiB cache and a 192 MiB memtable budget. Below roughly 3.75 GiB of
+machine memory the unit does not fit in half the cache, the budget stops at that half, and the warning
+above is expected; a node that wants the unit covered there sets `rocksdb_shared_memtable_budget_mb`
+explicitly. An explicit `rocksdb_shared_memtable_budget_mb` always wins, and the `dev` profile never
+applies the floor.
+
+The floor needs Kommander 1.6.6 or later and is the `RaftWalFlushUnitFloorEnabled` constant in
+`EmbeddedKahunaOptionsBuilder`. It shipped off on Kommander 1.6.5: an unstarved budget let the
+Raft-log store retain every write-ahead `.log` file for the life of the process, because a rarely
+written column family (the meta partition's shard) never flushed without budget starvation and
+nothing else released the files (443 MiB to 2,709 MiB in ten minutes per node, against ~230 MB of
+live tables), and a follower restart took 4 s longer. Kommander 1.6.6 bounds the write-ahead files.
 
 At startup the node logs the values it uses, once, before RocksDB opens:
 
 ```text
-RocksDB shared memory: block cache 409 MiB, memtable budget 102 MiB; Raft-log flush unit plus headroom 192 MiB (NOT covered: Raft-log flushes will be budget-forced). Native budgets sit outside the managed heap: machine memory 4096 MiB (cgroup), managed heap budget 2457 MiB.
+RocksDB shared memory: block cache 409 MiB, memtable budget 192 MiB; Raft-log flush unit plus headroom 192 MiB (covered). Native budgets sit outside the managed heap: machine memory 4096 MiB (cgroup), managed heap budget 2457 MiB.
 ```
 
 The machine-memory source is `cgroup`, `meminfo` (Linux RAM), `sysctl` (macOS RAM), or `gc` (no
@@ -317,10 +317,14 @@ a batch is dispatched while nothing is in flight, the cap bounds a batch's items
 Measured 2026-09-09: the linger itself is inert at full occupancy (1, 3 and 5 ms all gave the same
 batches), because a completing batch re-dispatches whatever is queued.
 
-`kahuna.key_value_write_post_completion_hold_ms` (default **0**, Kahuna 1.7.2) is the knob that does add
-density at full occupancy: after a batch completes the aggregator holds this long before dispatching
-the next, so more items accumulate per batch; the cost is that much added write latency. Qualify with an
-A/B before changing it.
+`kahuna.key_value_write_post_completion_hold_ms` (default **2** in CamusDB; Kahuna's own default is 0)
+is the knob that does add density at full occupancy: after a batch completes the aggregator holds this
+long before dispatching the next, so more items accumulate per batch; the cost is that much added write
+latency. The aggregator keeps one Raft round in flight per partition, so at full load a round carries
+only what arrived during the previous ~2.4 ms round; the 2 ms hold roughly doubled the items per round
+(110 vs 51 at 128 workers on the bank shape) for +6% throughput and a *lower* write p50, and an idle
+aggregator still dispatches on arrival, so low-load latency is unchanged. Set `0` to restore Kahuna's
+dispatch-at-once behaviour; an explicit value always wins over the shipped default.
 
 `kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
 RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read
@@ -361,8 +365,8 @@ Three cautions apply to the whole group.
   `kahuna.rocksdb_shared_memory_budget_mb` on a small node. Under the shared WriteBufferManager an
   over-budget node flushes early, which quietly returns the flush unit to its old size rather than
   growing memory, so raising the memtable knobs without raising the budget can buy nothing. The
-  computed memtable budget does not follow these two keys while the flush-unit floor above is gated
-  off; raise `kahuna.rocksdb_shared_memtable_budget_mb` alongside them.
+  computed memtable budget follows these two keys through the flush-unit floor above, but only up to
+  half the block cache; past that, raise `kahuna.rocksdb_shared_memtable_budget_mb` alongside them.
 - **Restart.** A wider flush unit is a wider WAL-replay unit. A restart re-reads more before the node
   reports ready; measure that, not only the bytes written.
 - **Universal makes the level size inert.** Setting `wal_shard_universal_compaction: true` together with
