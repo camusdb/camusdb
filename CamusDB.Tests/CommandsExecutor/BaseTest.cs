@@ -46,6 +46,10 @@ public abstract class BaseTest
     // Databases opened in the current test method — closed in TearDown.
     private readonly List<(string dbname, CommandExecutor executor)> openDatabases = new();
 
+    // Every engine handed out by the factories below, whether or not a database was ever created
+    // through it — disposed in TearDown. See CreateCommandExecutor for why this list exists.
+    private readonly List<CommandExecutor> createdExecutors = new();
+
     protected BaseTest()
     {
         logger = SharedLoggerFactory.CreateLogger<ICamusDB>();
@@ -162,8 +166,27 @@ public abstract class BaseTest
     /// An engine configured with <paramref name="options"/> rather than the fixture's defaults, for a
     /// case that needs a setting the rest of the fixture does not — or two settings at once. Engines
     /// built this way are independent: nothing one is configured with is visible to another.
+    ///
+    /// <para>Every engine returned here is disposed in <see cref="CloseAllDatabases"/>, even when the
+    /// test never creates a database through it. An undisposed engine is not inert: it keeps its
+    /// background schedulers and a process-wide metrics listener alive, and each such listener is
+    /// invoked on every Raft heartbeat of every node the suite boots afterwards. Leaking a few
+    /// hundred of them across a run is what made the process slow enough for every later node start
+    /// to lose the election race the test node defaults describe. Fixtures that need a different
+    /// engine override <see cref="BuildCommandExecutor"/>, so the tracking cannot be bypassed.</para>
     /// </summary>
-    protected virtual CommandExecutor CreateCommandExecutor(CamusDBOptions options)
+    protected CommandExecutor CreateCommandExecutor(CamusDBOptions options)
+    {
+        CommandExecutor executor = BuildCommandExecutor(options);
+        createdExecutors.Add(executor);
+        return executor;
+    }
+
+    /// <summary>
+    /// Constructs the engine for <see cref="CreateCommandExecutor(CamusDBOptions)"/>. Override this,
+    /// not the factory, so the engine is still registered for disposal.
+    /// </summary>
+    protected virtual CommandExecutor BuildCommandExecutor(CamusDBOptions options)
     {
         CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
@@ -183,9 +206,11 @@ public abstract class BaseTest
     {
         CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
-        return new(validator, catalogsManager, logger, options,
+        CommandExecutor executor = new(validator, catalogsManager, logger, options,
                    sharedNode: testNode!, registry: sharedRegistry!, isClusterMode: false,
                    optionsHolder: holder, clusterSettings: clusterSettings);
+        createdExecutors.Add(executor);
+        return executor;
     }
 
     /// <summary>
@@ -262,6 +287,12 @@ public abstract class BaseTest
         }
 
         openDatabases.Clear();
+
+        // Engines that never opened a database still own background loops and a metrics listener.
+        foreach (CommandExecutor executor in createdExecutors)
+            executors.Add(executor);
+
+        createdExecutors.Clear();
 
         foreach (CommandExecutor executor in executors)
         {

@@ -83,7 +83,7 @@ internal sealed class TestMultiPartitionUniqueIndex : BaseTest
     /// A cluster-mode engine over this fixture's own node. The options-taking overload is the one to
     /// override, so the parameterless factory and <c>CreateDatabase(options)</c> both route through it.
     /// </summary>
-    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
+    protected override CommandExecutor BuildCommandExecutor(CamusDBOptions options)
     {
         CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);

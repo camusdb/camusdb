@@ -49,7 +49,7 @@ public sealed class TestQueryResultCacheResponseMetadata : CommandsExecutor.Base
     /// The options-taking overload is the one to override: the parameterless factory routes through it,
     /// so a test that asks for particular cache limits still gets the injected cache.
     /// </summary>
-    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
+    protected override CommandExecutor BuildCommandExecutor(CamusDBOptions options)
     {
         _cache = new QueryResultCache(options, sweepIntervalMs: -1);
         CommandValidator validator = new(options);

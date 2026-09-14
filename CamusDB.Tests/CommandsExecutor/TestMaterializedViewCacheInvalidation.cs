@@ -44,7 +44,7 @@ public sealed class TestMaterializedViewCacheInvalidation : BaseTest
 {
     private QueryResultCache? cache;
 
-    protected override CommandExecutor CreateCommandExecutor(CamusDBOptions options)
+    protected override CommandExecutor BuildCommandExecutor(CamusDBOptions options)
     {
         cache = new QueryResultCache(options, sweepIntervalMs: -1);
         CommandValidator validator = new(options);

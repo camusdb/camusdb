@@ -49,6 +49,17 @@ public static class TestNodeDefaults
         options.CheckLeaderInterval = TimeSpan.FromMilliseconds(25);
         options.VotingTimeout = TimeSpan.FromMilliseconds(300);
 
+        // The system partition may not elect itself until Kommander's UpdateNodes tick has run once
+        // (ElectionCoordinator suppresses a self-election while the roster is empty and discovery
+        // has not reported). That timer fires at TimerInitialDelay, measured from the RaftManager
+        // constructor, and then every UpdateNodesInterval. The node joins only in StartAsync, so
+        // when construction-to-join takes longer than the initial delay the first tick is a no-op
+        // and the election waits for the second one. At Kommander's 5 s default that lost race
+        // costs a full 5 s per node start; under the contention of a long suite run it was lost
+        // for most tests and CI runs hit the 120-minute limit. 250 ms keeps the loss to a quarter
+        // of a second.
+        options.UpdateNodesInterval = TimeSpan.FromMilliseconds(250);
+
         // One Raft executor thread instead of one per processor. The pool size defaults to 0, which
         // Kommander reads as Environment.ProcessorCount, so every node gets that many dedicated OS
         // threads and their stacks — for a node that runs a single partition and can only ever drain
