@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
@@ -33,9 +34,12 @@ public sealed class RowUpdater
 {
     private readonly ILogger<ICamusDB> logger;
 
-    public RowUpdater(ILogger<ICamusDB> logger)
+    private readonly StatisticsManager? _stats;
+
+    public RowUpdater(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
     {
         this.logger = logger;
+        _stats = stats;
     }
 
     private static void ValidateIfColumnExists(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, string columnName)
@@ -320,9 +324,23 @@ public sealed class RowUpdater
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
+        // A plain-values update never reads the located row's values: the write phase re-reads and
+        // decodes every row from raw bytes under its lock, and the new cells come from the ticket.
+        // So its buffer keeps row-id-only records — retaining the scanned row would pin, per match,
+        // the decoded values (and for a borrowed-backed row its full KV bytes) for the life of the
+        // buffer, and would spill those values when the buffer overflows to disk. An expression-SET
+        // update must keep the scanned row: its values feed SqlExecutor.EvalExpr, and the locate
+        // columns already include the SET expression columns. The scan still runs to completion and
+        // the list still seals before the first mutation, so the full match set is fixed up front
+        // (Halloween barrier) exactly as before.
+        bool keepScannedValues = ticket.PlainValues is null;
+
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-            await rowList.AddAsync(row).ConfigureAwait(false);
+        {
+            QueryResultRow record = keepScannedValues ? row : new QueryResultRow(row.RowId, QueryResultRow.EmptyRow);
+            await rowList.AddAsync(record).ConfigureAwait(false);
+        }
         await rowList.SealAsync().ConfigureAwait(false);
         state.RowsToUpdate = rowList;
 
@@ -457,6 +475,13 @@ public sealed class RowUpdater
 
         await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
         {
+            // Drain-time retention check: a plain-values update buffers row-id-only records, so a
+            // drained record with columns on that path means the locate phase retained scanned
+            // values it must not. An expression-SET update legitimately drains its locate columns.
+            // Reading Count on a lazy row is a layout lookup — it materializes nothing.
+            if (_stats is not null && queryRow.Row.Count > _stats.DmlLocateBufferMaxColumnsSeen)
+                _stats.DmlLocateBufferMaxColumnsSeen = queryRow.Row.Count;
+
             chunkRows.Add(queryRow);
 
             if (chunkRows.Count >= chunkSize)

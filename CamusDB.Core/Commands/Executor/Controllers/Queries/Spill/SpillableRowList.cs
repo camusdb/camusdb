@@ -40,7 +40,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// <para>
 /// <b>RowId preservation:</b> <see cref="QueryResultRow.RowId"/> is encoded by
 /// <see cref="SpillRowCodec"/> and decoded intact, so DML callers (RowDeleter, RowUpdater)
-/// that buffer match sets via this class always recover the original row id.
+/// that buffer match sets via this class always recover the original row id. Those callers
+/// append row-id-only records (<see cref="QueryResultRow.EmptyRow"/>) whenever the mutation
+/// phase re-reads the row anyway — a zero-column record is a legal codec frame, and it keeps
+/// the buffer from pinning scanned values (or a borrowed row's full KV bytes) per match.
 /// </para>
 ///
 /// <para>

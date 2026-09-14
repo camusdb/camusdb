@@ -428,7 +428,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
         rowInserter = new(logger);
-        rowUpdater = new(logger);
+        rowUpdater = new(logger, statisticsManager);
         tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);

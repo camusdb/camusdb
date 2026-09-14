@@ -238,9 +238,16 @@ internal sealed class RowDeleter
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
+        // Buffer row-id-only records: the mutation phase reads RowId alone and re-reads every row
+        // under its lock (FlushDeleteChunk), so the scanned values are dead weight after the
+        // predicate has accepted the row. Retaining the scanned row would pin, per match, the
+        // decoded values — and for a borrowed-backed row its full KV bytes — for the life of the
+        // buffer, and would spill those values byte-for-byte when the buffer overflows to disk.
+        // The scan still runs to completion and the list still seals before the first mutation,
+        // so the full match set is fixed up front (Halloween barrier) exactly as before.
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-            await rowList.AddAsync(row).ConfigureAwait(false);
+            await rowList.AddAsync(new QueryResultRow(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
         await rowList.SealAsync().ConfigureAwait(false);
         state.RowsToDelete = rowList;
 
@@ -269,6 +276,12 @@ internal sealed class RowDeleter
 
         await foreach (QueryResultRow row in state.RowsToDelete.EnumerateAsync().ConfigureAwait(false))
         {
+            // Drain-time retention check: the buffer holds row-id-only records, so any drained
+            // record with columns means the locate phase retained scanned values it must not.
+            // Reading Count on a lazy row is a layout lookup — it materializes nothing.
+            if (_stats is not null && row.Row.Count > _stats.DmlLocateBufferMaxColumnsSeen)
+                _stats.DmlLocateBufferMaxColumnsSeen = row.Row.Count;
+
             chunk.Add(row.RowId);
 
             if (chunk.Count >= chunkSize)

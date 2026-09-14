@@ -115,6 +115,28 @@ public sealed class TestSpillRowCodec
         Assert.That(decoded.RowId, Is.EqualTo(ObjectIdValue.Empty));
     }
 
+    /// <summary>
+    /// A row-id-only record — what the DELETE and plain-values UPDATE locate buffers spill —
+    /// is a legal zero-column frame of exactly 20 bytes (4 frame length + 12 row id +
+    /// 4 column count) and round-trips to an empty column set with the frame fully consumed.
+    /// </summary>
+    [Test]
+    public void RoundTrip_RowIdOnly_ZeroColumns_TwentyByteFrame()
+    {
+        ObjectIdValue rowId = ObjectIdGenerator.Generate();
+        QueryResultRow row = new(rowId, QueryResultRow.EmptyRow);
+
+        byte[] frame = SpillRowCodec.Encode(row);
+        Assert.That(frame.Length, Is.EqualTo(20), "A row-id-only frame is 20 bytes.");
+
+        int offset = 0;
+        QueryResultRow decoded = SpillRowCodec.Decode(frame, ref offset);
+
+        Assert.That(offset, Is.EqualTo(frame.Length), "The frame must be fully consumed.");
+        Assert.That(decoded.RowId, Is.EqualTo(rowId));
+        Assert.That(decoded.Row.Count, Is.EqualTo(0));
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Individual ColumnType round-trips
     // ──────────────────────────────────────────────────────────────────────────

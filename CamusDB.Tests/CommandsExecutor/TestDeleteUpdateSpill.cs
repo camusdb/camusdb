@@ -18,6 +18,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -39,6 +40,14 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// (b) spill-file cleanup after the operation completes or errors, or (c) flag-off baseline
 /// correctness (no spill files created when <see cref="CamusDBOptions.SpillEnabled"/> is
 /// <c>false</c>).
+/// </para>
+///
+/// <para>
+/// The row-id-only tests additionally lock the buffered representation: DELETE and plain-values
+/// UPDATE buffer row-id-only records (the mutation phase re-reads each row under its lock), so a
+/// match on a wide column must not retain the scanned values — in memory or in a spill file. The
+/// observable is <c>StatisticsManager.DmlLocateBufferMaxColumnsSeen</c>, measured when the
+/// mutation phase drains the buffer.
 /// </para>
 /// </summary>
 [TestFixture]
@@ -325,6 +334,297 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
             "UPDATE without spill must update exactly the matching rows.");
         Assert.IsEmpty(SpillFiles(_dataDir),
             "Flag-off UPDATE must not create any spill files.");
+    }
+
+    // ── Row-id-only locate buffer (retention) tests ───────────────────────────
+
+    private const int WidePayloadLength = 4096;
+
+    private static string WidePayload(char marker) => new(marker, WidePayloadLength);
+
+    /// <summary>
+    /// Creates a <c>wide</c> table whose predicate column carries a ~4 KB string, plus a unique
+    /// index (<c>u_code</c> on <c>code</c>) and a non-unique index (<c>m_name</c> on <c>name</c>).
+    /// Even rows get payload 'A…', odd rows 'B…'; <c>name</c> groups rows as <c>grp0</c>/<c>grp1</c>
+    /// on the same parity, so a payload predicate and a name lookup select the same rows.
+    /// </summary>
+    private async Task<Fixture> SetupWideTable(CamusDBOptions options, int count = 20)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
+        KvTransaction txn = await database.Transactions.BeginAsync();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "wide",
+            columns:
+            [
+                new("id",      ColumnType.Id),
+                new("name",    ColumnType.String, notNull: true),
+                new("code",    ColumnType.Integer64),
+                new("payload", ColumnType.String),
+                new("value",   ColumnType.Integer64),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey,  "~pk",    [new("id",   OrderType.Ascending)]),
+                new(ConstraintType.IndexUnique, "u_code", [new("code", OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti,  "m_name", [new("name", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        List<string> ids = new(count);
+        List<Dictionary<string, ColumnValue>> rows = new(count);
+
+        for (int i = 0; i < count; i++)
+        {
+            string id = ObjectIdGenerator.Generate().ToString();
+            ids.Add(id);
+            rows.Add(new()
+            {
+                { "id",      new(ColumnType.Id,        id) },
+                { "name",    new(ColumnType.String,    "grp" + (i % 2)) },
+                { "code",    new(ColumnType.Integer64, (long)i) },
+                { "payload", new(ColumnType.String,    WidePayload(i % 2 == 0 ? 'A' : 'B')) },
+                { "value",   new(ColumnType.Integer64, (long)i) },
+            });
+        }
+
+        await executor.Insert(new InsertTicket(txn, dbname, "wide", values: rows));
+        await database.Transactions.CommitAsync(txn);
+
+        return new Fixture(dbname, database, executor, ids);
+    }
+
+    private static async Task<List<QueryResultRow>> RunQueryParams(
+        Fixture f, string sql, Dictionary<string, ColumnValue>? parameters)
+    {
+        KvTransaction txn = await f.Database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: txn, database: f.DbName, sql: sql, parameters: parameters);
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await f.Executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await f.Database.Transactions.CommitAsync(txn);
+        return rows;
+    }
+
+    private static async Task RunNonQueryParams(
+        Fixture f, string sql, Dictionary<string, ColumnValue>? parameters)
+    {
+        KvTransaction txn = await f.Database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: txn, database: f.DbName, sql: sql, parameters: parameters);
+        await f.Executor.ExecuteNonSQLQuery(ticket);
+        await f.Database.Transactions.CommitAsync(txn);
+    }
+
+    private static Dictionary<string, ColumnValue> PayloadParam(char marker) =>
+        new() { { "@p", new(ColumnType.String, WidePayload(marker)) } };
+
+    /// <summary>
+    /// Locks the row-id-only DELETE buffer: a DELETE whose predicate reads a ~4 KB column must
+    /// drain zero-column records from its locate buffer — the scanned values (and, for a
+    /// borrowed-backed scan row, its full KV bytes) must not be retained past the locate scan.
+    /// Also asserts row parity, unique-index cleanup (a deleted unique value is insertable
+    /// again), non-unique-index parity, and no leftover spill file.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task DeleteWidePredicate_LocateBufferKeepsRowIdsOnly(bool spillOn)
+    {
+        Fixture f = await SetupWideTable(spillOn ? SpillOn(3) : SpillOff, 20);
+        f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
+
+        await RunNonQueryParams(f, "DELETE FROM wide WHERE payload = @p", PayloadParam('A'));
+
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.EqualTo(0),
+            "The DELETE locate buffer must drain row-id-only records; a positive column count " +
+            "proves scanned values were retained past the locate scan.");
+
+        List<QueryResultRow> remaining = await RunQuery(f, "SELECT name, value FROM wide ORDER BY value");
+        Assert.That(remaining.Count, Is.EqualTo(10), "Exactly the payload-A rows must be deleted.");
+        Assert.IsTrue(remaining.All(r => r.Row["value"].LongValue % 2 == 1),
+            "Only odd (payload-B) rows must remain.");
+
+        // Non-unique index parity: every deleted row was in grp0, every survivor in grp1.
+        Assert.IsEmpty(await RunQuery(f, "SELECT id FROM wide WHERE name = 'grp0'"),
+            "The non-unique index must hold no entries for deleted rows.");
+        Assert.That((await RunQuery(f, "SELECT id FROM wide WHERE name = 'grp1'")).Count, Is.EqualTo(10));
+
+        // Unique index parity: a deleted unique value is gone and insertable again.
+        Assert.IsEmpty(await RunQuery(f, "SELECT id FROM wide WHERE code = 2"),
+            "The unique index must hold no entry for a deleted row.");
+
+        KvTransaction txn = await f.Database.Transactions.BeginAsync();
+        await f.Executor.Insert(new InsertTicket(txn, f.DbName, "wide", values:
+        [
+            new()
+            {
+                { "id",      new(ColumnType.Id,        ObjectIdGenerator.Generate().ToString()) },
+                { "name",    new(ColumnType.String,    "reborn") },
+                { "code",    new(ColumnType.Integer64, 0L) },
+                { "payload", new(ColumnType.String,    "reborn") },
+                { "value",   new(ColumnType.Integer64, 999L) },
+            }
+        ]));
+        await f.Database.Transactions.CommitAsync(txn);
+
+        Assert.That((await RunQuery(f, "SELECT id FROM wide WHERE code = 0")).Count, Is.EqualTo(1),
+            "Re-inserting a deleted unique value must succeed — its old index entry must be gone.");
+
+        Assert.IsEmpty(SpillFiles(_dataDir), "No spill file may remain after the DELETE.");
+    }
+
+    /// <summary>
+    /// Locks the row-id-only plain-values UPDATE buffer: a plain-values update never reads the
+    /// located row's values (the write phase re-reads every row under its lock and the new cells
+    /// come from the ticket), so its locate buffer must drain zero-column records even when the
+    /// predicate reads a ~4 KB column. Also asserts row parity and index maintenance on the
+    /// updated (non-unique-indexed) column.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task UpdatePlainValuesWidePredicate_LocateBufferKeepsRowIdsOnly(bool spillOn)
+    {
+        Fixture f = await SetupWideTable(spillOn ? SpillOn(3) : SpillOff, 20);
+        f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
+
+        KvTransaction txn = await f.Database.Transactions.BeginAsync();
+        UpdateResult result = await f.Executor.Update(new UpdateTicket(
+            txnState:     txn,
+            databaseName: f.DbName,
+            tableName:    "wide",
+            plainValues:  new() { { "name", new(ColumnType.String, "changed") } },
+            exprValues:   null,
+            where:        null,
+            filters:      new() { new("payload", "=", new(ColumnType.String, WidePayload('A'))) },
+            parameters:   null));
+        await f.Database.Transactions.CommitAsync(txn);
+
+        Assert.That(result.UpdatedRows, Is.EqualTo(10), "Exactly the payload-A rows must be updated.");
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.EqualTo(0),
+            "The plain-values UPDATE locate buffer must drain row-id-only records; a positive " +
+            "column count proves scanned values were retained past the locate scan.");
+
+        // Index maintenance on the id-only path: the old entries came from the locked re-read,
+        // not from the buffer, so the non-unique index must have moved every updated row.
+        Assert.IsEmpty(await RunQuery(f, "SELECT id FROM wide WHERE name = 'grp0'"));
+        Assert.That((await RunQuery(f, "SELECT id FROM wide WHERE name = 'changed'")).Count, Is.EqualTo(10));
+        Assert.That((await RunQuery(f, "SELECT id FROM wide WHERE name = 'grp1'")).Count, Is.EqualTo(10));
+
+        Assert.IsEmpty(SpillFiles(_dataDir), "No spill file may remain after the UPDATE.");
+    }
+
+    /// <summary>
+    /// Negative control for the drain-time retention counter: an expression-SET UPDATE must keep
+    /// its scanned locate columns (they feed the SET evaluation), so the counter observes a
+    /// positive column count. This proves the counter actually measures the drained records —
+    /// the zero asserted by the row-id-only tests is a real zero, not a dead counter.
+    /// </summary>
+    [Test]
+    public async Task UpdateExprValues_LocateBufferRetainsScannedColumns()
+    {
+        Fixture f = await SetupWideTable(SpillOff, 10);
+        f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
+
+        await RunNonQueryParams(f, "UPDATE wide SET value = value + 100 WHERE payload = @p", PayloadParam('A'));
+
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.GreaterThan(0),
+            "An expression-SET UPDATE buffers its locate columns; a zero here means the " +
+            "retention counter is not observing the drained records.");
+
+        List<QueryResultRow> bumped = await RunQuery(f, "SELECT value FROM wide WHERE value >= 100");
+        Assert.That(bumped.Count, Is.EqualTo(5), "The expression SET must still update the matched rows.");
+    }
+
+    /// <summary>
+    /// LIMIT rides inside the locate scan (the ticket's limit is applied before a row reaches the
+    /// buffer), so a limited DELETE on the row-id-only path removes exactly the limit count.
+    /// </summary>
+    [Test]
+    public async Task DeleteWithLimit_RowIdOnlyBuffer_DeletesExactlyLimit()
+    {
+        Fixture f = await SetupWideTable(SpillOn(3), 20);
+        f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
+
+        await RunNonQueryParams(f, "DELETE FROM wide WHERE payload = @p LIMIT 4", PayloadParam('A'));
+
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.EqualTo(0));
+
+        List<QueryResultRow> remainingA = await RunQueryParams(
+            f, "SELECT id FROM wide WHERE payload = @p", PayloadParam('A'));
+        Assert.That(remainingA.Count, Is.EqualTo(6), "LIMIT 4 must delete exactly 4 of the 10 matches.");
+        Assert.That((await RunQuery(f, "SELECT id FROM wide")).Count, Is.EqualTo(16));
+    }
+
+    /// <summary>
+    /// An empty match set on the row-id-only path deletes nothing and buffers nothing.
+    /// </summary>
+    [Test]
+    public async Task DeleteEmptyMatchSet_RowIdOnlyBuffer_DeletesNothing()
+    {
+        Fixture f = await SetupWideTable(SpillOff, 8);
+        f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
+
+        await RunNonQuery(f, "DELETE FROM wide WHERE value = -1");
+
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.EqualTo(0));
+        Assert.That((await RunQuery(f, "SELECT id FROM wide")).Count, Is.EqualTo(8),
+            "A DELETE that matches nothing must delete nothing.");
+    }
+
+    /// <summary>
+    /// Rolls back a multi-chunk DELETE (forced spill threshold 3 over 20 rows, so several
+    /// mutation chunks ran) and verifies the transaction restores every chunk: all rows are
+    /// back and both the unique and the non-unique index answer for them again.
+    /// </summary>
+    [Test]
+    public async Task DeleteMultiChunk_Rollback_RestoresEveryChunkAndIndexes()
+    {
+        Fixture f = await SetupWideTable(SpillOn(3), 20);
+
+        KvTransaction txn = await f.Database.Transactions.BeginAsync();
+        await f.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: txn, database: f.DbName, sql: "DELETE FROM wide WHERE value >= 0", parameters: null));
+
+        // The same transaction sees its own delete before the rollback.
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await f.Executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(txnState: txn, database: f.DbName, sql: "SELECT id FROM wide", parameters: null));
+        Assert.IsEmpty(await cursor.ToListAsync(), "Inside the transaction every row is deleted.");
+
+        await f.Database.Transactions.RollbackAsync(txn);
+
+        Assert.That((await RunQuery(f, "SELECT id FROM wide")).Count, Is.EqualTo(20),
+            "Rollback must restore every deleted chunk.");
+        Assert.That((await RunQuery(f, "SELECT id FROM wide WHERE code = 5")).Count, Is.EqualTo(1),
+            "Rollback must restore unique-index entries from every chunk.");
+        Assert.That((await RunQuery(f, "SELECT id FROM wide WHERE name = 'grp0'")).Count, Is.EqualTo(10),
+            "Rollback must restore non-unique-index entries from every chunk.");
+        Assert.IsEmpty(SpillFiles(_dataDir), "No spill file may remain after a rolled-back DELETE.");
+    }
+
+    /// <summary>
+    /// Rows written under an older column layout still delete correctly on the row-id-only path:
+    /// the locate scan and the mutation-phase re-read both decode the pre-ALTER rows through
+    /// schema history, and the buffer itself carries no values that could go stale.
+    /// </summary>
+    [Test]
+    public async Task DeleteOldSchemaLayoutRows_RowIdOnlyBuffer()
+    {
+        Fixture f = await SetupWideTable(SpillOn(3), 10);
+
+        KvTransaction ddlTxn = await f.Database.Transactions.BeginAsync();
+        await f.Executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: ddlTxn, database: f.DbName,
+            sql: "ALTER TABLE wide ADD COLUMN extra INT64 DEFAULT (7)", parameters: null));
+        await f.Database.Transactions.CommitAsync(ddlTxn);
+
+        f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
+
+        await RunNonQueryParams(f, "DELETE FROM wide WHERE payload = @p", PayloadParam('A'));
+
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.EqualTo(0));
+
+        List<QueryResultRow> remaining = await RunQuery(f, "SELECT value, extra FROM wide ORDER BY value");
+        Assert.That(remaining.Count, Is.EqualTo(5), "Exactly the payload-A rows (old layout) must be deleted.");
+        Assert.IsTrue(remaining.All(r => r.Row["extra"].LongValue == 7),
+            "Surviving old-layout rows must still decode the added column's default.");
     }
 
     /// <summary>
