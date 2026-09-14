@@ -67,6 +67,11 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
     /// Expiry stamped on the released marker, so a key nobody re-acquires does not linger. Not zero:
     /// zero means "no expiry" to the KV layer, which would make a release pin the key forever — the
     /// exact opposite of releasing it.
+    ///
+    /// <para>This expiry is short enough that the marker routinely lapses <em>between</em> the two
+    /// writes of an acquisition that follows an orderly release. <see cref="TryAcquireAsync"/> must
+    /// therefore never read one refused SetIfNotExists plus one refused compare-and-set as proof of a
+    /// live claim — see the re-probe there.</para>
     /// </summary>
     private const int ReleaseExpiryMs = 1;
 
@@ -132,6 +137,7 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
         byte[] value = ComposeValue(token);
 
         int retries = 0;
+        int expiredMarkerProbes = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
             (KeyValueResponseType type, _, _) = await kahuna.LocateAndTrySetKeyValue(
@@ -176,7 +182,22 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
                 }
 
                 if (freeType == KeyValueResponseType.NotSet)
+                {
+                    // Two refusals in a row do not prove a live claim. The free marker carries a
+                    // near-immediate expiry, and the KV layer treats an expired key as absent for
+                    // SetIfNotExists but compares its value — now null — for SetIfEqualToValue. So when
+                    // the marker lapses between the two writes above, the first refuses because the key
+                    // still existed and the second refuses because the stored value is no longer the
+                    // marker, although nobody holds the key. Giving up here reports a free fence as
+                    // held, which is exactly the failure an orderly release is meant to prevent.
+                    // Probe once more from the top: a lapsed marker is absent by then and the plain
+                    // SetIfNotExists claims it; a genuine live claim refuses both writes again and is
+                    // then reported as held.
+                    if (++expiredMarkerProbes <= 1)
+                        continue;
+
                     return null; // a live claim genuinely holds the key
+                }
 
                 if (freeType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
                     && ++retries < MaxRetries)

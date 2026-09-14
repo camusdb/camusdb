@@ -195,6 +195,99 @@ internal sealed class TestFenceLease : BaseTest
     }
 
     /// <summary>
+    /// The free marker a release leaves behind carries a near-immediate expiry, and the KV layer treats
+    /// an expired key as absent for SetIfNotExists but compares a null value for SetIfEqualToValue. When
+    /// the marker lapses between the acquire's two writes, both are refused although nobody holds the
+    /// key. The acquire must re-probe instead of reporting a free fence as held — otherwise the next
+    /// operation on the id is blocked for the whole lease. Deterministic form of the race: the two
+    /// refusals are injected, the re-probe reaches the real node.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task AcquireAfterRelease_FreeMarkerLapsesBetweenProbes_StillAcquires()
+    {
+        CamusDBOptions fence = Fence(leaseMs: 30_000, renewMs: 60_000);
+
+        string id = "f" + Guid.NewGuid().ToString("n");
+
+        RefusingSetKahuna refusing = new(TestNode!.Kahuna);
+        DatabaseRegistry a = await DatabaseRegistry.OpenForTestingAsync(TestNode!, refusing, fence);
+        DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, fence);
+        try
+        {
+            Assert.IsTrue(await a.AcquireDropIntentAsync(id), "sanity: fence acquired");
+            await a.ReleaseDropIntentAsync(id);
+
+            // Refuse the SetIfNotExists probe and the free-marker compare-and-set that follows it, as
+            // the real node does when the marker lapses between them.
+            refusing.RefuseSets = 2;
+
+            Assert.IsTrue(await a.AcquireDropIntentAsync(id),
+                "two refusals caused by a lapsed free marker must not be reported as a live claim");
+            Assert.Zero(refusing.RefuseSets, "sanity: both injected refusals were consumed");
+
+            Assert.IsFalse(await b.AcquireDropIntentAsync(id),
+                "the re-probed acquisition must really hold the fence");
+        }
+        finally
+        {
+            await a.ReleaseDropIntentAsync(id);
+            await a.DisposeAsync();
+            await b.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Timing form of the same race: an orderly release followed at once by a re-acquire, repeated
+    /// enough times that the re-acquire's writes straddle the marker's expiry on a fast machine. A
+    /// free fence must never be reported as held.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task AcquireAfterRelease_RepeatedHandoff_NeverReportsFreeFenceAsHeld()
+    {
+        DatabaseRegistry registry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
+        try
+        {
+            string id = "f" + Guid.NewGuid().ToString("n");
+            for (int i = 0; i < 300; i++)
+            {
+                Assert.IsTrue(await registry.AcquireDropIntentAsync(id), $"iteration {i}: free fence reported as held");
+                await registry.ReleaseDropIntentAsync(id);
+            }
+        }
+        finally
+        {
+            await registry.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Answers <see cref="KeyValueResponseType.NotSet"/> to the next <see cref="RefuseSets"/> writes that
+    /// touch a drop-intent key, then delegates to the real node. Models the two refusals an acquire sees
+    /// when the released marker lapses between its probe and its compare-and-set.
+    /// </summary>
+    private sealed class RefusingSetKahuna(IKahuna inner) : DelegatingKahuna(inner)
+    {
+        public int RefuseSets;
+
+        public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTrySetKeyValue(
+            HLCTimestamp transactionId, string key, byte[]? value, byte[]? compareValue, long compareRevision,
+            KeyValueFlags flags, int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken,
+            long routedGeneration = 0, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            if (RefuseSets > 0 && key.Contains("drop-intent", StringComparison.Ordinal))
+            {
+                RefuseSets--;
+                return Task.FromResult((KeyValueResponseType.NotSet, -1L, HLCTimestamp.Zero));
+            }
+
+            return base.LocateAndTrySetKeyValue(transactionId, key, value, compareValue, compareRevision,
+                flags, expiresMs, durability, cancellationToken, routedGeneration, coordinatorKey, operationId);
+        }
+    }
+
+    /// <summary>
     /// Returns <see cref="KeyValueResponseType.MustRetry"/> for the first
     /// <see cref="InjectSetFaults"/> writes that touch a drop-intent key, then delegates to the real
     /// node. Scoped to drop-intent keys so registry bookkeeping writes pass through untouched.
