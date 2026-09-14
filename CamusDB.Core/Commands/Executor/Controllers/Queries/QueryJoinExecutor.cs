@@ -1340,6 +1340,8 @@ internal sealed class QueryJoinExecutor
         // merged as the right argument, qualified by the merge itself).
         bool buildIsLeft = broadcast.Spec.BuildIsLeft;
         IReadOnlyList<string> localProbeKeys = buildIsLeft ? joinNode.BuildKeyColumns : probeKeys;
+        ColumnValue[] probeKeyScratch = new ColumnValue[localProbeKeys.Count];
+        var probeLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
         RowLayout? qualifiedProbeLayout = null;
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
@@ -1364,19 +1366,9 @@ internal sealed class QueryJoinExecutor
                             && !await queryFilterer.MeetWhereAsync(broadcast.ProbeFilter, qualifiedProbe, ticket, database).ConfigureAwait(false))
                             continue;
 
-                        ColumnValue[] probeKeyValues = new ColumnValue[localProbeKeys.Count];
-                        bool hasNull = false;
+                        if (!TryExtractKeyInto(keySource, localProbeKeys, probeKeyScratch)) continue;
 
-                        for (int k = 0; k < localProbeKeys.Count; k++)
-                        {
-                            if (!keySource.TryGetValue(localProbeKeys[k], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                            { hasNull = true; break; }
-                            probeKeyValues[k] = kv;
-                        }
-
-                        if (hasNull) continue;
-
-                        if (!hashTable.TryGetValue(new CompositeColumnValue(probeKeyValues), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                        if (!probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                             continue;
 
                         foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
@@ -1626,27 +1618,21 @@ internal sealed class QueryJoinExecutor
         // bucket order — match indices must reproduce the coordinator's merge order exactly.
         Dictionary<CompositeColumnValue, List<(int Index, Dictionary<string, ColumnValue> Row)>> buckets =
             new(CompositeColumnValueComparer.Instance);
+        var bucketLookup = buckets.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+
+        // Build and probe each get their own scratch array: the two key-column sets can differ,
+        // and a shared buffer would let a probe silently read a stale build key on a length match.
+        ColumnValue[] buildKeyScratch = new ColumnValue[bucketKeyColumns.Length];
 
         for (int i = 0; i < join.BuildRows.Length; i++)
         {
             Dictionary<string, ColumnValue> buildRow = QueryExecutor.ParseCells(join.BuildRows[i]);
 
-            ColumnValue[] keyValues = new ColumnValue[bucketKeyColumns.Length];
-            bool hasNull = false;
-
-            for (int k = 0; k < bucketKeyColumns.Length; k++)
-            {
-                if (!buildRow.TryGetValue(bucketKeyColumns[k], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                { hasNull = true; break; }
-                keyValues[k] = kv;
-            }
-
-            if (hasNull)
+            if (!TryExtractKeyInto(buildRow, bucketKeyColumns, buildKeyScratch))
                 continue;
 
-            CompositeColumnValue key = new(keyValues);
-            if (!buckets.TryGetValue(key, out List<(int Index, Dictionary<string, ColumnValue> Row)>? bucket))
-            { bucket = []; buckets[key] = bucket; }
+            if (!bucketLookup.TryGetValue(buildKeyScratch.AsSpan(), out List<(int Index, Dictionary<string, ColumnValue> Row)>? bucket))
+            { bucket = []; bucketLookup[buildKeyScratch.AsSpan()] = bucket; }
 
             bucket.Add((i, buildRow));
         }
@@ -1672,6 +1658,7 @@ internal sealed class QueryJoinExecutor
         RowLayout? qualifiedLayout = null;
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        ColumnValue[] probeKeyScratch = new ColumnValue[probeKeyColumns.Length];
         List<int> matches = [];
         long scanned = 0, shipped = 0;
 
@@ -1707,20 +1694,10 @@ internal sealed class QueryJoinExecutor
             // bare row for a right-side one.
             IReadOnlyDictionary<string, ColumnValue> keySource = join.BuildIsLeft ? row : qualified;
 
-            ColumnValue[] probeKeyValues = new ColumnValue[probeKeyColumns.Length];
-            bool hasNull = false;
-
-            for (int k = 0; k < probeKeyColumns.Length; k++)
-            {
-                if (!keySource.TryGetValue(probeKeyColumns[k], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                { hasNull = true; break; }
-                probeKeyValues[k] = kv;
-            }
-
-            if (hasNull)
+            if (!TryExtractKeyInto(keySource, probeKeyColumns, probeKeyScratch))
                 continue;
 
-            if (!buckets.TryGetValue(new CompositeColumnValue(probeKeyValues), out List<(int Index, Dictionary<string, ColumnValue> Row)>? bucket))
+            if (!bucketLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<(int Index, Dictionary<string, ColumnValue> Row)>? bucket))
                 continue;
 
             matches.Clear();
@@ -1805,30 +1782,25 @@ internal sealed class QueryJoinExecutor
 
         int rowCount = 0;
 
+        // Keys are looked up as a span over a reused scratch array; an owned key is copied
+        // (comparer Create) only when a new bucket is inserted, so a duplicate-heavy build
+        // allocates one key per distinct key rather than one per row.
+        var lookup = table.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+
         if (buildSide == HashJoinBuildSide.Right)
         {
             IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
+            ColumnValue[] keyScratch = new ColumnValue[buildKeys.Count];
 
             await foreach (QueryResultRow row in ScanJoinRightSource(
                 joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
             {
                 if (rowCount >= buildCap) return null;
 
-                ColumnValue[] keyValues = new ColumnValue[buildKeys.Count];
-                bool hasNull = false;
+                if (!TryExtractKeyInto(row.Row, buildKeys, keyScratch)) continue;
 
-                for (int i = 0; i < buildKeys.Count; i++)
-                {
-                    if (!row.Row.TryGetValue(buildKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                    { hasNull = true; break; }
-                    keyValues[i] = kv;
-                }
-
-                if (hasNull) continue;
-
-                CompositeColumnValue key = new(keyValues);
-                if (!table.TryGetValue(key, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
-                { bucket = []; table[key] = bucket; }
+                if (!lookup.TryGetValue(keyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                { bucket = []; lookup[keyScratch.AsSpan()] = bucket; }
 
                 bucket.Add(row.Row);
                 rowCount++;
@@ -1839,6 +1811,7 @@ internal sealed class QueryJoinExecutor
             // BuildSide.Left: materialise the left subtree; rows are qualified immediately so
             // they can be passed directly as the "left" arg to MergeRowsAsQueryRow during probe.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
+            ColumnValue[] keyScratch = new ColumnValue[probeKeys.Count];
             RowLayout? qualifiedLeftLayout = null;
 
             await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
@@ -1857,21 +1830,10 @@ internal sealed class QueryJoinExecutor
                     qualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
                 }
 
-                ColumnValue[] keyValues = new ColumnValue[probeKeys.Count];
-                bool hasNull = false;
+                if (!TryExtractKeyInto(qualified, probeKeys, keyScratch)) continue;
 
-                for (int i = 0; i < probeKeys.Count; i++)
-                {
-                    if (!qualified.TryGetValue(probeKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                    { hasNull = true; break; }
-                    keyValues[i] = kv;
-                }
-
-                if (hasNull) continue;
-
-                CompositeColumnValue key = new(keyValues);
-                if (!table.TryGetValue(key, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
-                { bucket = []; table[key] = bucket; }
+                if (!lookup.TryGetValue(keyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                { bucket = []; lookup[keyScratch.AsSpan()] = bucket; }
 
                 bucket.Add(qualified);
                 rowCount++;
@@ -1940,7 +1902,11 @@ internal sealed class QueryJoinExecutor
 
             // Standard path: probe = left subtree, build = right source.
             // Hash table rows are unqualified; MergeRowsAsQueryRow qualifies them with rightAlias.
+            // Probe keys go through the span alternate lookup: no key array or composite key
+            // is allocated per probe row — misses and hits alike reuse the scratch array.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
+            ColumnValue[] probeKeyScratch = new ColumnValue[probeKeys.Count];
+            var probeLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
 
             await foreach (QueryResultRow leftRow in ExecuteJoinTree(joinNode.Input!, plan).ConfigureAwait(false))
             {
@@ -1956,20 +1922,9 @@ internal sealed class QueryJoinExecutor
                     leftQualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
                 }
 
-                ColumnValue[] probeKeyValues = new ColumnValue[probeKeys.Count];
-                bool hasNull = false;
+                if (!TryExtractKeyInto(leftQualified, probeKeys, probeKeyScratch)) continue;
 
-                for (int i = 0; i < probeKeys.Count; i++)
-                {
-                    if (!leftQualified.TryGetValue(probeKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                    { hasNull = true; break; }
-                    probeKeyValues[i] = kv;
-                }
-
-                if (hasNull) continue;
-
-                CompositeColumnValue probeKey = new(probeKeyValues);
-                if (!hashTable.TryGetValue(probeKey, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                if (!probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                     continue;
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
@@ -2005,24 +1960,15 @@ internal sealed class QueryJoinExecutor
             // MergeRowsAsQueryRow(leftQualifiedBuildRow, rightUnqualifiedProbeRow, rightAlias) is the
             // same call shape as the standard path — output column naming is identical.
             IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
+            ColumnValue[] probeKeyScratch = new ColumnValue[buildKeys.Count];
+            var probeLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
 
             await foreach (QueryResultRow rightRow in ScanJoinRightSource(
                 joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
             {
-                ColumnValue[] probeKeyValues = new ColumnValue[buildKeys.Count];
-                bool hasNull = false;
+                if (!TryExtractKeyInto(rightRow.Row, buildKeys, probeKeyScratch)) continue;
 
-                for (int i = 0; i < buildKeys.Count; i++)
-                {
-                    if (!rightRow.Row.TryGetValue(buildKeys[i], out ColumnValue? kv) || kv.Type == ColumnType.Null)
-                    { hasNull = true; break; }
-                    probeKeyValues[i] = kv;
-                }
-
-                if (hasNull) continue;
-
-                CompositeColumnValue probeKey = new(probeKeyValues);
-                if (!hashTable.TryGetValue(probeKey, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                if (!probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
                     continue;
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> leftBuildRow in bucket)
@@ -2341,12 +2287,13 @@ internal sealed class QueryJoinExecutor
 
         try
         {
+            ColumnValue[] keyScratch = new ColumnValue[keyColumns.Count];
+
             await foreach (QueryResultRow row in input.WithCancellation(ct).ConfigureAwait(false))
             {
-                ColumnValue[]? keyVals = ExtractMergeKey(row.Row, keyColumns);
-                if (keyVals is null) continue;
+                if (!TryExtractKeyInto(row.Row, keyColumns, keyScratch)) continue;
 
-                int p = PartitionIndex(keyVals, K, seed);
+                int p = PartitionIndex(keyScratch, K, seed);
                 SpillRowCodec.EncodeToStream(writers[p], row);
             }
 
@@ -2498,6 +2445,10 @@ internal sealed class QueryJoinExecutor
         // overflow strategy, not whether we detect the overflow.
         Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable =
             new(CompositeColumnValueComparer.Instance);
+        var hashLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+        // Separate scratch arrays for the build and probe loops of this partition: reusing one
+        // buffer across the two phases would risk a probe reading leftover build-key values.
+        ColumnValue[] buildKeyScratch = new ColumnValue[buildKeyColumns.Count];
         int buildCount = 0;
         bool overflow = false;
 
@@ -2507,8 +2458,9 @@ internal sealed class QueryJoinExecutor
         while (await buildEnum.MoveNextAsync().ConfigureAwait(false))
         {
             QueryResultRow buildRow = buildEnum.Current;
-            ColumnValue[]? keyVals = ExtractMergeKey(buildRow.Row, buildKeyColumns);
-            if (keyVals is null) continue;
+            // NULL-key rows are skipped before the threshold check, exactly as before: they
+            // never count toward the overflow decision.
+            if (!TryExtractKeyInto(buildRow.Row, buildKeyColumns, buildKeyScratch)) continue;
 
             if (buildCount >= threshold)
             {
@@ -2516,9 +2468,8 @@ internal sealed class QueryJoinExecutor
                 break;
             }
 
-            CompositeColumnValue key = new(keyVals);
-            if (!hashTable.TryGetValue(key, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
-            { bucket = []; hashTable[key] = bucket; }
+            if (!hashLookup.TryGetValue(buildKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+            { bucket = []; hashLookup[buildKeyScratch.AsSpan()] = bucket; }
             bucket.Add(buildRow.Row);
             buildCount++;
         }
@@ -2563,13 +2514,12 @@ internal sealed class QueryJoinExecutor
         // Probe phase: stream probe partition against the loaded hash table.
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        ColumnValue[] probeKeyScratch = new ColumnValue[probeKeyColumns.Count];
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, _options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
-            ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
-            if (probeKeyVals is null) continue;
+            if (!TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch)) continue;
 
-            CompositeColumnValue probeKey = new(probeKeyVals);
-            if (!hashTable.TryGetValue(probeKey, out List<IReadOnlyDictionary<string, ColumnValue>>? bucket)) continue;
+            if (!hashLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket)) continue;
 
             foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
             {
@@ -2609,17 +2559,20 @@ internal sealed class QueryJoinExecutor
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
 
+        // The outer scratch must stay stable while the inner loop compares against it,
+        // so the two loops each own a buffer.
+        ColumnValue[] probeKeyScratch = new ColumnValue[probeKeyColumns.Count];
+        ColumnValue[] buildKeyScratch = new ColumnValue[buildKeyColumns.Count];
+
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, _options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
-            ColumnValue[]? probeKeyVals = ExtractMergeKey(probeRow.Row, probeKeyColumns);
-            if (probeKeyVals is null) continue;
+            if (!TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch)) continue;
 
             await foreach (QueryResultRow buildRow in ReadSpillFileAsync(buildFile, _options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
             {
-                ColumnValue[]? buildKeyVals = ExtractMergeKey(buildRow.Row, buildKeyColumns);
-                if (buildKeyVals is null) continue;
+                if (!TryExtractKeyInto(buildRow.Row, buildKeyColumns, buildKeyScratch)) continue;
 
-                if (!CompositeColumnValueComparer.Instance.Equals(probeKeyVals.AsSpan(), buildKeyVals.AsSpan()))
+                if (!CompositeColumnValueComparer.Instance.Equals(probeKeyScratch.AsSpan(), buildKeyScratch.AsSpan()))
                     continue;
 
                 IReadOnlyDictionary<string, ColumnValue> leftQ  = joinNode.BuildSide == HashJoinBuildSide.Right ? probeRow.Row : buildRow.Row;
@@ -2637,24 +2590,43 @@ internal sealed class QueryJoinExecutor
     }
 
     /// <summary>
-    /// Extracts the merge-join key values from a row.
+    /// Extracts the join-key values of a row into a caller-owned scratch array.
+    /// Returns false when any key column is absent or NULL (the row is excluded — SQL inner-join
+    /// NULL semantics). <paramref name="destination"/> must have exactly
+    /// <paramref name="keyColumns"/>.Count slots and is overwritten on every call, so the caller
+    /// must finish reading it (hash-table lookup, partition routing, span comparison) before the
+    /// next extraction. Hash-table code paths pass the filled span to the alternate lookup of
+    /// <see cref="CompositeColumnValueComparer"/>; an owned copy is made only on bucket insert.
+    /// </summary>
+    private static bool TryExtractKeyInto(
+        IReadOnlyDictionary<string, ColumnValue> row,
+        IReadOnlyList<string> keyColumns,
+        ColumnValue[] destination)
+    {
+        for (int i = 0; i < keyColumns.Count; i++)
+        {
+            if (!row.TryGetValue(keyColumns[i], out ColumnValue? v) || v.Type == ColumnType.Null)
+                return false;
+
+            destination[i] = v;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Extracts the merge-join key values from a row into a freshly allocated array.
     /// Returns null when any key column is absent or NULL (the row is excluded).
+    /// The merge-join callers retain the returned array across iterations (current-key runs),
+    /// so this owning form must not be replaced with the scratch-filling
+    /// <see cref="TryExtractKeyInto"/> there.
     /// </summary>
     private static ColumnValue[]? ExtractMergeKey(
         IReadOnlyDictionary<string, ColumnValue> row,
         IReadOnlyList<string> keyColumns)
     {
         ColumnValue[] key = new ColumnValue[keyColumns.Count];
-
-        for (int i = 0; i < keyColumns.Count; i++)
-        {
-            if (!row.TryGetValue(keyColumns[i], out ColumnValue? v) || v.Type == ColumnType.Null)
-                return null;
-
-            key[i] = v;
-        }
-
-        return key;
+        return TryExtractKeyInto(row, keyColumns, key) ? key : null;
     }
 
     /// <summary>
@@ -2681,16 +2653,6 @@ internal sealed class QueryJoinExecutor
         return 0;
     }
 
-    /// <summary>
-    /// Value-based equality comparer for <see cref="CompositeColumnValue"/> hash table keys.
-    ///
-    /// Neither <see cref="CompositeColumnValue"/> nor <see cref="ColumnValue"/> overrides
-    /// <c>Equals</c>/<c>GetHashCode</c> (both only implement <see cref="IComparable"/>), so
-    /// the default dictionary comparer uses reference equality and would match nothing. This
-    /// comparer hashes and compares by <c>Type + payload</c>, consistent with
-    /// <see cref="ColumnValue.CompareTo"/> for non-NULL values. NULL keys are excluded before
-    /// they reach the table so the comparer does not need null-equality semantics.
-    /// </summary>
     /// <summary>
     /// Carries the two pieces of mutable state that the index-nested-loop right-side probe
     /// needs to reuse across iterations of the outer left-row loop:
@@ -2720,7 +2682,30 @@ internal sealed class QueryJoinExecutor
         internal RowLayout? QualifiedLayout;
     }
 
-    private sealed class CompositeColumnValueComparer : IEqualityComparer<CompositeColumnValue>
+    /// <summary>
+    /// Value-based equality comparer for <see cref="CompositeColumnValue"/> hash table keys.
+    ///
+    /// Neither <see cref="CompositeColumnValue"/> nor <see cref="ColumnValue"/> overrides
+    /// <c>Equals</c>/<c>GetHashCode</c> (both only implement <see cref="IComparable"/>), so
+    /// the default dictionary comparer uses reference equality and would match nothing. This
+    /// comparer hashes and compares by <c>Type + payload</c>, consistent with
+    /// <see cref="ColumnValue.CompareTo"/> for non-NULL values. NULL keys are excluded before
+    /// they reach the table so the comparer does not need null-equality semantics.
+    ///
+    /// Implements the span alternate (<see cref="IAlternateEqualityComparer{TAlternate,T}"/>) so
+    /// build and probe loops can look a just-extracted key up as a <see cref="ReadOnlySpan{T}"/>
+    /// over a reused scratch array — no per-row key array or <see cref="CompositeColumnValue"/>
+    /// wrapper is allocated. An owned key (a defensive copy of the span, via <see cref="Create"/>)
+    /// is materialized only when a new bucket is inserted, so a stored key never aliases a
+    /// caller's scratch array. Span and object forms share one hash and one equality
+    /// implementation, so a span probe and a stored key always agree.
+    ///
+    /// Internal (not private) only so tests can differentially exercise span-vs-object lookup
+    /// parity for every key type; production callers outside this class must not use it.
+    /// </summary>
+    internal sealed class CompositeColumnValueComparer
+        : IEqualityComparer<CompositeColumnValue>,
+          IAlternateEqualityComparer<ReadOnlySpan<ColumnValue>, CompositeColumnValue>
     {
         public static readonly CompositeColumnValueComparer Instance = new();
 
@@ -2730,6 +2715,22 @@ internal sealed class QueryJoinExecutor
             if (x is null || y is null) return false;
             return Equals(x.Values, y.Values);
         }
+
+        /// <summary>
+        /// Materializes an owned, immutable key from a probe span. Called by the dictionary only
+        /// when a new bucket is inserted through the alternate lookup; the copy guarantees the
+        /// stored key does not alias the caller's reusable scratch array.
+        /// </summary>
+        public CompositeColumnValue Create(ReadOnlySpan<ColumnValue> alternate) =>
+            new(alternate.ToArray());
+
+        /// <summary>
+        /// Alternate-lookup equality between a probe span and a stored key. Delegates to the
+        /// span-span overload so the semantics (type match plus <see cref="ColumnValue.CompareTo"/>
+        /// per position) cannot drift from the object form.
+        /// </summary>
+        public bool Equals(ReadOnlySpan<ColumnValue> alternate, CompositeColumnValue other) =>
+            Equals(alternate, other.Values);
 
         /// <summary>
         /// Span-based key equality — lets callers compare join keys without wrapping either operand in a
