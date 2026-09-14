@@ -113,6 +113,7 @@ internal sealed class JoinQueryPlanner
         else
         {
             orderedSource = _options.CostBasedJoinOrderEnabled && _stats is not null
+                    && AllBaseTableEstimatesLoaded(database, bound)
                 ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options)
                 : JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
         }
@@ -147,6 +148,32 @@ internal sealed class JoinQueryPlanner
                     JoinAliasOrder: CollectAliasOrder(orderedSource)));
 
         return plan;
+    }
+
+    /// <summary>
+    /// True when every base table of the query has a loaded row-count estimate. Cost-based
+    /// join ordering and hash-join build-side selection compare per-table estimates against
+    /// each other; while a table's statistics are still unloaded, its estimate is the fixed
+    /// default row count, and comparing a real count against that default systematically
+    /// mis-sizes the unloaded side (a tiny table impersonates 10,000 rows, so the genuinely
+    /// small analyzed side becomes the build/probe backwards). Until every estimate is real,
+    /// those comparisons degrade to the declared-order defaults. Calling
+    /// <see cref="StatisticsManager.GetRowCountEstimate"/> here also fires the background
+    /// stats load for every table (no early exit, so the loads run in parallel), and a
+    /// completed load bumps the table's statistics generation, which invalidates plans cached
+    /// during the window — the degradation heals itself.
+    /// </summary>
+    private bool AllBaseTableEstimatesLoaded(DatabaseDescriptor database, BoundSelectQuery bound)
+    {
+        bool all = true;
+
+        foreach (BoundTableSource s in bound.Sources)
+        {
+            if (_stats!.GetRowCountEstimate(database, s.Table) is null)
+                all = false;
+        }
+
+        return all;
     }
 
     // Recursively collects (TableId, SchemaVersion) pairs from every table referenced in
@@ -644,6 +671,13 @@ internal sealed class JoinQueryPlanner
     /// <see cref="HashJoinBuildSide.Right"/> (declared right = build), which matches the
     /// prior convention and is always safe.
     ///
+    /// The comparison runs only when both sides' leaf estimates are real. While a leaf
+    /// table's statistics are still unloaded its estimate is the fixed default row count, and
+    /// a real count on the other side then always "wins" the small-side contest — the join
+    /// builds the genuinely large side and probes the small one, which also starves the
+    /// broadcast probe (the probe must be the large, span-split side). Interior nodes keep
+    /// their fixed-constant estimates by design.
+    ///
     /// The rule: if the left-side estimated row count is strictly less than the right-side
     /// row count, choose left as the build side (smaller hash table, smaller memory
     /// footprint). Otherwise choose right.
@@ -658,11 +692,33 @@ internal sealed class JoinQueryPlanner
         if (stats is null || rightSource.Table is null)
             return HashJoinBuildSide.Right;
 
+        if (stats.GetRowCountEstimate(database, rightSource.Table.Table) is null
+            || !LeafEstimateGrounded(leftNode, database, stats))
+            return HashJoinBuildSide.Right;
+
         long rightRows = EstimateRightRows(rightSource, database, stats, rightScanFilter);
         long leftRows  = EstimatePhysicalNodeRows(leftNode, database, stats);
 
         return leftRows < rightRows ? HashJoinBuildSide.Left : HashJoinBuildSide.Right;
     }
+
+    /// <summary>
+    /// True when <paramref name="node"/>'s row estimate is not the unloaded-statistics
+    /// default: a leaf scan whose table has a loaded row count, a point lookup (exactly one
+    /// row by construction), or an interior/derived node, whose estimates are fixed constants
+    /// by design and are not affected by statistics loads. Used by
+    /// <see cref="ChooseBuildSide"/> to avoid comparing a real count against the default.
+    /// </summary>
+    private static bool LeafEstimateGrounded(
+        PhysicalPlanNode node,
+        DatabaseDescriptor database,
+        StatisticsManager stats) => node switch
+    {
+        TableScanNode { BoundSource: { } bound }      => stats.GetRowCountEstimate(database, bound.Table) is not null,
+        IndexRangeScanNode { BoundSource: { } bound } => stats.GetRowCountEstimate(database, bound.Table) is not null,
+        IndexLookupNode                               => true,
+        _                                             => true,
+    };
 
     /// <summary>
     /// Returns the estimated row count for the right side of a join, applying the pushed-down

@@ -42,8 +42,8 @@ public class HashJoinKeyLookupBenchmarks
     private const int DistinctKeys = 1_000;
     private const int SmallRows = 64;
 
-    private static readonly QueryJoinExecutor.CompositeColumnValueComparer Comparer =
-        QueryJoinExecutor.CompositeColumnValueComparer.Instance;
+    private static readonly CompositeColumnValueComparer Comparer =
+        CompositeColumnValueComparer.Instance;
 
     // Per-row key values for each workload, pre-materialized so the measured loops do the
     // same reference copies the executor's key extraction does.

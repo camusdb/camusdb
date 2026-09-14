@@ -148,11 +148,13 @@ public sealed class StatisticsManager
     // ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns this node's generation of the last histogram/NDV publish for <paramref name="table"/>
-    /// (0 when statistics were never published on this node). The plan cache includes this value in
-    /// its dependency fingerprint so that an ANALYZE invalidates cached access-path decisions —
-    /// without it, the first plan per query shape would be frozen forever regardless of stats
-    /// refreshes. Per-node by design: caches and stats entries are both node-local.
+    /// Returns this node's generation of the last statistics change for <paramref name="table"/>:
+    /// a histogram/NDV publish, or the completion of the background load of the persisted blob
+    /// (0 when neither happened on this node). The plan cache includes this value in its
+    /// dependency fingerprint so that an ANALYZE — and the arrival of a table's first real row
+    /// estimate — invalidates cached access-path and join-shape decisions; without it, the first
+    /// plan per query shape would be frozen forever regardless of stats refreshes. Per-node by
+    /// design: caches and stats entries are both node-local.
     /// </summary>
     public long GetAnalyzeGeneration(DatabaseDescriptor database, TableDescriptor table)
     {
@@ -1772,6 +1774,12 @@ public sealed class StatisticsManager
                 entry.FlushedMutations = Math.Max(0, loaded.MutationsSinceAnalyze);
                 if (loaded.IndexEntryCounts is not null)
                     entry.FlushedIndexEntries = new Dictionary<string, long>(loaded.IndexEntryCounts, StringComparer.Ordinal);
+
+                // A plan built while this table's estimates were still unloaded compared its
+                // neighbours' real counts against the fixed default row count. Bumping the
+                // statistics generation invalidates any such plan cached during the load
+                // window, so the next planning of the same shape sees the real numbers.
+                Volatile.Write(ref entry.AnalyzeGeneration, Interlocked.Increment(ref globalAnalyzeGeneration));
             }
 
             entry.Loaded = true;
@@ -1969,14 +1977,14 @@ public sealed class StatisticsManager
     /// <summary>
     /// Counts how many times the Grace hash join has fallen back to nested-loop for a single
     /// skewed partition that could not be split below the threshold within the recursion depth
-    /// limit. Incremented by <c>QueryJoinExecutor.JoinPartitionAsync</c>. Test-only; not thread-safe.
+    /// limit. Incremented by <c>GraceHashJoinOperator.JoinPartitionAsync</c>. Test-only; not thread-safe.
     /// </summary>
     internal int HashJoinNljPartitionFallbackCount { get; set; }
 
     /// <summary>
     /// Counts how many times a hash join routed to the Grace/hybrid partitioning path because the
     /// build side exceeded <c>CamusDBOptions.SpillEffectiveThreshold</c> with spill enabled.
-    /// Incremented by <c>QueryJoinExecutor.GraceHashJoinAsync</c>. Lets a test prove the Grace path
+    /// Incremented by <c>GraceHashJoinOperator.GraceHashJoinAsync</c>. Lets a test prove the Grace path
     /// was actually taken (vs the in-memory hash join) independent of result values. Test-only;
     /// not thread-safe.
     /// </summary>

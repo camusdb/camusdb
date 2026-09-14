@@ -1274,7 +1274,12 @@ internal sealed class SelectStatementExecutor
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Query fragment database id mismatch: resolved '{database.Id}', coordinator planned '{request.DatabaseId}'");
 
-        TableDescriptor table = await database.TableDescriptors[request.TableName].ConfigureAwait(false);
+        // Open through the TableOpener, never the raw descriptor dictionary: descriptors are
+        // populated lazily per node on first local use, and the node serving a fragment has
+        // often never touched this table (a freshly split span's leader is the common case).
+        // The opener loads the descriptor on demand; the raw indexer would throw and silently
+        // demote every broadcast probe on this node to the coordinator's local fallback.
+        TableDescriptor table = await context.TableOpener.Open(database, request.TableName).ConfigureAwait(false);
 
         if (!string.Equals(table.Id, request.TableId, StringComparison.Ordinal))
             throw new CamusDBException(

@@ -53,6 +53,18 @@ public sealed class QueryPlan
     /// </summary>
     public string? DistributionSkipReason { get; internal set; }
 
+    /// <summary>
+    /// Why a hash join in this plan did NOT run its probe as broadcast fragments, when
+    /// distributed execution is on and the broadcast planner declined at execution time. Null
+    /// when no hash join ran, when the broadcast probe engaged, or when the feature is off
+    /// entirely (off is "never considered", not a decline). A declined broadcast is silent by
+    /// design — the local probe is always correct — so this field, plus the Debug-level log
+    /// line written with it, is the only signal that separates "declined" from "never
+    /// eligible". Set during execution, so plain EXPLAIN cannot carry it; EXPLAIN ANALYZE does
+    /// not support joins yet.
+    /// </summary>
+    public string? BroadcastJoinSkipReason { get; internal set; }
+
     /// <summary>Row filter applied during scan execution after index selection.</summary>
     public NodeAst? ExecutionFilter { get; internal set; }
 

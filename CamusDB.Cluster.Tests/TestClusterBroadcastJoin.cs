@@ -262,6 +262,14 @@ public sealed class TestClusterBroadcastJoin
             Assert.AreEqual(reference, Shape(await RunSql(cluster.Nodes[0], db, joinSql)),
                 "Node 0: broadcast join must reproduce its own classic join sequence exactly");
 
+            // Exactly one query has run since the reset, so its remote fragments together can
+            // never exceed the query's matched probe rows: a fragment ships one frame per
+            // MATCHED probe row — never the span's full row count, and never one frame per
+            // output pair. (Asserted here, per query: every node's query ships fragments, so
+            // a cumulative bound after the loop below would be query-count dependent.)
+            Assert.LessOrEqual(cluster.FragmentTransport.RowsReturned, (long)matchedFacts,
+                "Remote join fragments must ship only matched probe rows, once each");
+
             // Other nodes may plan a different join order/build side (their statistics
             // differ), which legally reorders inner-join output — compare as multisets.
             List<(string FactId, long Val, string Name)> canonicalReference = Canonical(reference);
@@ -276,11 +284,6 @@ public sealed class TestClusterBroadcastJoin
             Assert.Greater(cluster.FragmentTransport.ExecutedJoinCount, 0,
                 "At least one probe span must have executed as a broadcast-join fragment on its leader " +
                 "(every node cannot lead every span)");
-
-            // A remote probe fragment ships one frame per MATCHED probe row — never the
-            // span's full row count, and never one frame per output pair.
-            Assert.LessOrEqual(cluster.FragmentTransport.RowsReturned, (long)matchedFacts,
-                "Remote join fragments must ship only matched probe rows, once each");
 
             // Unfiltered probe (no WHERE): broadcast must also engage and stay exact.
             const string unfilteredSql =

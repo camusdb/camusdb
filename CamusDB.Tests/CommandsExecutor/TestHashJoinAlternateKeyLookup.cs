@@ -26,8 +26,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// </summary>
 internal sealed class TestHashJoinAlternateKeyLookup
 {
-    private static QueryJoinExecutor.CompositeColumnValueComparer Comparer =>
-        QueryJoinExecutor.CompositeColumnValueComparer.Instance;
+    private static CompositeColumnValueComparer Comparer =>
+        CompositeColumnValueComparer.Instance;
 
     /// <summary>
     /// Asserts that the object lookup and the span lookup return the same hit/miss result and,

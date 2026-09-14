@@ -593,12 +593,12 @@ public sealed class TestHashJoinSpill : SharedNodeBaseTest
 
         // Take a group of distinct keys that all land in the same bucket at depth 0.
         List<ColumnValue[]> collidingAtLevel0 = keys
-            .GroupBy(k => QueryJoinExecutor.PartitionIndex(k, K, seed: 0))
+            .GroupBy(k => GraceHashJoinOperator.PartitionIndex(k, K, seed: 0))
             .First(g => g.Count() >= 8)
             .ToList();
 
         int distinctBucketsAtLevel1 = collidingAtLevel0
-            .Select(k => QueryJoinExecutor.PartitionIndex(k, K, seed: 1))
+            .Select(k => GraceHashJoinOperator.PartitionIndex(k, K, seed: 1))
             .Distinct()
             .Count();
 
