@@ -31,6 +31,28 @@ public sealed class ErrorClassifierTests
         Assert.That(code, Is.EqualTo("IOException"));
     }
 
+    /// <summary>
+    /// The driver's own "could not connect" code (CamusDB.Client 0.12.3): the request was never sent,
+    /// so it is retryable and never indeterminate, even when the failing call was the commit. Before
+    /// the client raised it, a killed leader produced ~28,000 connection-refused failures per second
+    /// under the generic CADB0000, all counted as domain errors.
+    /// </summary>
+    [Test]
+    public void EndpointUnreachableIsTransientBeforeAndDuringCommit()
+    {
+        CamusException ex = new(CamusClientErrorCodes.EndpointUnreachable, "Endpoint https://localhost:16095 could not be reached: Error connecting to subchannel.");
+
+        (OperationStatus before, string code) = ErrorClassifier.Classify(ex, commitSubmitted: false);
+        Assert.That(before, Is.EqualTo(OperationStatus.Transient));
+        Assert.That(code, Is.EqualTo(CamusClientErrorCodes.EndpointUnreachable));
+
+        (OperationStatus during, _) = ErrorClassifier.Classify(ex, commitSubmitted: true);
+        Assert.That(during, Is.EqualTo(OperationStatus.Transient), "a commit that was never sent cannot have landed");
+
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentRead(ex), Is.True);
+        Assert.That(ErrorClassifier.DescribeReadFailure(ex, TimeSpan.FromSeconds(1)), Does.Contain("could not be reached"));
+    }
+
     [Test]
     public void TransportFailureDuringCommitIsIndeterminate()
     {
@@ -273,7 +295,7 @@ public sealed class IdempotentReadRetryTests
     {
         // A permanent error must still end the read, or a broken query burns the whole budget.
         Assert.That(
-            ErrorClassifier.IsRetryableForIdempotentRead(new CamusException("CADB0001", "table does not exist")),
+            ErrorClassifier.IsRetryableForIdempotentRead(new CamusException("CADB0011", "table does not exist")),
             Is.False);
     }
 }

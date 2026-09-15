@@ -68,7 +68,7 @@ public sealed class ReadOperation
         catch (Exception ex)
         {
             (OperationStatus status, string code) = ErrorClassifier.Classify(ex);
-            return OperationResult.Failure(OperationKind.Read, status, code);
+            return OperationResult.Failure(OperationKind.Read, status, code, ErrorClassifier.MessageOf(ex));
         }
     }
 }

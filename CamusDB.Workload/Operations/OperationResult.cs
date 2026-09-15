@@ -42,7 +42,9 @@ public enum OperationStatus
 /// The result of one submitted operation. Latency fields are filled by the operation itself so a
 /// write can report its begin/read/update/commit sub-stage split; the whole-operation latency is
 /// timed by the scheduler around <c>ExecuteAsync</c>. <see cref="ErrorCode"/> is a stable CADBxxxx
-/// (or a short synthetic class) — never a raw message — so error aggregation stays bounded.
+/// (or a short synthetic class) — never a raw message — so error aggregation stays bounded;
+/// <see cref="ErrorMessage"/> is the sanitized, truncated text kept only for the handful of samples
+/// the error artifact retains per code, so a run can say <i>which</i> CADB0000 it saw.
 /// </summary>
 public readonly record struct OperationResult(
     OperationKind Kind,
@@ -51,12 +53,13 @@ public readonly record struct OperationResult(
     double BeginMs,
     double ReadMs,
     double UpdateMs,
-    double CommitMs)
+    double CommitMs,
+    string? ErrorMessage = null)
 {
     public bool IsSuccess => Status == OperationStatus.Ok;
 
     public static OperationResult ReadOk() => new(OperationKind.Read, OperationStatus.Ok, null, 0, 0, 0, 0);
 
-    public static OperationResult Failure(OperationKind kind, OperationStatus status, string? code)
-        => new(kind, status, code, 0, 0, 0, 0);
+    public static OperationResult Failure(OperationKind kind, OperationStatus status, string? code, string? message = null)
+        => new(kind, status, code, 0, 0, 0, 0, message);
 }

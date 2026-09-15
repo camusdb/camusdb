@@ -137,8 +137,8 @@ public sealed class TransferOperation : IWriteOperation
             (OperationStatus status, string code) = ErrorClassifier.Classify(ex);
             // A begin failure never touched a row; retry if it was a conflict, else surface it.
             return status == OperationStatus.Conflict
-                ? (false, OperationResult.Failure(OperationKind.Write, status, code))
-                : (true, OperationResult.Failure(OperationKind.Write, status, code));
+                ? (false, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)))
+                : (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
         }
 
         bool commitSubmitted = false;
@@ -165,7 +165,7 @@ public sealed class TransferOperation : IWriteOperation
                 // conserved. Leave it for the server's reaper and carry the ambiguity into reconciliation.
                 System.Threading.Interlocked.Increment(ref _indeterminateTxns);
                 _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Indeterminate, code);
-                return (true, OperationResult.Failure(OperationKind.Write, status, code));
+                return (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
             }
 
             try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
@@ -176,8 +176,8 @@ public sealed class TransferOperation : IWriteOperation
                 status == OperationStatus.Conflict ? Metrics.TransferOutcome.ConflictRetry : Metrics.TransferOutcome.Error,
                 code);
             return status == OperationStatus.Conflict
-                ? (false, OperationResult.Failure(OperationKind.Write, status, code))
-                : (true, OperationResult.Failure(OperationKind.Write, status, code));
+                ? (false, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)))
+                : (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
         }
     }
 

@@ -47,6 +47,12 @@ public static class ErrorClassifier
         (OperationStatus status, string code) = Classify(ex);
         if (!commitSubmitted)
             return (status, code);
+        // The driver could not connect to the endpoint at all, so the commit request was never sent:
+        // a definite non-commit even mid-finalize, and the one transport failure that is never
+        // indeterminate. The client raises it only for connect-level failures (refused, no route,
+        // connect timeout), never for a call that was sent and then lost.
+        if (ex is CamusException unreachable && unreachable.Code == CamusClientErrorCodes.EndpointUnreachable)
+            return (status, code);
         if (ex is not CamusException camus || CarriesNoVerdict(camus))
             return (OperationStatus.Indeterminate, code);
         return (status, code);
@@ -171,12 +177,12 @@ public static class ErrorClassifier
 
         if (ex is CamusException camus)
         {
-            if (!string.IsNullOrEmpty(camus.Code) && camus.Code != InternalUnmapped)
+            if (!string.IsNullOrEmpty(camus.Code) && camus.Code != InternalUnmapped && camus.Code != CamusClientErrorCodes.EndpointUnreachable)
                 return $"the server answered {camus.Code} — {camus.Message}";
             if (camus.Message.Contains("deadline", StringComparison.OrdinalIgnoreCase))
                 return $"the request exceeded the client's per-request deadline after {lastAttempt.TotalSeconds:F1}s " +
                        "(the aggregate is slower than the deadline; the cluster answered other requests) — " + detail;
-            if (IsTransportFailure(camus) || camus.Code == InternalUnmapped)
+            if (IsTransportFailure(camus) || camus.Code == InternalUnmapped || camus.Code == CamusClientErrorCodes.EndpointUnreachable)
                 return $"the endpoint could not be reached (connection refused / no route / transport dropped) — {detail}";
             return detail;
         }
@@ -191,6 +197,16 @@ public static class ErrorClassifier
         return detail;
     }
 
+    /// <summary>A bounded, single-line rendering of an exception for the error artifact's samples:
+    /// the type and the first 200 characters of its message. Never used for classification.</summary>
+    public static string MessageOf(Exception ex)
+    {
+        string text = (ex.Message ?? "").Replace('\n', ' ').Replace('\r', ' ');
+        if (text.Length > 200)
+            text = text[..200] + "…";
+        return ex is CamusException ? text : $"{ex.GetType().Name}: {text}";
+    }
+
     public static (OperationStatus Status, string Code) Classify(Exception ex)
     {
         if (ex is CamusException camus)
@@ -198,7 +214,7 @@ public static class ErrorClassifier
             string code = string.IsNullOrEmpty(camus.Code) ? "CADB_UNKNOWN" : camus.Code;
             if (code is LockConflict or MustRetry or LifetimeExceeded || SerializableRetryHelper.IsRetryable(camus))
                 return (OperationStatus.Conflict, code);
-            if (IsTransportFailure(camus))
+            if (code == CamusClientErrorCodes.EndpointUnreachable || IsTransportFailure(camus))
                 return (OperationStatus.Transient, code);
             return (OperationStatus.DomainError, code);
         }

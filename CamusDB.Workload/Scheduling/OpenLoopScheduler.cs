@@ -143,7 +143,7 @@ public sealed class OpenLoopScheduler
             {
                 (Operations.OperationStatus status, string code) = Operations.ErrorClassifier.Classify(ex);
                 metrics.RecordResult(
-                    Operations.OperationResult.Failure(kind, status, code), 0);
+                    Operations.OperationResult.Failure(kind, status, code, Operations.ErrorClassifier.MessageOf(ex)), 0);
             }
         }
         finally

@@ -80,7 +80,7 @@ public sealed class ClosedLoopScheduler
                 if (metrics is not null)
                 {
                     (Operations.OperationStatus status, string code) = Operations.ErrorClassifier.Classify(ex);
-                    metrics.RecordResult(Operations.OperationResult.Failure(kind, status, code), 0);
+                    metrics.RecordResult(Operations.OperationResult.Failure(kind, status, code, Operations.ErrorClassifier.MessageOf(ex)), 0);
                 }
             }
             finally

@@ -101,7 +101,7 @@ public sealed class WriteOperation : IWriteOperation
         catch (Exception ex)
         {
             (OperationStatus status, string code) = ErrorClassifier.Classify(ex);
-            return OperationResult.Failure(OperationKind.Write, status, code);
+            return OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex));
         }
 
         // False until control reaches the commit call itself. A SELECT/UPDATE failure — even one thrown
@@ -156,7 +156,7 @@ public sealed class WriteOperation : IWriteOperation
                 // rejected or race the in-flight commit, so the transaction is left for the server's
                 // reaper/finalizer and the ambiguity is carried into reconciliation instead.
                 System.Threading.Interlocked.Increment(ref _indeterminateTxns);
-                return OperationResult.Failure(OperationKind.Write, status, code);
+                return OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex));
             }
 
             try
@@ -168,7 +168,7 @@ public sealed class WriteOperation : IWriteOperation
                 // A rollback failure does not change the operation's classification; the transaction
                 // is abandoned and the server's reaper/finalizer resolves it.
             }
-            return OperationResult.Failure(OperationKind.Write, status, code);
+            return OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex));
         }
     }
 

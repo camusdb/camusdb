@@ -47,12 +47,23 @@ public sealed class ResultWriter
     private static string RenderErrors(ErrorSampler errors)
     {
         var snapshot = errors.Snapshot();
+        var classes = errors.Classes();
         var payload = new
         {
             total = errors.TotalCount(),
             byCode = snapshot.ToDictionary(
                 kv => kv.Key,
-                kv => new { count = kv.Value.Count, samples = kv.Value.Samples }),
+                kv => new
+                {
+                    count = kv.Value.Count,
+                    samples = kv.Value.Samples,
+                    // Every message shape seen under the code with its count, most frequent first —
+                    // the samples above are only the first five failures, which after a fault are
+                    // all one shape (the in-flight set) and say nothing about the thousands after.
+                    classes = classes.TryGetValue(kv.Key, out var cls)
+                        ? cls.Select(c => new { count = c.Count, sample = c.Sample }).ToList()
+                        : [],
+                }),
         };
         return JsonSerializer.Serialize(payload, Json);
     }

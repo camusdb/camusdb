@@ -129,6 +129,8 @@ public sealed class RunMetrics
             case OperationStatus.DomainError: Interlocked.Increment(ref _domainErrors); break;
             default: Interlocked.Increment(ref _internalErrors); break;
         }
-        Errors.Record(result.ErrorCode ?? "UNKNOWN", $"{result.Kind}:{result.Status}");
+        Errors.Record(
+            result.ErrorCode ?? "UNKNOWN",
+            result.ErrorMessage is null ? $"{result.Kind}:{result.Status}" : $"{result.Kind}:{result.Status} — {result.ErrorMessage}");
     }
 }
