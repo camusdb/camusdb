@@ -138,25 +138,15 @@ public sealed class ClusterSettingsService : IAsyncDisposable
     {
         await sharedNode.WaitUntilStartedAsync(cancellationToken).ConfigureAwait(false);
 
-        long generationBefore = await ReadGenerationAsync(cancellationToken).ConfigureAwait(false);
+        // Every read below hash-routes the _system bucket and so usually has to reach a peer. A node
+        // that restarts into a cluster mid-election — the successor of a killed leader, a peer still
+        // booting — gets a transport deadline or a MustRetry back, and that is a blip to wait out, not
+        // a reason to die: an unhandled fault here escapes Program.Main and kills the process. Same
+        // policy as the catalog and registry scans (StartupLoadRetry): the budget is the discriminator.
+        long generationBefore = await RunBootStepAsync(
+            () => ReadGenerationAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
 
-        await overlaySync.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await ScanOverlayLockedAsync(cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            overlaySync.Release();
-        }
-
-        busSubscription = sharedNode.RegisterClusterSettingsApply(
-            (partition, entry) => OnLogEntryAsync(entry),
-            (partition, entry) => OnLogEntryAsync(entry),
-            onRestoreFinished: () => RepublishAsync());
-
-        long generationAfter = await ReadGenerationAsync(cancellationToken).ConfigureAwait(false);
-        if (generationAfter != generationBefore)
+        await RunBootStepAsync(async () =>
         {
             await overlaySync.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -167,10 +157,60 @@ public sealed class ClusterSettingsService : IAsyncDisposable
             {
                 overlaySync.Release();
             }
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
+
+        busSubscription = sharedNode.RegisterClusterSettingsApply(
+            (partition, entry) => OnLogEntryAsync(entry),
+            (partition, entry) => OnLogEntryAsync(entry),
+            onRestoreFinished: () => RepublishAsync());
+
+        long generationAfter = await RunBootStepAsync(
+            () => ReadGenerationAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
+        if (generationAfter != generationBefore)
+        {
+            await RunBootStepAsync(async () =>
+            {
+                await overlaySync.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await ScanOverlayLockedAsync(cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    overlaySync.Release();
+                }
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
         }
 
         await RepublishAsync().ConfigureAwait(false);
         started = true;
+    }
+
+    /// <summary>
+    /// Runs one boot step under the startup retry policy: any fault except cancellation is retried
+    /// every <see cref="CommandsExecutor.Controllers.StartupLoadRetry.RetryDelayMs"/> until the
+    /// budget elapses, then the last fault is surfaced unchanged. See
+    /// <see cref="CommandsExecutor.Controllers.StartupLoadRetry"/> for why the budget, not the
+    /// exception type, decides.
+    /// </summary>
+    internal static async Task<T> RunBootStepAsync<T>(
+        Func<Task<T>> step, CancellationToken cancellationToken, int budgetMs = CommandsExecutor.Controllers.StartupLoadRetry.MaxWaitMs)
+    {
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+
+        while (true)
+        {
+            try
+            {
+                return await step().ConfigureAwait(false);
+            }
+            catch (Exception ex) when (CommandsExecutor.Controllers.StartupLoadRetry.ShouldRetry(ex, sw.ElapsedMilliseconds, budgetMs))
+            {
+                await Task.Delay(CommandsExecutor.Controllers.StartupLoadRetry.RetryDelayMs, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>Current overlay entries — what the cluster carries beyond local configuration.</summary>
@@ -460,8 +500,25 @@ public sealed class ClusterSettingsService : IAsyncDisposable
             HLCTimestamp.Zero, GenerationKey, -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
 
-        // revision + 1 so "never written" (0) stays distinguishable from the first write (revision 0).
-        return type == KeyValueResponseType.Get && entry is not null ? entry.Revision + 1 : 0;
+        return GenerationFromResponse(type, entry);
+    }
+
+    /// <summary>
+    /// The generation a read answered with. <c>revision + 1</c> so "never written" (0) stays
+    /// distinguishable from the first write (revision 0). A non-answer — <c>MustRetry</c> from a
+    /// partition between leaders, <c>Errored</c>, anything but a value or a definite absence — is
+    /// thrown rather than read as "never written": treating it as generation 0 would skip the
+    /// post-subscription re-scan and let a change that committed during boot go unseen.
+    /// </summary>
+    internal static long GenerationFromResponse(KeyValueResponseType type, ReadOnlyKeyValueEntry? entry)
+    {
+        if (type == KeyValueResponseType.Get && entry is not null)
+            return entry.Revision + 1;
+        if (type == KeyValueResponseType.DoesNotExist || (type == KeyValueResponseType.Get && entry is null))
+            return 0;
+
+        throw new InvalidOperationException(
+            $"cluster-settings generation read did not answer: {type} (the partition may be between leaders; retried at boot)");
     }
 
     /// <summary>Replaces the overlay with the persisted checkpoint. Caller holds <see cref="overlaySync"/>.</summary>

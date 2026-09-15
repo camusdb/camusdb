@@ -6,6 +6,7 @@
  */
 
 using System.Diagnostics;
+using Grpc.Core;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -67,6 +68,71 @@ internal sealed class KahunaRetryPolicy
     internal static int RetryDelayMs(int attempt) => attempt < 6 ? 1 << attempt : MaxRetryDelayMs;
 
     /// <summary>
+    /// Whether a Kahuna call failed because the node it was forwarded to could not be reached, as
+    /// opposed to answering. Kahuna forwards a key-value operation whose partition leader is
+    /// another node over its inter-node gRPC streams, and when that node is gone the forwarding
+    /// throws the raw transport <see cref="RpcException"/> into this process (its transaction
+    /// start/commit/rollback forwarding returns <c>MustRetry</c> instead; the key-value paths do
+    /// not). Left alone that exception reached the RPC boundary as a generic internal error: run
+    /// recorded ~8,000 <c>Error connecting to subchannel … Connection refused</c>
+    /// failures per surviving node in the two seconds between a leader's SIGKILL and the placement
+    /// moving, every one returned to a client as <c>CADB0000</c> and retried at once. The truthful
+    /// contract is the one <c>MustRetry</c> already has: the operation did not happen (a refused
+    /// connection sends nothing; a registered operation replays idempotently), so it is retried on
+    /// the same budget and, past it, surfaced as <c>TransactionMustRetry</c> like any other
+    /// unconfirmed answer.
+    /// </summary>
+    /// <remarks>
+    /// The status set mirrors Kahuna's own <c>InterNodeTransportFailure</c>: <c>Unavailable</c> and
+    /// <c>DeadlineExceeded</c> outright, <c>Cancelled</c> and <c>Internal</c> only when they wrap a
+    /// transport cause (a disposed inter-node stream, a socket error) rather than an application
+    /// error. A cancelled caller is never retried: its token is the reason, not the transport.
+    /// </remarks>
+    internal static bool IsTransientTransportFailure(RpcException ex, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested)
+            return false;
+
+        return ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded
+            || (ex.StatusCode is StatusCode.Cancelled or StatusCode.Internal && HasTransportCause(ex));
+    }
+
+    private static bool HasTransportCause(RpcException ex)
+        => IsTransportException(ex.Status.DebugException) || IsTransportException(ex.InnerException)
+           || ex.Status.Detail.Contains("stream write failed", StringComparison.OrdinalIgnoreCase)
+           || ex.Status.Detail.Contains("call disposed", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsTransportException(Exception? ex)
+    {
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is System.Net.Http.HttpRequestException or IOException or System.Net.Sockets.SocketException
+                or ObjectDisposedException)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Runs one attempt of a Kahuna call, answering <paramref name="transient"/> — the caller's
+    /// <c>MustRetry</c>-shaped tuple — when the call failed at the transport instead of answering.
+    /// Every other exception propagates unchanged.
+    /// </summary>
+    private static async Task<T> InvokeOrTransient<T>(Func<Task<T>> fn, T transient, CancellationToken ct)
+    {
+        try
+        {
+            return await fn().ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsTransientTransportFailure(ex, ct))
+        {
+            ServerDiagnostics.AddKvRetryWait("transport_unreachable");
+            return transient;
+        }
+    }
+
+    /// <summary>
     /// The wall-clock instant, as a <see cref="Stopwatch"/> timestamp, past which a deadline-aware
     /// retry loop gives up. Read once at the top of a loop so the whole loop shares one deadline.
     /// </summary>
@@ -85,7 +151,7 @@ internal sealed class KahunaRetryPolicy
 
         do
         {
-            type = await fn().ConfigureAwait(false);
+            type = await InvokeOrTransient(fn, KeyValueResponseType.MustRetry, ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 ServerDiagnostics.AddKvRetryWait("mustretry_595");
@@ -113,7 +179,7 @@ internal sealed class KahunaRetryPolicy
 
         do
         {
-            (type, entry) = await fn().ConfigureAwait(false);
+            (type, entry) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, null), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 ServerDiagnostics.AddKvRetryWait("mustretry_2560");
@@ -139,7 +205,7 @@ internal sealed class KahunaRetryPolicy
 
         do
         {
-            (type, revision, ts) = await fn().ConfigureAwait(false);
+            (type, revision, ts) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, 0L, HLCTimestamp.Zero), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 ServerDiagnostics.AddKvRetryWait("mustretry_2583");
@@ -165,7 +231,7 @@ internal sealed class KahunaRetryPolicy
 
         do
         {
-            (type, endpoint, durability) = await fn().ConfigureAwait(false);
+            (type, endpoint, durability) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, "", KeyValueDurability.Persistent), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 ServerDiagnostics.AddKvRetryWait("mustretry_2606");
@@ -198,7 +264,7 @@ internal sealed class KahunaRetryPolicy
 
         do
         {
-            (type, revision, ts) = await fn().ConfigureAwait(false);
+            (type, revision, ts) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, 0L, HLCTimestamp.Zero), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
@@ -231,7 +297,7 @@ internal sealed class KahunaRetryPolicy
 
         do
         {
-            (type, endpoint, durability, holder) = await fn().ConfigureAwait(false);
+            (type, endpoint, durability, holder) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, "", KeyValueDurability.Persistent, HLCTimestamp.Zero), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
                 if (Stopwatch.GetTimestamp() >= deadline)
