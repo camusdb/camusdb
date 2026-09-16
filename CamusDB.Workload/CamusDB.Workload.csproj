@@ -11,7 +11,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="CamusDB.Client" Version="0.12.3-unreach.4" />
+        <PackageReference Include="CamusDB.Client" Version="0.12.3" />
         <PackageReference Include="CommandLineParser" Version="2.9.1" />
     </ItemGroup>
 
