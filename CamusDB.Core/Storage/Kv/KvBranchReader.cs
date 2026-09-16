@@ -204,19 +204,22 @@ internal sealed class KvBranchReader
 
         while (pending.Count > 0)
         {
-            List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)> results =
-                await kahuna.LocateAndTryGetManyValues(
-                    txId,
-                    readTimestamp,
-                    pending,
-                    cancellationToken,
-                    coordinatorKey,
-                    operationId
-                ).ConfigureAwait(false);
+            // null: the forward was refused by the dead partition leader, so no key was answered — every
+            // pending key stays pending and the unchanged batch is resent under the same id.
+            List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)>? results =
+                await KahunaRetryPolicy.InvokeOrUnanswered(
+                    () => kahuna.LocateAndTryGetManyValues(
+                        txId,
+                        readTimestamp,
+                        pending,
+                        cancellationToken,
+                        coordinatorKey,
+                        operationId),
+                    cancellationToken).ConfigureAwait(false);
 
-            List<(string key, long revision, KeyValueDurability durability)>? nextPending = null;
+            List<(string key, long revision, KeyValueDurability durability)>? nextPending = results is null ? new(pending) : null;
 
-            foreach ((KeyValueResponseType responseType, string key, _, ReadOnlyKeyValueEntry? entry) in results)
+            foreach ((KeyValueResponseType responseType, string key, _, ReadOnlyKeyValueEntry? entry) in results ?? [])
             {
                 if (responseType == KeyValueResponseType.Aborted)
                     throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,

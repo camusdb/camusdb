@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.App.Services;
 using CamusDB.Grpc;
 using Kahuna.Shared.KeyValue;
@@ -950,6 +951,21 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 Error = new BatchError { Code = ex.Code, Message = ex.Message },
             }, ct).ConfigureAwait(false);
         }
+        catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, ct))
+        {
+            // A Kahuna forward refused by a dead partition leader that no in-server retry absorbed is
+            // answered as the retryable code the client replays from BeginAsync, never as CADB0000: the
+            // failing endpoint is a healthy follower, and a generic internal error on it teaches the
+            // client's endpoint health exactly the wrong lesson.
+            CamusDBException mapped = KahunaRetryPolicy.ToMustRetry(ex, "statement");
+            outcome = ClassifyOutcome(mapped.Code);
+            CommandFailureLog.LogFailure(logger, mapped);
+            await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+            {
+                RequestId = req.RequestId,
+                Error = new BatchError { Code = mapped.Code, Message = mapped.Message },
+            }, ct).ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
             outcome = ServerDiagnostics.Tags.Outcome.InternalError;
@@ -1371,6 +1387,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         try
         {
             return await body().ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, CancellationToken.None))
+        {
+            // Same rule as the batch path: an unreachable Kahuna partition leader is the client's
+            // retryable code, not a raw Unavailable that reads as this endpoint being down.
+            CamusDBException mapped = KahunaRetryPolicy.ToMustRetry(ex, "statement");
+            CommandFailureLog.LogFailure(logger, mapped);
+            throw GrpcErrorMapper.ToRpcException(mapped);
         }
         catch (RpcException)
         {

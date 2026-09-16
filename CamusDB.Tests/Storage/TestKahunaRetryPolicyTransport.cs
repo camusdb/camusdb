@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
 using System.Threading;
@@ -15,6 +16,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using NUnit.Framework;
+using CamusDB.Core;
 using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Tests.Storage;
@@ -131,6 +133,93 @@ public sealed class TestKahunaRetryPolicyTransport
         Assert.ThrowsAsync<RpcException>(() => KahunaRetryPolicy.RetryOnMustRetry(refused, cts.Token));
 
         Assert.That(calls, Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task ABatchedCallThatWasRefusedIsUnanswered_NotAnException()
+    {
+        int calls = 0;
+        List<int> answer = [1, 2];
+
+        Func<Task<List<int>>> alwaysRefused = () => { calls++; throw LeaderRefused(); };
+        List<int>? refused = await KahunaRetryPolicy.InvokeOrUnanswered(alwaysRefused, CancellationToken.None);
+        List<int>? answered = await KahunaRetryPolicy.InvokeOrUnanswered(
+            () => Task.FromResult(answer),
+            CancellationToken.None);
+
+        Assert.That(refused, Is.Null, "no item was answered, so the caller resends every pending item");
+        Assert.That(answered, Is.SameAs(answer));
+        Assert.That(calls, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void ABatchedCallWithAnApplicationStatusPropagates()
+    {
+        RpcException invalid = new(new Status(StatusCode.InvalidArgument, "bad key"));
+        Func<Task<List<int>>> rejected = () => throw invalid;
+
+        RpcException thrown = Assert.ThrowsAsync<RpcException>(
+            () => KahunaRetryPolicy.InvokeOrUnanswered(rejected, CancellationToken.None))!;
+
+        Assert.That(thrown, Is.SameAs(invalid));
+    }
+
+    [Test]
+    public void AnUnreachableLeaderWithNoInPlaceRetryIsTheClientsRetryableCode()
+    {
+        CamusDBException mapped = KahunaRetryPolicy.ToMustRetry(LeaderRefused(), "row scan of table accounts");
+
+        Assert.That(mapped.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(mapped.Message, Does.Contain("row scan of table accounts"));
+        Assert.That(mapped.Message, Does.Contain("Unavailable"));
+        Assert.That(mapped.Message, Does.Contain("Error connecting to subchannel."));
+        Assert.That(mapped.Message, Does.Contain("BeginAsync"));
+    }
+
+    [Test]
+    public async Task AScanPageRefusedByTheDeadLeaderEndsTheScanAsMustRetry()
+    {
+        static async IAsyncEnumerable<int> TwoRowsThenRefused()
+        {
+            yield return 1;
+            yield return 2;
+            await Task.Yield();
+            throw LeaderRefused();
+        }
+
+        List<int> seen = [];
+        CamusDBException thrown = Assert.ThrowsAsync<CamusDBException>(async () =>
+        {
+            await foreach (int row in KvScanFailure.Translate(TwoRowsThenRefused(), "row scan of table accounts", CancellationToken.None))
+                seen.Add(row);
+        })!;
+
+        Assert.That(seen, Is.EqualTo(new[] { 1, 2 }), "rows served before the refused page are handed out unchanged");
+        Assert.That(thrown.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(thrown.Message, Does.Contain("row scan of table accounts"));
+        await Task.CompletedTask;
+    }
+
+    [Test]
+    public void AScanPageWithAnApplicationStatusPropagatesUntranslated()
+    {
+        RpcException invalid = new(new Status(StatusCode.InvalidArgument, "bad cursor"));
+
+        async IAsyncEnumerable<int> Rejected()
+        {
+            await Task.Yield();
+            throw invalid;
+#pragma warning disable CS0162
+            yield break;
+#pragma warning restore CS0162
+        }
+
+        RpcException thrown = Assert.ThrowsAsync<RpcException>(async () =>
+        {
+            await foreach (int _ in KvScanFailure.Translate(Rejected(), "row scan", CancellationToken.None)) { }
+        })!;
+
+        Assert.That(thrown, Is.SameAs(invalid));
     }
 
     [Test]

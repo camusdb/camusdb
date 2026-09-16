@@ -373,14 +373,19 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     ///
     /// <para>A read that does not answer reports 0, which is the conservative direction: 0 matches no cache
     /// that has adopted a real generation, so the resolve revalidates against KV rather than trusting a
-    /// possibly stale hit. That is why this read is deliberately not retried — an unavailable partition
-    /// costs an extra point read, not correctness, and this runs under every database open.</para>
+    /// possibly stale hit. The read runs on the ordinary <see cref="KahunaRetryPolicy"/> budget first: this
+    /// runs under every database open, and while the stamp's partition is between leaders 
+    /// an unretried read either threw the raw transport failure out of
+    /// every statement on the node, or answered 0 and sent the resolve into a revalidation that could not
+    /// answer either. Past the budget it still reports 0.</para>
     /// </summary>
     private async Task<long> ReadGenerationAsync()
     {
-        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, GenerationKey, -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await KahunaRetryPolicy.RetryOnMustRetry(
+            () => kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, GenerationKey, -1,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None),
+            CancellationToken.None
         ).ConfigureAwait(false);
 
         return type == KeyValueResponseType.Get && entry is not null ? entry.Revision + 1 : 0;
@@ -562,11 +567,28 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// <para>Caller must hold <see cref="writeSem"/>: the upsert/evict below must not interleave with a
     /// mutation's own cache update.</para>
     /// </summary>
+    /// <summary>
+    /// A registry read that came back neither <c>Get</c> nor <c>DoesNotExist</c> — still transient past the
+    /// retry budget, or errored — carries no verdict on the name. It is surfaced as the retryable code so
+    /// the statement is replayed from BeginAsync, never read as an absence.
+    /// </summary>
+    private static void ThrowIfUnanswered(KeyValueResponseType type, string name)
+    {
+        if (type is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.TransactionMustRetry,
+            $"The registry entry for database '{name}' could not be read from Kahuna ({type}) — retry the statement from BeginAsync.");
+    }
+
     private async Task<DatabaseRegistryEntry?> RevalidateSingleNameLockedAsync(string normalizedName)
     {
-        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? kvEntry) = await kahuna.LocateAndTryGetValue(
-            HLCTimestamp.Zero, NameKey(normalizedName), -1,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+        (KeyValueResponseType getType, ReadOnlyKeyValueEntry? kvEntry) = await KahunaRetryPolicy.RetryOnMustRetry(
+            () => kahuna.LocateAndTryGetValue(
+                HLCTimestamp.Zero, NameKey(normalizedName), -1,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None),
+            CancellationToken.None
         ).ConfigureAwait(false);
 
         if (getType == KeyValueResponseType.Get && kvEntry?.Value is not null)
@@ -578,6 +600,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             byId[loaded.Id] = loaded;
             return loaded;
         }
+
+        // Only a confirmed answer may evict. A read that is still unanswered past the retry budget (the
+        // name's partition between leaders) says nothing about the name: evicting on it turned a
+        // transient into "database does not exist" for a database that was never dropped.
+        ThrowIfUnanswered(getType, normalizedName);
 
         // Gone from KV: dropped, or renamed away on another node. Evict it, and drop the id mapping only
         // if it still points at this name — a rename re-points byId at the new name, and that mapping
@@ -826,10 +853,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         try
         {
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? kvEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, NameKey(name), -1,
-                    HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
+                await KahunaRetryPolicy.RetryOnMustRetry(
+                    () => kahuna.LocateAndTryGetValue(
+                        tx.TransactionId, NameKey(name), -1,
+                        HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None),
+                    CancellationToken.None
                 ).ConfigureAwait(false);
+
+            // Same rule as RevalidateSingleNameLockedAsync: "no such database" is only a confirmed answer.
+            ThrowIfUnanswered(getType, name);
 
             if (getType != KeyValueResponseType.Get || kvEntry?.Value is null)
                 return null;

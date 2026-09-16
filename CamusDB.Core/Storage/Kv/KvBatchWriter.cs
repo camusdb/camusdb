@@ -651,15 +651,19 @@ internal sealed class KvBatchWriter
 
         while (pending.Count > 0)
         {
-            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)> responses =
-                await kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct, tx.CoordinatorKey, lockBatchOperationId).ConfigureAwait(false);
+            // A forward the dead partition leader refused answers nothing for any key (null): the whole
+            // batch is transient and is resent unchanged, under the same id, after the ordinary wait.
+            List<(KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder)>? responses =
+                await KahunaRetryPolicy.InvokeOrUnanswered(
+                    () => kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct, tx.CoordinatorKey, lockBatchOperationId),
+                    ct).ConfigureAwait(false);
 
             // First pass: trace every successfully locked key (when lock tracing is on). The coordinator
             // owns the folded point locks and releases them at finalize, so no client-side tracking is
             // needed for cleanup.
             if (options.LockTracingEnabled)
             {
-                foreach ((KeyValueResponseType type, string key, KeyValueDurability _, _) in responses)
+                foreach ((KeyValueResponseType type, string key, KeyValueDurability _, _) in responses ?? [])
                 {
                     if (type == KeyValueResponseType.Locked)
                         Log.LogPointLockAcquired(logger, key, tx.UniqueId);
@@ -668,7 +672,10 @@ internal sealed class KvBatchWriter
 
             // Second pass: queue transient failures for retry; throw on hard failures.
             List<(string, int, KeyValueDurability)> retryBatch = [];
-            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses)
+            if (responses is null)
+                retryBatch.AddRange(pending);
+
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses ?? [])
             {
                 if (type == KeyValueResponseType.Locked)
                     continue;
@@ -735,8 +742,12 @@ internal sealed class KvBatchWriter
 
         while (pending.Count > 0)
         {
-            List<KahunaSetKeyValueResponseItem> responses =
-                await kahuna.LocateAndTrySetManyKeyValue(pending, ct, tx.CoordinatorKey, batchOperationId).ConfigureAwait(false);
+            // null: the forward was refused by the dead partition leader, so no key was answered — the
+            // whole batch is transient and is resent unchanged under the same id (see AcquireManyWithRetry).
+            List<KahunaSetKeyValueResponseItem>? responses =
+                await KahunaRetryPolicy.InvokeOrUnanswered(
+                    () => kahuna.LocateAndTrySetManyKeyValue(pending, ct, tx.CoordinatorKey, batchOperationId),
+                    ct).ConfigureAwait(false);
 
             // Only rebuilt if a transient response forces a retry. Re-sending an already-Set
             // unique key would falsely report a duplicate (its MVCC entry now exists), so we
@@ -744,7 +755,10 @@ internal sealed class KvBatchWriter
             List<KahunaSetKeyValueRequestItem> retryBatch = [];
             Dictionary<string, KahunaSetKeyValueRequestItem>? byKey = null;
 
-            foreach (KahunaSetKeyValueResponseItem resp in responses)
+            if (responses is null)
+                retryBatch.AddRange(pending);
+
+            foreach (KahunaSetKeyValueResponseItem resp in responses ?? [])
             {
                 string key = resp.Key ?? "";
 
@@ -820,13 +834,19 @@ internal sealed class KvBatchWriter
 
         while (pending.Count > 0)
         {
-            List<KahunaDeleteKeyValueResponseItem> responses =
-                await kahuna.LocateAndTryDeleteManyKeyValue(pending, ct, tx.CoordinatorKey, deleteBatchOperationId).ConfigureAwait(false);
+            // null: the forward was refused, no key was answered — resend the whole batch (see above).
+            List<KahunaDeleteKeyValueResponseItem>? responses =
+                await KahunaRetryPolicy.InvokeOrUnanswered(
+                    () => kahuna.LocateAndTryDeleteManyKeyValue(pending, ct, tx.CoordinatorKey, deleteBatchOperationId),
+                    ct).ConfigureAwait(false);
 
             List<KahunaDeleteKeyValueRequestItem> retryBatch = [];
             Dictionary<string, KahunaDeleteKeyValueRequestItem>? byKey = null;
 
-            foreach (KahunaDeleteKeyValueResponseItem resp in responses)
+            if (responses is null)
+                retryBatch.AddRange(pending);
+
+            foreach (KahunaDeleteKeyValueResponseItem resp in responses ?? [])
             {
                 string key = resp.Key ?? "";
 

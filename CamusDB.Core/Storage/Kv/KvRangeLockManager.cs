@@ -345,12 +345,16 @@ internal sealed class KvRangeLockManager
 
         while (true)
         {
-            (KeyValueResponseType type, HLCTimestamp holder) = await kahuna.LocateAndTryAcquireRangeLock(
-                tx.TransactionId, bucketPrefix,
-                startKey, startInclusive, endKey, endInclusive,
-                RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken,
-                tx.CoordinatorKey, rangeLockOperationId
-            ).ConfigureAwait(false);
+            // A forward refused by the dead partition leader is the same transient as a MustRetry answer:
+            // waited out below under the same id, surfaced past the deadline as MustRetry.
+            (KeyValueResponseType type, HLCTimestamp holder) = await KahunaRetryPolicy.InvokeOrTransient(
+                () => kahuna.LocateAndTryAcquireRangeLock(
+                    tx.TransactionId, bucketPrefix,
+                    startKey, startInclusive, endKey, endInclusive,
+                    RangeLockExpiresMs, KeyValueDurability.Persistent, mode, cancellationToken,
+                    tx.CoordinatorKey, rangeLockOperationId),
+                (KeyValueResponseType.MustRetry, HLCTimestamp.Zero),
+                cancellationToken).ConfigureAwait(false);
 
             if (type == KeyValueResponseType.Locked)
             {

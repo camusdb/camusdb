@@ -119,7 +119,7 @@ internal sealed class KahunaRetryPolicy
     /// <c>MustRetry</c>-shaped tuple — when the call failed at the transport instead of answering.
     /// Every other exception propagates unchanged.
     /// </summary>
-    private static async Task<T> InvokeOrTransient<T>(Func<Task<T>> fn, T transient, CancellationToken ct)
+    internal static async Task<T> InvokeOrTransient<T>(Func<Task<T>> fn, T transient, CancellationToken ct)
     {
         try
         {
@@ -131,6 +131,37 @@ internal sealed class KahunaRetryPolicy
             return transient;
         }
     }
+
+    /// <summary>
+    /// Runs one attempt of a batched Kahuna call that answers a list, returning <c>null</c> when the
+    /// call failed at the transport instead of answering: no item was answered, so the caller treats
+    /// every pending item as <c>MustRetry</c> and resends the unchanged batch under the same operation
+    /// id. Every other exception propagates unchanged.
+    /// </summary>
+    internal static async Task<T?> InvokeOrUnanswered<T>(Func<Task<T>> fn, CancellationToken ct) where T : class
+    {
+        try
+        {
+            return await fn().ConfigureAwait(false);
+        }
+        catch (RpcException ex) when (IsTransientTransportFailure(ex, ct))
+        {
+            ServerDiagnostics.AddKvRetryWait("transport_unreachable");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The retryable failure for a Kahuna call that could not reach its partition leader and has no
+    /// in-place retry (a streaming scan page, a statement at the API boundary): the same
+    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/> a spent retry budget surfaces, so the
+    /// client replays from BeginAsync instead of receiving a generic internal error.
+    /// </summary>
+    internal static CamusDBException ToMustRetry(RpcException ex, string what)
+        => new(
+            CamusDBErrorCodes.TransactionMustRetry,
+            $"The {what} could not reach its Kahuna partition leader ({ex.StatusCode}: {ex.Status.Detail}) — " +
+            "retry the statement from BeginAsync.");
 
     /// <summary>
     /// The wall-clock instant, as a <see cref="Stopwatch"/> timestamp, past which a deadline-aware

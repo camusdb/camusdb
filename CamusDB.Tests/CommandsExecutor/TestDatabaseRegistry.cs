@@ -20,6 +20,12 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util;
 using CamusDB.Core.Util.ObjectIds;
 using Kahuna;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
+using Grpc.Core;
+using System.Net.Sockets;
+using CamusDB.Tests.Storage;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -72,6 +78,88 @@ internal sealed class TestDatabaseRegistry
 
     private static string NewId() => ObjectIdGenerator.Generate().ToString();
     private static string NewName() => Guid.NewGuid().ToString("n");
+
+    // -----------------------------------------------------------------------
+    // Resolve while the registry's partition is between leaders
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Refuses point reads the way a follower's forward to a killed partition leader is refused
+    /// <see cref="RefuseGenerationReads"/> covers the generation stamp too; otherwise
+    /// only name entries are refused, which is what revalidation of one name under a moved generation reads.
+    /// </summary>
+    private sealed class RefusingReadKahuna(IKahuna inner) : DelegatingKahuna(inner)
+    {
+        public volatile bool Refuse;
+        public volatile bool RefuseGenerationReads = true;
+
+        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+            HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability,
+            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            bool generation = key.EndsWith("dbregistry/generation", StringComparison.Ordinal);
+            if (Refuse && (RefuseGenerationReads || !generation))
+                throw new RpcException(new Status(StatusCode.Unavailable, "Error connecting to subchannel.",
+                    new SocketException((int)SocketError.ConnectionRefused)));
+
+            return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+        }
+    }
+
+    [Test]
+    public async Task Resolve_CacheHitWhileTheStampIsUnreachable_WaitsOutTheWindowAndTrustsTheCache()
+    {
+        RefusingReadKahuna refusing = new(sharedNode!.Kahuna);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(sharedNode!, refusing, CamusDBOptions.Default, isClusterMode: true);
+
+        string name = NewName();
+        string id = NewId();
+        await registry.RegisterAsync(name, id);
+
+        refusing.Refuse = true;
+        DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(name);
+
+        Assert.IsNotNull(entry, "the refused stamp read is waited out on the retry budget, then the cache is trusted — never a raw transport failure");
+        Assert.AreEqual(id, entry!.Id);
+    }
+
+    [Test]
+    public async Task Resolve_RevalidationReadUnanswered_IsRetryableAndEvictsNothing()
+    {
+        RefusingReadKahuna refusing = new(sharedNode!.Kahuna) { RefuseGenerationReads = false };
+        await using DatabaseRegistry a = await DatabaseRegistry.OpenForTestingAsync(sharedNode!, refusing, CamusDBOptions.Default, isClusterMode: true);
+        await using DatabaseRegistry b = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default, isClusterMode: true);
+
+        string name = NewName();
+        string id = NewId();
+        await a.RegisterAsync(name, id);
+
+        // Another node moves the generation, so a's next cache hit must re-read the name from KV.
+        await b.RegisterAsync(NewName(), NewId());
+
+        refusing.Refuse = true;
+        CamusDBException thrown = Assert.ThrowsAsync<CamusDBException>(() => a.TryResolveEntryAsync(name))!;
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, thrown.Code,
+            "an unanswered re-read carries no verdict on the name: it is the client's retryable code");
+
+        refusing.Refuse = false;
+        DatabaseRegistryEntry? after = await a.TryResolveEntryAsync(name);
+        Assert.IsNotNull(after, "the database was never dropped, so the unanswered re-read must not have evicted it");
+        Assert.AreEqual(id, after!.Id);
+    }
+
+    [Test]
+    public async Task Resolve_CacheMissWhileUnreachable_IsRetryableNotAbsent()
+    {
+        RefusingReadKahuna refusing = new(sharedNode!.Kahuna);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(sharedNode!, refusing, CamusDBOptions.Default, isClusterMode: true);
+
+        refusing.Refuse = true;
+        CamusDBException thrown = Assert.ThrowsAsync<CamusDBException>(() => registry.TryResolveEntryAsync(NewName()))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, thrown.Code,
+            "\"no such database\" is only ever a confirmed answer");
+    }
 
     // -----------------------------------------------------------------------
     // Register → resolve by name and by id

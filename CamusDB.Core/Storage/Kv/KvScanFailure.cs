@@ -6,6 +6,7 @@
  */
 
 using System.Runtime.CompilerServices;
+using Grpc.Core;
 using Kahuna;
 using Kahuna.Shared.KeyValue;
 
@@ -25,6 +26,13 @@ namespace CamusDB.Core.Storage.Kv;
 /// the table store issues therefore streams through <see cref="Translate{T}"/>, which maps the
 /// exception to <see cref="CamusDBErrorCodes.TransactionMustRetry"/> with a message naming the scan
 /// and Kahuna's own response type.</para>
+///
+/// <para>A page whose forward the partition leader's dead process refused is the other way a scan ends
+/// without answering: Kahuna's routed scan waits out a page that answers <c>MustRetry</c> but lets 
+/// the raw <see cref="RpcException"/> escape, and from here it
+/// reached the client as a generic internal error, some ten thousand times per surviving node in the
+/// seconds before the new leader was elected. It is translated the same way: nothing was applied and
+/// the scan is idempotent.</para>
 /// </summary>
 internal static class KvScanFailure
 {
@@ -53,6 +61,10 @@ internal static class KvScanFailure
             catch (KahunaServerException ex)
             {
                 throw Describe(ex, what);
+            }
+            catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, cancellationToken))
+            {
+                throw KahunaRetryPolicy.ToMustRetry(ex, what);
             }
 
             if (!moved)
