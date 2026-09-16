@@ -53,6 +53,12 @@ statements for the rows. The `CREATE TABLE` text comes from `SHOW CREATE TABLE`,
 column defaults, `CHECK` constraints, `COMMENT` clauses, covering-index `INCLUDE` columns, and the
 row-level TTL configuration of the table.
 
+Index definitions carry their **per-column sort direction** and their **comment**, both in the
+inline `KEY` clause of the `CREATE TABLE` and in the separate `CREATE INDEX` statements, so a
+descending index restores descending. Dumping from a server older than the release that added them
+loses both silently: the older server does not report the direction at all, and no amount of
+rewriting in the tool can recover it. Check a descending index after reimporting such a dump.
+
 **A revision upgrade empties the user catalog.** Accounts, grants and sessions live in the same
 key-value store the rows do, under the same revision directory, so a `v2` server starting over a `v1`
 data directory starts with no accounts at all — it then seeds its bootstrap superuser and nothing else.
@@ -112,7 +118,7 @@ started on the `v1` data directory.
 2. Run the dump for every database:
 
 ```shell
-camus-dump -e http://db1.internal:5096 --all-databases -b 500 --defer-indexes \
+camus-dump -e http://db1.internal:5096 --all-databases -b 100 \
   --output-directory /backup/camusdb-v1/
 ```
 
@@ -120,19 +126,81 @@ camus-dump -e http://db1.internal:5096 --all-databases -b 500 --defer-indexes \
 
    - `--all-databases` (`-A`) asks the server for its databases with `SHOW DATABASES` and dumps
      each one. Use `--exclude-database` to skip a database you do not want to carry over.
-   - `-b 500` writes 500 rows per `INSERT` statement. A batched load is much faster than one row
-     per statement. Stay below the server's mutation limit per transaction (see
-     [transaction-limits.md](transaction-limits.md)).
-   - `--defer-indexes` writes each table's `CREATE INDEX` statements after its rows. The load
-     then builds each index in one backfill instead of maintaining it row by row.
+   - `-b 100` writes 100 rows per `INSERT` statement. **This is the option that matters most.**
+     See "Choosing the batch size" below.
    - `--output-directory` writes one `<database>.sql` file per database. Use `-o server.sql`
      instead to get one file with every database in sequence.
+   - `--defer-indexes` is **not** in the command above on purpose. See "Should you defer the
+     indexes?" below; it is not the free win it sounds like.
+
+### Choosing the batch size
+
+One row per `INSERT` is the tool default and it is by far the slowest thing you can do. Measured on
+a single node, restoring 20,000 narrow rows, 5,000 rows of about 1 KB, and 1,500 rows of about 8 KB:
+
+| Rows per `INSERT` | narrow (~100 B) | ~1 KB rows | ~8 KB rows |
+| --- | --- | --- | --- |
+| 1 | 177 rows/s | 165 rows/s | 185 rows/s |
+| 10 | 1,888 | 1,647 | 814 |
+| 50 | 4,510 | 3,549 | 1,786 |
+| **100** | **5,033** | **3,582** | **2,086** |
+| 250 | 6,031 | 3,043 | 2,206 |
+| 500 | 5,759 | 4,425 | 2,161 |
+| 1,000 | 6,163 | 4,480 | — |
+
+`-b 1` is 28 to 41 times slower than a batched load, and its throughput barely depends on row width,
+because the cost is one round trip per statement rather than the data. **Anything above about 100
+rows recovers most of the difference**, and past that the curve is flat inside the run-to-run noise
+of the measurement, which was about ±20 %.
+
+`-b 100` is the recommended starting point because it is at the knee *and* keeps the statement small:
+100 rows of an 8 KB-row table is about 805 KB of SQL, comfortably inside the 4 MiB gRPC message limit.
+A larger batch on a wide table is what breaks — 500 rows of 8 KB rows is a 4.02 MB statement, right at
+the edge. Raise `-b` for narrow tables if you want; do not raise it for wide ones without checking the
+statement size.
+
+Two hard limits bound the batch whatever the throughput says:
+
+- **The server's mutation limit per transaction**, 20,000 by default. A row costs **two** mutations
+  before any secondary index — its row key and its primary-key index entry — so the ceiling is
+  `floor(20000 / (2 + secondary index entries per row))`: 10,000 rows on a table with no secondary
+  index, 6,666 with one. See [transaction-limits.md](transaction-limits.md).
+- **The transport message size.** gRPC accepts 4 MiB per message; the HTTP API accepts 30 MB per
+  body. A wide-row table reaches the gRPC limit long before the mutation limit.
+
+### Should you defer the indexes?
+
+`--defer-indexes` writes each table's `CREATE INDEX` statements after its rows, so the rows load into
+a table with no secondary index and each index is built once at the end instead of being maintained
+row by row.
+
+**It is not automatically faster.** Measured on the same single node, 20,000 rows, comparing total
+restore time including the index build:
+
+| Table | Without the flag | With `--defer-indexes` |
+| --- | --- | --- |
+| One secondary index | 4.56 s | 4.05 s (**about 10 % faster**) |
+| Four secondary indexes | 9.01 s | 10.00 s (**about 18 % slower**) |
+
+The index build has to read the whole table once per index, and past one index that costs more than
+the per-row maintenance it saves. Use the flag for a table with a single secondary index; skip it for
+a table with several. These figures are from one machine at 20,000 rows — if your tables are far
+larger, measure rather than assume, because a bulk build and per-row maintenance do not scale the
+same way.
+
+Whether or not you use it, **a restore is complete only once every index is built and validated.**
+Keep the target out of service until then.
+
+If your dump comes from a server older than the release that added
+`SHOW CREATE TABLE … WITHOUT INDEXES`, `--defer-indexes` cannot work: that server renders each index
+inline in the table definition, so the index exists before the first row regardless. `camus-dump`
+detects this and prints a warning rather than producing a file that only looks deferred.
 
 3. With authentication on, add the user and the password:
 
 ```shell
 CAMUSDB_PASSWORD=app-secret camus-dump -e https://db1.internal:5096 -A -u admin \
-  -b 500 --defer-indexes --output-directory /backup/camusdb-v1/
+  -b 100 --output-directory /backup/camusdb-v1/
 ```
 
    The dump needs `SELECT` and `SHOW` privileges on every table. Give the password through the

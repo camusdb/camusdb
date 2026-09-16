@@ -60,6 +60,7 @@ public class ConfigReader
         "sql_parser_cache_ttl_seconds",
         "sql_parser_cache_max_entries",
         "sql_parser_cache_sweep_seconds",
+        "sql_parser_cache_max_bytes",
         "cost_based_access_path_enabled",
         "cost_based_join_order_enabled",
         "plan_cache_enabled",

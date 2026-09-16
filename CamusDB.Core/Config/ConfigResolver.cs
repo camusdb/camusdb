@@ -224,6 +224,7 @@ public static class ConfigResolver
         SqlParserCacheTtlSeconds = config.SqlParserCacheTtlSeconds,
         SqlParserCacheMaxEntries = config.SqlParserCacheMaxEntries,
         SqlParserCacheSweepSeconds = config.SqlParserCacheSweepSeconds,
+        SqlParserCacheMaxBytes = config.SqlParserCacheMaxBytes,
 
         OrphanRetentionMs = config.OrphanRetentionMs,
         OrphanReclaimIntervalMs = config.OrphanReclaimIntervalMs,

@@ -282,6 +282,13 @@ public enum NodeType
     ShowColumns,
     ShowTables,
     ShowCreateTable,
+
+    /// <summary>
+    /// Marker leaf hung off <see cref="ShowCreateTable"/> when the statement carried
+    /// <c>WITHOUT INDEXES</c>. It is never dispatched on as a statement; its presence alone is the
+    /// flag, which keeps the one <c>SHOW CREATE TABLE</c> case and its authorization unchanged.
+    /// </summary>
+    WithoutIndexes,
     ShowDatabase,
     ShowDatabases,
     ShowBranches,

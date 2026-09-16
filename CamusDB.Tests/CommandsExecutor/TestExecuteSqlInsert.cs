@@ -12,6 +12,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Text;
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
@@ -1212,5 +1213,179 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
 
         Assert.AreEqual(1, rows.Count, $"Full scan after update must return 1 row, got {rows.Count}");
         Assert.AreEqual("Belgica", rows[0].Row["name_es"].StrValue);
+    }
+
+    /// <summary>
+    /// Builds an INSERT of <paramref name="rows"/> rows in the shape a logical dump emits, so the
+    /// VALUES tree the parser hands the executor matches what a restore really sends. Row i carries
+    /// year = i, which makes row order observable after the insert.
+    /// </summary>
+    private static string BuildMultiRowInsert(int rows)
+    {
+        StringBuilder sb = new(rows * 96);
+        sb.Append("INSERT INTO robots (id, name, year, enabled) VALUES ");
+
+        for (int i = 0; i < rows; i++)
+        {
+            if (i > 0)
+                sb.Append(", ");
+
+            sb.Append("(STR_ID('").Append(ObjectIdGenerator.Generate().ToString()).Append("'), ");
+            sb.Append("'row_").Append(i).Append("', ").Append(i).Append(", true)");
+        }
+
+        return sb.ToString();
+    }
+
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupEmptyRobotsTable()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "robots",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id),
+                new("name", ColumnType.String, notNull: true),
+                new("year", ColumnType.Integer64),
+                new("enabled", ColumnType.Bool)
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) })
+            },
+            ifNotExists: false
+        ));
+
+        return (dbname, database, executor);
+    }
+
+    /// <summary>
+    /// A statement holding as many rows as the transaction mutation budget admits must execute.
+    ///
+    /// <para>The row count matters. The batch list the grammar builds is left-deep, so a walk that
+    /// recursed once per row reached one stack frame per row and ended the whole process — not with
+    /// an exception a caller could handle, but with a stack overflow the runtime cannot catch. That
+    /// happened below the number of rows the server admits, so a statement that passed admission
+    /// could kill the node. Every row here costs two mutations (its row key and its primary-key
+    /// index entry), so this count is the largest a default-configured transaction accepts.</para>
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertAtMutationBudgetRowCount()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupEmptyRobotsTable();
+
+        int rows = CamusDBOptions.Default.MaxMutationsPerTransaction / 2;
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(tx, dbname, BuildMultiRowInsert(rows), null));
+        await database.Transactions.CommitAsync(tx);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT year FROM robots", null));
+        int rowCount = (await cursor.ToListAsync()).Count;
+        await database.Transactions.CommitAsync(txq);
+
+        Assert.AreEqual(rows, rowCount);
+    }
+
+    /// <summary>
+    /// A statement past the mutation budget must be refused with <c>CADB0506</c>. Before the batch
+    /// walk stopped recursing, a statement this large never reached the budget check at all: it
+    /// exhausted the stack while the ticket was still being built, which ends the process instead
+    /// of returning an error the caller can act on.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertOverMutationBudgetFailsCleanly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupEmptyRobotsTable();
+
+        int rows = CamusDBOptions.Default.MaxMutationsPerTransaction;   // two mutations each, so double the budget
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new(tx, dbname, BuildMultiRowInsert(rows), null)));
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMutationLimitExceeded, ex!.Code);
+
+        await database.Transactions.RollbackIfNotCompletedAsync(tx);
+    }
+
+    /// <summary>
+    /// Rows must land in the order the SQL text lists them, whatever the shape of the batch tree.
+    /// Order is not cosmetic here: it fixes the evaluation order of volatile values and function
+    /// defaults, and it is what the <c>Position</c> of an arity error counts.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertPreservesRowOrder()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupEmptyRobotsTable();
+
+        const int rows = 500;
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new(tx, dbname, BuildMultiRowInsert(rows), null));
+        await database.Transactions.CommitAsync(tx);
+
+        KvTransaction txq = await database.Transactions.BeginAsync();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new(txq, dbname, "SELECT name, year FROM robots ORDER BY year", null));
+        List<QueryResultRow> result = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(txq);
+
+        Assert.AreEqual(rows, result.Count);
+
+        for (int i = 0; i < rows; i++)
+        {
+            Assert.AreEqual((long)i, result[i].Row["year"].LongValue);
+            Assert.AreEqual("row_" + i, result[i].Row["name"].StrValue);
+        }
+    }
+
+    /// <summary>
+    /// A row with the wrong number of values must be reported with its zero-based position in the
+    /// VALUES list, and a row late in a long list must report the same way as an early one.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestExecuteInsertArityErrorReportsPosition()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupEmptyRobotsTable();
+
+        // A short list: the bad row is second.
+        KvTransaction tx1 = await database.Transactions.BeginAsync();
+        CamusDBException? early = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new(tx1, dbname,
+                "INSERT INTO robots (id, name, year, enabled) VALUES " +
+                "(GEN_ID(), 'a', 1, true), (GEN_ID(), 'b', 2)", null)));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, early!.Code);
+        StringAssert.Contains("Position=1", early.Message);
+        await database.Transactions.RollbackIfNotCompletedAsync(tx1);
+
+        // A long list: the bad row is last, so it is only reached after the walk has shaped 1 000
+        // good rows. The reported position must still be the row's own index.
+        StringBuilder sb = new();
+        sb.Append("INSERT INTO robots (id, name, year, enabled) VALUES ");
+
+        const int goodRows = 1_000;
+        for (int i = 0; i < goodRows; i++)
+            sb.Append("(GEN_ID(), 'r', ").Append(i).Append(", true), ");
+
+        sb.Append("(GEN_ID(), 'short', 1)");
+
+        KvTransaction tx2 = await database.Transactions.BeginAsync();
+        CamusDBException? late = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new(tx2, dbname, sb.ToString(), null)));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, late!.Code);
+        StringAssert.Contains($"Position={goodRows}", late.Message);
+        await database.Transactions.RollbackIfNotCompletedAsync(tx2);
     }
 }

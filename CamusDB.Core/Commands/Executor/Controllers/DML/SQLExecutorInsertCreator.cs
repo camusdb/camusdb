@@ -123,11 +123,24 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
     }
 
     /// <summary>
-    /// Recursively walks the batch-list AST and for each VALUES row builds a
+    /// Walks the batch-list AST and for each VALUES row builds a
     /// <see cref="Dictionary{TKey,TValue}"/> directly — no intermediate
     /// <c>List&lt;List&lt;ColumnValue?&gt;&gt;</c> is allocated. Coercion to the declared column
     /// type and default substitution are applied in the same pass by
     /// <see cref="InsertRowShaper.ShapeRow"/>.
+    ///
+    /// <para>The walk uses an explicit stack rather than recursion. The grammar builds the batch
+    /// list left-deep (<c>insert_batch_list : insert_batch_list ',' insert_values</c>), so a
+    /// recursive walk reaches one frame per row and a large VALUES list overflows the stack of the
+    /// thread serving the request — a process-ending failure that no <c>catch</c> can absorb.
+    /// It is reachable well inside what the server admits: a statement is refused only once its
+    /// mutations exceed <see cref="CamusDBOptions.MaxMutationsPerTransaction"/>, and that check
+    /// runs later, in the write path, long after this walk has already built every row.</para>
+    ///
+    /// <para>Children are pushed right-then-left so they pop left-to-right. That keeps row order —
+    /// and therefore the evaluation order of volatile values and function defaults, and the
+    /// <c>Position</c> in an arity error — identical to the order the rows appear in the SQL
+    /// text.</para>
     /// </summary>
     private static void FillBatchDicts(
         NodeAst batchListAst,
@@ -135,19 +148,41 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         InsertRowShaper shaper,
         List<Dictionary<string, ColumnValue>> batchValues)
     {
-        if (batchListAst.nodeType == NodeType.InsertBatchList)
-        {
-            if (batchListAst.leftAst is not null)
-                FillBatchDicts(batchListAst.leftAst, parameters, shaper, batchValues);
-            if (batchListAst.rightAst is not null)
-                FillBatchDicts(batchListAst.rightAst, parameters, shaper, batchValues);
-            return;
-        }
+        Stack<NodeAst> pending = new();
+        pending.Push(batchListAst);
 
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            if (node.nodeType == NodeType.InsertBatchList)
+            {
+                if (node.rightAst is not null)
+                    pending.Push(node.rightAst);
+                if (node.leftAst is not null)
+                    pending.Push(node.leftAst);
+                continue;
+            }
+
+            AddRow(node, parameters, shaper, batchValues);
+        }
+    }
+
+    /// <summary>
+    /// Shapes one VALUES row and appends it to <paramref name="batchValues"/>. The per-row
+    /// <c>ExprList</c> walk stays recursive: its depth is the number of columns in the row, which
+    /// the table schema bounds, not the number of rows in the statement.
+    /// </summary>
+    private static void AddRow(
+        NodeAst rowAst,
+        Dictionary<string, ColumnValue>? parameters,
+        InsertRowShaper shaper,
+        List<Dictionary<string, ColumnValue>> batchValues)
+    {
         // Flatten the ExprList tree into a fixed-size buffer, one slot per field.
         ColumnValue?[] slots = new ColumnValue?[shaper.FieldCount];
         int filled = 0;
-        FillSlots(batchListAst, parameters, slots, ref filled);
+        FillSlots(rowAst, parameters, slots, ref filled);
 
         if (filled != shaper.FieldCount)
             throw new CamusDBException(

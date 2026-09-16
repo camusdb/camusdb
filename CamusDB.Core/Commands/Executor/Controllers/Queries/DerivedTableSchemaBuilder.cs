@@ -77,6 +77,10 @@ internal static class DerivedTableSchemaBuilder
         new("Columns",    ColumnType.String),
         new("Include",    ColumnType.String),
         new("Index_type", ColumnType.String),
+        // Appended rather than inserted: the column order is a wire contract for positional result
+        // rows, so a new field goes at the end where it cannot shift an existing ordinal.
+        new("Directions", ColumnType.String),
+        new("Comment",    ColumnType.String),
     ];
 
     /// <summary>

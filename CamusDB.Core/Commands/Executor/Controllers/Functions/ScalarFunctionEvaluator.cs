@@ -66,25 +66,7 @@ internal static class ScalarFunctionEvaluator
     /// never mentions.
     /// </summary>
     internal static bool ContainsSessionScopedFunction(NodeAst? ast)
-    {
-        if (ast is null)
-            return false;
-
-        if (ast.nodeType == NodeType.ExprFuncCall)
-        {
-            string name = ast.leftAst?.yytext?.ToLowerInvariant() ?? string.Empty;
-            if (Registry.TryGet(name, out ScalarFunctionDescriptor? descriptor) && descriptor.IsSessionScoped)
-                return true;
-        }
-
-        return ContainsSessionScopedFunction(ast.leftAst)
-            || ContainsSessionScopedFunction(ast.rightAst)
-            || ContainsSessionScopedFunction(ast.extendedOne)
-            || ContainsSessionScopedFunction(ast.extendedTwo)
-            || ContainsSessionScopedFunction(ast.extendedThree)
-            || ContainsSessionScopedFunction(ast.extendedFour)
-            || ContainsSessionScopedFunction(ast.extendedFive);
-    }
+        => NodeAstWalk.Any(ast, IsSessionScopedCall);
 
     /// <summary>
     /// True when <paramref name="functionName"/> reports the session it runs in
@@ -116,24 +98,30 @@ internal static class ScalarFunctionEvaluator
     /// a new non-deterministic function is registered.</para>
     /// </summary>
     internal static bool ContainsVolatileFunction(NodeAst? ast)
-    {
-        if (ast is null)
-            return false;
+        => NodeAstWalk.Any(ast, IsVolatileCall);
 
-        if (ast.nodeType == NodeType.ExprFuncCall)
+    private static bool IsSessionScopedCall(NodeAst node)
+        => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsSessionScoped;
+
+    private static bool IsVolatileCall(NodeAst node)
+        => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsVolatile;
+
+    /// <summary>
+    /// Resolves the descriptor of the scalar function <paramref name="node"/> calls, or answers
+    /// false when the node is not a call at all. An unregistered name also answers false here; it
+    /// throws later, at execution, which is where an unknown function belongs.
+    /// </summary>
+    private static bool TryGetCalledDescriptor(NodeAst node, out ScalarFunctionDescriptor? descriptor)
+    {
+        if (node.nodeType != NodeType.ExprFuncCall)
         {
-            string name = ast.leftAst?.yytext?.ToLowerInvariant() ?? string.Empty;
-            if (Registry.TryGet(name, out ScalarFunctionDescriptor? descriptor) && descriptor.IsVolatile)
-                return true;
+            descriptor = null;
+            return false;
         }
 
-        return ContainsVolatileFunction(ast.leftAst)
-            || ContainsVolatileFunction(ast.rightAst)
-            || ContainsVolatileFunction(ast.extendedOne)
-            || ContainsVolatileFunction(ast.extendedTwo)
-            || ContainsVolatileFunction(ast.extendedThree)
-            || ContainsVolatileFunction(ast.extendedFour)
-            || ContainsVolatileFunction(ast.extendedFive);
+        string name = node.leftAst?.yytext?.ToLowerInvariant() ?? string.Empty;
+
+        return Registry.TryGet(name, out descriptor);
     }
 
     /// <summary>

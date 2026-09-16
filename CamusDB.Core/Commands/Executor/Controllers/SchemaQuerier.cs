@@ -318,6 +318,57 @@ internal sealed class SchemaQuerier
         };
     }
 
+
+    /// <summary>
+    /// Renders an index's key columns with their sort direction, for the inline <c>KEY</c> clause of
+    /// <c>SHOW CREATE TABLE</c>.
+    ///
+    /// <para><c>ASC</c> is omitted and <c>DESC</c> is written, which is what <c>CREATE INDEX</c>
+    /// accepts and what an ascending index rendered before mixed-direction indexes existed. Omitting
+    /// the default keeps the output of every all-ascending table byte-identical to what it was, so a
+    /// caller diffing DDL across versions sees a change only where one really exists.</para>
+    /// </summary>
+    private static string RenderIndexColumns(TableIndexSchema index, string separator, bool backquote)
+    {
+        StringBuilder sb = new();
+
+        for (int i = 0; i < index.Columns.Length; i++)
+        {
+            if (i > 0)
+                sb.Append(separator);
+
+            if (backquote)
+                sb.Append('`').Append(index.Columns[i]).Append('`');
+            else
+                sb.Append(index.Columns[i]);
+
+            if (index.DirectionAt(i) == OrderType.Descending)
+                sb.Append(" DESC");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The per-column sort directions of an index as a comma-separated list positionally aligned with
+    /// the <c>Columns</c> field of <c>SHOW INDEXES</c>. Every position is written, including
+    /// <c>ASC</c>, so a consumer can zip the two lists without having to know the default.
+    /// </summary>
+    private static string RenderIndexDirections(TableIndexSchema index)
+    {
+        StringBuilder sb = new();
+
+        for (int i = 0; i < index.Columns.Length; i++)
+        {
+            if (i > 0)
+                sb.Append(',');
+
+            sb.Append(index.DirectionAt(i) == OrderType.Descending ? "DESC" : "ASC");
+        }
+
+        return sb.ToString();
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ShowIndexes(TableDescriptor table)
     {
         await Task.CompletedTask;
@@ -334,7 +385,12 @@ internal sealed class SchemaQuerier
                 { "Key_name", new ColumnValue(ColumnType.String, index.Key) },
                 { "Columns", new ColumnValue(ColumnType.String, string.Join(",", index.Value.Columns)) },
                 { "Include", new ColumnValue(ColumnType.String, string.Join(",", index.Value.IncludeColumns)) },
-                { "Index_type", new ColumnValue(ColumnType.String, "ORDERED") }
+                { "Index_type", new ColumnValue(ColumnType.String, "ORDERED") },
+                // Directions is a parallel list to Columns, not part of it: a consumer splits Columns
+                // on ',' and treats each element as an identifier, so folding "a DESC" into that field
+                // would hand it a name it cannot quote.
+                { "Directions", new ColumnValue(ColumnType.String, RenderIndexDirections(index.Value)) },
+                { "Comment", new ColumnValue(ColumnType.String, index.Value.Comment ?? "") }
             });
         }
     }
@@ -500,7 +556,17 @@ internal sealed class SchemaQuerier
         };
     }
 
-    internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table)
+    /// <summary>
+    /// Renders the table's <c>CREATE TABLE</c> DDL.
+    ///
+    /// <para><paramref name="includeSecondaryIndexes"/> is false for
+    /// <c>SHOW CREATE TABLE … WITHOUT INDEXES</c>. The primary key is rendered either way: it is part
+    /// of the table definition and cannot be created by a later <c>CREATE INDEX</c>. A caller asking
+    /// for the index-free form is taking responsibility for creating the secondary indexes itself —
+    /// a dump that wants the rows loaded before the indexes are built is the case this exists for —
+    /// so the DDL it gets back no longer round-trips the table on its own.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table, bool includeSecondaryIndexes = true)
     {
         await Task.CompletedTask;
 
@@ -535,7 +601,10 @@ internal sealed class SchemaQuerier
             if (!SchemaElementStateRules.IsReadableIndex(table.Schema, kv.Value))
                 continue;
 
-            string cols = string.Join(", ", kv.Value.Columns.Select(c => "`" + c + "`"));
+            if (!includeSecondaryIndexes && kv.Key != CamusDBConstants.PrimaryKeyInternalName)
+                continue;
+
+            string cols = RenderIndexColumns(kv.Value, ", ", backquote: true);
 
             // Covering indexes render their stored/payload columns as a trailing INCLUDE (...) clause,
             // matching the CREATE INDEX syntax so SHOW CREATE TABLE round-trips through re-parse.

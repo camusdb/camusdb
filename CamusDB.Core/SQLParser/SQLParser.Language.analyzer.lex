@@ -46,6 +46,7 @@ TKey 		    (K|k)(E|e)(Y|y)
 TUnique 	    (U|u)(N|n)(I|i)(Q|q)(U|u)(E|e)
 TIndex 		    (I|i)(N|n)(D|d)(E|e)(X|x)
 TIndexes 		(I|i)(N|n)(D|d)(E|e)(X|x)(E|e)(S|s)
+TWithout        (W|w)(I|i)(T|t)(H|h)(O|o)(U|u)(T|t)
 TDefault 		(D|d)(E|e)(F|f)(A|a)(U|u)(L|l)(T|t)
 TAlter 		    (A|a)(L|l)(T|t)(E|e)(R|r)
 TWAdd 		    (A|a)(D|d)(D|d)
@@ -303,6 +304,8 @@ TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 {TIndex} { return (int)Token.TINDEX; }
 
 {TIndexes} { return (int)Token.TINDEXES; }
+
+{TWithout} { return (int)Token.TWITHOUT; }
 
 {TInclude} { return (int)Token.TINCLUDE; }
 

@@ -467,7 +467,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             logger,
             options.SqlParserCacheTtlSeconds,
             options.SqlParserCacheMaxEntries,
-            options.SqlParserCacheSweepSeconds);
+            options.SqlParserCacheSweepSeconds,
+            options.SqlParserCacheMaxBytes);
 
         // Built here rather than earlier because it names the openers, and DatabaseOpener is itself
         // constructed with a back-reference to this half-built executor — so the collaborators it
@@ -674,7 +675,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         sqlParserCache.Retune(
             next.SqlParserCacheTtlSeconds,
             next.SqlParserCacheMaxEntries,
-            next.SqlParserCacheSweepSeconds
+            next.SqlParserCacheSweepSeconds,
+            next.SqlParserCacheMaxBytes
         );
 
         // The compiled-regex cache keys entries by match timeout, so a timeout change strands the

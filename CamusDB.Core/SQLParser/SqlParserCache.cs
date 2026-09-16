@@ -23,15 +23,23 @@ internal sealed class ParsedSqlCacheEntry
     public NodeAst Ast { get; }
 
     /// <summary>
+    /// Estimated bytes this entry retains — the AST, its literal strings and the SQL text used as
+    /// the key. Stored on the entry so a removal can decrement the running total without deriving
+    /// the estimate a second time, and so the total stays consistent if the estimate changes.
+    /// </summary>
+    public long EstimatedBytes { get; }
+
+    /// <summary>
     /// Absolute expiry expressed as <see cref="Environment.TickCount64"/> milliseconds.
     /// A monotonic source avoids wall-clock adjustment surprises.
     /// </summary>
     public long ExpirationTicks { get; set; }
 
-    public ParsedSqlCacheEntry(NodeAst ast, long expirationTicks)
+    public ParsedSqlCacheEntry(NodeAst ast, long expirationTicks, long estimatedBytes)
     {
         Ast = ast;
         ExpirationTicks = expirationTicks;
+        EstimatedBytes = estimatedBytes;
     }
 }
 
@@ -74,6 +82,12 @@ public sealed class SqlParserCache : IAsyncDisposable
     private long _ttlMs;
     private volatile int _maxEntries;
     private volatile int _sweepSeconds;
+    private long _maxBytes;
+
+    // Running estimate of what the live entries retain. Approximate by construction: it is updated
+    // outside the dictionary's own atomicity, so a concurrent add and remove can leave it slightly
+    // off. It bounds growth; it is not an invariant, and every Store re-checks it.
+    private long _approxBytes;
 
     private readonly ILogger? _logger;
 
@@ -101,6 +115,30 @@ public sealed class SqlParserCache : IAsyncDisposable
 
     /// <summary>Current number of live entries in the cache.</summary>
     public int Count => _cache.Count;
+
+    /// <summary>
+    /// Estimated bytes the live entries retain. Approximate: see <see cref="EstimateBytes"/> for how
+    /// an entry's cost is derived and why it is an estimate rather than a measurement.
+    /// </summary>
+    public long ApproxBytes => Interlocked.Read(ref _approxBytes);
+
+    /// <summary>
+    /// Multiplier from SQL text length to retained bytes. A parsed statement retains far more than
+    /// its text: one <see cref="NodeAst"/> per token with nine child references, plus a string per
+    /// literal, plus the text itself as the dictionary key.
+    ///
+    /// <para>Derived on 2026-09-15 by filling a cache with unique INSERT statements and reading the
+    /// managed heap. Before this bound existed, 2,048 statements of 500 rows each held about
+    /// 1,348 MiB; with a 64 MiB budget the same load holds about 79 MiB. The per-entry ratio implied
+    /// by those two runs differs (about 20x and about 40x), because a whole-heap delta also counts
+    /// transient garbage, and that noise is a larger share once few entries survive. So treat 32 as
+    /// an order-of-magnitude constant: the budget is a bound on growth, not an accounting of bytes,
+    /// and the heap will sit somewhat above it rather than below.</para>
+    /// </summary>
+    private const long EstimatedBytesPerSqlChar = 32;
+
+    /// <summary>Estimated retained bytes for a statement of this text length.</summary>
+    private static long EstimateBytes(string sql) => (long)sql.Length * EstimatedBytesPerSqlChar;
 
     /// <summary>Volatile view of the sliding TTL so a concurrent <see cref="Retune"/> is never torn.</summary>
     private long TtlMs => Volatile.Read(ref _ttlMs);
@@ -133,12 +171,13 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// Interval between background eviction sweeps in seconds; clamped to 1 if &lt;= 0.
     /// Maps to <see cref="CamusDBOptions.SqlParserCacheSweepSeconds"/>.
     /// </param>
-    public SqlParserCache(ILogger? logger, int ttlSeconds, int maxEntries, int sweepSeconds)
+    public SqlParserCache(ILogger? logger, int ttlSeconds, int maxEntries, int sweepSeconds, long maxBytes = 0)
     {
         _logger = logger;
         _ttlMs = (long)ttlSeconds * 1000;
         _maxEntries = maxEntries;
         _sweepSeconds = sweepSeconds > 0 ? sweepSeconds : 60;
+        _maxBytes = maxBytes;
     }
 
     /// <summary>
@@ -152,28 +191,32 @@ public sealed class SqlParserCache : IAsyncDisposable
     /// die soonest go first. There is no LRU order to honor (the insert policy is
     /// stop-inserting-when-full), so nearest-expiry is the only defensible eviction order.</para>
     /// </summary>
-    internal void Retune(int ttlSeconds, int maxEntries, int sweepSeconds)
+    internal void Retune(int ttlSeconds, int maxEntries, int sweepSeconds, long maxBytes)
     {
         Volatile.Write(ref _ttlMs, (long)ttlSeconds * 1000);
         _maxEntries = maxEntries;
         _sweepSeconds = sweepSeconds > 0 ? sweepSeconds : 60;
+        Volatile.Write(ref _maxBytes, maxBytes);
 
-        if (maxEntries <= 0 || _cache.Count <= maxEntries)
+        bool overEntries = maxEntries > 0 && _cache.Count > maxEntries;
+        bool overBytes = maxBytes > 0 && Interlocked.Read(ref _approxBytes) > maxBytes;
+
+        if (!overEntries && !overBytes)
             return;
 
-        // Snapshot, order by nearest expiry, and remove until at/below the cap. Concurrent stores
-        // may race this trim; the cap is a bound on growth, not an exact invariant, and the next
-        // Store re-checks it anyway.
+        // Snapshot, order by nearest expiry, and remove until at/below both caps. Concurrent stores
+        // may race this trim; the caps bound growth, they are not exact invariants, and the next
+        // Store re-checks them anyway.
         List<KeyValuePair<string, ParsedSqlCacheEntry>> snapshot = new(_cache);
         snapshot.Sort(static (a, b) => a.Value.ExpirationTicks.CompareTo(b.Value.ExpirationTicks));
 
         foreach (KeyValuePair<string, ParsedSqlCacheEntry> pair in snapshot)
         {
-            if (_cache.Count <= maxEntries)
+            if ((maxEntries <= 0 || _cache.Count <= maxEntries)
+                && (maxBytes <= 0 || Interlocked.Read(ref _approxBytes) <= maxBytes))
                 break;
 
-            if (_cache.TryRemove(pair.Key, out _))
-                Interlocked.Increment(ref _evictions);
+            RemoveEntry(pair.Key);
         }
     }
 
@@ -205,8 +248,7 @@ public sealed class SqlParserCache : IAsyncDisposable
                 return true;
             }
             // Expired — remove eagerly so the sweep doesn't have to race with us.
-            _cache.TryRemove(sql, out _);
-            Interlocked.Increment(ref _evictions);
+            RemoveEntry(sql);
         }
 
         ast = null;
@@ -236,10 +278,25 @@ public sealed class SqlParserCache : IAsyncDisposable
         if (maxEntries > 0 && _cache.Count >= maxEntries)
             return;  // cap reached — skip silently; sweep will make room
 
-        long expiresAt = Environment.TickCount64 + ttlMs;
-        ParsedSqlCacheEntry newEntry = new(ast, expiresAt);
+        long cost = EstimateBytes(sql);
 
-        if (!_cache.TryAdd(sql, newEntry))
+        // Byte budget: make room rather than refuse. Refusing would be the cheaper policy, but it
+        // would also make a stream of large unique statements — a logical restore — parse the same
+        // text more than once per request: the transport reads the root node type before the engine
+        // parses it for execution, and the routing collector parses it again afterwards. Those
+        // repeats are cache hits today, and they stay hits only if the statement is cached at all.
+        // Evicting to fit keeps every within-request hit while bounding what the cache retains.
+        if (!MakeRoomForBytes(cost))
+            return;  // one entry alone exceeds the whole budget — leave it uncached
+
+        long expiresAt = Environment.TickCount64 + ttlMs;
+        ParsedSqlCacheEntry newEntry = new(ast, expiresAt, cost);
+
+        if (_cache.TryAdd(sql, newEntry))
+        {
+            Interlocked.Add(ref _approxBytes, cost);
+        }
+        else
         {
             // Another thread inserted first; slide its expiration so it stays hot.
             if (_cache.TryGetValue(sql, out ParsedSqlCacheEntry? existing))
@@ -247,6 +304,58 @@ public sealed class SqlParserCache : IAsyncDisposable
         }
 
         EnsureSweepRunning();
+    }
+
+    /// <summary>
+    /// Evicts nearest-expiry entries until <paramref name="cost"/> more bytes fit inside the budget.
+    /// Returns <see langword="false"/> when the entry could never fit, which leaves it uncached.
+    ///
+    /// <para>Nearest-expiry is the same order <see cref="Retune"/> uses, and for the same reason:
+    /// the insert policy is not an LRU, so there is no recency order to honor, and the entries
+    /// closest to dying anyway are the cheapest to lose.</para>
+    /// </summary>
+    private bool MakeRoomForBytes(long cost)
+    {
+        long maxBytes = Volatile.Read(ref _maxBytes);
+
+        if (maxBytes <= 0)
+            return true;   // unbounded
+
+        if (cost > maxBytes)
+            return false;  // never fits, whatever we evict
+
+        if (Interlocked.Read(ref _approxBytes) + cost <= maxBytes)
+            return true;
+
+        List<KeyValuePair<string, ParsedSqlCacheEntry>> snapshot = new(_cache);
+        snapshot.Sort(static (a, b) => a.Value.ExpirationTicks.CompareTo(b.Value.ExpirationTicks));
+
+        foreach (KeyValuePair<string, ParsedSqlCacheEntry> pair in snapshot)
+        {
+            if (Interlocked.Read(ref _approxBytes) + cost <= maxBytes)
+                break;
+
+            RemoveEntry(pair.Key);
+        }
+
+        // A concurrent store may have taken the room we just freed. The budget bounds growth rather
+        // than holding exactly, so admit the entry either way and let the next store re-check.
+        return true;
+    }
+
+    /// <summary>
+    /// Removes one entry and decrements the byte estimate, counting an eviction. The single place
+    /// that removes an entry outside <see cref="TryGet"/>, so the running total cannot drift from
+    /// the dictionary through a path that forgot to decrement it.
+    /// </summary>
+    private bool RemoveEntry(string sql)
+    {
+        if (!_cache.TryRemove(sql, out ParsedSqlCacheEntry? removed))
+            return false;
+
+        Interlocked.Add(ref _approxBytes, -removed.EstimatedBytes);
+        Interlocked.Increment(ref _evictions);
+        return true;
     }
 
     // ── Background sweeper ─────────────────────────────────────────────────────
@@ -324,10 +433,7 @@ public sealed class SqlParserCache : IAsyncDisposable
         foreach (KeyValuePair<string, ParsedSqlCacheEntry> pair in _cache)
         {
             if (pair.Value.ExpirationTicks < now)
-            {
-                if (_cache.TryRemove(pair.Key, out _))
-                    Interlocked.Increment(ref _evictions);
-            }
+                RemoveEntry(pair.Key);
         }
     }
 

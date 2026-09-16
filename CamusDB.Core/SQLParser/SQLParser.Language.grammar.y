@@ -37,7 +37,7 @@
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
-%token TTRUNCATE
+%token TTRUNCATE TWITHOUT
 %token TCASE TWHEN TTHEN TELSE TEND
 %token TINCLUDE
 %token TASOFSYSTEMTIME
@@ -718,6 +718,11 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null, null); }
+          /* WITHOUT INDEXES renders the table without its secondary indexes, so a caller that
+             creates them separately — a dump replayed with deferred index builds — does not get
+             them built inline before the rows load. The PRIMARY KEY is always rendered: it is
+             part of the table definition and cannot be created by CREATE INDEX. */
+          | TSHOW TCREATE TTABLE any_identifier TWITHOUT TINDEXES { $$.n = new(NodeType.ShowCreateTable, $4.n, NodeAst.WithoutIndexes, null, null, null, null, null, null); }
           | TSHOW TVIEWS { $$.n = new(NodeType.ShowViews, null, null, null, null, null, null, null, null); }
           | TSHOW TVIEWS TLIKE string { $$.n = new(NodeType.ShowViews, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TMATERIALIZED TVIEWS { $$.n = new(NodeType.ShowMaterializedViews, null, null, null, null, null, null, null, null); }

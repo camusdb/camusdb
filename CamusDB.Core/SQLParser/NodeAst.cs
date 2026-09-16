@@ -98,6 +98,9 @@ public sealed class NodeAst
     public static readonly NodeAst ExprAllFields = Leaf(NodeType.ExprAllFields);
     public static readonly NodeAst ExprDefault = Leaf(NodeType.ExprDefault);
 
+    /// <summary>Presence-only marker for <c>SHOW CREATE TABLE … WITHOUT INDEXES</c>.</summary>
+    public static readonly NodeAst WithoutIndexes = Leaf(NodeType.WithoutIndexes);
+
     // ── DDL type sentinels ───────────────────────────────────────────────────
 
     public static readonly NodeAst TypeObjectId = Leaf(NodeType.TypeObjectId);

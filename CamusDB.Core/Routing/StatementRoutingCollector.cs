@@ -146,28 +146,12 @@ public sealed class StatementRoutingCollector
     /// eligibility rule exists to exclude.
     /// </summary>
     internal static bool ContainsSubqueryNodes(NodeAst? ast)
-    {
-        if (ast is null)
-            return false;
+        => NodeAstWalk.Any(ast, IsSubqueryNode);
 
-        switch (ast.nodeType)
-        {
-            case NodeType.ExprScalarSubquery:
-            case NodeType.ExprInSubquery:
-            case NodeType.ExprNotInSubquery:
-            case NodeType.ExprExistsSubquery:
-            case NodeType.ExprExistsCorrelated:
-                return true;
-        }
-
-        return ContainsSubqueryNodes(ast.leftAst)
-            || ContainsSubqueryNodes(ast.rightAst)
-            || ContainsSubqueryNodes(ast.extendedOne)
-            || ContainsSubqueryNodes(ast.extendedTwo)
-            || ContainsSubqueryNodes(ast.extendedThree)
-            || ContainsSubqueryNodes(ast.extendedFour)
-            || ContainsSubqueryNodes(ast.extendedFive)
-            || ContainsSubqueryNodes(ast.extendedSix)
-            || ContainsSubqueryNodes(ast.extendedSeven);
-    }
+    private static bool IsSubqueryNode(NodeAst node)
+        => node.nodeType is NodeType.ExprScalarSubquery
+            or NodeType.ExprInSubquery
+            or NodeType.ExprNotInSubquery
+            or NodeType.ExprExistsSubquery
+            or NodeType.ExprExistsCorrelated;
 }

@@ -293,6 +293,14 @@ public class ConfigDefinition
     public int SqlParserCacheSweepSeconds { get; set; } = 60;
 
     /// <summary>
+    /// Approximate ceiling, in bytes, on what the SQL parser AST cache may retain. The entry cap
+    /// bounds the cache by count, which does not bound its memory; a stream of large unique
+    /// statements (a logical restore) fills it with ASTs it will never get a hit on.
+    /// <c>0</c> disables the byte bound. Maps to <c>CamusDBOptions.SqlParserCacheMaxBytes</c>.
+    /// </summary>
+    public long SqlParserCacheMaxBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>
     /// Retention window, in milliseconds, for orphaned (deferred-dropped) databases/tables before the
     /// garbage collector may physically reclaim them. <c>&lt;= 0</c> keeps orphans until an explicit
     /// FORCE drop / manual purge. Maps to <c>CamusDBOptions.OrphanRetentionMs</c> (yml
@@ -1164,6 +1172,10 @@ public class ConfigDefinition
         if (SqlParserCacheSweepSeconds <= 0)
             throw Invalid(
                 $"'sql_parser_cache_sweep_seconds' must be > 0, got {SqlParserCacheSweepSeconds}");
+
+        if (SqlParserCacheMaxBytes < 0)
+            throw Invalid(
+                $"'sql_parser_cache_max_bytes' must be >= 0 (0 = unbounded), got {SqlParserCacheMaxBytes}");
 
         if (RegexMatchTimeoutMs <= 0)
             throw Invalid(

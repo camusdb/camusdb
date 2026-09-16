@@ -54,6 +54,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `sql_parser_cache_ttl_seconds` | — | `300` |
 | `sql_parser_cache_max_entries` | — | `2048` |
 | `sql_parser_cache_sweep_seconds` | — | `60` |
+| `sql_parser_cache_max_bytes` | — | `67108864` |
 | `spill_enabled` | — | `false` |
 | `spill_threshold_rows` | — | `500000` |
 | `spill_merge_fan_in` | — | `16` |

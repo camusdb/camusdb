@@ -683,4 +683,177 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
         Assert.AreEqual(viaParameter.ArrayValues!.Count, viaLiteral.ArrayValues!.Count);
         Assert.AreEqual(0, viaLiteral.CompareTo(viaParameter), "literal and parameter paths must store the same value");
     }
+
+    /// <summary>
+    /// <c>SHOW CREATE TABLE … WITHOUT INDEXES</c> renders the table without its secondary indexes, so
+    /// a caller that creates them separately does not get them built inline before any rows load.
+    ///
+    /// <para>The primary key is still rendered: it is part of the table definition and cannot be
+    /// created by a later <c>CREATE INDEX</c>. That is the difference between "no secondary indexes"
+    /// and "no indexes", and getting it wrong would emit DDL that does not describe a usable table.</para>
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTableWithoutIndexes_DropsSecondaryIndexes_KeepsPrimaryKey()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL, b STRING NOT NULL)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX a_idx ON src (a)");
+        await DdlAsync(executor, db, dbname, "CREATE UNIQUE INDEX b_uniq ON src (b)");
+
+        List<QueryResultRow> withIndexes = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src");
+        string full = withIndexes[0].Row["Create Table"].StrValue!;
+
+        Assert.IsTrue(full.Contains("a_idx"), "the default rendering should still carry the secondary index");
+        Assert.IsTrue(full.Contains("b_uniq"), "the default rendering should still carry the unique index");
+
+        List<QueryResultRow> withoutIndexes = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src WITHOUT INDEXES");
+        string bare = withoutIndexes[0].Row["Create Table"].StrValue!;
+
+        Assert.IsFalse(bare.Contains("a_idx"), "WITHOUT INDEXES still rendered the secondary index");
+        Assert.IsFalse(bare.Contains("b_uniq"), "WITHOUT INDEXES still rendered the unique index");
+        Assert.IsTrue(bare.Contains("PRIMARY KEY"), "WITHOUT INDEXES dropped the primary key, which it must keep");
+    }
+
+    /// <summary>
+    /// The index-free rendering must still be executable DDL. A caller uses it to create the table
+    /// before loading rows, so a form that does not re-parse would be useless.
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTableWithoutIndexes_OutputIsReparseable()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX a_idx ON src (a)");
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src WITHOUT INDEXES");
+        string ddl = rows[0].Row["Create Table"].StrValue!.Replace("`src`", "`copy`");
+
+        await DdlAsync(executor, db, dbname, ddl);
+
+        List<QueryResultRow> copy = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE copy");
+        string copyDdl = copy[0].Row["Create Table"].StrValue!;
+
+        Assert.IsTrue(copyDdl.Contains("PRIMARY KEY"));
+        Assert.IsFalse(copyDdl.Contains("a_idx"), "the copy was created from index-free DDL, so it must carry no secondary index");
+    }
+
+    /// <summary>
+    /// A table with no secondary index renders identically with and without the clause, so the
+    /// clause is never a reason for a caller to special-case its own SQL.
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTableWithoutIndexes_NoSecondaryIndexes_RendersTheSame()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL)");
+
+        List<QueryResultRow> withClause = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src WITHOUT INDEXES");
+        List<QueryResultRow> without = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src");
+
+        Assert.AreEqual(without[0].Row["Create Table"].StrValue, withClause[0].Row["Create Table"].StrValue);
+    }
+
+    /// <summary>
+    /// A descending index must survive <c>SHOW CREATE TABLE</c>. Before this was fixed the direction
+    /// was dropped, so a dump of a descending index restored as an ascending one with no warning —
+    /// a silent schema change on the documented migration path.
+    ///
+    /// <para><c>ASC</c> is deliberately not written: it is the default, and omitting it keeps the
+    /// rendering of an all-ascending table unchanged.</para>
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTable_RendersDescendingIndexDirection()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL, b INT64 NOT NULL)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX a_desc ON src (a DESC)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX b_asc ON src (b)");
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src");
+        string ddl = rows[0].Row["Create Table"].StrValue!;
+
+        StringAssert.Contains("`a` DESC", ddl, "the descending direction was dropped from the DDL");
+        StringAssert.Contains("KEY `b_asc` (`b`)", ddl, "an ascending index should render without an explicit ASC");
+    }
+
+    /// <summary>
+    /// The direction has to survive a re-parse too, not just the rendering. A composite index with
+    /// mixed directions is the case a single per-index flag would get wrong, so it is the one worth
+    /// round-tripping.
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTable_MixedDirectionCompositeIndex_RoundTrips()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL, b INT64 NOT NULL)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX mixed ON src (a ASC, b DESC)");
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE src");
+        string ddl = rows[0].Row["Create Table"].StrValue!.Replace("`src`", "`copy`");
+
+        StringAssert.Contains("`a`, `b` DESC", ddl);
+
+        await DdlAsync(executor, db, dbname, ddl);
+
+        List<QueryResultRow> copy = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE copy");
+        StringAssert.Contains("`a`, `b` DESC", copy[0].Row["Create Table"].StrValue!,
+            "the direction was lost when the rendered DDL was re-parsed");
+    }
+
+    /// <summary>
+    /// <c>SHOW INDEXES</c> reports each key column's direction in a <c>Directions</c> list that is
+    /// positionally aligned with <c>Columns</c>, and reports the index comment.
+    ///
+    /// <para>The direction is a separate field rather than part of <c>Columns</c> on purpose: a
+    /// consumer splits <c>Columns</c> on the comma and treats each element as an identifier to quote,
+    /// so folding <c>a DESC</c> into it would hand that consumer a name it cannot render.</para>
+    /// </summary>
+    [Test]
+    public async Task ShowIndexes_ReportsDirectionsAndComment()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL, b INT64 NOT NULL)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX mixed ON src (a ASC, b DESC)");
+        await DdlAsync(executor, db, dbname, "COMMENT ON INDEX src.mixed IS 'why this exists'");
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SHOW INDEXES FROM src");
+        QueryResultRow mixed = rows.Find(r => r.Row["Key_name"].StrValue == "mixed")!;
+
+        Assert.AreEqual("a,b", mixed.Row["Columns"].StrValue,
+            "Columns must stay a plain identifier list so a consumer can quote each element");
+        Assert.AreEqual("ASC,DESC", mixed.Row["Directions"].StrValue);
+        Assert.AreEqual("why this exists", mixed.Row["Comment"].StrValue);
+    }
+
+    /// <summary>
+    /// An index with no comment reports an empty string rather than a null, so a consumer reading the
+    /// field does not have to null-check a column that is always present.
+    /// </summary>
+    [Test]
+    public async Task ShowIndexes_IndexWithoutComment_ReportsEmptyString()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX a_idx ON src (a)");
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SHOW INDEXES FROM src");
+        QueryResultRow idx = rows.Find(r => r.Row["Key_name"].StrValue == "a_idx")!;
+
+        Assert.AreEqual("", idx.Row["Comment"].StrValue);
+        Assert.AreEqual("ASC", idx.Row["Directions"].StrValue);
+    }
 }

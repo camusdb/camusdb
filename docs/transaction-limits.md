@@ -18,16 +18,27 @@ work into smaller transactions.
 
 CamusDB stores each row as a single KV blob (not column-per-cell). The mutation unit is:
 
-> **One mutation = one row-blob write/delete, OR one secondary-index entry write/delete.**
+> **One mutation = one row-blob write/delete, OR one index entry write/delete.**
 
-Consequences:
+**The primary key has an index entry of its own, and it counts.** A row is stored under a generated
+row id, and the primary key is an index mapping the key value to that row id — so writing a row to a
+table with no secondary index at all costs **two** mutations, not one. The insert figures are
+measured: an `INSERT` reserves 2 mutations per row on a primary-key-only table and 3 with one
+secondary index. `DELETE` collects its keys through the same index set, so it costs the same; the
+`UPDATE` row below predates this note and has not been re-checked.
+
+Below, **K is the number of secondary indexes** — the primary key is already counted separately.
 
 | Operation | Mutations |
 |---|---|
-| `INSERT` one row into a table with K indexes | `1 + K` |
+| `INSERT` one row into a table with K secondary indexes | `2 + K` |
 | `UPDATE` one row, changing M indexed columns | `1 + 2M` (row rewrite + old-entry delete + new-entry insert per changed index) |
-| `DELETE` one row from a table with K indexes | `1 + K` |
+| `DELETE` one row from a table with K secondary indexes | `2 + K` |
 | Touching the same row N times in one transaction | N × (per-row cost) |
+
+So the largest single-statement row count the default budget admits is
+`floor(20000 / (2 + K))`: **10,000** rows with no secondary index, **6,666** with one. A covering
+index costs the same as a plain one — its stored columns ride inside the entry it already writes.
 
 The counter is **monotonic** — updating the same row twice counts twice, not once.
 This reflects the real cost of holding the corresponding write intents in Kahuna until
@@ -35,7 +46,8 @@ the transaction commits.
 
 ### Default limit
 
-`CamusDBConfig.MaxMutationsPerTransaction = 20_000`
+`max_mutations_per_transaction: 20000` in the configuration file, which maps to
+`CamusDBOptions.MaxMutationsPerTransaction`.
 
 Setting this to `<= 0` disables the limit entirely (the reservation becomes a no-op and
 the transaction behaves identically to pre-cap CamusDB).

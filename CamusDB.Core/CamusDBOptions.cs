@@ -504,6 +504,32 @@ public sealed record CamusDBOptions
     public int SqlParserCacheSweepSeconds { get; init; } = 60;
 
     /// <summary>
+    /// Approximate ceiling, in bytes, on what the SQL parser AST cache may retain.
+    ///
+    /// <para><see cref="SqlParserCacheMaxEntries"/> bounds the cache by <em>count</em>, which does
+    /// not bound its memory: a parsed statement retains roughly 20 to 60 times its SQL text, so
+    /// 2,048 entries is a few megabytes of small statements or well over a gigabyte of large ones.
+    /// A logical restore is the case that matters — every statement it sends is unique text, so the
+    /// cache fills to its entry cap and returns no hit at all. Measured on 2026-09-15: 2,048 unique
+    /// 500-row INSERT statements retained about 1.3 GiB for the full 300 s TTL, with zero hits.</para>
+    ///
+    /// <para>When a new statement would exceed this budget the cache evicts nearest-expiry entries
+    /// to make room rather than refusing to store it. Refusing would be cheaper but would cost a
+    /// re-parse: the transport reads a statement's root node type before the engine parses it to
+    /// execute, so the same text is looked up more than once per request and only a cached entry
+    /// makes the repeats free.</para>
+    ///
+    /// <para>The accounting is an estimate derived from statement text length, not a measurement of
+    /// the objects retained, so treat this as an order-of-magnitude bound.</para>
+    /// <para>
+    ///   <c>0</c> — no byte bound; the entry cap alone applies, which is the pre-2026-09 behavior.
+    /// </para>
+    /// Default: <c>67108864</c> (64 MiB).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long SqlParserCacheMaxBytes { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>
     /// Enables reuse of a SELECT statement's binding — source resolution, name resolution,
     /// validation, and required-column analysis — across executions of the same cached SQL text.
     /// Reuse is keyed by the parser cache's shared AST instance, is validated against the source

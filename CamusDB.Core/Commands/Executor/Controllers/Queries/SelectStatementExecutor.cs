@@ -648,7 +648,8 @@ internal sealed class SelectStatementExecutor
                     TableDescriptor table = await context.TableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);
 
-                    return (database, schemaQuerier.ShowCreateTable(table));
+                    // A non-null rightAst is the WITHOUT INDEXES marker; its presence is the whole flag.
+                    return (database, schemaQuerier.ShowCreateTable(table, includeSecondaryIndexes: ast.rightAst is null));
                 }
 
             case NodeType.ShowDatabase:
