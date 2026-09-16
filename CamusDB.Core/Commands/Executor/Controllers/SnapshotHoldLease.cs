@@ -97,6 +97,12 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
     /// <summary>
     /// Acquires a hold at <paramref name="snapshot"/> and starts renewing it. Throws when the hold
     /// cannot be taken — a read that needs a pinned snapshot must not start without one.
+    ///
+    /// <para>A transient answer is ridden out for up to <paramref name="retryBudgetMs"/> first: the
+    /// acquire commits on Kahuna's snapshot-hold partition, so an election in flight there answers
+    /// <c>MustRetry</c> without refusing anything. Past the budget the read is refused as retryable
+    /// (the hold may well be grantable a moment later), which is a different statement from a
+    /// snapshot that genuinely cannot be pinned.</para>
     /// </summary>
     internal static async Task<SnapshotHoldLease> AcquireAsync(
         IKahuna kahuna,
@@ -104,11 +110,19 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
         string holderId,
         HLCTimestamp snapshot,
         int leaseMs,
+        int retryBudgetMs,
         string statementName)
     {
-        (KeyValueResponseType type, string holdId, _) = await kahuna
-            .LocateAndAcquireSnapshotHold(holderId, snapshot, leaseMs, CancellationToken.None)
+        (KeyValueResponseType type, string holdId, _) = await SnapshotHoldRetry
+            .AcquireAsync(kahuna, holderId, snapshot, leaseMs, retryBudgetMs, CancellationToken.None)
             .ConfigureAwait(false);
+
+        if (SnapshotHoldRetry.IsTransient(type))
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"Could not pin history at the requested snapshot: Kahuna's snapshot-hold partition reported no " +
+                $"confirmed leader for the whole {retryBudgetMs} ms retry budget (status {type}). The " +
+                $"{statementName} was not started and nothing was changed; retry the statement.");
 
         if (type != KeyValueResponseType.Set || string.IsNullOrEmpty(holdId))
             throw new CamusDBException(
@@ -184,11 +198,18 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
         // error — does not cost the hold.
         int intervalMs = Math.Max(250, leaseMs / 3);
 
+        // Counts consecutive attempts that ended without an authoritative answer. Non-zero replaces
+        // the ordinary interval with a short back-off, so an election lasting a few seconds is
+        // re-probed several times rather than once per third of the lease.
+        int unanswered = 0;
+
         try
         {
             while (!stop.IsCancellationRequested)
             {
-                await Task.Delay(intervalMs, stop.Token).ConfigureAwait(false);
+                int waitMs = unanswered == 0 ? intervalMs : SnapshotHoldRetry.DelayMs(unanswered - 1);
+
+                await Task.Delay(waitMs, stop.Token).ConfigureAwait(false);
 
                 if (stop.IsCancellationRequested)
                     return;
@@ -201,17 +222,34 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
                     if (type == KeyValueResponseType.Set)
                     {
                         sinceConfirmed.Restart();
+                        unanswered = 0;
                         continue;
                     }
 
-                    // Anything else means Kahuna no longer recognizes the hold — it has already expired
-                    // or was never registered. There is nothing to wait for.
-                    logger.LogWarning(
-                        "Snapshot hold {HoldId} was refused renewal (status {Status}); the pinned read can no longer be trusted",
-                        holdId, type);
+                    if (type == KeyValueResponseType.DoesNotExist)
+                    {
+                        // The one definitive refusal: the hold is gone from Kahuna's registry — it was
+                        // released, or the reaper purged it after its lease lapsed. Removal is
+                        // replicated and permanent, so this answer is the same on every node, forever.
+                        logger.LogWarning(
+                            "Snapshot hold {HoldId} no longer exists (released, or purged after its lease lapsed); " +
+                            "the pinned read can no longer be trusted",
+                            holdId);
 
-                    MarkLost();
-                    return;
+                        MarkLost();
+                        return;
+                    }
+
+                    // Every other status is not authoritative either way. MustRetry in particular means
+                    // Kahuna's snapshot-hold partition had no confirmed leader at that instant — a
+                    // routine election, which says nothing about whether this hold is alive. Treating
+                    // it as a refusal discards a live hold and aborts the read that depends on it, so
+                    // it takes the same rule as a transport failure: keep probing while the lease can
+                    // still be assumed live, and only then presume the hold gone.
+                    if (!TryContinueUnanswered($"renew returned {type}", ex: null))
+                        return;
+
+                    unanswered++;
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
                 {
@@ -221,19 +259,10 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
                 {
                     // A transport failure is worth retrying — but only for as long as the lease can
                     // still be assumed live. Past that the hold has to be presumed gone.
-                    if (sinceConfirmed.Elapsed.TotalMilliseconds >= leaseMs * LostAfterLeaseFraction)
-                    {
-                        logger.LogWarning(
-                            ex,
-                            "Snapshot hold {HoldId} could not be renewed within its lease; the pinned read can no longer be trusted",
-                            holdId);
-
-                        MarkLost();
+                    if (!TryContinueUnanswered("renew failed at the transport", ex))
                         return;
-                    }
 
-                    if (logger.IsEnabled(LogLevel.Debug))
-                        logger.LogDebug(ex, "Transient failure renewing snapshot hold {HoldId}; will retry", holdId);
+                    unanswered++;
                 }
             }
         }
@@ -241,6 +270,33 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
         {
             // Disposed while waiting — the ordinary way this loop ends.
         }
+    }
+
+    /// <summary>
+    /// Decides what one unanswered renew attempt means. Returns true to keep probing, false once the
+    /// lease can no longer be assumed live — in which case the hold is marked lost before returning.
+    ///
+    /// <para>Fails closed by design: nothing here proves the hold is gone, but a lease that has run
+    /// most of its length without a confirmed renewal can no longer be relied on, and a reader that
+    /// carries on would publish rows it cannot prove complete.</para>
+    /// </summary>
+    private bool TryContinueUnanswered(string detail, Exception? ex)
+    {
+        if (sinceConfirmed.Elapsed.TotalMilliseconds >= leaseMs * LostAfterLeaseFraction)
+        {
+            logger.LogWarning(
+                ex,
+                "Snapshot hold {HoldId} could not be renewed within its lease ({Detail}); the pinned read can no longer be trusted",
+                holdId, detail);
+
+            MarkLost();
+            return false;
+        }
+
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogDebug(ex, "Unanswered renewal of snapshot hold {HoldId} ({Detail}); will retry", holdId, detail);
+
+        return true;
     }
 
     private void MarkLost()

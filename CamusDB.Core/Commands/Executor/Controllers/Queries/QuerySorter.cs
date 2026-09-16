@@ -32,6 +32,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// is also spilled, and the runs are k-way merged (via a min-heap) with up to
 /// <see cref="context.Options.SpillMergeFanIn"/> simultaneously-open readers per merge pass.
 ///
+/// <b>Computed ordering keys</b> (any ORDER BY clause carrying an expression) are evaluated
+/// exactly once per row. The two computed-key paths that never spill — the bounded retention and
+/// the flag-off full sort — keep the keys beside the rows (<see cref="RankedRow"/>) and emit the
+/// input rows untouched. The spill-capable full sort materializes the keys as internal
+/// <c>~sort</c> carrier columns so they round-trip through spill files without recomputation;
+/// <see cref="SortKeyCarrier"/> keeps that attachment positional for <see cref="QueryRow"/>
+/// inputs and strips it before any row leaves the operator.
+///
 /// The shared <see cref="QueryResultRowOrderComparer"/> is used by both the in-memory
 /// <c>List.Sort</c> and the k-way heap, so the two paths produce the same ordering for
 /// distinct-key inputs. For tied keys, SQL leaves the relative order of equal rows
@@ -103,22 +111,51 @@ internal sealed class QuerySorter
             yield break;
         }
 
+        // With spill disabled the full sort buffers every row in memory regardless, so the
+        // evaluated keys can ride beside the rows exactly as the bounded retention's do: no
+        // carrier column is attached, no strip copy is made, and each row keeps whatever backing
+        // it arrived with — a positional (QueryRow) row stays positional for the projector and
+        // the wire serializers downstream.
+        if (!context.Options.SpillEnabled)
+        {
+            List<RankedRow> buffered = new();
+
+            await foreach (RankedRow entry in EvaluateSortKeysAsync(
+                ticket, ticket.OrderBy, dataCursor, cancellationToken).ConfigureAwait(false))
+            {
+                buffered.Add(entry);
+            }
+
+            buffered.Sort(new RankedRowComparer(ticket.OrderBy));
+
+            foreach (RankedRow entry in buffered)
+                yield return entry.Row;
+
+            yield break;
+        }
+
         // The full sort can spill, so every ordering key becomes a materialized column on the row:
         // the existing spill encoder round-trips it with no format change, and the comparer below
         // is the same one an ordinary column sort uses — including its NULL placement, its
-        // multi-key walk and its direction handling.
+        // multi-key walk and its direction handling. The carrier keeps positional rows positional
+        // (see SortKeyCarrier), so the value-only spill format and the comparer's ordinal fast
+        // path both survive the attach, and the strip hands back the input's own layout.
         List<QueryOrderBy> materializedOrder = BuildMaterializedOrder(ticket.OrderBy);
 
-        IAsyncEnumerable<QueryResultRow> keyed = MaterializeSortKeysAsync(
-            ticket, ticket.OrderBy, dataCursor, cancellationToken);
+        SortKeyCarrier carrier = new(ticket.OrderBy.Count);
+
+        IAsyncEnumerable<QueryResultRow> keyed = AttachSortKeysAsync(
+            ticket, ticket.OrderBy, dataCursor, carrier, cancellationToken);
 
         await foreach (QueryResultRow row in SortByKeys(keyed, materializedOrder, context, cancellationToken).ConfigureAwait(false))
-            yield return StripSortKeys(row);
+            yield return carrier.Strip(row);
     }
 
     /// <summary>
-    /// A row paired with its evaluated ordering keys, one per ORDER BY clause. Used only by the
-    /// bounded retention, which keeps at most k of these alive and never writes them to disk.
+    /// A row paired with its evaluated ordering keys, one per ORDER BY clause. Used by the two
+    /// computed-key paths that never write rows to disk: the bounded retention (at most k alive)
+    /// and the spill-disabled full sort (everything buffered in memory anyway). Keys held here
+    /// never become row columns, so the row itself travels untouched.
     /// </summary>
     private readonly record struct RankedRow(QueryResultRow Row, ColumnValue[] Keys);
 
@@ -151,7 +188,7 @@ internal sealed class QuerySorter
     /// <summary>
     /// Evaluates every ordering key <b>once per input row</b> and pairs the row with its key array,
     /// without touching the row itself. Key evaluation is shared with
-    /// <see cref="MaterializeSortKeysAsync"/> through <see cref="EvaluateKey"/>, so the bounded and
+    /// <see cref="AttachSortKeysAsync"/> through <see cref="EvaluateKey"/>, so the bounded and
     /// full-sort paths compute identical keys for identical rows.
     /// </summary>
     private static async IAsyncEnumerable<RankedRow> EvaluateSortKeysAsync(
@@ -272,7 +309,7 @@ internal sealed class QuerySorter
 
     /// <summary>
     /// Evaluates every ordering key <b>once per input row</b> and attaches the results as internal
-    /// carrier columns.
+    /// carrier columns through <paramref name="carrier"/>.
     ///
     /// <para>Evaluating inside the comparer instead would call the expression O(n log n) times rather
     /// than n — for a distance over 768 dimensions that is the difference between a scan and a
@@ -280,28 +317,145 @@ internal sealed class QuerySorter
     /// expression were ever non-deterministic.</para>
     ///
     /// <para>The carrier travels as an ordinary column, so the existing spill encoder and k-way merge
-    /// round-trip it with no format change, and a spilled key is never recomputed. Only the full
-    /// sort pays the attach copy here: the bounded retention never spills, so it takes
+    /// round-trip it with no format change, and a spilled key is never recomputed. Only the
+    /// spill-capable full sort pays the attach copy here: the bounded retention and the
+    /// spill-disabled full sort never write rows to disk, so they take
     /// <see cref="EvaluateSortKeysAsync"/> instead, and an ordinary column sort keeps the
     /// slot-native comparison path untouched.</para>
     /// </summary>
-    private static async IAsyncEnumerable<QueryResultRow> MaterializeSortKeysAsync(
+    private static async IAsyncEnumerable<QueryResultRow> AttachSortKeysAsync(
         QueryTicket ticket,
         IReadOnlyList<QueryOrderBy> orderBy,
         IAsyncEnumerable<QueryResultRow> cursor,
+        SortKeyCarrier carrier,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            Dictionary<string, ColumnValue> carried = new(row.Row.Count + orderBy.Count, StringComparer.Ordinal);
+            ColumnValue[] keys = new ColumnValue[orderBy.Count];
+
+            for (int i = 0; i < orderBy.Count; i++)
+                keys[i] = EvaluateKey(ticket, orderBy[i], row);
+
+            yield return carrier.Attach(row, keys);
+        }
+    }
+
+    /// <summary>
+    /// Attaches, and later removes, the materialized ordering-key columns of the spill-capable
+    /// full computed sort — keeping a positional row positional across the whole round trip.
+    ///
+    /// <para>A <see cref="QueryRow"/> input gets a positional carrier: one carrier
+    /// <see cref="RowLayout"/> (the input's columns followed by the <c>~sort</c> keys) is built
+    /// per input layout <b>instance</b> and shared by every row carrying that layout. Sharing one
+    /// carrier layout instance is what preserves the two downstream fast paths a per-row
+    /// dictionary defeats: the spill writer's value-only format and the order comparer's ordinal
+    /// fast path both gate on <see cref="object.ReferenceEquals"/> of row layouts. The strip then
+    /// hands back the <b>original</b> input layout instance, so the projector's
+    /// <see cref="QueryRow"/> fast path (and any alias names the input layout carried) survive
+    /// the sort. Any other row shape falls back to the dictionary carrier, mirroring how the
+    /// comparer itself degrades on unknown shapes.</para>
+    ///
+    /// <para>The carrier row owns a fresh cell array (input cells copied once, keys appended), and
+    /// the strip allocates a fresh array of exactly the input's width — a stripped row must never
+    /// expose a longer backing array through <see cref="QueryRow.Values"/>, or the extra carrier
+    /// cells would leak into whole-row consumers such as the spill encoder.</para>
+    ///
+    /// <para>Not thread-safe: one instance lives inside a single sort invocation, whose rows are
+    /// produced and consumed on one pipeline path.</para>
+    /// </summary>
+    private sealed class SortKeyCarrier
+    {
+        private readonly int keyCount;
+
+        /// <summary>Carrier layout per input layout instance (reference identity, matching the comparer's fast-path gate).</summary>
+        private readonly Dictionary<RowLayout, RowLayout> carrierByInput = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Input layout per carrier layout instance — the strip's way back to the original shape.</summary>
+        private readonly Dictionary<RowLayout, RowLayout> inputByCarrier = new(ReferenceEqualityComparer.Instance);
+
+        public SortKeyCarrier(int keyCount) => this.keyCount = keyCount;
+
+        /// <summary>
+        /// Returns <paramref name="row"/> with the evaluated <paramref name="keys"/> attached as
+        /// trailing <c>~sort</c> columns: positionally for a <see cref="QueryRow"/> input, via a
+        /// dictionary copy for any other row shape. The input row itself is never mutated.
+        /// </summary>
+        public QueryResultRow Attach(QueryResultRow row, ColumnValue[] keys)
+        {
+            if (row.Row is QueryRow input)
+            {
+                RowLayout carrierLayout = GetCarrierLayout(input.Layout);
+                int width = input.Layout.Count;
+
+                // One owned positional copy. Values materializes a lazily-backed row's cells, which
+                // the dictionary carrier paid too — but here they land in an array under a shared
+                // layout instead of a per-row dictionary with per-cell hashing.
+                ColumnValue[] cells = new ColumnValue[width + keyCount];
+                Array.Copy(input.Values, cells, width);
+
+                for (int i = 0; i < keyCount; i++)
+                    cells[width + i] = keys[i];
+
+                return new QueryResultRow(row.RowId, new QueryRow(row.RowId, carrierLayout, cells));
+            }
+
+            Dictionary<string, ColumnValue> carried = new(row.Row.Count + keyCount, StringComparer.Ordinal);
 
             foreach (KeyValuePair<string, ColumnValue> cell in row.Row)
                 carried[cell.Key] = cell.Value;
 
-            for (int i = 0; i < orderBy.Count; i++)
-                carried[SortKeyPrefix + i] = EvaluateKey(ticket, orderBy[i], row);
+            for (int i = 0; i < keyCount; i++)
+                carried[SortKeyPrefix + i] = keys[i];
 
-            yield return new QueryResultRow(row.RowId, carried);
+            return new QueryResultRow(row.RowId, carried);
+        }
+
+        /// <summary>
+        /// Removes the carrier columns before the row leaves the sort operator, so a computed key
+        /// can never surface as a column of a <c>SELECT *</c> result. A positional carrier strips
+        /// back to the original input layout instance — a spilled run's value-only decode hands
+        /// rows back under the same carrier layout instance it was written with, so the reverse
+        /// lookup holds across the spill round trip. Everything else (the dictionary carrier, and
+        /// a mixed-shape run that spilled schema-less) strips by the <c>~sort</c> name prefix.
+        /// </summary>
+        public QueryResultRow Strip(QueryResultRow row)
+        {
+            if (row.Row is QueryRow qr && inputByCarrier.TryGetValue(qr.Layout, out RowLayout? inputLayout))
+            {
+                ColumnValue[] cells = new ColumnValue[inputLayout.Count];
+                Array.Copy(qr.Values, cells, inputLayout.Count);
+
+                return new QueryResultRow(row.RowId, new QueryRow(row.RowId, inputLayout, cells));
+            }
+
+            Dictionary<string, ColumnValue> stripped = new(row.Row.Count, StringComparer.Ordinal);
+
+            foreach (KeyValuePair<string, ColumnValue> cell in row.Row)
+            {
+                if (!cell.Key.StartsWith(SortKeyPrefix, StringComparison.Ordinal))
+                    stripped[cell.Key] = cell.Value;
+            }
+
+            return new QueryResultRow(row.RowId, stripped);
+        }
+
+        private RowLayout GetCarrierLayout(RowLayout input)
+        {
+            if (carrierByInput.TryGetValue(input, out RowLayout? carrier))
+                return carrier;
+
+            string[] names = new string[input.Count + keyCount];
+            Array.Copy(input.OutputNames, names, input.Count);
+
+            for (int i = 0; i < keyCount; i++)
+                names[input.Count + i] = SortKeyPrefix + i;
+
+            carrier = new RowLayout(names);
+            carrierByInput.Add(input, carrier);
+            inputByCarrier.Add(carrier, input);
+
+            return carrier;
         }
     }
 
@@ -333,23 +487,6 @@ internal sealed class QuerySorter
             return value;
 
         return ColumnValue.Null;
-    }
-
-    /// <summary>
-    /// Removes the carrier columns before the row leaves the sort operator, so a computed key can
-    /// never surface as a column of a <c>SELECT *</c> result.
-    /// </summary>
-    private static QueryResultRow StripSortKeys(QueryResultRow row)
-    {
-        Dictionary<string, ColumnValue> stripped = new(row.Row.Count, StringComparer.Ordinal);
-
-        foreach (KeyValuePair<string, ColumnValue> cell in row.Row)
-        {
-            if (!cell.Key.StartsWith(SortKeyPrefix, StringComparison.Ordinal))
-                stripped[cell.Key] = cell.Value;
-        }
-
-        return new QueryResultRow(row.RowId, stripped);
     }
 
     /// <summary>

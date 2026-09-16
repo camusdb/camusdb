@@ -706,6 +706,13 @@ public class ConfigDefinition
     public int BranchSnapshotHoldLeaseMs { get; set; } = 300_000;
 
     /// <summary>
+    /// Total wall-clock budget in milliseconds for retrying a Kahuna snapshot-floor hold acquire
+    /// against <c>MustRetry</c> before the statement fails with CADB0504. &lt;= 0 attempts the
+    /// acquire once. Default 10 000 (10 s).
+    /// </summary>
+    public int SnapshotHoldRetryBudgetMs { get; set; } = 10_000;
+
+    /// <summary>
     /// Enables spill-to-disk for blocking query operators (sort, GROUP BY, DISTINCT,
     /// hash join, derived-table materialization, DELETE/UPDATE row buffers).
     /// When <c>false</c> (default), every operator keeps its in-memory path; when <c>true</c>,

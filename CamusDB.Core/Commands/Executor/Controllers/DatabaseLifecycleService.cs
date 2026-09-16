@@ -11,6 +11,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Maintenance;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using Kahuna;
 using Kahuna.Shared.KeyValue;
@@ -227,15 +228,33 @@ internal sealed class DatabaseLifecycleService
             // A hold that is not confirmed granted means durability cannot be guaranteed — fail the
             // create rather than register a branch whose frozen view GC may later reclaim. The hold
             // is renewed while the branch lives (leader-owned renewer) and released on leaf drop.
+            //
+            // "Not confirmed granted" is not the same as "refused". The acquire commits on Kahuna's
+            // meta partition, so a leader election in flight there answers MustRetry — a routine
+            // state carrying no decision, which a create must ride out rather than decode. The
+            // budgeted retry is what makes an election invisible to CREATE DATABASE … BRANCH FROM,
+            // and a spent budget is reported as retryable rather than as a rejected statement. The
+            // wait happens under the source's SchemaDdlSemaphore, which the unbounded metadata copy
+            // below already holds for far longer — and no DDL on that source could make progress
+            // during the election anyway.
             IKahuna sourceKahuna = sourceDescriptor.Kahuna.Kahuna;
-            (KeyValueResponseType holdType, string holdId, _) = await sourceKahuna
-                .LocateAndAcquireSnapshotHold(branchId, forkT, currentOptions.BranchSnapshotHoldLeaseMs, CancellationToken.None)
+            (KeyValueResponseType holdType, string holdId, _) = await SnapshotHoldRetry
+                .AcquireAsync(
+                    sourceKahuna, branchId, forkT, currentOptions.BranchSnapshotHoldLeaseMs,
+                    currentOptions.SnapshotHoldRetryBudgetMs, CancellationToken.None)
                 .ConfigureAwait(false);
 
             if (holdType != KeyValueResponseType.Set || string.IsNullOrEmpty(holdId))
                 throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Could not acquire a snapshot-floor hold on '{ticket.BranchFrom}' at the fork point (status {holdType}); branch not created because its frozen view could not be guaranteed durable");
+                    SnapshotHoldRetry.IsTransient(holdType)
+                        ? CamusDBErrorCodes.TransactionMustRetry
+                        : CamusDBErrorCodes.InvalidInput,
+                    SnapshotHoldRetry.IsTransient(holdType)
+                        ? $"Could not acquire a snapshot-floor hold on '{ticket.BranchFrom}' at the fork point: " +
+                          $"Kahuna's snapshot-hold partition reported no confirmed leader for the whole " +
+                          $"{currentOptions.SnapshotHoldRetryBudgetMs} ms retry budget (status {holdType}). Nothing was " +
+                          "created and nothing was changed; retry the statement."
+                        : $"Could not acquire a snapshot-floor hold on '{ticket.BranchFrom}' at the fork point (status {holdType}); branch not created because its frozen view could not be guaranteed durable");
 
             // The metadata copy below has no duration bound, and the registry-driven renewer only
             // sweeps holds of REGISTERED branches — during creation nothing else renews this hold.

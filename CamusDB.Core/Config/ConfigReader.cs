@@ -115,6 +115,7 @@ public class ConfigReader
         "materialized_view_refresh_enabled",
         "materialized_view_refresh_takeover_attempts",
         "branch_snapshot_hold_lease_ms",
+        "snapshot_hold_retry_budget_ms",
         "spill_enabled",
         "spill_threshold_rows",
         "spill_merge_fan_in",

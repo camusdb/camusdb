@@ -17,6 +17,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -288,6 +289,131 @@ public sealed class TestQuerySorterSpill
         Assert.That(ext.Select(r => r.Row["n"].LongValue),
             Is.EqualTo(inMem.Select(r => r.Row["n"].LongValue)).AsCollection,
             "spill path and in-memory path must produce identical ordering");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Computed ordering keys across the spill round trip
+    // ──────────────────────────────────────────────────────────────────────────
+
+    private static CamusDB.Core.SQLParser.NodeAst Identifier(string name) => new(
+        CamusDB.Core.SQLParser.NodeType.Identifier, null, null, null, null, null, null, null, name);
+
+    /// <summary>
+    /// A computed full sort over positional (<see cref="QueryRow"/>) inputs, forced through spill
+    /// runs and intermediate merge passes. The rows must come back in the same order the
+    /// in-memory sort produces, positional, under the <b>original</b> layout instance, with no
+    /// carrier cell left in the backing array — the spill round trip must not demote the rows to
+    /// dictionaries or leak the internal <c>~sort</c> columns.
+    /// </summary>
+    [Test]
+    public async Task ComputedOrdering_ForcedSpill_KeepsRowsPositionalUnderTheInputLayout()
+    {
+        RowLayout layout = RowLayout.ForColumns(["a", "b"]);
+
+        QueryResultRow Make(long a, long b) =>
+            new(default, new QueryRow(default, layout, [new(ColumnType.Integer64, a), new(ColumnType.Integer64, b)]));
+
+        // Duplicate computed keys plus a unique second key, so the total order is deterministic
+        // and exact positional equality between the two paths is a fair requirement.
+        List<QueryResultRow> input = new(12);
+        for (long i = 0; i < 12; i++)
+            input.Add(Make((12 - i) % 5, i));
+
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Ascending, Identifier("a")),
+            new QueryOrderBy("b", OrderType.Ascending));
+
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(3, 2)).ToListAsync();
+
+        Assert.That(spilled.Select(r => r.Row["b"].LongValue),
+            Is.EqualTo(reference.Select(r => r.Row["b"].LongValue)).AsCollection,
+            "spilled and in-memory computed sorts must produce identical row orders");
+
+        foreach (QueryResultRow row in spilled)
+        {
+            Assert.That(row.Row, Is.InstanceOf<QueryRow>(), "a positional input must stay positional across the spill round trip");
+
+            QueryRow qr = (QueryRow)row.Row;
+            Assert.That(ReferenceEquals(qr.Layout, layout), Is.True, "the strip must hand back the original layout instance");
+            Assert.That(qr.Count, Is.EqualTo(2));
+            Assert.That(qr.Values.Length, Is.EqualTo(2), "no carrier cell may remain in the backing array");
+            Assert.That(row.Row.Keys.Any(static key => key.StartsWith('~')), Is.False, "carrier columns must not leak");
+        }
+    }
+
+    /// <summary>
+    /// Mixed row shapes (positional rows interleaved with dictionary rows) push the spill writer
+    /// off the value-only format and the carrier onto its dictionary fallback. The result must
+    /// still match the in-memory sort exactly, and no row of either shape may expose a
+    /// <c>~sort</c> column.
+    /// </summary>
+    [Test]
+    public async Task ComputedOrdering_ForcedSpill_MixedRowShapes_MatchInMemoryAndLeakNoCarrier()
+    {
+        RowLayout layout = RowLayout.ForColumns(["a", "b"]);
+
+        List<QueryResultRow> input = new(10);
+        for (long i = 0; i < 10; i++)
+        {
+            input.Add(i % 2 == 0
+                ? new QueryResultRow(default, new QueryRow(default, layout,
+                    [new(ColumnType.Integer64, (10 - i) % 4), new(ColumnType.Integer64, i)]))
+                : Row(("a", (10 - i) % 4), ("b", i)));
+        }
+
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Descending, Identifier("a")),
+            new QueryOrderBy("b", OrderType.Ascending));
+
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(3, 2)).ToListAsync();
+
+        Assert.That(spilled.Select(r => r.Row["b"].LongValue),
+            Is.EqualTo(reference.Select(r => r.Row["b"].LongValue)).AsCollection);
+
+        foreach (QueryResultRow row in spilled)
+        {
+            Assert.That(row.Row.Keys.Any(static key => key.StartsWith('~')), Is.False, "carrier columns must not leak");
+            Assert.That(row.Row.Count, Is.EqualTo(2), "every input column must survive, and nothing more");
+        }
+    }
+
+    /// <summary>
+    /// Randomized parity over the shapes the correctness constraints call out: mixed
+    /// ascending/descending keys, NULLs in the computed key, duplicate keys, and a unique
+    /// tie-breaking key that makes the total order deterministic. The spilled sort must equal
+    /// the in-memory sort exactly, row for row.
+    /// </summary>
+    [Test]
+    public async Task ComputedOrdering_ForcedSpill_RandomizedMixedDirections_MatchInMemoryExactly()
+    {
+        Random random = new(20260915);
+        RowLayout layout = RowLayout.ForColumns(["a", "b", "tie"]);
+
+        List<QueryResultRow> input = new(120);
+        for (long i = 0; i < 120; i++)
+        {
+            ColumnValue a = random.Next(4) == 0
+                ? ColumnValue.Null
+                : new ColumnValue(ColumnType.Integer64, (long)random.Next(0, 7));
+
+            input.Add(new QueryResultRow(default, new QueryRow(default, layout,
+                [a, new(ColumnType.Integer64, (long)random.Next(0, 3)), new(ColumnType.Integer64, i)])));
+        }
+
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Descending, Identifier("a")),
+            new QueryOrderBy("b", OrderType.Ascending),
+            new QueryOrderBy("tie", OrderType.Ascending));
+
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOn(7, 2)).ToListAsync();
+
+        Assert.That(reference.Count, Is.EqualTo(120));
+        Assert.That(spilled.Select(r => r.Row["tie"].LongValue),
+            Is.EqualTo(reference.Select(r => r.Row["tie"].LongValue)).AsCollection,
+            "the deterministic total order must be identical on both paths");
     }
 
     // ──────────────────────────────────────────────────────────────────────────

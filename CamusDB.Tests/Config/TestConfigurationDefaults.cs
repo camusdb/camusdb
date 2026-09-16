@@ -64,6 +64,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(30_000, CamusDBOptions.Default.FenceLeaseMs, nameof(CamusDBOptions.Default.FenceLeaseMs));
         Assert.AreEqual(10_000, CamusDBOptions.Default.FenceLeaseRenewIntervalMs, nameof(CamusDBOptions.Default.FenceLeaseRenewIntervalMs));
         Assert.AreEqual(300_000, CamusDBOptions.Default.BranchSnapshotHoldLeaseMs, nameof(CamusDBOptions.Default.BranchSnapshotHoldLeaseMs));
+        Assert.AreEqual(10_000, CamusDBOptions.Default.SnapshotHoldRetryBudgetMs, nameof(CamusDBOptions.Default.SnapshotHoldRetryBudgetMs));
         Assert.AreEqual(3600, CamusDBOptions.Default.PitrWindowSeconds, nameof(CamusDBOptions.Default.PitrWindowSeconds));
         Assert.AreEqual(300, CamusDBOptions.Default.SqlParserCacheTtlSeconds, nameof(CamusDBOptions.Default.SqlParserCacheTtlSeconds));
         Assert.AreEqual(2048, CamusDBOptions.Default.SqlParserCacheMaxEntries, nameof(CamusDBOptions.Default.SqlParserCacheMaxEntries));

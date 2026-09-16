@@ -319,6 +319,7 @@ public static class ConfigResolver
         MaterializedViewRefreshEnabled = config.MaterializedViewRefreshEnabled,
         MaterializedViewRefreshTakeoverAttempts = config.MaterializedViewRefreshTakeoverAttempts,
         BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs,
+        SnapshotHoldRetryBudgetMs = config.SnapshotHoldRetryBudgetMs,
 
             // Mirror the effective Kahuna PITR retention window (seconds) into the process-wide config so
             // the restore window guard can reject a target time older than now - window without re-reading
