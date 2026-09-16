@@ -77,9 +77,8 @@ public abstract class KeyRangeSplitFixture : BaseTest
             [
                 new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
                     [new ColumnIndexInfo("id", OrderType.Ascending)]),
-                // Integer64 rather than String on purpose: only indexes whose key columns all use the
-                // non-String ordered encoding are registered for key-range routing, so a String-keyed
-                // index would stay hash-routed and have no range to split.
+                // An Integer64-keyed index; String-keyed indexes are range-routed too and are
+                // covered separately by TestKeyRangeStringIndexSeek.
                 new ConstraintInfo(ConstraintType.IndexMulti, "amount_idx",
                     [new ColumnIndexInfo("amount", OrderType.Ascending)]),
             ],

@@ -458,6 +458,29 @@ public sealed record CamusDBOptions
     public int BranchSnapshotHoldLeaseMs { get; init; } = 300_000;
 
     /// <summary>
+    /// Total wall-clock budget, in milliseconds, for retrying a Kahuna snapshot-floor hold acquire
+    /// that answers <c>MustRetry</c>, before the statement that needs the hold surfaces
+    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/>.
+    ///
+    /// <para>A hold is committed on Kahuna's meta partition, so acquiring one needs that partition's
+    /// confirmed leader. <c>MustRetry</c> is the answer while the node is still joining, while no
+    /// leader is resolved, or while a revision-prune window overlaps the acquire — all routine and
+    /// short-lived, and none of them a refusal. This budget is what decides whether a routine
+    /// election is invisible or fails a user's <c>CREATE DATABASE … BRANCH FROM</c>.</para>
+    ///
+    /// <para>A wall-clock budget rather than an attempt count, and sized against the election itself:
+    /// an election runs on the order of seconds (Kommander's election timeout is 2–4 s before
+    /// increments), while a handful of attempts with short back-off spends its whole allowance in
+    /// well under one. Same reasoning as <see cref="SequenceRetryBudgetMs"/>, which is why a
+    /// <c>CREATE TABLE</c> already survives an election that a <c>CREATE DATABASE</c> did not.</para>
+    ///
+    /// <para><c>&lt;= 0</c> disables retrying: the acquire is attempted once and any <c>MustRetry</c>
+    /// surfaces immediately. Default: 10 000 ms (10 s).</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int SnapshotHoldRetryBudgetMs { get; init; } = 10_000;
+
+    /// <summary>
     /// Effective Kahuna point-in-time-recovery retention window, in seconds — how far back a restore may
     /// target. Mirrors <c>kahuna.pitr_window_seconds</c> (→ <see cref="Kahuna.EmbeddedKahunaOptions.PitrWindow"/>)
     /// so the restore admin path can reject a target time older than <c>now - window</c> (or in the
@@ -562,9 +585,11 @@ public sealed record CamusDBOptions
     /// opens-and-registers independently), and the range-lock path switches from prefix locks to
     /// Kahuna range locks (prefix locks are rejected on ranged spaces).
     ///
-    /// Secondary indexes whose key columns are all non-String ASCII-encoding types
-    /// (Integer64/Float64/Bool/Id/Null) are also registered and range-locked. String-keyed indexes
-    /// stay hash-routed until the persistence comparator is aligned.
+    /// Secondary indexes are also registered and range-locked, whatever their key column types:
+    /// every type — String included — now encodes to pure ASCII whose byte order matches the
+    /// in-memory ordinal order, so the persistence comparator agrees with the scan comparator.
+    /// The only index left hash-routed is one whose key column ids cannot be resolved
+    /// (see <see cref="Commands.Executor.Controllers.TableOpener.IsIndexRangeable"/>).
     ///
     /// <b>Splitting.</b> A registered space starts as one whole-space range and can be divided into
     /// child ranges owned by different Raft partitions — which is the point of the mode, since it is

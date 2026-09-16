@@ -256,6 +256,49 @@ public class TestQuerySorter
         }
     }
 
+    /// <summary>
+    /// With spill disabled the full computed sort must not attach carrier columns or rebuild the
+    /// rows: the emitted rows are the input row instances themselves, still positional
+    /// (<see cref="QueryRow"/>) under the same layout instance, so every downstream fast path
+    /// that gates on the layout keeps working.
+    /// </summary>
+    [Test]
+    public async Task SortResultset_ComputedFullSortWithSpillOff_EmitsTheInputRowsUntouched()
+    {
+        CamusDB.Core.SQLParser.NodeAst identifier = new(
+            CamusDB.Core.SQLParser.NodeType.Identifier, null, null, null, null, null, null, null, "a");
+
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("k", OrderType.Ascending, identifier));
+
+        RowLayout layout = RowLayout.ForColumns(["a", "b"]);
+
+        QueryResultRow Make(long a, string b) =>
+            new(default, new QueryRow(default, layout, [new(ColumnType.Integer64, a), new(ColumnType.String, b)]));
+
+        List<QueryResultRow> rows = [Make(3, "x"), Make(1, "y"), Make(2, "z")];
+
+        QuerySorter sorter = new();
+        List<QueryResultRow> sorted = await sorter
+            .SortResultset(ticket, ToAsync(rows), new QueryExecutionContext(CamusDBOptions.Default))
+            .ToListAsync();
+
+        CollectionAssert.AreEqual(new[] { 1L, 2L, 3L }, sorted.Select(r => r.Row["a"].LongValue).ToArray());
+
+        foreach (QueryResultRow row in sorted)
+        {
+            Assert.IsInstanceOf<QueryRow>(row.Row, "a positional input row must stay positional");
+
+            QueryRow qr = (QueryRow)row.Row;
+            Assert.IsTrue(ReferenceEquals(qr.Layout, layout), "the row must keep its original layout instance");
+            Assert.AreEqual(2, qr.Count);
+            Assert.IsFalse(row.Row.Keys.Any(static key => key.StartsWith('~')),
+                "no internal carrier column may leave the sort operator");
+        }
+
+        // The emitted rows are the input instances — no copy of any shape was made.
+        CollectionAssert.AreEquivalent(rows.Select(r => r.Row), sorted.Select(r => r.Row));
+    }
+
     private static QueryResultRow Row(params (string name, object value)[] columns)
     {
         Dictionary<string, ColumnValue> row = new();

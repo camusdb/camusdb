@@ -1178,7 +1178,8 @@ internal sealed class SelectStatementExecutor
         // closed when renewal stops being confirmed — is what makes "one pinned snapshot" true for the
         // whole read rather than only for its first few minutes.
         SnapshotHoldLease lease = await SnapshotHoldLease.AcquireAsync(
-            kahuna, context.Logger, holderId, snapshotT, options.BranchSnapshotHoldLeaseMs, statementName)
+            kahuna, context.Logger, holderId, snapshotT, options.BranchSnapshotHoldLeaseMs,
+            options.SnapshotHoldRetryBudgetMs, statementName)
             .ConfigureAwait(false);
 
         ExecuteSQLTicket snapshotTicket = new(
