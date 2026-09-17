@@ -63,6 +63,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.UnknownType      => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ValueTooLong     => StatusCode.InvalidArgument,
         CamusDBErrorCodes.SchemaLimitExceeded => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.StatementTooDeeplyNested => StatusCode.InvalidArgument,
         CamusDBErrorCodes.NotNullViolation => StatusCode.InvalidArgument,
         CamusDBErrorCodes.CheckConstraintViolation => StatusCode.InvalidArgument,
 

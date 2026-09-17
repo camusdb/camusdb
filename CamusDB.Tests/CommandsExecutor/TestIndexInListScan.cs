@@ -640,7 +640,7 @@ public class TestIndexInListScan : BaseTest
     public async Task ExecNotInListWithPlaceholders_ExcludesCorrectRows()
     {
         // Regression: NOT IN (@p1, @p2) with placeholders must also resolve parameters
-        // through EvaluateNotInMembership → Enumerate → EvalExpr.
+        // through EvaluateMembership → Enumerate → EvalExpr.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsWithNameIndex();
 
         KvTransaction txn = await database.Transactions.BeginAsync();

@@ -486,7 +486,7 @@ public static class PredicateAnalyzer
                 values.Add(replacement);
         }
 
-        return values is null ? inList : new AnalyzedInList(inList.ColumnName, values, inList.Conjunct);
+        return values is null ? inList : inList with { Values = values };
     }
 
     private static AnalyzedComparison CoerceStringConstant(AnalyzedComparison comparison, TableDescriptor table)
@@ -570,6 +570,11 @@ public static class PredicateAnalyzer
         return CombineConjuncts(conjuncts);
     }
 
+    /// <summary>
+    /// Rebuilds a conjunction from its conjuncts. A long conjunction is built balanced through
+    /// <see cref="ExpressionChains.Combine"/>: a residual filter can keep thousands of conjuncts of a
+    /// generated WHERE clause, and a left-deep rebuild would restore the depth the parser removed.
+    /// </summary>
     internal static NodeAst? CombineConjuncts(IReadOnlyCollection<NodeAst> conjuncts)
     {
         if (conjuncts.Count == 0)
@@ -578,41 +583,26 @@ public static class PredicateAnalyzer
         if (conjuncts.Count == 1)
             return conjuncts.First();
 
-        NodeAst? combined = null;
-
-        foreach (NodeAst conjunct in conjuncts)
-        {
-            combined = combined is null
-                ? conjunct
-                : new NodeAst(
-                    NodeType.ExprAnd,
-                    combined,
-                    conjunct,
-                    extendedOne: null,
-                    extendedTwo: null,
-                    extendedThree: null,
-                    extendedFour: null,
-                    extendedFive: null,
-                    yytext: null);
-        }
-
-        return combined;
+        return ExpressionChains.Combine(NodeType.ExprAnd, conjuncts as IReadOnlyList<NodeAst> ?? conjuncts.ToList());
     }
 
+    /// <summary>
+    /// Appends the conjuncts of <paramref name="node"/> in source order, whatever the shape of its
+    /// AND chain. Iterative; see <see cref="ExpressionChains.Flatten"/>.
+    /// </summary>
     internal static void CollectAndConjuncts(NodeAst node, ICollection<NodeAst> conjuncts)
     {
-        if (node.nodeType == NodeType.ExprAnd)
+        if (conjuncts is List<NodeAst> list)
         {
-            if (node.leftAst is not null)
-                CollectAndConjuncts(node.leftAst, conjuncts);
-
-            if (node.rightAst is not null)
-                CollectAndConjuncts(node.rightAst, conjuncts);
-
+            ExpressionChains.Flatten(node, NodeType.ExprAnd, list);
             return;
         }
 
-        conjuncts.Add(node);
+        List<NodeAst> flattened = [];
+        ExpressionChains.Flatten(node, NodeType.ExprAnd, flattened);
+
+        foreach (NodeAst conjunct in flattened)
+            conjuncts.Add(conjunct);
     }
 
     /// <summary>
@@ -638,26 +628,28 @@ public static class PredicateAnalyzer
             return false;
 
         List<ColumnValue> values = [];
-        if (!TryExtractInListValues(conjunct.rightAst, parameters, values))
+        bool containsNull = SubqueryValueListAst.ListContainsRemovedNull(conjunct);
+        if (!TryExtractInListValues(conjunct.rightAst, parameters, values, ref containsNull))
             return false;
 
         // An all-NULL list still has an empty non-null values list — valid but zero seeks.
         string columnName = conjunct.leftAst.yytext;
-        result = new AnalyzedInList(columnName, values, conjunct);
+        result = new AnalyzedInList(columnName, values, conjunct, containsNull);
         return true;
     }
 
     private static bool TryExtractInListValues(
         NodeAst node,
         Dictionary<string, ColumnValue>? parameters,
-        List<ColumnValue> values)
+        List<ColumnValue> values,
+        ref bool containsNull)
     {
         if (node.nodeType == NodeType.ExprList)
         {
-            if (node.leftAst is not null && !TryExtractInListValues(node.leftAst, parameters, values))
+            if (node.leftAst is not null && !TryExtractInListValues(node.leftAst, parameters, values, ref containsNull))
                 return false;
 
-            if (node.rightAst is not null && !TryExtractInListValues(node.rightAst, parameters, values))
+            if (node.rightAst is not null && !TryExtractInListValues(node.rightAst, parameters, values, ref containsNull))
                 return false;
                 
             return true;
@@ -677,9 +669,12 @@ public static class PredicateAnalyzer
             return false;
         }
 
-        // NULL list values match nothing — skip them.
+        // NULL list values match nothing, so a seek skips them; the predicate's value still
+        // depends on them (no match plus a NULL item is UNKNOWN), so record that one was seen.
         if (value.Type != ColumnType.Null)
             values.Add(value);
+        else
+            containsNull = true;
 
         return true;
     }

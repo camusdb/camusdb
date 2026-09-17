@@ -2975,7 +2975,7 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             txnState: txnState,
             database: dbname,
             sql: "SELECT id FROM robots WHERE id NOT IN (SELECT robots_id FROM blocked_robots) AND id = @id",
-            parameters: new() { { "id", new(ColumnType.Id, objectsId[0]) } });
+            parameters: new() { { "@id", new(ColumnType.Id, objectsId[0]) } });
 
         (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
         List<QueryResultRow> result = await cursor.ToListAsync();

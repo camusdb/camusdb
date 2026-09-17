@@ -94,6 +94,11 @@ internal sealed class ExistsSubqueryPreparer
         ExecuteSQLTicket ticket,
         ExistsRewriteContext context)
     {
+        // An async frame is large, and a deep predicate would overflow the stack; continue on a
+        // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
+        if (!StatementDepthGuard.HasStackHeadroom())
+            return await Task.Run(() => RewriteExpressionAsync(database, expr, outerTableSources, outerDerivedSources, ticket, context)).ConfigureAwait(false);
+
         if (expr.nodeType == NodeType.ExprExistsSubquery)
         {
             if (expr.leftAst is null)

@@ -22,14 +22,17 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// hash overhead for the common tiny-IN case). Larger lists use a <see cref="HashSet{T}"/>
 /// with <see cref="SqlColumnValueComparer"/> (consistent with <see cref="ColumnValue.CompareTo"/>).
 ///
-/// NULL semantics: NULL is never a member of any IN list (SQL three-valued logic).
-/// NULL values in the source list are dropped when the set is built; a NULL lhs returns false.
+/// NULL semantics: NULL is never a member of any IN list. NULL values in the source list are
+/// dropped when the set is built, and <see cref="Contains"/> returns false for a NULL lhs. The SQL
+/// value of the predicate is three-valued, so <see cref="Evaluate"/> also needs to know whether a
+/// NULL item was dropped, here or earlier by <see cref="PredicateAnalyzer"/>: with no match, that
+/// NULL item makes the result UNKNOWN instead of FALSE.
 ///
 /// Cross-type semantics: <c>x IN (a, b, c)</c> is defined as <c>x = a OR x = b OR x = c</c>, so each
 /// element uses the equality <c>=</c> uses (<see cref="MixedNumericComparison.EqualsForMembership"/>):
 /// a mixed numeric pair widens to double, so <c>1 IN (1.0)</c> is true, and any other cross-type
 /// element (e.g. <c>5 IN (1, 'foo')</c>) is a non-match rather than a hard error. This matches the
-/// AST reference path (<see cref="SubqueryValueListAst.ContainsValue"/>), so prepared and reference
+/// AST reference path (<see cref="SubqueryValueListAst.EvaluateMembership"/>), so prepared and reference
 /// paths stay identical — and it matches the index IN-list seek, which rewrites list items into the
 /// column's type. IN lists are not type-checked at bind time, so mixed-type lists are reachable and
 /// must not throw.
@@ -40,8 +43,13 @@ public sealed class PreparedInSet
 
     private readonly ColumnValue[] _values;
     private readonly HashSet<ColumnValue>? _set;
+    private readonly bool _containsNull;
 
-    public PreparedInSet(IReadOnlyList<ColumnValue> values)
+    /// <param name="values">The list items. NULL items are allowed and are dropped.</param>
+    /// <param name="containsNull">True when the caller already dropped a NULL item from
+    /// <paramref name="values"/>. A NULL item still present in <paramref name="values"/> sets it
+    /// too.</param>
+    public PreparedInSet(IReadOnlyList<ColumnValue> values, bool containsNull = false)
     {
         // PredicateAnalyzer already drops NULLs, but filter defensively in case the
         // caller supplies raw AST-extracted values that still contain NULLs.
@@ -49,6 +57,7 @@ public sealed class PreparedInSet
         for (int i = 0; i < values.Count; i++)
             if (values[i].Type != ColumnType.Null) nonNullCount++;
 
+        _containsNull = containsNull || nonNullCount < values.Count;
         _values = new ColumnValue[nonNullCount];
         int idx = 0;
         for (int i = 0; i < values.Count; i++)
@@ -82,6 +91,29 @@ public sealed class PreparedInSet
             MixedNumericComparison.IsNumeric(obj.Type)
                 ? MixedNumericComparison.ToDouble(obj).GetHashCode()
                 : SqlColumnValueComparer.Instance.GetHashCode(obj);
+    }
+
+    /// <summary>
+    /// Returns the SQL value of <c>lhs IN (list)</c>: TRUE, FALSE, or a NULL value for UNKNOWN. It
+    /// must agree with <see cref="SubqueryValueListAst.EvaluateMembership"/>: a NULL
+    /// <paramref name="lhs"/> is UNKNOWN, a match is TRUE, and no match is UNKNOWN when the list held
+    /// a NULL item and FALSE when it did not.
+    ///
+    /// <para>The source list is never empty. A set is built only for a membership node that has a
+    /// list (a literal list, or a subquery that returned a non-NULL value), so the "empty list is
+    /// FALSE even for NULL" rule never applies. The set itself can hold no values, when
+    /// <see cref="PredicateAnalyzer"/> drops every item that the column type cannot equal
+    /// (<c>int_col IN (1.5)</c>); a NULL lhs is still UNKNOWN then, as on the reference path.</para>
+    /// </summary>
+    public ColumnValue Evaluate(ColumnValue lhs)
+    {
+        if (lhs.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        if (Contains(lhs))
+            return ColumnValue.True;
+
+        return _containsNull ? ColumnValue.Null : ColumnValue.False;
     }
 
     /// <summary>

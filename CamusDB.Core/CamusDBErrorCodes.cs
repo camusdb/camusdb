@@ -84,6 +84,17 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string InvalidVectorValue = "CADB0412";
 
+    /// <summary>
+    /// A statement nests deeper than the engine can evaluate safely: an expression, a list or a
+    /// subquery chain whose parse tree exceeds the limit that <c>StatementDepthGuard</c> enforces.
+    /// Refused when the statement is parsed, before any walker recurses over it, because a stack
+    /// overflow cannot be caught and would end the server process instead of failing the one
+    /// statement. Long OR and AND chains, IN lists and ARRAY literals do not count against the limit
+    /// at their full length — the parser rebalances them. A permanent caller mistake: rewrite the
+    /// statement with less nesting. Maps to HTTP 400.
+    /// </summary>
+    public const string StatementTooDeeplyNested = "CADB0413";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -565,6 +576,7 @@ public static class CamusDBErrorCodes
         MalformedVector => 400,
         VectorDimensionMismatch => 400,
         InvalidVectorValue => 400,
+        StatementTooDeeplyNested => 400,
         InvalidAsOfSystemTime => 400,
         CommentTooLong => 400,
         UnsupportedAuthPlugin => 400,

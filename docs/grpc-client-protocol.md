@@ -454,7 +454,7 @@ Domain errors are surfaced two ways depending on the call shape:
 
 | gRPC `StatusCode` | Meaning | Example CamusDB codes |
 |-------------------|---------|-----------------------|
-| `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, NOT NULL violation, CHECK constraint violation |
+| `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), NOT NULL violation, CHECK constraint violation |
 | `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key |
 | `ALREADY_EXISTS` | Duplicate | duplicate unique key, duplicate primary key, database/table already exists |
 | `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants |

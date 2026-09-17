@@ -25,12 +25,13 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Parity tests for Task 2: pre-materialized IN-list lookup.
+/// Parity tests for the pre-materialized IN-list lookup.
 ///
-/// Unit tests verify <see cref="PreparedInSet.Contains"/> against
-/// <see cref="SubqueryValueListAst.ContainsValue"/> for:
+/// Unit tests verify <see cref="PreparedInSet.Evaluate"/> against
+/// <see cref="SubqueryValueListAst.EvaluateMembership"/> (TRUE / FALSE / UNKNOWN) for:
 ///   - same-type integer and string lists (value present / absent)
-///   - NULL in the list (ignored; a NULL lhs always returns false)
+///   - NULL in the list (never a member; no match with a NULL item is UNKNOWN)
+///   - NULL lhs (never a member; the predicate is UNKNOWN)
 ///   - cross-type lookup (int lhs vs float list, and vice versa)
 ///   - small list (≤8, linear scan) vs large list (>8, HashSet)
 ///   - empty list
@@ -48,12 +49,21 @@ public class TestPreparedInSet : SharedNodeBaseTest
     private static ColumnValue Flt(double v) => new(ColumnType.Float64, v);
     private static ColumnValue Null() => ColumnValue.Null;
 
-    // Wrap the current AST-walk ContainsValue so we can assert parity in unit tests.
-    private static bool AstContains(ColumnValue lhs, IReadOnlyList<ColumnValue> listValues)
+    // The SQL value of `lhs IN (listValues)` on the AST reference path, as TRUE / FALSE / UNKNOWN,
+    // so the unit tests can assert three-valued parity with PreparedInSet.Evaluate.
+    private static string AstTruth(ColumnValue lhs, IReadOnlyList<ColumnValue> listValues)
     {
-        NodeAst? ast = SubqueryValueListAst.Build(listValues);
-        return SubqueryValueListAst.ContainsValue(lhs, ast);
+        NodeAst node = new(NodeType.ExprInMembership, new NodeAst(NodeType.Null, null, null, null, null, null, null, null, null),
+            SubqueryValueListAst.Build(listValues), null, null, null, null, null, null);
+        return Truth(SubqueryValueListAst.EvaluateMembership(lhs, node));
     }
+
+    private static string Truth(ColumnValue value) => value.Type switch
+    {
+        ColumnType.Null => "UNKNOWN",
+        ColumnType.Bool => value.BoolValue ? "TRUE" : "FALSE",
+        _ => throw new AssertionException($"membership returned a {value.Type}")
+    };
 
     // ── same-type integer lists ───────────────────────────────────────────────
 
@@ -63,7 +73,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = [Int(1), Int(2), Int(3)];
         PreparedInSet set = new(values);
         Assert.IsTrue(set.Contains(Int(2)));
-        Assert.AreEqual(AstContains(Int(2), values), set.Contains(Int(2)));
+        Assert.AreEqual(AstTruth(Int(2), values), Truth(set.Evaluate(Int(2))));
     }
 
     [Test]
@@ -72,7 +82,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = [Int(1), Int(2), Int(3)];
         PreparedInSet set = new(values);
         Assert.IsFalse(set.Contains(Int(99)));
-        Assert.AreEqual(AstContains(Int(99), values), set.Contains(Int(99)));
+        Assert.AreEqual(AstTruth(Int(99), values), Truth(set.Evaluate(Int(99))));
     }
 
     [Test]
@@ -81,7 +91,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = Enumerable.Range(1, 50).Select(i => Int(i)).ToArray();
         PreparedInSet set = new(values);
         Assert.IsTrue(set.Contains(Int(25)));
-        Assert.AreEqual(AstContains(Int(25), values), set.Contains(Int(25)));
+        Assert.AreEqual(AstTruth(Int(25), values), Truth(set.Evaluate(Int(25))));
     }
 
     [Test]
@@ -90,7 +100,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = Enumerable.Range(1, 50).Select(i => Int(i)).ToArray();
         PreparedInSet set = new(values);
         Assert.IsFalse(set.Contains(Int(999)));
-        Assert.AreEqual(AstContains(Int(999), values), set.Contains(Int(999)));
+        Assert.AreEqual(AstTruth(Int(999), values), Truth(set.Evaluate(Int(999))));
     }
 
     // ── same-type string lists ────────────────────────────────────────────────
@@ -101,7 +111,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = [Str("alpha"), Str("beta"), Str("gamma")];
         PreparedInSet set = new(values);
         Assert.IsTrue(set.Contains(Str("beta")));
-        Assert.AreEqual(AstContains(Str("beta"), values), set.Contains(Str("beta")));
+        Assert.AreEqual(AstTruth(Str("beta"), values), Truth(set.Evaluate(Str("beta"))));
     }
 
     [Test]
@@ -110,7 +120,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = [Str("alpha"), Str("beta"), Str("gamma")];
         PreparedInSet set = new(values);
         Assert.IsFalse(set.Contains(Str("delta")));
-        Assert.AreEqual(AstContains(Str("delta"), values), set.Contains(Str("delta")));
+        Assert.AreEqual(AstTruth(Str("delta"), values), Truth(set.Evaluate(Str("delta"))));
     }
 
     [Test]
@@ -119,40 +129,58 @@ public class TestPreparedInSet : SharedNodeBaseTest
         ColumnValue[] values = [Str("Alpha")];
         PreparedInSet set = new(values);
         Assert.IsFalse(set.Contains(Str("alpha")));
-        Assert.AreEqual(AstContains(Str("alpha"), values), set.Contains(Str("alpha")));
+        Assert.AreEqual(AstTruth(Str("alpha"), values), Truth(set.Evaluate(Str("alpha"))));
     }
 
     // ── NULL semantics ────────────────────────────────────────────────────────
 
     [Test]
-    public void NullLhs_AlwaysFalse()
+    public void NullLhs_IsNeverAMember_AndIsUnknown()
     {
+        // NULL IN (1, 2) is NULL = 1 OR NULL = 2, which is UNKNOWN, not FALSE: a NOT above it
+        // must stay UNKNOWN.
         ColumnValue[] values = [Int(1), Int(2)];
         PreparedInSet set = new(values);
         Assert.IsFalse(set.Contains(Null()));
-        Assert.AreEqual(AstContains(Null(), values), set.Contains(Null()));
+        Assert.AreEqual("UNKNOWN", Truth(set.Evaluate(Null())));
+        Assert.AreEqual(AstTruth(Null(), values), Truth(set.Evaluate(Null())));
     }
 
     [Test]
-    public void NullInList_IsIgnored_NonNullLhsCanStillMatch()
+    public void NullInList_NonNullLhsCanStillMatch_NoMatchIsUnknown()
     {
-        // A NULL value in the list matches nothing; non-null values still match.
+        // A NULL value in the list matches nothing; non-null values still match. With no match,
+        // the NULL item's equality is UNKNOWN, so the whole predicate is UNKNOWN.
         ColumnValue[] values = [Null(), Int(1), Null(), Int(2)];
         PreparedInSet set = new(values);
         Assert.IsTrue(set.Contains(Int(1)));
         Assert.IsFalse(set.Contains(Int(99)));
-        // ContainsValue skips NULLs in the list, so compare against equivalent non-null list.
-        ColumnValue[] nonNullValues = [Int(1), Int(2)];
-        Assert.AreEqual(AstContains(Int(1), nonNullValues), set.Contains(Int(1)));
-        Assert.AreEqual(AstContains(Int(99), nonNullValues), set.Contains(Int(99)));
+        Assert.AreEqual("TRUE", Truth(set.Evaluate(Int(1))));
+        Assert.AreEqual("UNKNOWN", Truth(set.Evaluate(Int(99))));
+        Assert.AreEqual(AstTruth(Int(1), values), Truth(set.Evaluate(Int(1))));
+        Assert.AreEqual(AstTruth(Int(99), values), Truth(set.Evaluate(Int(99))));
     }
 
     [Test]
-    public void AllNullList_NeverMatches()
+    public void NullDroppedByCaller_StillMakesNoMatchUnknown()
+    {
+        // PredicateAnalyzer removes NULL items before it builds the set and passes the fact in.
+        ColumnValue[] nonNullValues = [Int(1), Int(2)];
+        PreparedInSet set = new(nonNullValues, containsNull: true);
+        Assert.AreEqual("TRUE", Truth(set.Evaluate(Int(2))));
+        Assert.AreEqual("UNKNOWN", Truth(set.Evaluate(Int(99))));
+        Assert.AreEqual(AstTruth(Int(99), [Int(1), Null(), Int(2)]), Truth(set.Evaluate(Int(99))));
+    }
+
+    [Test]
+    public void AllNullList_NeverMatches_IsUnknown()
     {
         ColumnValue[] values = [Null(), Null()];
         PreparedInSet set = new(values);
         Assert.IsFalse(set.Contains(Int(1)));
+        Assert.AreEqual("UNKNOWN", Truth(set.Evaluate(Int(1))));
+        Assert.AreEqual(AstTruth(Int(1), values), Truth(set.Evaluate(Int(1))));
+        Assert.AreEqual(AstTruth(Null(), values), Truth(set.Evaluate(Null())));
     }
 
     [Test]
@@ -161,6 +189,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         PreparedInSet set = new(Array.Empty<ColumnValue>());
         Assert.IsFalse(set.Contains(Int(1)));
         Assert.IsFalse(set.Contains(Null()));
+        Assert.AreEqual("FALSE", Truth(set.Evaluate(Int(1))));
     }
 
     // ── cross-type: lhs type does not match list type ─────────────────────────
@@ -174,8 +203,8 @@ public class TestPreparedInSet : SharedNodeBaseTest
         PreparedInSet set = new(values);
         Assert.IsTrue(set.Contains(Int(1)));
         Assert.IsFalse(set.Contains(Int(3)));
-        Assert.AreEqual(AstContains(Int(1), values), set.Contains(Int(1)));
-        Assert.AreEqual(AstContains(Int(3), values), set.Contains(Int(3)));
+        Assert.AreEqual(AstTruth(Int(1), values), Truth(set.Evaluate(Int(1))));
+        Assert.AreEqual(AstTruth(Int(3), values), Truth(set.Evaluate(Int(3))));
     }
 
     [Test]
@@ -185,8 +214,8 @@ public class TestPreparedInSet : SharedNodeBaseTest
         PreparedInSet set = new(values);
         Assert.IsTrue(set.Contains(Flt(1.0)));
         Assert.IsFalse(set.Contains(Flt(1.5)));
-        Assert.AreEqual(AstContains(Flt(1.0), values), set.Contains(Flt(1.0)));
-        Assert.AreEqual(AstContains(Flt(1.5), values), set.Contains(Flt(1.5)));
+        Assert.AreEqual(AstTruth(Flt(1.0), values), Truth(set.Evaluate(Flt(1.0))));
+        Assert.AreEqual(AstTruth(Flt(1.5), values), Truth(set.Evaluate(Flt(1.5))));
     }
 
     [Test]
@@ -211,7 +240,7 @@ public class TestPreparedInSet : SharedNodeBaseTest
         Assert.IsTrue(set.Contains(Int(7)));
         Assert.IsFalse(set.Contains(Int(25)));
         Assert.IsFalse(set.Contains(Flt(7.5)));
-        Assert.AreEqual(AstContains(Int(7), values), set.Contains(Int(7)));
+        Assert.AreEqual(AstTruth(Int(7), values), Truth(set.Evaluate(Int(7))));
     }
 
     [Test]
@@ -224,10 +253,10 @@ public class TestPreparedInSet : SharedNodeBaseTest
         PreparedInSet set = new(values);
 
         Assert.IsFalse(set.Contains(Int(5)));
-        Assert.AreEqual(AstContains(Int(5), values), set.Contains(Int(5)));
+        Assert.AreEqual(AstTruth(Int(5), values), Truth(set.Evaluate(Int(5))));
 
         Assert.IsTrue(set.Contains(Int(2)));
-        Assert.AreEqual(AstContains(Int(2), values), set.Contains(Int(2)));
+        Assert.AreEqual(AstTruth(Int(2), values), Truth(set.Evaluate(Int(2))));
     }
 
     // ── large list uses HashSet ───────────────────────────────────────────────

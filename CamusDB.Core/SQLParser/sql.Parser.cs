@@ -31,7 +31,18 @@ internal partial class sqlParser
         if (!string.IsNullOrEmpty(scanner.YYError))
             throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, scanner.YYError);
 
-        return CurrentSemanticValue.n;
+        NodeAst ast = CurrentSemanticValue.n;
+
+        // Both passes run here, before the tree leaves the parser: the rebalance assigns child slots,
+        // which is only allowed until the tree is shared (the parser cache hands one instance to
+        // concurrent executions), and the depth check must precede every recursive walker.
+        if (ast is not null)
+        {
+            ExpressionChains.Normalize(ast);
+            StatementDepthGuard.Enforce(ast);
+        }
+
+        return ast!;
     }
 
     /// <summary>

@@ -14,8 +14,12 @@ namespace CamusDB.Core.CommandsExecutor.Models.Predicates;
 /// An indexable IN-list predicate: <c>column IN (v1, v2, ...)</c> where every list item
 /// is a constant or resolved parameter (no columns, no expressions, no subqueries).
 /// NULL list values are already filtered out — a NULL list item matches nothing in SQL.
+/// <see cref="ContainsNull"/> records that one was removed: the removal is safe for an index seek,
+/// but not for the predicate's value, which is UNKNOWN rather than FALSE when no item matches and
+/// the list held a NULL.
 /// </summary>
 public sealed record AnalyzedInList(
     string ColumnName,
     IReadOnlyList<ColumnValue> Values,
-    NodeAst Conjunct);
+    NodeAst Conjunct,
+    bool ContainsNull = false);

@@ -367,6 +367,19 @@ internal abstract class SQLExecutorBaseCreator
         elements.Add(EvalExpr(node, row, parameters));
     }
 
+    /// <summary>
+    /// Evaluates one expression node against a row. This is the per-row interpreter: every WHERE
+    /// term, projection, UPDATE assignment and CHECK expression reaches it once per node per row.
+    ///
+    /// <para><b>Keep this method a thin dispatcher.</b> It recurses once per level of expression
+    /// nesting, and the JIT gives a method one frame big enough for the locals of <em>every</em> case
+    /// in it. When the case bodies lived here the frame was about 1.7 KB, so <c>a + 0 + 0 …</c> with
+    /// fewer than 900 terms — a 3 KiB statement — overflowed the stack, and a stack overflow ends the
+    /// process. Each case therefore calls a helper that owns its locals, its string formatting and its
+    /// throw, and a new case must follow the same pattern. The expression depth the whole engine
+    /// accepts is bounded by <see cref="StatementDepthGuard"/>, whose limit assumes this frame stays
+    /// small.</para>
+    /// </summary>
     public static ColumnValue EvalExpr(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
@@ -377,325 +390,403 @@ internal abstract class SQLExecutorBaseCreator
         switch (expr.nodeType)
         {
             case NodeType.Integer:
-                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedInteger))
-                    return cachedInteger;
-
-                if (!long.TryParse(expr.yytext!, NumberStyles.Integer, CultureInfo.InvariantCulture, out long longValue))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
-
-                return CacheLiteralValue(expr, new ColumnValue(ColumnType.Integer64, longValue));
+                return EvalIntegerLiteral(expr);
 
             case NodeType.Float:
-                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedFloat))
-                    return cachedFloat;
-
-                if (!double.TryParse(expr.yytext!, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
-
-                return CacheLiteralValue(expr, new ColumnValue(ColumnType.Float64, doubleValue));
+                return EvalFloatLiteral(expr);
 
             case NodeType.String:
-                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedString))
-                    return cachedString;
-
-                return CacheLiteralValue(expr, new ColumnValue(ColumnType.String, UnquoteStringLiteral(expr.yytext!)));
+                return EvalStringLiteral(expr);
 
             case NodeType.BytesLiteral:
-                // The cached instance's byte[] is shared across rows; consumers treat ColumnValue
-                // payloads as read-only (encode paths copy bytes out), same as the string case.
-                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedBytes))
-                    return cachedBytes;
-
-                return CacheLiteralValue(expr, new ColumnValue(SqlStringLiteral.DecodeBytes(expr.yytext!)));
+                return EvalBytesLiteral(expr);
 
             case NodeType.ArrayLiteral:
                 return EvalArrayLiteral(expr, row, parameters);
 
             case NodeType.Bool:
-                if (!bool.TryParse(expr.yytext!, out bool boolValue))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Bool: " + expr.yytext!);
-
-                return ColumnValue.FromBool(boolValue);
+                return EvalBoolLiteral(expr);
 
             case NodeType.Null:
                 return ColumnValue.Null;
 
             case NodeType.ObjectIdLiteral:
-                if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cachedId))
-                    return cachedId;
-
-                if (string.IsNullOrEmpty(expr.yytext))
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid ObjectId literal");
-
-                return CacheLiteralValue(expr, new ColumnValue(ColumnType.Id, expr.yytext));
+                return EvalObjectIdLiteral(expr);
 
             case NodeType.Identifier:
-                {
-                    string lookupKey = rowNameResolver?.ResolveRowLookupKey(expr.yytext!) ?? expr.yytext!;
-
-                    // Ordinal fast path: when the caller supplies a QueryRow directly, bypass the
-                    // IReadOnlyDictionary adapter and read the cell by ordinal without virtual dispatch.
-                    // Uses GetColumnValue (per-cell), not Values, so evaluating a predicate against a
-                    // slot-backed row materializes only the columns the expression references — a row
-                    // rejected by a WHERE clause never materializes its projection cells.
-                    // Falls through to the dictionary path for any key not found in the layout
-                    // (e.g. a parameter alias or a column absent from this row's schema version).
-                    if (queryRow is not null)
-                    {
-                        int ordinal = queryRow.Layout.IndexOf(lookupKey);
-                        if (ordinal >= 0)
-                            return queryRow.GetColumnValue(ordinal);
-                    }
-
-                    if (row.TryGetValue(lookupKey, out ColumnValue? columnValue))
-                        return columnValue;
-
-                    throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, "Unknown column: " + expr.yytext!);
-                }
+                return EvalIdentifier(expr, row, rowNameResolver, queryRow);
 
             case NodeType.Placeholder:
-                {
-                    if (parameters is null)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing placeholders to replace: " + expr.yytext!);
-
-                    if (parameters.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
-                        return columnValue;
-
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown placeholder: " + expr.yytext!);
-                }
+                return EvalPlaceholder(expr, parameters);
 
             case NodeType.ExprEquals:
-                {
-                    // Byte-native fast path for `stringColumn = 'literal'` against a borrowed row: compares
-                    // the row's stored UTF-8 slice to the literal's UTF-8 bytes without materializing the
-                    // row's string. Byte equality is exactly string equality, so this matches CompareValues.
-                    if (queryRow is { IsBorrowedBacked: true } && TryUtf8StringEquality(expr, rowNameResolver, queryRow, out bool eq))
-                        return ColumnValue.FromBool(eq);
-
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalComparison(NodeType.ExprEquals, leftValue, rightValue);
-                }
-
             case NodeType.ExprNotEquals:
-                {
-                    if (queryRow is { IsBorrowedBacked: true } && TryUtf8StringEquality(expr, rowNameResolver, queryRow, out bool eq))
-                        return ColumnValue.FromBool(!eq);
-
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalComparison(NodeType.ExprNotEquals, leftValue, rightValue);
-                }
-
             case NodeType.ExprLessThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalComparison(NodeType.ExprLessThan, leftValue, rightValue);
-                }
-
             case NodeType.ExprGreaterThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalComparison(NodeType.ExprGreaterThan, leftValue, rightValue);
-                }
-
             case NodeType.ExprLessEqualsThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalComparison(NodeType.ExprLessEqualsThan, leftValue, rightValue);
-                }
-
             case NodeType.ExprGreaterEqualsThan:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalComparison(NodeType.ExprGreaterEqualsThan, leftValue, rightValue);
-                }
+                return EvalComparisonNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprBetween:
-                {
-                    ColumnValue subject = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue low = EvalExpr(expr.extendedOne!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver, queryRow);
-
-                    if (subject.Type == ColumnType.Null || low.Type == ColumnType.Null || high.Type == ColumnType.Null)
-                        return ColumnValue.False;
-
-                    return ColumnValue.FromBool(
-                        CompareValues(subject, low) >= 0 && CompareValues(subject, high) <= 0);
-                }
+                return EvalBetweenNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprOr:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalOr(leftValue, rightValue);
-                }
-
             case NodeType.ExprAnd:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalAnd(leftValue, rightValue);
-                }
+                return EvalLogicalNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprNot:
-                {
-                    ColumnValue value = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                    // Three-valued logic: NOT NULL is NULL (unknown), which the predicate filter
-                    // treats as non-matching.
-                    if (value.Type == ColumnType.Null)
-                        return ColumnValue.Null;
-
-                    if (value.Type != ColumnType.Bool)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator NOT for argument type: {value.Type}");
-
-                    return ColumnValue.FromBool(!value.BoolValue);
-                }
+                return EvalNotNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprAdd:
             case NodeType.ExprSub:
             case NodeType.ExprMult:
             case NodeType.ExprDiv:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return EvalArithmetic(expr.nodeType, leftValue, rightValue);
-                }
+                return EvalArithmeticNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprFuncCall:
-                // The static lambda pins the 4-param (IReadOnlyDictionary) overload because the
-                // optional queryRow param makes the method group ambiguous for delegate conversion.
-                // Column refs inside function arguments therefore go through the IReadOnlyDictionary
-                // adapter rather than the ordinal fast path. This is correctness-neutral (QueryRow
-                // implements the interface) but leaves a small per-argument hashing cost on the
-                // table. Reaching the ordinal path here would mean adding queryRow to
-                // EvaluateExpressionDelegate, which changes the signature every scalar function
-                // implements — a wider refactor than the saving justifies on its own.
+                // Called directly rather than through a helper: a nested call re-enters this method
+                // once per level, so every frame on that cycle is paid once per level. The static
+                // lambda pins the 4-param (IReadOnlyDictionary) overload because the optional
+                // queryRow param makes the method group ambiguous for delegate conversion. Column refs
+                // inside function arguments therefore go through the IReadOnlyDictionary adapter
+                // rather than the ordinal fast path. This is correctness-neutral (QueryRow implements
+                // the interface) but leaves a small per-argument hashing cost on the table. Reaching
+                // the ordinal path here would mean adding queryRow to EvaluateExpressionDelegate,
+                // which changes the signature every scalar function implements — a wider refactor
+                // than the saving justifies on its own.
+                //
+                // A nested call is the costliest level of this recursion (the evaluator, the argument
+                // list and the delegate each add a frame), so it checks its stack headroom: a call is
+                // already expensive, and the check turns an overflow into a statement error.
+                StatementDepthGuard.EnsureStackHeadroom();
                 return ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver,
                     static (e, r, p, rnr) => EvalExpr(e, r, p, rnr));
 
             case NodeType.ExprCast:
-                {
-                    ColumnValue input = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    return CastScalarFunctions.CastExpression("cast", input, expr.rightAst!);
-                }
+                return EvalCastNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprCase:
-                {
-                    // Simple CASE evaluates its operand once; each WHEN then tests operand = value.
-                    // Searched CASE has no operand and each WHEN is a boolean condition. Either way the
-                    // FIRST matching branch wins and later branches are never evaluated — a later branch
-                    // may reference a column only valid under a different WHEN, so evaluating it eagerly
-                    // could raise a spurious error.
-                    ColumnValue? operand = expr.leftAst is null
-                        ? null
-                        : EvalExpr(expr.leftAst, row, parameters, rowNameResolver, queryRow);
-
-                    foreach (NodeAst clause in EnumerateWhenClauses(expr.rightAst!))
-                    {
-                        bool matched;
-                        if (operand is null)
-                        {
-                            ColumnValue cond = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                            // Only TRUE matches; FALSE and NULL/UNKNOWN skip, consistent with how the
-                            // WHERE evaluator treats a NULL predicate as non-matching.
-                            if (cond.Type == ColumnType.Null)
-                                matched = false;
-                            else if (cond.Type != ColumnType.Bool)
-                                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                                    $"No matching signature for CASE WHEN condition; expected Bool, got: {cond.Type}");
-                            else
-                                matched = cond.BoolValue;
-                        }
-                        else
-                        {
-                            ColumnValue value = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                            // operand = value with normal equality; a NULL on either side is UNKNOWN → no match.
-                            matched = operand.Type != ColumnType.Null
-                                   && value.Type != ColumnType.Null
-                                   && CompareValues(operand, value) == 0;
-                        }
-
-                        if (matched)
-                            return EvalExpr(clause.rightAst!, row, parameters, rowNameResolver, queryRow);
-                    }
-
-                    // No WHEN matched: the ELSE result, or typed NULL when ELSE is omitted.
-                    return expr.extendedOne is null
-                        ? ColumnValue.Null
-                        : EvalExpr(expr.extendedOne, row, parameters, rowNameResolver, queryRow);
-                }
+                return EvalCaseNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprIsNull:
-                {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return ColumnValue.FromBool(columnValue.Type == ColumnType.Null);
-                }
-
             case NodeType.ExprIsNotNull:
-                {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return ColumnValue.FromBool(columnValue.Type != ColumnType.Null);
-                }
-
             case NodeType.ExprIsTrue:
             case NodeType.ExprIsNotTrue:
             case NodeType.ExprIsFalse:
             case NodeType.ExprIsNotFalse:
-                {
-                    ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return ColumnValue.FromBool(BooleanTruthTest.Evaluate(expr.nodeType, columnValue));
-                }
+                return EvalTruthTestNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprLike:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return ColumnValue.FromBool(Like(leftValue.StrValue!, rightValue.StrValue!));
-                }
-
             case NodeType.ExprILike:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
-
-                    if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
-
-                    return ColumnValue.FromBool(ILike(leftValue.StrValue!, rightValue.StrValue!));
-                }
-
             case NodeType.ExprRegexMatch:
             case NodeType.ExprRegexMatchCi:
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+                return EvalPatternMatchNode(expr, row, parameters, rowNameResolver, queryRow);
 
+            case NodeType.ExprInMembership:
+            case NodeType.ExprNotInMembership:
+                return EvalMembershipNode(expr, row, parameters, rowNameResolver, queryRow);
+
+            default:
+                throw UnevaluableExpression(expr.nodeType);
+        }
+    }
+
+    private static ColumnValue EvalIntegerLiteral(NodeAst expr)
+    {
+        if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
+            return cached;
+
+        if (!long.TryParse(expr.yytext!, NumberStyles.Integer, CultureInfo.InvariantCulture, out long longValue))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
+
+        return CacheLiteralValue(expr, new ColumnValue(ColumnType.Integer64, longValue));
+    }
+
+    private static ColumnValue EvalFloatLiteral(NodeAst expr)
+    {
+        if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
+            return cached;
+
+        if (!double.TryParse(expr.yytext!, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
+
+        return CacheLiteralValue(expr, new ColumnValue(ColumnType.Float64, doubleValue));
+    }
+
+    private static ColumnValue EvalStringLiteral(NodeAst expr)
+    {
+        if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
+            return cached;
+
+        return CacheLiteralValue(expr, new ColumnValue(ColumnType.String, UnquoteStringLiteral(expr.yytext!)));
+    }
+
+    private static ColumnValue EvalBytesLiteral(NodeAst expr)
+    {
+        // The cached instance's byte[] is shared across rows; consumers treat ColumnValue
+        // payloads as read-only (encode paths copy bytes out), same as the string case.
+        if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
+            return cached;
+
+        return CacheLiteralValue(expr, new ColumnValue(SqlStringLiteral.DecodeBytes(expr.yytext!)));
+    }
+
+    private static ColumnValue EvalBoolLiteral(NodeAst expr)
+    {
+        if (!bool.TryParse(expr.yytext!, out bool boolValue))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Bool: " + expr.yytext!);
+
+        return ColumnValue.FromBool(boolValue);
+    }
+
+    private static ColumnValue EvalObjectIdLiteral(NodeAst expr)
+    {
+        if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
+            return cached;
+
+        if (string.IsNullOrEmpty(expr.yytext))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid ObjectId literal");
+
+        return CacheLiteralValue(expr, new ColumnValue(ColumnType.Id, expr.yytext));
+    }
+
+    private static ColumnValue EvalIdentifier(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        string lookupKey = rowNameResolver?.ResolveRowLookupKey(expr.yytext!) ?? expr.yytext!;
+
+        // Ordinal fast path: when the caller supplies a QueryRow directly, bypass the
+        // IReadOnlyDictionary adapter and read the cell by ordinal without virtual dispatch.
+        // Uses GetColumnValue (per-cell), not Values, so evaluating a predicate against a
+        // slot-backed row materializes only the columns the expression references — a row
+        // rejected by a WHERE clause never materializes its projection cells.
+        // Falls through to the dictionary path for any key not found in the layout
+        // (e.g. a parameter alias or a column absent from this row's schema version).
+        if (queryRow is not null)
+        {
+            int ordinal = queryRow.Layout.IndexOf(lookupKey);
+            if (ordinal >= 0)
+                return queryRow.GetColumnValue(ordinal);
+        }
+
+        if (row.TryGetValue(lookupKey, out ColumnValue? columnValue))
+            return columnValue;
+
+        throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, "Unknown column: " + expr.yytext!);
+    }
+
+    private static ColumnValue EvalPlaceholder(NodeAst expr, Dictionary<string, ColumnValue>? parameters)
+    {
+        if (parameters is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing placeholders to replace: " + expr.yytext!);
+
+        if (parameters.TryGetValue(expr.yytext!, out ColumnValue? columnValue))
+            return columnValue;
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown placeholder: " + expr.yytext!);
+    }
+
+    private static ColumnValue EvalComparisonNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        // Byte-native fast path for `stringColumn = 'literal'` against a borrowed row: compares
+        // the row's stored UTF-8 slice to the literal's UTF-8 bytes without materializing the
+        // row's string. Byte equality is exactly string equality, so this matches CompareValues.
+        if (expr.nodeType is NodeType.ExprEquals or NodeType.ExprNotEquals
+            && queryRow is { IsBorrowedBacked: true }
+            && TryUtf8StringEquality(expr, rowNameResolver, queryRow, out bool eq))
+        {
+            return ColumnValue.FromBool(expr.nodeType == NodeType.ExprEquals ? eq : !eq);
+        }
+
+        ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        return EvalComparison(expr.nodeType, leftValue, rightValue);
+    }
+
+    private static ColumnValue EvalBetweenNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue subject = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue low = EvalExpr(expr.extendedOne!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver, queryRow);
+
+        if (subject.Type == ColumnType.Null || low.Type == ColumnType.Null || high.Type == ColumnType.Null)
+            return ColumnValue.False;
+
+        return ColumnValue.FromBool(
+            CompareValues(subject, low) >= 0 && CompareValues(subject, high) <= 0);
+    }
+
+    private static ColumnValue EvalLogicalNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        return expr.nodeType == NodeType.ExprOr
+            ? EvalOr(leftValue, rightValue)
+            : EvalAnd(leftValue, rightValue);
+    }
+
+    private static ColumnValue EvalNotNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue value = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+        // Three-valued logic: NOT NULL is NULL (unknown), which the predicate filter
+        // treats as non-matching.
+        if (value.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        if (value.Type != ColumnType.Bool)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator NOT for argument type: {value.Type}");
+
+        return ColumnValue.FromBool(!value.BoolValue);
+    }
+
+    private static ColumnValue EvalArithmeticNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        return EvalArithmetic(expr.nodeType, leftValue, rightValue);
+    }
+
+    private static ColumnValue EvalCastNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue input = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        return CastScalarFunctions.CastExpression("cast", input, expr.rightAst!);
+    }
+
+    private static ColumnValue EvalCaseNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        // Simple CASE evaluates its operand once; each WHEN then tests operand = value.
+        // Searched CASE has no operand and each WHEN is a boolean condition. Either way the
+        // FIRST matching branch wins and later branches are never evaluated — a later branch
+        // may reference a column only valid under a different WHEN, so evaluating it eagerly
+        // could raise a spurious error.
+        ColumnValue? operand = expr.leftAst is null
+            ? null
+            : EvalExpr(expr.leftAst, row, parameters, rowNameResolver, queryRow);
+
+        foreach (NodeAst clause in EnumerateWhenClauses(expr.rightAst!))
+        {
+            bool matched;
+            if (operand is null)
+            {
+                ColumnValue cond = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+                // Only TRUE matches; FALSE and NULL/UNKNOWN skip, consistent with how the
+                // WHERE evaluator treats a NULL predicate as non-matching.
+                if (cond.Type == ColumnType.Null)
+                    matched = false;
+                else if (cond.Type != ColumnType.Bool)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"No matching signature for CASE WHEN condition; expected Bool, got: {cond.Type}");
+                else
+                    matched = cond.BoolValue;
+            }
+            else
+            {
+                ColumnValue value = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+                // operand = value with normal equality; a NULL on either side is UNKNOWN → no match.
+                matched = operand.Type != ColumnType.Null
+                       && value.Type != ColumnType.Null
+                       && CompareValues(operand, value) == 0;
+            }
+
+            if (matched)
+                return EvalExpr(clause.rightAst!, row, parameters, rowNameResolver, queryRow);
+        }
+
+        // No WHEN matched: the ELSE result, or typed NULL when ELSE is omitted.
+        return expr.extendedOne is null
+            ? ColumnValue.Null
+            : EvalExpr(expr.extendedOne, row, parameters, rowNameResolver, queryRow);
+    }
+
+    private static ColumnValue EvalTruthTestNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue columnValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+        return expr.nodeType switch
+        {
+            NodeType.ExprIsNull => ColumnValue.FromBool(columnValue.Type == ColumnType.Null),
+            NodeType.ExprIsNotNull => ColumnValue.FromBool(columnValue.Type != ColumnType.Null),
+            _ => ColumnValue.FromBool(BooleanTruthTest.Evaluate(expr.nodeType, columnValue)),
+        };
+    }
+
+    private static ColumnValue EvalPatternMatchNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        switch (expr.nodeType)
+        {
+            case NodeType.ExprLike:
+                if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
+
+                return ColumnValue.FromBool(Like(leftValue.StrValue!, rightValue.StrValue!));
+
+            case NodeType.ExprILike:
+                if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
+
+                return ColumnValue.FromBool(ILike(leftValue.StrValue!, rightValue.StrValue!));
+
+            default:
+                {
                     if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                         throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt,
                             $"No matching signature for operator ~ for argument types: {leftValue.Type}, {rightValue.Type}");
@@ -705,52 +796,51 @@ internal abstract class SQLExecutorBaseCreator
                     bool matched = Functions.RegexMatcher.IsMatch(leftValue.StrValue!, rightValue.StrValue!, ci);
                     return ColumnValue.FromBool(negate ? !matched : matched);
                 }
-
-            case NodeType.ExprScalarSubquery:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "Scalar subquery must be resolved before expression evaluation");
-
-            case NodeType.ExprInSubquery:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "IN subquery must be resolved before expression evaluation");
-
-            case NodeType.ExprNotInSubquery:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "NOT IN subquery must be resolved before expression evaluation");
-
-            case NodeType.ExprInMembership:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-
-                    return ColumnValue.FromBool(
-                        SubqueryValueListAst.ContainsValue(leftValue, expr.rightAst, parameters));
-                }
-
-            case NodeType.ExprNotInMembership:
-                {
-                    ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
-                    bool? result = SubqueryValueListAst.EvaluateNotInMembership(leftValue, expr, parameters);
-
-                    return ColumnValue.FromBool(result ?? false);
-                }
-
-            case NodeType.ExprExistsSubquery:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "EXISTS subquery must be resolved before expression evaluation");
-
-            case NodeType.ExprExistsCorrelated:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    "Correlated EXISTS subquery must be evaluated by the query filter");
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {expr.nodeType}");
         }
     }
+
+    private static ColumnValue EvalMembershipNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+        // UNKNOWN comes back as a NULL value, never as FALSE: NOT (x IN (…)) and a CHECK must see it.
+        return SubqueryValueListAst.EvaluateMembership(leftValue, expr, parameters);
+    }
+
+    /// <summary>
+    /// The error for a node <see cref="EvalExpr"/> cannot evaluate: a subquery form that a rewrite
+    /// step must have replaced first, or an unknown node type. Returned rather than thrown so the
+    /// dispatcher's frame carries no message formatting.
+    /// </summary>
+    private static CamusDBException UnevaluableExpression(NodeType nodeType) => nodeType switch
+    {
+        NodeType.ExprScalarSubquery => new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "Scalar subquery must be resolved before expression evaluation"),
+
+        NodeType.ExprInSubquery => new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "IN subquery must be resolved before expression evaluation"),
+
+        NodeType.ExprNotInSubquery => new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "NOT IN subquery must be resolved before expression evaluation"),
+
+        NodeType.ExprExistsSubquery => new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "EXISTS subquery must be resolved before expression evaluation"),
+
+        NodeType.ExprExistsCorrelated => new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            "Correlated EXISTS subquery must be evaluated by the query filter"),
+
+        _ => new CamusDBException(CamusDBErrorCodes.UnknownType, $"ERROR {nodeType}"),
+    };
 
     /// <summary>
     /// Flattens the left-recursive <see cref="NodeType.ExprCaseWhenList"/> chain that a CASE's WHEN
@@ -762,17 +852,28 @@ internal abstract class SQLExecutorBaseCreator
     /// </summary>
     internal static IEnumerable<NodeAst> EnumerateWhenClauses(NodeAst whenList)
     {
-        if (whenList.nodeType == NodeType.ExprCaseWhenList)
-        {
-            foreach (NodeAst clause in EnumerateWhenClauses(whenList.leftAst!))
-                yield return clause;
-
-            yield return whenList.rightAst!;
-        }
-        else
+        if (whenList.nodeType != NodeType.ExprCaseWhenList)
         {
             yield return whenList;
+            yield break;
         }
+
+        // Walk down the left spine, then yield bottom-up. Iterative, so the number of WHEN clauses
+        // cannot overflow the stack, and each clause costs constant time rather than one nested
+        // iterator per level above it.
+        Stack<NodeAst> spine = new();
+        NodeAst node = whenList;
+
+        while (node.nodeType == NodeType.ExprCaseWhenList)
+        {
+            spine.Push(node);
+            node = node.leftAst!;
+        }
+
+        yield return node;
+
+        while (spine.Count > 0)
+            yield return spine.Pop().rightAst!;
     }
 
     protected static void GetColumnConstraintList(NodeAst constraintsList, List<(ColumnConstraintType, ColumnValue?)> constraintTypes)

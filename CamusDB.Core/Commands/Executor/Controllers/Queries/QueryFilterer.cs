@@ -140,7 +140,7 @@ internal sealed class QueryFilterer
                     ColumnValue lhs = row is QueryRow qrIn
                         ? SqlExecutor.EvalExpr(expr.leftAst!, qrIn, ticket.Parameters, ticket.RowNameResolver)
                         : SqlExecutor.EvalExpr(expr.leftAst!, row, ticket.Parameters, ticket.RowNameResolver);
-                    return ColumnValue.FromBool(prepared.Contains(lhs));
+                    return prepared.Evaluate(lhs);
                 }
                 goto default;
             }
@@ -205,6 +205,11 @@ internal sealed class QueryFilterer
         IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket)
     {
+        // An async frame is large, and a deep predicate would overflow the stack; continue on a
+        // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
+        if (!StatementDepthGuard.HasStackHeadroom())
+            return new ValueTask<ColumnValue>(EvaluateHavingOnFreshStack(expr, row, ticket));
+
         if (expr.nodeType is NodeType.ExprAnd)        
             return EvaluateHavingAndAsync(expr, row, ticket);        
 
@@ -242,12 +247,32 @@ internal sealed class QueryFilterer
         return SQLExecutorBaseCreator.EvalOr(leftValue, rightValue);
     }
 
+    /// <summary>Runs <see cref="EvaluateHavingAsync"/> on a fresh thread-pool stack.</summary>
+    private Task<ColumnValue> EvaluateHavingOnFreshStack(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryTicket ticket) =>
+        Task.Run(() => EvaluateHavingAsync(expr, row, ticket).AsTask());
+
+    /// <summary>Runs <see cref="EvaluatePredicateAsync"/> on a fresh thread-pool stack.</summary>
+    private Task<ColumnValue> EvaluatePredicateOnFreshStack(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryTicket ticket,
+        DatabaseDescriptor database) =>
+        Task.Run(() => EvaluatePredicateAsync(expr, row, ticket, database).AsTask());
+
     private async ValueTask<ColumnValue> EvaluatePredicateAsync(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
         QueryTicket ticket,
         DatabaseDescriptor database)
     {
+        // An async frame is large, and a deep predicate would overflow the stack; continue on a
+        // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
+        if (!StatementDepthGuard.HasStackHeadroom())
+            return await EvaluatePredicateOnFreshStack(expr, row, ticket, database).ConfigureAwait(false);
+
         switch (expr.nodeType)
         {
             case NodeType.ExprExistsCorrelated:
@@ -277,7 +302,7 @@ internal sealed class QueryFilterer
                     ColumnValue lhs = row is QueryRow qrIn
                         ? SqlExecutor.EvalExpr(expr.leftAst!, qrIn, ticket.Parameters, ticket.RowNameResolver)
                         : SqlExecutor.EvalExpr(expr.leftAst!, row, ticket.Parameters, ticket.RowNameResolver);
-                    return ColumnValue.FromBool(prepared.Contains(lhs));
+                    return prepared.Evaluate(lhs);
                 }
                 goto default;
             }

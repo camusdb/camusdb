@@ -148,9 +148,11 @@ a single node, restoring 20,000 narrow rows, 5,000 rows of about 1 KB, and 1,500
 | 500 | 5,759 | 4,425 | 2,161 |
 | 1,000 | 6,163 | 4,480 | — |
 
-`-b 1` is 28 to 41 times slower than a batched load, and its throughput barely depends on row width,
-because the cost is one round trip per statement rather than the data. **Anything above about 100
-rows recovers most of the difference**, and past that the curve is flat inside the run-to-run noise
+`-b 1` is far slower than a batched load: 41 times on narrow rows, 27 times on 1 KB rows and 12 times
+on 8 KB rows, against the best batch size for each shape. Its own throughput barely depends on row
+width, because the cost is one round trip per statement rather than the data; the gap narrows on wide
+rows only because a batched load of wide rows is itself slower. **Anything above about 100 rows
+recovers most of the difference**, and past that the curve is flat inside the run-to-run noise
 of the measurement, which was about ±20 %.
 
 `-b 100` is the recommended starting point because it is at the knee *and* keeps the statement small:

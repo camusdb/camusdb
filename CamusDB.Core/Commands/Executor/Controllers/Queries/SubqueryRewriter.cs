@@ -79,6 +79,11 @@ internal sealed class SubqueryRewriter
         if (!ContainsSubqueryToRewrite(expr, includeExists: true))
             return expr;
 
+        // An async frame is large, and a deep predicate would overflow the stack; continue on a
+        // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
+        if (!StatementDepthGuard.HasStackHeadroom())
+            return await Task.Run(() => RewriteProjectionExpressionAsync(database, expr, ticket).AsTask()).ConfigureAwait(false);
+
         switch (expr.nodeType)
         {
             case NodeType.ExprExistsSubquery:
@@ -169,6 +174,11 @@ internal sealed class SubqueryRewriter
         NodeAst expr,
         ExecuteSQLTicket ticket)
     {
+        // An async frame is large, and a deep predicate would overflow the stack; continue on a
+        // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
+        if (!StatementDepthGuard.HasStackHeadroom())
+            return await Task.Run(() => RewriteExpressionAsync(database, expr, ticket)).ConfigureAwait(false);
+
         if (expr.nodeType == NodeType.ExprScalarSubquery)
         {
             if (expr.leftAst is null)

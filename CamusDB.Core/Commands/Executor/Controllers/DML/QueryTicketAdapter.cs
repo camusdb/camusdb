@@ -113,7 +113,7 @@ internal static class QueryTicketAdapter
             ReferenceEqualityComparer.Instance);
 
         foreach (AnalyzedInList inList in analysis.InListComparisons)
-            sets[inList.Conjunct] = new PreparedInSet(inList.Values);
+            sets[inList.Conjunct] = new PreparedInSet(inList.Values, inList.ContainsNull);
 
         return sets;
     }

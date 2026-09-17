@@ -254,30 +254,8 @@ internal sealed class SemiJoinAnalyzer
     }
 
     private static void FlattenAndInto(NodeAst expr, List<NodeAst> result)
-    {
-        if (expr.nodeType == NodeType.ExprAnd)
-        {
-            if (expr.leftAst is not null) FlattenAndInto(expr.leftAst, result);
-            if (expr.rightAst is not null) FlattenAndInto(expr.rightAst, result);
-        }
-        else
-        {
-            result.Add(expr);
-        }
-    }
+        => ExpressionChains.Flatten(expr, NodeType.ExprAnd, result);
 
     private static NodeAst? RebuildAnd(List<NodeAst> predicates)
-    {
-        if (predicates.Count == 0) return null;
-        NodeAst result = predicates[0];
-        for (int i = 1; i < predicates.Count; i++)
-        {
-            result = new NodeAst(
-                NodeType.ExprAnd,
-                result,
-                predicates[i],
-                null, null, null, null, null, null);
-        }
-        return result;
-    }
+        => ExpressionChains.Combine(NodeType.ExprAnd, predicates);
 }

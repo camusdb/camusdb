@@ -21,6 +21,14 @@ internal static class ScalarFunctionArguments
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver);
 
+    /// <summary>
+    /// Evaluates a call's arguments in source order.
+    ///
+    /// <para>Deliberately not recursive. A nested call such as <c>abs(abs(abs(x)))</c> re-enters the
+    /// expression evaluator once per level through this method, so every frame here is paid once per
+    /// level of nesting; a separate recursive walk over the argument list added one more. The common
+    /// single-argument call skips the list walk entirely.</para>
+    /// </summary>
     public static IReadOnlyList<ColumnValue> EvaluateArgumentList(
         NodeAst? argumentAst,
         IReadOnlyDictionary<string, ColumnValue> row,
@@ -31,8 +39,17 @@ internal static class ScalarFunctionArguments
         if (argumentAst is null)
             return [];
 
-        List<ColumnValue> argumentList = [];
-        CollectArguments(argumentAst, row, parameters, rowNameResolver, evaluateExpression, argumentList);
+        if (argumentAst.nodeType != NodeType.ExprArgumentList)
+            return new List<ColumnValue>(1) { evaluateExpression(argumentAst, row, parameters, rowNameResolver) };
+
+        List<NodeAst> argumentNodes = [];
+        ExpressionChains.Flatten(argumentAst, NodeType.ExprArgumentList, argumentNodes);
+
+        List<ColumnValue> argumentList = new(argumentNodes.Count);
+
+        for (int i = 0; i < argumentNodes.Count; i++)
+            argumentList.Add(evaluateExpression(argumentNodes[i], row, parameters, rowNameResolver));
+
         return argumentList;
     }
 
@@ -107,28 +124,6 @@ internal static class ScalarFunctionArguments
                 CamusDBErrorCodes.InvalidInput,
                 $"Expected numeric argument but received {argument.Type}"),
         };
-    }
-
-    private static void CollectArguments(
-        NodeAst argumentAst,
-        IReadOnlyDictionary<string, ColumnValue> row,
-        Dictionary<string, ColumnValue>? parameters,
-        QueryRowNameResolver? rowNameResolver,
-        EvaluateExpressionDelegate evaluateExpression,
-        List<ColumnValue> argumentList)
-    {
-        if (argumentAst.nodeType == NodeType.ExprArgumentList)
-        {
-            if (argumentAst.leftAst is not null)
-                CollectArguments(argumentAst.leftAst, row, parameters, rowNameResolver, evaluateExpression, argumentList);
-
-            if (argumentAst.rightAst is not null)
-                CollectArguments(argumentAst.rightAst, row, parameters, rowNameResolver, evaluateExpression, argumentList);
-
-            return;
-        }
-
-        argumentList.Add(evaluateExpression(argumentAst, row, parameters, rowNameResolver));
     }
 
     private static string FormatExpectedArity(int minArity, int maxArity)
