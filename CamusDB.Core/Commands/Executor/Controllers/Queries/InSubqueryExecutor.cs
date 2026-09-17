@@ -51,7 +51,7 @@ internal sealed class InSubqueryExecutor
         bool anyRow = false;
 
         await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
-            database, selectAst, txnState, parameters).ConfigureAwait(false))
+            database, selectAst, txnState, parameters, cancellationToken).ConfigureAwait(false))
         {
             anyRow = true;
             ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);

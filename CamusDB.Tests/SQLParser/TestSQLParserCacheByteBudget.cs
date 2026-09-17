@@ -174,6 +174,11 @@ public sealed class TestSQLParserCacheByteBudget
     /// A cached statement must still be served from the cache, so the engine parses one statement
     /// once however large it is. This is what makes the byte budget free: the budget evicts to make
     /// room instead of refusing, so a second lookup of the same text inside one request stays a hit.
+    ///
+    /// <para>The evidence is per instance: the cache's own hit and miss counters, and the identity
+    /// of the returned tree, which only a hit can preserve. The process-wide
+    /// <see cref="SQLParserProcessor.TotalParses"/> counter is not usable here, because fixtures run
+    /// in parallel and every other fixture that parses SQL advances it.</para>
     /// </summary>
     [Test]
     public async Task CachedStatement_IsParsedOnce_HoweverLargeItIs()
@@ -183,13 +188,20 @@ public sealed class TestSQLParserCacheByteBudget
 
         string sql = UniqueInsert(7, rows: 500);
 
-        long before = SQLParserProcessor.TotalParses;
+        NodeAst first = SQLParserProcessor.Parse(sql, cache);
+        NodeAst second = SQLParserProcessor.Parse(sql, cache);
+        NodeAst third = SQLParserProcessor.Parse(sql, cache);
 
-        SQLParserProcessor.Parse(sql, cache);
-        SQLParserProcessor.Parse(sql, cache);
-        SQLParserProcessor.Parse(sql, cache);
+        Assert.AreEqual(1, cache.Misses,
+            "the first lookup of the large statement must be the only miss");
 
-        Assert.AreEqual(1, SQLParserProcessor.TotalParses - before,
+        Assert.AreEqual(2, cache.Hits,
             "a repeated lookup of the same large statement re-parsed instead of hitting the cache");
+
+        Assert.AreEqual(1, cache.Count, "one statement must occupy exactly one entry");
+
+        // A hit returns the cached instance; a re-parse would build a new tree.
+        Assert.AreSame(first, second, "the second lookup returned a freshly parsed tree");
+        Assert.AreSame(first, third, "the third lookup returned a freshly parsed tree");
     }
 }

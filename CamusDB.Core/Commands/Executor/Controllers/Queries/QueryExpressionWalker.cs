@@ -88,6 +88,11 @@ internal static class QueryExpressionWalker
 
                 return;
 
+            // A nested SELECT is its own scope: the identifiers inside it bind against its own
+            // sources, so none of them is a column reference of the query being walked. The
+            // subquery is resolved (rewritten, prepared, or lifted) by its own stage before this
+            // query's names are bound, exactly as an IN subquery's right-hand SELECT is above.
+            case NodeType.ExprScalarSubquery:
             case NodeType.ExprExistsSubquery:
             case NodeType.ExprExistsCorrelated:
                 return;

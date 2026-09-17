@@ -38,7 +38,8 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
                 "Uncorrelated EXISTS execution requires a subquery executor");
         }
 
-        await foreach (QueryResultRow _ in queryExecutor.ExecuteExistsSelectAsync(database, selectAst, txnState, parameters).ConfigureAwait(false))
+        await foreach (QueryResultRow _ in queryExecutor.ExecuteExistsSelectAsync(
+            database, selectAst, txnState, parameters, cancellationToken).ConfigureAwait(false))
         {
             return true;
         }

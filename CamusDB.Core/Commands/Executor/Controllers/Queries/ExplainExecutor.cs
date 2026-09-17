@@ -39,13 +39,7 @@ internal sealed class ExplainExecutor
 {
     private readonly SelectQueryCreator selectQueryCreator = new();
 
-    private readonly SubqueryRewriter subqueryRewriter;
-
-    private readonly SemiJoinAnalyzer? semiJoinAnalyzer;
-
-    private readonly QueryBinder queryBinder;
-
-    private readonly ExistsSubqueryPreparer existsSubqueryPreparer;
+    private readonly SelectBindPipeline bindPipeline;
 
     private readonly QueryPlanner queryPlanner;
 
@@ -57,18 +51,12 @@ internal sealed class ExplainExecutor
     private readonly CamusDBOptions options;
 
     public ExplainExecutor(
-        SubqueryRewriter subqueryRewriter,
-        QueryBinder queryBinder,
-        ExistsSubqueryPreparer existsSubqueryPreparer,
+        SelectBindPipeline bindPipeline,
         QueryExecutor queryExecutor,
         CamusDBOptions options,
-        StatisticsManager? stats = null,
-        SemiJoinAnalyzer? semiJoinAnalyzer = null)
+        StatisticsManager? stats = null)
     {
-        this.subqueryRewriter = subqueryRewriter;
-        this.semiJoinAnalyzer = semiJoinAnalyzer;
-        this.queryBinder = queryBinder;
-        this.existsSubqueryPreparer = existsSubqueryPreparer;
+        this.bindPipeline = bindPipeline;
         this.queryExecutor = queryExecutor;
         this.options = options;
         queryPlanner = new QueryPlanner(options, stats);
@@ -422,40 +410,13 @@ internal sealed class ExplainExecutor
     {
         SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(selectAst);
 
-        // Extract semi/anti-join specs before SubqueryRewriter materialises IN/NOT IN.
-        List<SemiJoinSpec> semiJoinSpecs = [];
-        if (semiJoinAnalyzer is not null)
-        {
-            (selectQuery, semiJoinSpecs) = await semiJoinAnalyzer
-                .AnalyzeAsync(database, selectQuery, ticket)
-                .ConfigureAwait(false);
-        }
+        // The same stages, in the same order, as an executed SELECT — so the plan EXPLAIN shows is
+        // the plan the statement would run.
+        SelectBindResult bound = await bindPipeline.BindAsync(database, selectQuery, ticket).ConfigureAwait(false);
+        BoundSelectQuery boundQuery = bound.Bound;
 
-        selectQuery = await subqueryRewriter
-            .RewriteSelectQueryAsync(database, selectQuery, ticket)
-            .ConfigureAwait(false);
-
-        BoundSelectQuery boundQuery = await queryBinder
-            .BindAsync(database, selectQuery)
-            .ConfigureAwait(false);
-
-        (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
-            .PrepareAsync(
-                database,
-                selectQuery,
-                boundQuery.Sources,
-                boundQuery.DerivedSources,
-                ticket)
-            .ConfigureAwait(false);
-
-        boundQuery = new BoundSelectQuery(
-            selectQuery,
-            boundQuery.Sources,
-            boundQuery.RowNames,
-            boundQuery.DerivedSources);
-
-        IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
-        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(boundQuery, ticket, existsRegistry, specs);
+        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
+            boundQuery, ticket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);
 
         if (boundQuery.IsMultiSource)
             return joinQueryPlanner.GetPlan(database, boundQuery, queryTicket);

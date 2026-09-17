@@ -69,6 +69,12 @@ internal sealed class SelectStatementExecutor
 
     internal readonly ExistsSubqueryPreparer existsSubqueryPreparer;
 
+    /// <summary>
+    /// The bind stages a SELECT runs before planning. Shared with the subquery executors so a nested
+    /// SELECT binds exactly as a top-level one does; see <see cref="SelectBindPipeline"/>.
+    /// </summary>
+    internal readonly SelectBindPipeline bindPipeline;
+
     internal readonly ExplainExecutor explainExecutor;
 
     internal readonly TableAnalyzer tableAnalyzer;
@@ -110,6 +116,7 @@ internal sealed class SelectStatementExecutor
         QueryBinder queryBinder,
         SubqueryRewriter subqueryRewriter,
         ExistsSubqueryPreparer existsSubqueryPreparer,
+        SelectBindPipeline bindPipeline,
         ExplainExecutor explainExecutor,
         TableAnalyzer tableAnalyzer,
         SemiJoinAnalyzer semiJoinAnalyzer,
@@ -132,6 +139,7 @@ internal sealed class SelectStatementExecutor
         this.queryBinder = queryBinder;
         this.subqueryRewriter = subqueryRewriter;
         this.existsSubqueryPreparer = existsSubqueryPreparer;
+        this.bindPipeline = bindPipeline;
         this.explainExecutor = explainExecutor;
         this.tableAnalyzer = tableAnalyzer;
         this.semiJoinAnalyzer = semiJoinAnalyzer;
@@ -886,29 +894,10 @@ internal sealed class SelectStatementExecutor
             }
         }
 
-        // Extract eligible IN / NOT IN subqueries as semi/anti-join specs
-        // before SubqueryRewriter materialises them.
-        (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
-            .AnalyzeAsync(database, selectQuery, ticket)
-            .ConfigureAwait(false);
-
-        selectQuery = await subqueryRewriter
-            .RewriteSelectQueryAsync(database, selectQuery, ticket)
-            .ConfigureAwait(false);
-        BoundSelectQuery boundQuery = await queryBinder.BindAsync(database, selectQuery).ConfigureAwait(false);
-        (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
-            .PrepareAsync(
-                database,
-                selectQuery,
-                boundQuery.Sources,
-                boundQuery.DerivedSources,
-                ticket)
-            .ConfigureAwait(false);
-        boundQuery = new BoundSelectQuery(
-            selectQuery,
-            boundQuery.Sources,
-            boundQuery.RowNames,
-            boundQuery.DerivedSources);
+        // Semi-join extraction, subquery materialization, binding and EXISTS preparation, in the
+        // order the pipeline fixes. The same pipeline binds every nested subquery's SELECT.
+        (BoundSelectQuery boundQuery, ExistsSubqueryRegistry? existsRegistry, List<SemiJoinSpec> semiJoinSpecs) =
+            await bindPipeline.BindAsync(database, selectQuery, ticket).ConfigureAwait(false);
         IReadOnlyList<SemiJoinSpec>? specs = semiJoinSpecs.Count > 0 ? semiJoinSpecs : null;
 
         BoundQuerySlot? newSlot = attemptCache

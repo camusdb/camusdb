@@ -442,7 +442,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             authService is null
                 ? null
                 : (ownerName, ownerId) => authService.TryLoadOwnerPrincipalAsync(ownerName, ownerId));
-        SubqueryQueryExecutor subqueryQueryExecutor = new(queryBinder, queryExecutor);
+        SubqueryQueryExecutor subqueryQueryExecutor = new(queryExecutor);
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
         subqueryRewriter = new SubqueryRewriter(
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
@@ -451,7 +451,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         );
         existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
-        explainExecutor = new ExplainExecutor(subqueryRewriter, queryBinder, existsSubqueryPreparer, queryExecutor, options, statisticsManager, semiJoinAnalyzer);
+        // The pipeline holds the rewriter and the rewriter's executors run nested SELECTs through the
+        // pipeline, so the subquery executor receives it after both exist.
+        SelectBindPipeline selectBindPipeline = new(semiJoinAnalyzer, subqueryRewriter, queryBinder, existsSubqueryPreparer);
+        subqueryQueryExecutor.AttachBindPipeline(selectBindPipeline);
+        explainExecutor = new ExplainExecutor(selectBindPipeline, queryExecutor, options, statisticsManager);
         tableAnalyzer = new TableAnalyzer(statisticsManager, options);
 
         // Observing the embedded Kommander/Kahuna meters costs nothing while no instrument fires, and
@@ -541,6 +545,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             queryBinder,
             subqueryRewriter,
             existsSubqueryPreparer,
+            selectBindPipeline,
             explainExecutor,
             tableAnalyzer,
             semiJoinAnalyzer,

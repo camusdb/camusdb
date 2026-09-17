@@ -18,7 +18,7 @@ using CamusDB.Core.Transactions;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Shared uncorrelated subquery execution for scalar and IN subqueries.
+/// Shared uncorrelated subquery execution for scalar, IN and EXISTS subqueries.
 ///
 /// <para>
 /// Both entry points return an <see cref="IAsyncEnumerable{T}"/> rather than a materialised
@@ -27,19 +27,44 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// a row-presence check for EXISTS). This eliminates the <c>ToListAsync</c> unbounded
 /// in-memory buffer at the subquery level.
 /// </para>
+///
+/// <para>
+/// The inner SELECT is bound through the same <see cref="SelectBindPipeline"/> as a top-level
+/// SELECT, so a subquery may itself contain scalar / IN / NOT IN / EXISTS subqueries to any depth,
+/// and an eligible inner IN becomes a semi-join exactly as it would at the top level. That pipeline
+/// contains the <see cref="SubqueryRewriter"/>, which in turn owns this executor, so the pipeline
+/// cannot be a constructor argument: <c>CommandExecutor</c> attaches it with
+/// <see cref="AttachBindPipeline"/> right after both exist. A call before that attach is a wiring
+/// bug and fails fast rather than silently binding the inner SELECT without its subquery stages.
+/// </para>
 /// </summary>
 internal sealed class SubqueryQueryExecutor
 {
-    private readonly QueryBinder queryBinder;
     private readonly QueryExecutor queryExecutor;
     private readonly QueryJoinExecutor queryJoinExecutor;
     private readonly SelectQueryCreator selectQueryCreator = new();
+    private SelectBindPipeline? bindPipeline;
 
-    public SubqueryQueryExecutor(QueryBinder queryBinder, QueryExecutor queryExecutor)
+    public SubqueryQueryExecutor(QueryExecutor queryExecutor)
     {
-        this.queryBinder = queryBinder;
         this.queryExecutor = queryExecutor;
         queryJoinExecutor = new QueryJoinExecutor(queryExecutor, queryExecutor.Options);
+    }
+
+    /// <summary>
+    /// Completes the wiring cycle described in the class summary. Called once, during engine
+    /// construction, before any statement can run.
+    /// </summary>
+    public void AttachBindPipeline(SelectBindPipeline pipeline)
+    {
+        if (bindPipeline is not null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Subquery executor already has a bind pipeline attached");
+        }
+
+        bindPipeline = pipeline;
     }
 
     /// <summary>
@@ -50,8 +75,9 @@ internal sealed class SubqueryQueryExecutor
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters) =>
-        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true);
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken = default) =>
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true, cancellationToken);
 
     /// <summary>
     /// Executes a subquery for EXISTS semantics and returns a streaming cursor.
@@ -61,8 +87,9 @@ internal sealed class SubqueryQueryExecutor
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters) =>
-        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false);
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken = default) =>
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, cancellationToken);
 
     private async IAsyncEnumerable<QueryResultRow> ExecuteSelectInternalAsync(
         DatabaseDescriptor database,
@@ -79,12 +106,17 @@ internal sealed class SubqueryQueryExecutor
                 "Subquery must be a SELECT statement");
         }
 
+        if (bindPipeline is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Subquery executor has no bind pipeline attached");
+        }
+
         SelectQuery subquery = selectQueryCreator.CreateSelectQuery(selectAst);
 
         if (requireSingleColumn)
             ValidateSingleColumnProjection(subquery);
-
-        BoundSelectQuery bound = await queryBinder.BindAsync(database, subquery).ConfigureAwait(false);
 
         // No request-scoped ticket reaches this helper, so the descriptor's display name is the only
         // name available. That is safe because a rename refreshes it in place — but if this method
@@ -93,13 +125,21 @@ internal sealed class SubqueryQueryExecutor
             txnState: txnState,
             database: database.Name,
             sql: "",
-            parameters: parameters);
+            parameters: parameters,
+            cancellationToken: ct);
 
-        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(bound, executeTicket);
+        SelectBindResult bound = await bindPipeline.BindAsync(database, subquery, executeTicket).ConfigureAwait(false);
 
-        IAsyncEnumerable<QueryResultRow> cursor = bound.IsMultiSource
-            ? queryJoinExecutor.ExecuteJoinQuery(database, bound, queryTicket)
-            : queryExecutor.Query(database, bound.PrimaryTable, queryTicket);
+        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
+            bound.Bound, executeTicket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);
+
+        // The subquery reads these tables under the caller's transaction, so the transaction must
+        // carry the same schema pins a top-level SELECT of them would take.
+        SelectStatementExecutor.PinSchemaVersions(database, bound.Bound.Sources, txnState);
+
+        IAsyncEnumerable<QueryResultRow> cursor = bound.Bound.IsMultiSource
+            ? queryJoinExecutor.ExecuteJoinQuery(database, bound.Bound, queryTicket)
+            : queryExecutor.Query(database, bound.Bound.PrimaryTable, queryTicket);
 
         await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
             yield return row;
