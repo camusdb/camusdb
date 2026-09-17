@@ -237,7 +237,7 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
 
         Assert.That(ddl, Does.Contain("STRING(32)"),  "sized string must keep its length");
         Assert.That(ddl, Does.Contain("FLOAT32"),     "float32 must render as FLOAT32");
-        Assert.That(ddl, Does.Contain("BYTES"),       "bytes must render as BYTES");
+        Assert.That(ddl, Does.Match(@"`payload`\s+BYTES\s"), "unsized bytes must render as bare BYTES");
         Assert.That(ddl, Does.Contain("DATETIME"),    "datetime must render as DATETIME");
         Assert.That(ddl, Does.Contain("ARRAY(INT64)"),"array must render with its element type");
         // The 'day' DATE column: it must render as DATE, but not be confused with DATETIME.
@@ -258,6 +258,62 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
         Assert.AreEqual("ARRAY(INT64)", NameType("tags"));
         Assert.AreEqual("FLOAT32",     NameType("ratio"));
         Assert.AreEqual("DATETIME",    NameType("ts"));
+        Assert.AreEqual("BYTES",       NameType("payload"));
+    }
+
+    /// <summary>
+    /// A declared <c>bytes(N)</c> maximum is enforced on write, so SHOW CREATE TABLE must carry it.
+    /// Rendered as bare <c>BYTES</c>, DDL taken from the output re-creates the column with the 10 MB
+    /// default ceiling, a dump reload silently widens it, and a client comparing schemas sees a false
+    /// difference. The round-trip must keep the size and keep enforcing it; an unsized column must
+    /// still render bare.
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTable_SizedBytes_KeepsEnforcedMaximum_RoundTrips()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        await DdlAsync(executor, db, dbname,
+            "CREATE TABLE docs (id OID PRIMARY KEY NOT NULL, embedding BYTES(3072) STORAGE EXTERNAL, payload BYTES)");
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE docs");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.That(ddl, Does.Contain("`embedding` BYTES(3072) NULL STORAGE EXTERNAL"), $"sized bytes must keep its size: {ddl}");
+        Assert.That(ddl, Does.Contain("`payload` BYTES NULL"), $"unsized bytes must render bare: {ddl}");
+
+        List<QueryResultRow> cols = await QueryAsync(executor, db, dbname, "SHOW COLUMNS FROM docs");
+        string Type(List<QueryResultRow> rows, string field) => rows.First(r => r.Row["Field"].StrValue == field).Row["Type"].StrValue!;
+        Assert.AreEqual("BYTES(3072)", Type(cols, "embedding"));
+        Assert.AreEqual("BYTES",       Type(cols, "payload"));
+
+        // Re-create the table from the rendered DDL.
+        await DdlAsync(executor, db, dbname, ddl.Replace("`docs`", "`docs2`", System.StringComparison.Ordinal));
+
+        List<QueryResultRow> showRows2 = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE docs2");
+        Assert.AreEqual(
+            ddl.Replace("`docs`", "`docs2`", System.StringComparison.Ordinal),
+            showRows2[0].Row["Create Table"].StrValue,
+            "the re-created table must render the same DDL");
+
+        List<QueryResultRow> cols2 = await QueryAsync(executor, db, dbname, "SHOW COLUMNS FROM docs2");
+        Assert.AreEqual("BYTES(3072)", Type(cols2, "embedding"));
+        Assert.AreEqual("BYTES",       Type(cols2, "payload"));
+
+        // The re-created column enforces the declared maximum, not the default ceiling.
+        KvTransaction ok = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(ok, dbname,
+            "INSERT INTO docs2 (id, embedding) VALUES (gen_id(), @v)",
+            new Dictionary<string, ColumnValue> { { "@v", new ColumnValue(new byte[3072]) } }));
+        await db.Transactions.CommitAsync(ok);
+
+        KvTransaction tooLong = await db.Transactions.BeginAsync();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tooLong, dbname,
+                "INSERT INTO docs2 (id, embedding) VALUES (gen_id(), @v)",
+                new Dictionary<string, ColumnValue> { { "@v", new ColumnValue(new byte[3073]) } })))!;
+        Assert.AreEqual(CamusDBErrorCodes.ValueTooLong, ex.Code);
+        await db.Transactions.RollbackAsync(tooLong);
     }
 
     [Test]

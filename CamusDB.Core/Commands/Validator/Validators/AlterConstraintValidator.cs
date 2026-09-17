@@ -36,5 +36,14 @@ internal sealed class AlterConstraintValidator : ValidatorBase
              ticket.Operation == AlterConstraintOperation.DropNotNull) &&
             string.IsNullOrWhiteSpace(ticket.ColumnName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column name is required for SET/DROP NOT NULL");
+
+        if (ticket.Operation == AlterConstraintOperation.SetStorage)
+        {
+            if (string.IsNullOrWhiteSpace(ticket.ColumnName))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column name is required for SET STORAGE");
+
+            if (ticket.Storage is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A storage strategy is required for SET STORAGE");
+        }
     }
 }

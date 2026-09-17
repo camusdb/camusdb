@@ -669,6 +669,41 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TALTER any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $5.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TALTER any_identifier TSET TIDENTIFIER TIDENTIFIER
+                   {
+                     if (!string.Equals($7.s, "storage", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: ALTER TABLE <table> ALTER [COLUMN] <column> SET STORAGE <strategy>, got 'SET " + $7.s + "'");
+                     $$.n = new(NodeType.AlterTableSetColumnStorage, $3.n, $5.n, null, null, null, null, null, $8.s);
+                   }
+                 | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TSET TIDENTIFIER TIDENTIFIER
+                   {
+                     if (!string.Equals($8.s, "storage", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: ALTER TABLE <table> ALTER [COLUMN] <column> SET STORAGE <strategy>, got 'SET " + $8.s + "'");
+                     $$.n = new(NodeType.AlterTableSetColumnStorage, $3.n, $6.n, null, null, null, null, null, $9.s);
+                   }
+                 | TALTER TTABLE any_identifier TIDENTIFIER TIDENTIFIER
+                   {
+                     if (!string.Equals($4.s, "rewrite", System.StringComparison.OrdinalIgnoreCase) ||
+                         !string.Equals($5.s, "storage", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: ALTER TABLE <table> REWRITE STORAGE [INLINE], got '" + $4.s + " " + $5.s + "'");
+                     $$.n = new(NodeType.AlterTableRewriteStorage, $3.n, null, null, null, null, null, null, null);
+                   }
+                 | TALTER TTABLE any_identifier TIDENTIFIER TIDENTIFIER TIDENTIFIER
+                   {
+                     if (!string.Equals($4.s, "rewrite", System.StringComparison.OrdinalIgnoreCase) ||
+                         !string.Equals($5.s, "storage", System.StringComparison.OrdinalIgnoreCase) ||
+                         !string.Equals($6.s, "inline", System.StringComparison.OrdinalIgnoreCase))
+                         throw new CamusDB.Core.CamusDBException(
+                             CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                             "Expected: ALTER TABLE <table> REWRITE STORAGE [INLINE], got '" + $4.s + " " + $5.s + " " + $6.s + "'");
+                     $$.n = new(NodeType.AlterTableRewriteStorage, $3.n, null, null, null, null, null, null, "inline");
+                   }
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TSET LPAREN table_setting_list RPAREN { $$.n = new(NodeType.AlterTableSetSetting, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TRESET LPAREN table_setting_key_list RPAREN { $$.n = new(NodeType.AlterTableResetSetting, $3.n, $6.n, null, null, null, null, null, null); }
@@ -1127,6 +1162,14 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
                         | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.ConstraintCheck, $3.n, null, null, null, null, null, null, null); }
                         | TCOMMENT string { $$.n = new(NodeType.ConstraintComment, $2.n, null, null, null, null, null, null, null); }
+                        | TIDENTIFIER TIDENTIFIER
+                          {
+                            if (!string.Equals($1.s, "storage", System.StringComparison.OrdinalIgnoreCase))
+                                throw new CamusDB.Core.CamusDBException(
+                                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                    "Expected a column constraint, got '" + $1.s + " " + $2.s + "'");
+                            $$.n = new(NodeType.ConstraintStorage, null, null, null, null, null, null, null, $2.s);
+                          }
                         ;
 
 default_expr : int { $$.n = $1.n; $$.s = $1.s; }

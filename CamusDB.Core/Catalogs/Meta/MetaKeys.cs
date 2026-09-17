@@ -111,6 +111,15 @@ internal static class MetaKeys
     internal static string KeyspaceCatalogKey(string dbId, string storageId) => $"{KeyspaceCatalogKeyPrefix(dbId)}{storageId}";
 
     /// <summary>
+    /// The progress cursor of an <c>ALTER TABLE ... REWRITE STORAGE</c> run over one storage generation:
+    /// the rewrite mode and the last row id it committed. It is written in the same transaction as each
+    /// rewritten batch, so a run that stops for any reason resumes after the last committed batch, and
+    /// it is deleted when a run completes. Keyed by the <c>EffectiveStorageId</c> for the same reason as
+    /// <see cref="KeyspaceCatalogKey"/>: a truncated table starts a new generation and a new cursor.
+    /// </summary>
+    internal static string StorageRewriteKey(string dbId, string storageId) => $"{dbId}/meta/storagerewrite:{storageId}";
+
+    /// <summary>
     /// Returns the exclusive ordinal upper bound for every key beginning with <paramref name="prefix"/>.
     /// Incrementing the last available UTF-16 code unit keeps a prefix scan inside its logical subrange
     /// even though several key families share the one routing bucket. Returns <c>null</c> when no

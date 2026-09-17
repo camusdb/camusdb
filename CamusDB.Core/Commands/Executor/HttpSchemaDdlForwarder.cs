@@ -151,6 +151,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             ReferencedColumns = ticket.ReferencedColumns,
             Operation = ticket.Operation,
             ColumnName = ticket.ColumnName,
+            Storage = ticket.Storage,
         };
 
         return await PostAsync(leader, "alter-constraint", request, cancellationToken).ConfigureAwait(false);
@@ -291,6 +292,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         DefaultFunction = col.DefaultFunction,
         NotNullConstraintName = col.NotNullConstraintName,
         Comment = col.Comment,
+        Storage = col.Storage,
     };
 
     private static ColumnInfoRequest[] MapColumns(ColumnInfo[] cols)

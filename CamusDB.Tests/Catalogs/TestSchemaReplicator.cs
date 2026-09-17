@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Replication;
@@ -53,6 +54,49 @@ public sealed class TestSchemaReplicator
         Assert.AreEqual(1, database.Schema.SchemaVersion);
         Assert.AreEqual(1, database.Schema.Tables.Count);
         Assert.True(database.Schema.Tables.ContainsKey("robots"));
+    }
+
+    [Test]
+    public async Task ApplyAsync_SetColumnStorage_SetsTheStrategyOnEveryReplay()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, SchemaChangeLogEntryCodec.Encode(CreateTableEntry(db, 0, 1))));
+        int tableVersion = database.Schema.Tables["robots"].Version;
+
+        byte[] setStorage = SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
+        {
+            Database = db,
+            FromVersion = 1,
+            ToVersion = 2,
+            Op = SchemaOp.SetColumnStorage,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetColumnStoragePayload
+            {
+                TableName = "robots",
+                ColumnName = "NAME",
+                Storage = ColumnStorageStrategy.External
+            })
+        });
+
+        Assert.True(await replicator.ApplyAsync(database, partitionId, setStorage));
+        Assert.True(await replicator.ApplyAsync(database, partitionId, setStorage));
+
+        TableSchema table = database.Schema.Tables["robots"];
+        Assert.AreEqual(ColumnStorageStrategy.External, table.Columns!.Single(c => c.Name == "name").Storage);
+        Assert.AreEqual(tableVersion, table.Version, "a strategy change does not change the row layout");
+        Assert.AreEqual(2, database.Schema.SchemaVersion);
+
+        // An id column has no variable-length value: the delta is refused on apply, like on the proposer.
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => ConstraintDeltaApplier.ApplySetColumnStorage(
+            database.Schema,
+            new SchemaSetColumnStoragePayload { TableName = "robots", ColumnName = "id", Storage = ColumnStorageStrategy.Plain }))!;
+        Assert.AreEqual(CamusDBErrorCodes.ColumnStorageNotApplicable, ex.Code);
     }
 
     [Test]

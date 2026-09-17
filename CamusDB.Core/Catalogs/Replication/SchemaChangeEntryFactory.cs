@@ -187,6 +187,7 @@ internal static class SchemaChangeEntryFactory
             ArrayElementType = c.ArrayElementType,
             NotNullConstraintName = c.NotNullConstraintName,
             Comment = c.Comment,
+            Storage = c.Storage,
         })];
 
         return new()
@@ -622,6 +623,24 @@ internal static class SchemaChangeEntryFactory
                 ConstraintName = constraintName,
                 Expression = "",
                 ReferencedColumns = []
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry SetColumnStorageEntry(
+        DatabaseDescriptor database, string tableName, string columnName, ColumnStorageStrategy storage)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetColumnStorage,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetColumnStoragePayload
+            {
+                TableName = tableName,
+                ColumnName = columnName,
+                Storage = storage
             })
         };
     }

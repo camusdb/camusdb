@@ -67,6 +67,33 @@ internal abstract class ValidatorBase
                 $"{subject} comment is {comment.Length} characters, exceeding the maximum of {maxLen}");
     }
 
+    /// <summary>
+    /// Rejects a declared <c>MaxLength</c> that is not a positive number on a String or Bytes column.
+    ///
+    /// <para>The SQL grammar path already refuses <c>string(0)</c> / <c>bytes(0)</c> while it builds the
+    /// ticket, but the HTTP/gRPC path copies <c>MaxLength</c> straight into <see cref="ColumnInfo"/>.
+    /// Without this check a non-positive size reaches the replicated schema, where it makes every
+    /// non-empty value too long, and <c>SHOW CREATE TABLE</c> renders it as <c>BYTES(0)</c> — DDL that
+    /// the parser then refuses, so a dump of the table cannot be restored. Checking the ticket covers
+    /// both entry points.</para>
+    ///
+    /// <para><c>MaxLength</c> on any other type is ignored by enforcement and by rendering, so it is
+    /// not checked here.</para>
+    /// </summary>
+    protected static void ValidateColumnMaxLength(ColumnInfo column, string subject)
+    {
+        if (column.MaxLength is not int maxLength)
+            return;
+
+        if (column.Type is not (ColumnType.String or ColumnType.Bytes))
+            return;
+
+        if (maxLength <= 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"{subject} has an invalid maximum length {maxLength}: it must be a positive integer");
+    }
+
 
     /// <summary>
     /// Validates a column's constant <c>DEFAULT</c> against the column it belongs to: the value must

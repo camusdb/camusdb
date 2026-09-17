@@ -84,6 +84,20 @@ This mirrors PostgreSQL's default behavior (`SQLSTATE 22001`). Unlike PostgreSQL
 silently truncate trailing whitespace, and does **not** truncate on an explicit `CAST` to a narrower
 bound — an overflowing cast raises the same error.
 
+### Large values
+
+A large `string`, `bytes` or `array` value can be stored compressed, or under its own key outside the
+row. Each column has a storage strategy (`PLAIN`, `MAIN`, `EXTERNAL`, or the default `EXTENDED`) that
+decides which forms the writer may use:
+
+```sql
+CREATE TABLE files (id oid PRIMARY KEY, name string, content bytes STORAGE EXTERNAL);
+ALTER TABLE files ALTER COLUMN content SET STORAGE PLAIN;
+```
+
+The form never changes a result. It changes the I/O a query does and the size of each stored version.
+See [Large values: compression and out-of-line storage](storage-layout.md).
+
 ---
 
 ## Arrays

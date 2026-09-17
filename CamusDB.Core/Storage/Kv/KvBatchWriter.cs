@@ -123,6 +123,22 @@ internal sealed class KvBatchWriter
                 setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
             }
 
+            // Out-of-line values ride the same lock list and the same set batch as their row, so the
+            // row and the values it points at commit or abort together. Each costs one mutation.
+            IReadOnlyList<LargeValueWrite>? largeValues = row.LargeValues;
+            for (int v = 0; largeValues is not null && v < largeValues.Count; v++)
+            {
+                LargeValueWrite value = largeValues[v];
+                string valueKey = keys.BuildLargeValueKey(row.RowId, value.VariableOrdinal);
+                lockKeys.Add((valueKey, 0, KeyValueDurability.Persistent));
+
+                if (!isBranch)
+                {
+                    uniqueByKey[valueKey] = false;
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Value = value.StorageValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                }
+            }
+
             // Indexed loop: foreach over the IReadOnlyList interface boxes the list enumerator
             // on the heap once per row; same for the sibling batch loops below.
             IReadOnlyList<KvTableStore.IndexWrite>? indexEntries = row.IndexEntries;
@@ -194,6 +210,14 @@ internal sealed class KvBatchWriter
                 byte[] rowValue = row.RowData;   // already the enveloped storage value (EncodeStorageValue)
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
+
+                IReadOnlyList<LargeValueWrite>? largeValues = row.LargeValues;
+                for (int v = 0; largeValues is not null && v < largeValues.Count; v++)
+                {
+                    string valueKey = keys.BuildLargeValueKey(row.RowId, largeValues[v].VariableOrdinal);
+                    batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Value = largeValues[v].StorageValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    batchByKey[valueKey] = false;
+                }
 
                 IReadOnlyList<KvTableStore.IndexWrite>? indexEntries = row.IndexEntries;
                 for (int e = 0; indexEntries is not null && e < indexEntries.Count; e++)
@@ -306,6 +330,31 @@ internal sealed class KvBatchWriter
                 setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
             }
 
+            // Out-of-line values the new row writes, and the old ones it no longer points at. Both ride
+            // the row's lock list and batches, so the pointer and its target never disagree after commit.
+            IReadOnlyList<LargeValueWrite>? largeValues = row.LargeValues;
+            for (int v = 0; largeValues is not null && v < largeValues.Count; v++)
+            {
+                string valueKey = keys.BuildLargeValueKey(row.RowId, largeValues[v].VariableOrdinal);
+                AddLockKey(valueKey);
+
+                if (!isBranch)
+                {
+                    uniqueByKey[valueKey] = false;
+                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Value = largeValues[v].StorageValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                }
+            }
+
+            IReadOnlyList<int>? largeValueDeletes = row.LargeValueDeletes;
+            for (int v = 0; largeValueDeletes is not null && v < largeValueDeletes.Count; v++)
+            {
+                string valueKey = keys.BuildLargeValueKey(row.RowId, largeValueDeletes[v]);
+                AddLockKey(valueKey);
+
+                if (!isBranch)
+                    deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Durability = KeyValueDurability.Persistent });
+            }
+
             // Indexed loops: foreach over the IReadOnlyList interface boxes the list enumerator
             // on the heap once per row per loop.
             IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries = row.OldIndexEntries;
@@ -390,6 +439,25 @@ internal sealed class KvBatchWriter
                 batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = rowKey, Value = rowValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
                 batchByKey[rowKey] = false;
 
+                IReadOnlyList<LargeValueWrite>? largeValues = row.LargeValues;
+                for (int v = 0; largeValues is not null && v < largeValues.Count; v++)
+                {
+                    string valueKey = keys.BuildLargeValueKey(row.RowId, largeValues[v].VariableOrdinal);
+                    batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Value = largeValues[v].StorageValue, CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    batchByKey[valueKey] = false;
+                }
+
+                // A value the row no longer points at is tombstoned, not deleted: an ancestor may hold
+                // a value under the same key, and without a level-0 tombstone the lineage walk would
+                // resurface it.
+                IReadOnlyList<int>? largeValueDeletes = row.LargeValueDeletes;
+                for (int v = 0; largeValueDeletes is not null && v < largeValueDeletes.Count; v++)
+                {
+                    string valueKey = keys.BuildLargeValueKey(row.RowId, largeValueDeletes[v]);
+                    batchItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Value = BranchKvCodec.EncodeTombstone(), CompareValue = null, CompareRevision = -1, Flags = KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    batchByKey[valueKey] = false;
+                }
+
                 IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries = row.OldIndexEntries;
                 for (int e = 0; oldIndexEntries is not null && e < oldIndexEntries.Count; e++)
                 {
@@ -473,6 +541,10 @@ internal sealed class KvBatchWriter
         {
             deleteKeys.Add(keys.BuildRowKey(row.RowId));
 
+            IReadOnlyList<int>? largeValueOrdinals = row.LargeValueOrdinals;
+            for (int v = 0; largeValueOrdinals is not null && v < largeValueOrdinals.Count; v++)
+                deleteKeys.Add(keys.BuildLargeValueKey(row.RowId, largeValueOrdinals[v]));
+
             IReadOnlyList<KvTableStore.IndexDelete>? indexEntries = row.IndexEntries;
             for (int e = 0; indexEntries is not null && e < indexEntries.Count; e++)
             {
@@ -551,27 +623,31 @@ internal sealed class KvBatchWriter
 
     /// <summary>
     /// Physically deletes every KV entry in this database's row overlay for this table
-    /// (<c>{dbId}:{tableId}|r/…</c>). Used by <c>DROP TABLE</c> on a branch database to reclaim
-    /// branch-local row entries without scanning or tombstoning inherited ancestor rows — those
-    /// become unreachable through the schema once the table is dropped from the branch, so no
-    /// tombstone is required. Returns the number of entries deleted.
+    /// (<c>{dbId}:{tableId}|r/…</c>) and its large-value overlay (<c>{dbId}:{tableId}|v/…</c>). Used by
+    /// <c>DROP TABLE</c> on a branch database to reclaim branch-local entries without scanning or
+    /// tombstoning inherited ancestor rows — those become unreachable through the schema once the table
+    /// is dropped from the branch, so no tombstone is required. The large values go with the rows: a
+    /// value is only ever reached through a row that points at it. Returns the number of entries deleted.
     /// </summary>
     internal async Task<int> PurgeLocalRowOverlayAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
         List<string> keysToDelete = [];
 
-        await foreach ((string kvKey, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-            tx.TransactionId,
-            keys.RowBucketPrefix,
-            null, true,
-            null, true,
-            KvStoreConstants.DefaultPageSize,
-            HLCTimestamp.Zero,
-            KeyValueDurability.Persistent,
-            cancellationToken).ConfigureAwait(false))
+        foreach ((string bucketPrefix, string keyPrefix) in new[] { (keys.RowBucketPrefix, keys.RowKeyPrefix), (keys.LargeValueBucketPrefix, keys.LargeValueKeyPrefix) })
         {
-            if (kvKey.StartsWith(keys.RowKeyPrefix, StringComparison.Ordinal))
-                keysToDelete.Add(kvKey);
+            await foreach ((string kvKey, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                tx.TransactionId,
+                bucketPrefix,
+                null, true,
+                null, true,
+                KvStoreConstants.DefaultPageSize,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent,
+                cancellationToken).ConfigureAwait(false))
+            {
+                if (kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
+                    keysToDelete.Add(kvKey);
+            }
         }
 
         await DeleteKeysBatch(tx, keysToDelete, cancellationToken).ConfigureAwait(false);

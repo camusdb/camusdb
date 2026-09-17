@@ -32,7 +32,10 @@ internal sealed class AlterTableValidator : ValidatorBase
         // ADD COLUMN … DEFAULT(…) is the other way a default enters the schema, and it must meet the
         // same type/length rules as one declared at CREATE TABLE.
         if (ticket.Operation is AlterTableOperation.AddColumn)
+        {
+            ValidateColumnMaxLength(ticket.Column, $"Column '{ticket.Column.Name}'");
             ValidateColumnDefault(ticket.Column, $"Column '{ticket.Column.Name}'");
+        }
 
         if (ticket.Operation == AlterTableOperation.RenameColumn)
         {

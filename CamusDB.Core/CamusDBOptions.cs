@@ -1109,6 +1109,78 @@ public sealed record CamusDBOptions
     public int MaxMutationsPerTransaction { get; init; } = 20_000;
 
     /// <summary>
+    /// Stored size, in bytes, at or above which a <c>string</c>, <c>bytes</c> or array value moves out
+    /// of its row into its own key, when the column's storage strategy allows it (<c>EXTENDED</c> or
+    /// <c>EXTERNAL</c>). The size compared is the value after any compression, so a value that
+    /// compresses below the threshold stays inline.
+    ///
+    /// <para>An out-of-line value costs one extra mutation per value on insert and delete, and one
+    /// batched fetch per scan batch when a query reads its column. A query that does not name the column
+    /// never fetches it, and an update of another column never rewrites it.</para>
+    ///
+    /// <para>A size decision only: results are identical at any value. <c>&lt;= 0</c> keeps every new
+    /// value inline; values already out of line keep reading. Read per statement by the insert and
+    /// update paths, so a change applies to the next statement.</para>
+    ///
+    /// Default: <c>2048</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int LargeValueThresholdBytes { get; init; } = 2048;
+
+    /// <summary>
+    /// Whether the writer may LZ4-compress a <c>string</c>, <c>bytes</c> or array value of at least
+    /// 256 bytes when the column's storage strategy allows it (<c>EXTENDED</c> or <c>MAIN</c>). Reads
+    /// ignore this setting completely: every stored cell records whether it is compressed, so turning
+    /// compression off never makes a value unreadable. Read per statement by the insert and update
+    /// paths.
+    ///
+    /// Default: <c>true</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public bool LargeValueCompressionEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Minimum saving, in percent, for a compressed value to be stored compressed. A compressed form
+    /// that saves less is discarded and the raw bytes are stored, so data that does not compress (float32
+    /// embeddings, images, archives) never pays a decompression on read. Values outside 0–99 are
+    /// clamped. Read per statement by the insert and update paths.
+    ///
+    /// Default: <c>12</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int LargeValueCompressionMinSavingPercent { get; init; } = 12;
+
+    /// <summary>
+    /// Rows read and rewritten per transaction by <c>ALTER TABLE ... REWRITE STORAGE</c>, the explicit
+    /// conversion of rows written before their current storage rules. Each rewritten row costs
+    /// <c>1 + k</c> mutations for <c>k</c> out-of-line values, so this must stay well below
+    /// <see cref="MaxMutationsPerTransaction"/> divided by the widest row's cost, or a batch would trip
+    /// the mutation limit. Read once per statement.
+    ///
+    /// Default: <c>200</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int LargeValueRewriteBatchRows { get; init; } = 200;
+
+    /// <summary>
+    /// Upper bound, in bytes, on the decoded size of the compressed and out-of-line cells that one read
+    /// resolves at a time. A stored row can be far smaller than its values: a compressed cell expands up
+    /// to 255 times, and an out-of-line cell is a 16-byte pointer. A scan window, a batch read and a
+    /// storage rewrite batch therefore close on this bound as well as on their row count, so a table of
+    /// large compressible values cannot make one read hold gigabytes before it returns a row. The bound
+    /// uses the lengths the row records, before any value is fetched or decompressed. One row larger than
+    /// the bound is resolved alone. <c>&lt;= 0</c> removes the bound.
+    ///
+    /// <para>Runtime: the table store takes a new value through its options swap, and a storage rewrite
+    /// reads it when the statement starts. Node scope: it bounds this node's memory and never changes a
+    /// result.</para>
+    ///
+    /// Default: <c>67108864</c> (64 MiB).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long LargeValueResolveBatchBytes { get; init; } = 64L * 1024 * 1024;
+
+    /// <summary>
     /// Maximum nesting depth for view-over-view expansion.
     ///
     /// <para>A backstop, not the defense: a cycle is rejected at DDL time by walking the stored

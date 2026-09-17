@@ -82,7 +82,8 @@ internal static class TableDeltaApplier
                     arrayElementType: column.ArrayElementType,
                     defaultFunction: column.DefaultFunction,
                     notNullConstraintName: column.NotNullConstraintName,
-                    comment: column.Comment
+                    comment: column.Comment,
+                    storage: column.Storage
                 )
             );
         }
@@ -168,7 +169,8 @@ internal static class TableDeltaApplier
                     arrayElementType: column.ArrayElementType,
                     defaultFunction: column.DefaultFunction,
                     notNullConstraintName: column.NotNullConstraintName,
-                    comment: column.Comment
+                    comment: column.Comment,
+                    storage: column.Storage
                 )
             );
         }
@@ -329,7 +331,8 @@ internal static class TableDeltaApplier
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: old.NotNullConstraintName,
-                        comment: payload.Comment
+                        comment: payload.Comment,
+                        storage: old.Storage
                     );
                     break;
                 }

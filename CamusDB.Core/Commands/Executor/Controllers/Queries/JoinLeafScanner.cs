@@ -87,10 +87,12 @@ internal sealed class JoinLeafScanner
         RowLayout? qualifiedLayout = null;
 
         deps?.RecordRange(table.Store.RowKeySpace);
+        deps?.RecordRange(table.Store.LargeValueKeySpace);
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-            plan.Ticket.TxnState, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false))
+            plan.Ticket.TxnState, cancellationToken: plan.Ticket.CancellationToken,
+            largeValues: LargeValueFetch.Columns(table.Schema, required)).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -409,7 +411,9 @@ internal sealed class JoinLeafScanner
         QueryPlan plan,
         RightDecodeState? decodeState = null)
     {
-        ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(
+            plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken,
+            LargeValueFetch.Columns(source.Table.Schema, JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias))).ConfigureAwait(false);
 
         if (dataOpt is null || dataOpt.Value.Length == 0)
             return null;

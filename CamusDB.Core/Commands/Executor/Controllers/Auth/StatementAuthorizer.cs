@@ -356,6 +356,7 @@ internal sealed class StatementAuthorizer
             or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex
             or NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableDropConstraint
             or NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull
+            or NodeType.AlterTableSetColumnStorage or NodeType.AlterTableRewriteStorage
             or NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey
             or NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or NodeType.AnalyzeTable
             or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,

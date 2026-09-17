@@ -310,6 +310,34 @@ internal sealed class SchemaElementReplicator
     }
 
     /// <summary>
+    /// Proposes a <c>SetColumnStorage</c> delta and replicates it to all cluster nodes. The delta is
+    /// validated against a clone of the schema under the schema lock first, so an unknown column or a
+    /// type that cannot carry a strategy is refused before anything is proposed.
+    /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
+    /// </summary>
+    internal async Task ReplicateSetColumnStorageAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string columnName,
+        ColumnStorageStrategy storage)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = SchemaChangeEntryFactory.SetColumnStorageEntry(database, tableName, columnName, storage);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Proposes a <c>SetColumnNotNull</c> delta and replicates it to all cluster nodes.
     /// Idempotent: if the column's NOT NULL state already matches, the delta is a no-op but still
     /// advances the schema version.

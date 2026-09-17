@@ -55,7 +55,8 @@ internal static class PrimaryKeyNotNullRule
                         column.ArrayElementType,
                         column.DefaultFunction,
                         column.NotNullConstraintName,
-                        column.Comment);
+                        column.Comment,
+                        column.Storage);
                 }
             }
         }

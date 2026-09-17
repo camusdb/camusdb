@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
+
 namespace CamusDB.Core.CommandsExecutor.Models.Tickets;
 
 /// <summary>
@@ -35,6 +37,15 @@ public enum AlterConstraintOperation
     /// <see cref="AlterConstraintTicket.ColumnName"/> identifies the target column.
     /// </summary>
     DropNotNull,
+
+    /// <summary>
+    /// Sets the storage strategy of a <c>string</c>, <c>bytes</c> or array column
+    /// (<c>ALTER TABLE t ALTER COLUMN c SET STORAGE PLAIN | MAIN | EXTERNAL | EXTENDED</c>).
+    /// Changes the form of future writes only: no stored row is read or rewritten, so the statement
+    /// is instant whatever the table size. <see cref="AlterConstraintTicket.ColumnName"/> and
+    /// <see cref="AlterConstraintTicket.Storage"/> identify the column and the strategy.
+    /// </summary>
+    SetStorage,
 }
 
 /// <summary>
@@ -74,6 +85,9 @@ public readonly struct AlterConstraintTicket
     /// </summary>
     public string? ColumnName { get; }
 
+    /// <summary>The new strategy for <see cref="AlterConstraintOperation.SetStorage"/>; null for every other operation.</summary>
+    public ColumnStorageStrategy? Storage { get; }
+
     public AlterConstraintTicket(
         string databaseName,
         string tableName,
@@ -81,7 +95,8 @@ public readonly struct AlterConstraintTicket
         string? expression,
         string[]? referencedColumns,
         AlterConstraintOperation operation,
-        string? columnName = null)
+        string? columnName = null,
+        ColumnStorageStrategy? storage = null)
     {
         DatabaseName = databaseName;
         TableName = tableName;
@@ -90,5 +105,6 @@ public readonly struct AlterConstraintTicket
         ReferencedColumns = referencedColumns;
         Operation = operation;
         ColumnName = columnName;
+        Storage = storage;
     }
 }

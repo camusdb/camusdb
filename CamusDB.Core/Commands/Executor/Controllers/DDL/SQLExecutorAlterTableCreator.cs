@@ -30,10 +30,12 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             string? defaultFunction = null;
             string? comment = null;
             bool notNull = false;
+            List<(ColumnConstraintType type, ColumnValue? value)>? declaredConstraints = null;
 
             if (ast.extendedTwo is not null)
             {
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
+                declaredConstraints = constraintTypes;
                 GetColumnConstraintList(ast.extendedTwo, constraintTypes);
                 defaultValue = GetDefaultFromConstraints(constraintTypes);
                 defaultFunction = GetDefaultFunctionFromConstraints(constraintTypes);
@@ -49,11 +51,15 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             if (defaultFunction is not null)
                 ValidateDefaultFunctionType(defaultFunction, colType, ast.rightAst!.yytext!);
 
+            ColumnStorageStrategy? storage = declaredConstraints is null
+                ? null
+                : GetStorageFromConstraints(declaredConstraints, colType, ast.rightAst!.yytext!);
+
             return new(
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
-                new ColumnInfo(ast.rightAst!.yytext!, colType, notNull, defaultValue, maxLen, elemType, defaultFunction: defaultFunction, comment: comment)
+                new ColumnInfo(ast.rightAst!.yytext!, colType, notNull, defaultValue, maxLen, elemType, defaultFunction: defaultFunction, comment: comment, storage: storage)
             );
         }
 

@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Flux;
 using CamusDB.Core.Flux.Models;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.Diagnostics;
 using Microsoft.Extensions.Logging;
@@ -136,14 +137,21 @@ public sealed class TableColumnDropper
         TableDescriptor table = state.Table;
         KvTransaction tx = state.Tx;
 
+        List<(ObjectIdValue, IReadOnlyDictionary<string, ColumnValue>)> pending = new(StoredRowRewriter.BatchRows);
+
         await foreach (QueryResultRow row in state.DataCursor)
         {
-            byte[] buffer = RowEncoder.Encode(table.Schema, row.Row, row.RowId);
-
-            await table.Store.UpdateRow(tx, row.RowId, buffer).ConfigureAwait(false);
-
+            pending.Add((row.RowId, row.Row));
             state.ModifiedRows++;
+
+            if (pending.Count >= StoredRowRewriter.BatchRows)
+            {
+                await StoredRowRewriter.RewriteAsync(state.Database, table, tx, pending).ConfigureAwait(false);
+                pending.Clear();
+            }
         }
+
+        await StoredRowRewriter.RewriteAsync(state.Database, table, tx, pending).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }

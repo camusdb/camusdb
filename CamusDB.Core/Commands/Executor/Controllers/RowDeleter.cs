@@ -94,8 +94,6 @@ internal sealed class RowDeleter
         if (rowIds.Count == 0)
             return (0, 0);
 
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken).ConfigureAwait(false);
-
         // Index writability is fixed for the statement, so filter once here instead of per row; the
         // decode below is narrowed to the columns this method actually consumes — the index key
         // columns (for CollectIndexDeletes) plus the expiry column (for the re-check). Values for
@@ -104,6 +102,8 @@ internal sealed class RowDeleter
         HashSet<string> requiredColumns = CollectIndexKeyColumns(writableIndexes);
         requiredColumns.Add(expirationColumn);
         RowEncoder.DictionaryDecodeState decodeState = new();
+
+        (ReadOnlyMemory<byte>?[] rawRows, List<int>?[] outOfLine) = await ReadRowsForDeleteAsync(table, tx, rowIds, requiredColumns, cancellationToken).ConfigureAwait(false);
 
         List<KvTableStore.RowDelete> batch = new(rowIds.Count);
         int skipped = 0;
@@ -135,6 +135,7 @@ internal sealed class RowDeleter
             {
                 RowId = rowId,
                 IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
+                LargeValueOrdinals = outOfLine[i],
             });
         }
 
@@ -311,8 +312,6 @@ internal sealed class RowDeleter
         List<ObjectIdValue> chunk,
         DeleteFluxState state)
     {
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, chunk).ConfigureAwait(false);
-
         // Index writability is fixed for the statement, so filter once per chunk instead of per row;
         // the decode below is narrowed to the index key columns — the only values this path consumes
         // (the row bytes are deleted wholesale, never re-encoded). Values for those columns are
@@ -320,6 +319,8 @@ internal sealed class RowDeleter
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
         HashSet<string> requiredColumns = CollectIndexKeyColumns(writableIndexes);
         RowEncoder.DictionaryDecodeState decodeState = new();
+
+        (ReadOnlyMemory<byte>?[] rawRows, List<int>?[] outOfLine) = await ReadRowsForDeleteAsync(table, tx, chunk, requiredColumns, default).ConfigureAwait(false);
 
         List<KvTableStore.RowDelete> batch = new(chunk.Count);
         for (int i = 0; i < chunk.Count; i++)
@@ -339,6 +340,7 @@ internal sealed class RowDeleter
             {
                 RowId = rowId,
                 IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
+                LargeValueOrdinals = outOfLine[i],
             });
         }
 
@@ -350,6 +352,40 @@ internal sealed class RowDeleter
 
         foreach (KvTableStore.RowDelete row in batch)
             Log.LogRowDeleted(logger, row.RowId);
+    }
+
+    /// <summary>
+    /// Reads rows for deletion under the mutation lock, and returns, per row, the variable ordinals of
+    /// its out-of-line values beside bytes in which only <paramref name="requiredColumns"/> are resolved.
+    ///
+    /// <para>The ordinals come from the stored pointers, read before any value is resolved, so the
+    /// delete names every key the row points at without fetching a single large value. Only a large
+    /// value that is also an index key column — the one thing the delete must compare — is fetched.</para>
+    /// </summary>
+    private static async Task<(ReadOnlyMemory<byte>?[] rows, List<int>?[] outOfLine)> ReadRowsForDeleteAsync(
+        TableDescriptor table,
+        KvTransaction tx,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        IReadOnlySet<string> requiredColumns,
+        CancellationToken cancellationToken)
+    {
+        ReadOnlyMemory<byte>?[] rows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, LargeValueFetch.Raw).ConfigureAwait(false);
+
+        List<int>?[] outOfLine = new List<int>?[rows.Length];
+        bool anyMarked = false;
+        for (int i = 0; i < rows.Length; i++)
+        {
+            if (rows[i] is { } row && RowStorageForms.HasTrailer(row.Span))
+            {
+                outOfLine[i] = RowStorageForms.OutOfLineOrdinals(row.Span);
+                anyMarked = true;
+            }
+        }
+
+        if (anyMarked)
+            await table.Store.ResolveLargeValuesAsync(tx, rowIds, rows, LargeValueFetch.Columns(table.Schema, requiredColumns), cancellationToken).ConfigureAwait(false);
+
+        return (rows, outOfLine);
     }
 
     /// <summary>

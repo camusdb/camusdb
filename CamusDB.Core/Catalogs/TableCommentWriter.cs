@@ -169,7 +169,8 @@ internal static class TableCommentWriter
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: old.NotNullConstraintName,
-                        comment: comment
+                        comment: comment,
+                        storage: old.Storage
                     );
                     break;
                 }

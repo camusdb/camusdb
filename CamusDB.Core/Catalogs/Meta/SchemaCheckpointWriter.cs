@@ -274,6 +274,7 @@ internal sealed class SchemaCheckpointWriter
         SchemaOp.SetTableSettings => SchemaDeltaApplier.DecodePayload<SchemaSetTableSettingsPayload>(entry).TableName,
         SchemaOp.SetComment => SchemaDeltaApplier.DecodePayload<SchemaSetCommentPayload>(entry).TableName,
         SchemaOp.SetColumnNotNull => SchemaDeltaApplier.DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
+        SchemaOp.SetColumnStorage => SchemaDeltaApplier.DecodePayload<SchemaSetColumnStoragePayload>(entry).TableName,
         SchemaOp.TruncateTable => SchemaDeltaApplier.DecodePayload<SchemaTruncateTablePayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,

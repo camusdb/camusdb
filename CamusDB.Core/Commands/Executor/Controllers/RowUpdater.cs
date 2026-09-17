@@ -504,43 +504,52 @@ public sealed class RowUpdater
         List<QueryResultRow> chunkRows,
         UpdateFluxState state)
     {
-        // Batch-load raw row bytes for the whole chunk in one Kahuna round-trip. Uses the
-        // lock-acquiring batch read so a Serializable+RW update holds the same shared point locks on the
-        // read rows that a per-row GetRow would — without them, an index-scan-located update could read a
-        // row lock-free and miss a concurrent commit, deleting a stale index entry.
+        // Batch-load row bytes for the whole chunk in one Kahuna round-trip. Uses the lock-acquiring
+        // batch read so a Serializable+RW update holds the same shared point locks on the read rows that
+        // a per-row GetRow would — without them, an index-scan-located update could read a row lock-free
+        // and miss a concurrent commit, deleting a stale index entry. The bytes are read raw: which
+        // large values to fetch is decided per row below.
         List<ObjectIdValue> rowIds = new(chunkRows.Count);
         for (int i = 0; i < chunkRows.Count; i++)
             rowIds.Add(chunkRows[i].RowId);
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, default, LargeValueFetch.Raw).ConfigureAwait(false);
 
         // The rewritten row is stored under the current schema version, so its positional layout is
         // fixed for the whole chunk. Compiled once here rather than per row.
         CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
         List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
+        LargeValuePolicy largeValuePolicy = LargeValuePolicy.For(schemaColumns, state.Database.Options);
 
         // Index writability is fixed for the statement (the transaction pins the schema version),
         // so filter once per chunk instead of re-evaluating per index per row.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
 
+        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes);
+        (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
+            await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
+
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
 
-        // Per-chunk decode-plan cache: every row at the same stored schema version shares one resolved
-        // plan instead of re-running schema-history lookups and visibility resolution per row.
+        // Per-chunk decode-plan caches: every row at the same stored schema version shares one resolved
+        // plan instead of re-running schema-history lookups and visibility resolution per row. A row that
+        // carries its untouched large values decodes a narrower column set, so it has its own cache.
         RowEncoder.DictionaryDecodeState decodeState = new();
+        RowEncoder.DictionaryDecodeState carryDecodeState = new();
 
         for (int i = 0; i < chunkRows.Count; i++)
         {
             QueryResultRow queryRow = chunkRows[i];
             ObjectIdValue rowId = queryRow.RowId;
-            ReadOnlyMemory<byte>? rawData = rawRows[i];
+            ReadOnlyMemory<byte>? rawData = oldRows[i];
 
             if (rawData is null || rawData.Value.Length == 0)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
 
             Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, rawData.Value,
+                requiredColumns: carried[i] ? carry.DecodedColumns : null,
                 visibilitySchemaVersion: table.Schema.Version,
-                decodeState: decodeState).ConfigureAwait(false);
+                decodeState: carried[i] ? carryDecodeState : decodeState).ConfigureAwait(false);
 
             Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, queryRow, ticket);
 
@@ -548,7 +557,12 @@ public sealed class RowUpdater
             CheckForNotNulls(table, newRow);
             CheckEnforcer.EnforceOnRow(table, newRow);
 
-            byte[] newData = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, newRow));
+            // A carried cell is copied from the row as stored, never from the resolved row: resolution
+            // clears the marks of a cell the update decodes, and copying that plain cell would write the
+            // large value inline again instead of keeping its pointer.
+            EncodedRow encoded = carried[i]
+                ? codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, newRow), largeValuePolicy, storedRows[i]!.Value.Span, carry.CarryMask)
+                : codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, newRow), largeValuePolicy);
 
             (IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries,
              IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
@@ -557,9 +571,11 @@ public sealed class RowUpdater
             batch.Add(new KvTableStore.RowUpdate
             {
                 RowId = rowId,
-                NewRowData = newData,
+                NewRowData = encoded.StorageValue,
                 OldIndexEntries = oldIndexEntries,
                 NewIndexEntries = newIndexEntries,
+                LargeValues = encoded.OutOfLine,
+                LargeValueDeletes = UnreferencedLargeValues(oldOutOfLine[i], encoded, carried[i] ? carry.CarriedVariableOrdinals : null),
             });
         }
 
@@ -569,6 +585,206 @@ public sealed class RowUpdater
 
         foreach (KvTableStore.RowUpdate row in batch)
             Log.LogRowUpdated(logger, row.RowId);
+    }
+
+    /// <summary>
+    /// Which columns of the current schema an update carries from the old row, and which columns it
+    /// decodes. Two separate questions:
+    /// <list type="bullet">
+    ///   <item><b>Carry</b> (copy the stored cell, marks included, and write no large value): every
+    ///   <c>string</c>, <c>bytes</c> or array column the statement does not assign. Its value cannot
+    ///   change, so its stored form stays valid.</item>
+    ///   <item><b>Decode</b>: every column that is not carried, plus a carried column that a writable
+    ///   index uses as a key or INCLUDE column or that a CHECK constraint reads. The update compares or
+    ///   re-validates those values, so they are resolved, but the stored cell is still carried.</item>
+    /// </list>
+    /// A column that must be decoded is not a reason to write its large value again: a CHECK on a large
+    /// column would otherwise make every small update rewrite the large value.
+    /// </summary>
+    private sealed class UpdateCarryPlan
+    {
+        /// <summary>Per stored ordinal of the current schema version: true when the column is carried.</summary>
+        public required bool[] CarryMask { get; init; }
+
+        /// <summary>Variable ordinals of the carried columns, in the current layout.</summary>
+        public required HashSet<int> CarriedVariableOrdinals { get; init; }
+
+        /// <summary>
+        /// The names decoded from a row that carries: every column that is not carried, and each carried
+        /// column that an index or a CHECK constraint reads.
+        /// </summary>
+        public required IReadOnlySet<string> DecodedColumns { get; init; }
+
+        public bool IsEmpty => CarriedVariableOrdinals.Count == 0;
+
+        public static UpdateCarryPlan Build(TableDescriptor table, UpdateTicket ticket, List<TableIndexSchema> writableIndexes)
+        {
+            HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
+
+            if (ticket.PlainValues is not null)
+                assigned.UnionWith(ticket.PlainValues.Keys);
+            if (ticket.ExprValues is not null)
+                assigned.UnionWith(ticket.ExprValues.Keys);
+
+            HashSet<string> validated = new(StringComparer.OrdinalIgnoreCase);
+
+            foreach (TableIndexSchema index in writableIndexes)
+            {
+                validated.UnionWith(index.Columns);
+                validated.UnionWith(index.IncludeColumns);
+            }
+
+            if (table.Schema.CheckConstraints is { } checks)
+            {
+                foreach (CheckConstraintSchema check in checks)
+                    validated.UnionWith(check.ReferencedColumns);
+            }
+
+            List<TableColumnSchema> columns = table.Schema.Columns!;
+            bool[] mask = new bool[columns.Count];
+            HashSet<int> carriedOrdinals = [];
+            HashSet<string> decoded = new(StringComparer.Ordinal);
+            int variableOrdinal = 0;
+
+            for (int i = 0; i < columns.Count; i++)
+            {
+                TableColumnSchema column = columns[i];
+                bool variable = TableColumnSchema.SupportsStorageStrategy(column.Type);
+
+                if (variable && SchemaElementStateRules.IsWritable(column) && !assigned.Contains(column.Name))
+                {
+                    mask[i] = true;
+                    carriedOrdinals.Add(variableOrdinal);
+
+                    if (validated.Contains(column.Name))
+                        decoded.Add(column.Name);
+                }
+                else
+                {
+                    decoded.Add(column.Name);
+                }
+
+                if (variable)
+                    variableOrdinal++;
+            }
+
+            return new UpdateCarryPlan { CarryMask = mask, CarriedVariableOrdinals = carriedOrdinals, DecodedColumns = decoded };
+        }
+    }
+
+    /// <summary>
+    /// Decides, per row, whether the update carries untouched large values, and resolves exactly the
+    /// cells the update then reads.
+    ///
+    /// <para>A row carries only when it has marked cells and was written under the current schema
+    /// version: a carried cell is copied verbatim into the new row, and its out-of-line key is derived
+    /// from the cell's variable ordinal, which is stable only within one layout. Such a row resolves only
+    /// the columns <see cref="UpdateCarryPlan.DecodedColumns"/> names, so an update of a small column
+    /// never rewrites a large value, and fetches one only when an index or a CHECK constraint reads it.
+    /// A marked row of an older layout resolves everything and is rewritten in the new form. An unmarked
+    /// row needs no resolution.</para>
+    ///
+    /// <para>Returns the resolved rows for decoding and, aligned with them, the rows as stored. A carried
+    /// cell must be copied from the stored row, because resolution replaces a decoded cell with its plain
+    /// value. The out-of-line ordinals of each old row are read from its pointers before resolution, so
+    /// the caller can name the old keys the new row no longer points at.</para>
+    /// </summary>
+    private static async Task<(ReadOnlyMemory<byte>?[] rows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] outOfLine, bool[] carried)> ResolveRowsForUpdateAsync(
+        TableDescriptor table,
+        KvTransaction tx,
+        List<ObjectIdValue> rowIds,
+        ReadOnlyMemory<byte>?[] rawRows,
+        UpdateCarryPlan carry)
+    {
+        List<int>?[] outOfLine = new List<int>?[rawRows.Length];
+        bool[] carried = new bool[rawRows.Length];
+        ReadOnlyMemory<byte>?[] storedRows = (ReadOnlyMemory<byte>?[])rawRows.Clone();
+
+        List<ObjectIdValue>? carryIds = null, fullIds = null;
+        List<int>? carryPositions = null, fullPositions = null;
+
+        for (int i = 0; i < rawRows.Length; i++)
+        {
+            if (rawRows[i] is not { } row || !RowStorageForms.HasTrailer(row.Span))
+                continue;
+
+            outOfLine[i] = RowStorageForms.OutOfLineOrdinals(row.Span);
+
+            int storedVersion = RowStorageForms.StoredVersion(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(row.Span));
+            if (!carry.IsEmpty && storedVersion == table.Schema.Version)
+            {
+                carried[i] = true;
+                (carryIds ??= []).Add(rowIds[i]);
+                (carryPositions ??= []).Add(i);
+            }
+            else
+            {
+                (fullIds ??= []).Add(rowIds[i]);
+                (fullPositions ??= []).Add(i);
+            }
+        }
+
+        if (carryIds is not null)
+            await ResolveSubsetAsync(table, tx, rawRows, carryIds, carryPositions!, LargeValueFetch.Columns(table.Schema, carry.DecodedColumns)).ConfigureAwait(false);
+
+        if (fullIds is not null)
+            await ResolveSubsetAsync(table, tx, rawRows, fullIds, fullPositions!, null).ConfigureAwait(false);
+
+        return (rawRows, storedRows, outOfLine, carried);
+    }
+
+    private static async Task ResolveSubsetAsync(
+        TableDescriptor table,
+        KvTransaction tx,
+        ReadOnlyMemory<byte>?[] rows,
+        List<ObjectIdValue> ids,
+        List<int> positions,
+        LargeValueFetch? fetch)
+    {
+        ReadOnlyMemory<byte>?[] subset = new ReadOnlyMemory<byte>?[positions.Count];
+        for (int i = 0; i < positions.Count; i++)
+            subset[i] = rows[positions[i]];
+
+        await table.Store.ResolveLargeValuesAsync(tx, ids, subset, fetch).ConfigureAwait(false);
+
+        for (int i = 0; i < positions.Count; i++)
+            rows[positions[i]] = subset[i];
+    }
+
+    /// <summary>
+    /// The old out-of-line ordinals the new row no longer points at: every old pointer ordinal, minus the
+    /// ordinals the new row carries (their key is left untouched) and minus the ordinals the new row
+    /// writes again (their key is overwritten in place). Null when nothing is left to delete.
+    /// </summary>
+    private static List<int>? UnreferencedLargeValues(List<int>? oldOrdinals, EncodedRow encoded, HashSet<int>? carriedOrdinals)
+    {
+        if (oldOrdinals is null)
+            return null;
+
+        List<int>? deletes = null;
+        foreach (int ordinal in oldOrdinals)
+        {
+            if (carriedOrdinals is not null && carriedOrdinals.Contains(ordinal))
+                continue;
+
+            bool rewritten = false;
+            if (encoded.OutOfLine is { } writes)
+            {
+                for (int w = 0; w < writes.Count; w++)
+                {
+                    if (writes[w].VariableOrdinal == ordinal)
+                    {
+                        rewritten = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!rewritten)
+                (deletes ??= []).Add(ordinal);
+        }
+
+        return deletes;
     }
 
     /// <summary>

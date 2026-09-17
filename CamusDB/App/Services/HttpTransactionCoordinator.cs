@@ -106,8 +106,8 @@ public sealed class HttpTransactionCoordinator
     /// <param name="sessionOwned">
     /// True when the caller is handling an explicit <c>BEGIN</c> / <c>START TRANSACTION</c> and the
     /// client will commit or roll the transaction back itself. The transaction is marked so a
-    /// statement that cannot honour a later <c>ROLLBACK</c> — <c>TRUNCATE</c> — can refuse to run
-    /// inside it. Leave false for the server-side transaction wrapped around one autocommit statement.
+    /// statement that cannot honour a later <c>ROLLBACK</c> — <c>TRUNCATE</c>, or
+    /// <c>ALTER TABLE ... REWRITE STORAGE</c> — can refuse to run inside it. Leave false for the server-side transaction wrapped around one autocommit statement.
     /// </param>
     public async Task<KvTransaction> StartAsync(
         string databaseName,

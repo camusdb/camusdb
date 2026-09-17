@@ -212,7 +212,15 @@ internal sealed class TableOpener
         // extra round-trip to establish the range descriptor. Registering at CREATE TABLE time
         // would buy nothing.
         if (database.Options.KeyRangeShardingEnabled)
+        {
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
+
+            // The out-of-line values of a table live in their own key space. Registering it beside the
+            // row space lets it split on its own load instead of staying hash-placed on one partition
+            // while the rows it belongs to are split across several. Unconditional: a table cannot know
+            // in advance whether it will ever store a value out of line.
+            await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.LargeValueKeySpace);
+        }
 
         // Build a column-ID→type lookup used by IsIndexRangeable to gate index registration.
         // Every indexable type uses an ASCII order-preserving key encoding, so only missing or

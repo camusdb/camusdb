@@ -56,6 +56,7 @@ internal sealed class CreateTableValidator : ValidatorBase
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column type cannot be null");
 
             ValidateCommentLength(columnInfo.Comment, $"Column '{columnInfo.Name}'");
+            ValidateColumnMaxLength(columnInfo, $"Column '{columnInfo.Name}'");
             ValidateColumnDefault(columnInfo, $"Column '{columnInfo.Name}'");
         }
 

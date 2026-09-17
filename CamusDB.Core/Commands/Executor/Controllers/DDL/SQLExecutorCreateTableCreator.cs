@@ -311,7 +311,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                         arrayElementType: elemType,
                         defaultFunction: defaultFunction,
                         notNullConstraintName: notNullConstraintName,
-                        comment: GetCommentFromConstraints(constraintTypes)
+                        comment: GetCommentFromConstraints(constraintTypes),
+                        storage: GetStorageFromConstraints(constraintTypes, colType, columnName)
                     )
                 );
                 return;

@@ -116,6 +116,7 @@ internal sealed class QueryScanner
 
         // Full table scan: the entire row-bucket range is a dependency (catches phantom inserts).
         deps?.RecordRange(table.Store.RowKeySpace);
+        deps?.RecordRange(table.Store.LargeValueKeySpace);
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         // One RowLayout per stored schema version. Most scans touch only one version so this
@@ -184,8 +185,11 @@ internal sealed class QueryScanner
             // Read-set folding follows the transaction (KvTransaction.FoldReads), not the plan shape:
             // an optimistic transaction folds this scan's rows so its commit validates them, exactly
             // as a point read would — isolation must not depend on which plan answered the predicate.
+            // Only the cells the decode below reads are resolved: a large column the query does not
+            // name is never fetched. ScanRequiredColumns == null means every column, and so every cell.
             await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cancellationToken))
+                plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cancellationToken,
+                largeValues: LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -328,7 +332,8 @@ internal sealed class QueryScanner
                 List<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> chunk = new(ParallelDecodeChunkSize);
 
                 await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                    plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cts.Token).ConfigureAwait(false))
+                    plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cts.Token,
+                    largeValues: LargeValueFetch.Columns(table.Schema, requiredColumns)).ConfigureAwait(false))
                 {
                     if (data.Length == 0)
                         continue;
@@ -440,6 +445,7 @@ internal sealed class QueryScanner
             exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         deps?.RecordRange(table.Store.RowKeySpace);
+        deps?.RecordRange(table.Store.LargeValueKeySpace);
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
         using System.Diagnostics.Activity? storageSpan =
@@ -752,7 +758,8 @@ internal sealed class QueryScanner
                     afterRowId: afterRowId,
                     cancellationToken: cts.Token,
                     untilRowId: untilRowId,
-                    fromRowId: fromRowId).ConfigureAwait(false))
+                    fromRowId: fromRowId,
+                    largeValues: LargeValueFetch.Columns(table.Schema, requiredColumns)).ConfigureAwait(false))
                 {
                     if (data.Length == 0)
                         continue;
@@ -897,7 +904,7 @@ internal sealed class QueryScanner
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page, cancellationToken).ConfigureAwait(false);
+                ticket.TxnState, page, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();

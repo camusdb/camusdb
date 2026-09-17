@@ -23,7 +23,14 @@ namespace CamusDB.Core.Storage.Kv;
 ///   Primary rows:      {dbId}:{tableId}|r/{rowIdHex24}                         -> serialized row bytes
 ///   Unique index:      {dbId}:{tableId}|i:{indexId}/{encodedKey}               -> rowIdHex24 (UTF-8)
 ///   Non-unique index:  {dbId}:{tableId}|i:{indexId}/{encodedKey}{rowIdHex24}   -> rowIdHex24 (UTF-8)
+///   Large value:       {dbId}:{tableId}|v/{rowIdHex24}{ordinalHex4}             -> stored cell bytes
 /// </code>
+///
+/// <para>A large value is one variable cell a row stores out of line (see
+/// <see cref="RowStorageForms"/>). Its key appends the cell's variable ordinal to the row id as
+/// exactly four lowercase hex digits with no separator, so, like a non-unique index key, it holds a
+/// single <c>'/'</c> and every large value of a table shares the key space
+/// <c>{dbId}:{tableId}|v</c> and the table's placement group.</para>
 ///
 /// <para>Kahuna scans, locks and range-registers a <b>key space</b>: the prefix before the last
 /// <c>'/'</c> (<c>{dbId}:{tableId}|r</c>, <c>{dbId}:{tableId}|i:{indexId}</c>). Under hash routing
@@ -72,6 +79,12 @@ internal sealed class KvKeyBuilder
     /// </summary>
     internal const string SessionSpaceSuffix = "|tx";
 
+    /// <summary><c>|v</c> — the suffix that turns a table prefix into its large-value key space.</summary>
+    internal const string LargeValueSpaceSuffix = "|v";
+
+    /// <summary>Width of the variable-ordinal suffix of a large-value key: four lowercase hex digits.</summary>
+    internal const int LargeValueOrdinalHexLength = 4;
+
     // Caches "{dbId}:{tableId}|i:{indexId}" per index so the bucket prefix is interpolated once
     // instead of on every lock/scan. The index-id set is small and bounded by the table's schema.
     private readonly ConcurrentDictionary<string, string> indexBucketPrefixCache = new();
@@ -117,6 +130,12 @@ internal sealed class KvKeyBuilder
     /// <summary><c>{dbId}:{tableId}|i:</c> — prepended to an index id to form an index key space.</summary>
     internal string IndexSpacePrefix { get; }
 
+    /// <summary><c>{dbId}:{tableId}|v</c> — the bucket prefix (no trailing slash) of the table's large values.</summary>
+    internal string LargeValueBucketPrefix { get; }
+
+    /// <summary><c>{dbId}:{tableId}|v/</c> — prepended to a row-id hex and an ordinal to form a large-value key.</summary>
+    internal string LargeValueKeyPrefix { get; }
+
     internal KvKeyBuilder(string dbId, string dbName, string tableId, string tableName)
     {
         DbId = dbId;
@@ -127,6 +146,8 @@ internal sealed class KvKeyBuilder
         RowBucketPrefix = RowSpaceOf(dbId, tableId);
         RowKeyPrefix = RowBucketPrefix + "/";
         IndexSpacePrefix = TableKeyPrefix + IndexSpaceInfix;
+        LargeValueBucketPrefix = LargeValueSpaceOf(dbId, tableId);
+        LargeValueKeyPrefix = LargeValueBucketPrefix + "/";
     }
 
     /// <summary>
@@ -143,6 +164,13 @@ internal sealed class KvKeyBuilder
     /// </summary>
     internal static string IndexSpaceOf(string dbId, string tableId, string indexId)
         => string.Concat(dbId, ":", tableId, IndexSpaceInfix, indexId);
+
+    /// <summary>
+    /// <c>{dbId}:{tableId}|v</c> — the large-value key space of a table, for callers that address a
+    /// table without opening it (the keyspace purges). Identical to <see cref="LargeValueBucketPrefix"/>
+    /// on an instance for the same pair.
+    /// </summary>
+    internal static string LargeValueSpaceOf(string dbId, string tableId) => string.Concat(dbId, ":", tableId, LargeValueSpaceSuffix);
 
     /// <summary>
     /// <c>{placementGroup}|tx/{sessionId}</c> — the Kahuna coordinator key that anchors a
@@ -210,6 +238,29 @@ internal sealed class KvKeyBuilder
             state.RowKeyPrefix.CopyTo(span);
             ObjectId.WriteHex(span[state.RowKeyPrefix.Length..], state.rowId.a, state.rowId.b, state.rowId.c);
         });
+
+    /// <summary>
+    /// <c>{dbId}:{tableId}|v/{rowIdHex24}{ordinalHex4}</c> — the key of one out-of-line cell. The row id
+    /// and the ordinal are both fixed width, so the key needs no separator between them and keeps the
+    /// single <c>'/'</c> that makes <c>{dbId}:{tableId}|v</c> its key space.
+    /// </summary>
+    internal string BuildLargeValueKey(ObjectIdValue rowId, int variableOrdinal)
+    {
+        if ((uint)variableOrdinal > RowStorageForms.MaxOutOfLineOrdinal)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Variable ordinal {variableOrdinal} cannot address an out-of-line value");
+
+        return string.Create(
+            LargeValueKeyPrefix.Length + KvStoreConstants.RowIdHexLength + LargeValueOrdinalHexLength,
+            (LargeValueKeyPrefix, rowId, variableOrdinal),
+            static (span, state) =>
+            {
+                state.LargeValueKeyPrefix.CopyTo(span);
+                int at = state.LargeValueKeyPrefix.Length;
+                ObjectId.WriteHex(span[at..], state.rowId.a, state.rowId.b, state.rowId.c);
+                at += KvStoreConstants.RowIdHexLength;
+                state.variableOrdinal.TryFormat(span[at..], out _, "x4", System.Globalization.CultureInfo.InvariantCulture);
+            });
+    }
 
     // Returns "{dbId}:{tableId}|i:{indexId}" — the bucket prefix (no trailing slash) used for
     // LocateAndScanRange. It is the key space of every key "{dbId}:{tableId}|i:{indexId}/{...}", so

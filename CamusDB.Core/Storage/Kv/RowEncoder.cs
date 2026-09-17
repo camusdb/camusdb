@@ -472,8 +472,8 @@ public static class RowEncoder
     };
 
     /// <summary>
-    /// Reads the stored schema version from the front of a positional row payload (a raw little-endian
-    /// <c>u32</c> at offset 0). The row id is not stored — it already lives in the KV key — so there is
+    /// Reads the stored schema version from the front of a positional row payload (a little-endian
+    /// <c>u32</c> at offset 0, with the storage-form flag in bit 31 masked off). The row id is not stored — it already lives in the KV key — so there is
     /// no header past the version; every value is addressed positionally from the payload start. Kept
     /// synchronous and span-based so async decoders can read the version before awaiting lazy
     /// schema-history loads without holding a span across the await.
@@ -487,7 +487,9 @@ public static class RowEncoder
                 CamusDBErrorCodes.SystemSpaceCorrupt,
                 $"Row payload is {data.Length} bytes, shorter than the 4-byte schema-version header");
 
-        return (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data);
+        // Bit 31 marks a storage-form trailer (see RowStorageForms), not part of the version. Every
+        // plan and history lookup keys on the stored version alone.
+        return RowStorageForms.StoredVersion(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data));
     }
 
     public static Dictionary<string, ColumnValue> Decode(

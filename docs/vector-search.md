@@ -29,10 +29,14 @@ wire is the four bytes `00 00 80 3F` — low byte first.
 CREATE TABLE docs (
     id         oid PRIMARY KEY,
     tenant_id  int64,
-    embedding  bytes(3072) NOT NULL,
+    embedding  bytes(3072) NOT NULL STORAGE PLAIN,
     CONSTRAINT embedding_is_768d CHECK (vector_dims(embedding) = 768)
 );
 ```
+
+`STORAGE PLAIN` keeps each embedding inside its row. See
+[Storage strategy for embeddings](#storage-strategy-for-embeddings) — without it, every 768-dimension
+embedding moves out of its row.
 
 ### `bytes(N)` is a maximum, not a width
 
@@ -55,6 +59,35 @@ exactly the corruption the check exists to catch.
 A `NULL` embedding **passes** `CHECK (vector_dims(embedding) = 768)`, because SQL violates a check
 only on `false` and `vector_dims(NULL)` is `NULL`. Use `NOT NULL` to forbid a missing vector; the
 check cannot do it.
+
+### Storage strategy for embeddings
+
+An embedding is a `bytes` value, so the large-value rules of [Large values](storage-layout.md) apply to
+it. A 768-dimension embedding is 3 072 bytes, which is above the default out-of-line threshold of
+2 048 bytes. Under the default strategy, `EXTENDED`, each embedding therefore moves out of its row, and
+a KNN query that ranks every row pays one extra batched fetch per scanned batch. LZ4 does not shrink
+float32 data, so an attempt to compress it only costs CPU on every write; the minimum-saving rule then
+stores it raw.
+
+Measured on 10 000 rows of 768 dimensions (the workload in [Cost](#cost)), a `LIMIT 10` KNN query
+over out-of-line embeddings took about 90 ms, against 15–35 ms with `PLAIN` or with every value inline:
+roughly 2.5 times slower. `PLAIN` measured the same as an engine that stores every value inline, within
+the noise of the run.
+
+Choose the strategy for the query that reads the column:
+
+- **`PLAIN`** — for an embedding that a KNN query reads on every row. It stays inside the row, is
+  never compressed, and costs exactly what it cost before large-value storage existed.
+- **`EXTERNAL`** — for an embedding that most queries do not read. It moves out of the row without a
+  compression attempt, so queries that read only the other columns stay fast.
+
+Do not leave an embedding column on `EXTENDED`. For an existing table, change the strategy and convert
+the stored rows:
+
+```sql
+ALTER TABLE docs ALTER COLUMN embedding SET STORAGE PLAIN;
+ALTER TABLE docs REWRITE STORAGE;
+```
 
 ## Distance functions
 

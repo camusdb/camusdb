@@ -668,4 +668,31 @@ public enum NodeType
     /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
     /// </summary>
     FlushSessions,
+
+    /// <summary>
+    /// Inline <c>STORAGE PLAIN | MAIN | EXTERNAL | EXTENDED</c> on a column definition. The strategy
+    /// name is carried verbatim in <c>yytext</c>; <c>STORAGE</c> is matched as an identifier so it
+    /// stays usable as a table or column name.
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    ConstraintStorage,
+
+    /// <summary>
+    /// <c>ALTER TABLE t ALTER [COLUMN] c SET STORAGE strategy</c>. <c>leftAst</c> is the table,
+    /// <c>rightAst</c> the column, and <c>yytext</c> the strategy name.
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
+    /// </summary>
+    AlterTableSetColumnStorage,
+
+    /// <summary>
+    /// <c>ALTER TABLE t REWRITE STORAGE [INLINE]</c>: convert stored rows to the table's current
+    /// storage rules, or, with <c>INLINE</c>, back to fully inline and uncompressed form. <c>leftAst</c>
+    /// is the table; <c>yytext</c> is <c>"inline"</c> for the reverse form and null otherwise.
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
+    /// </summary>
+    AlterTableRewriteStorage,
 }

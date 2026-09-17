@@ -222,11 +222,28 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   at write time; <= 0 disables. Default 4096 (4 KiB).
 # max_mutations_per_transaction: max rows one user transaction may mutate; <= 0 disables (unlimited);
 #   DDL/backfill always run unlimited. Default 20000.
+# large_value_threshold_bytes: stored size at or above which a string/bytes/array value moves out of its
+#   row into its own key (columns with STORAGE EXTENDED or EXTERNAL); <= 0 keeps new values inline.
+#   A size decision only — results never change. Default 2048.
+# large_value_compression_enabled: LZ4-compress values of 256+ bytes (STORAGE EXTENDED or MAIN) when the
+#   saving pays back; reads ignore it. Default true.
+# large_value_compression_min_saving_percent: minimum saving a compressed value must reach to be kept
+#   compressed; incompressible data is stored raw. Default 12.
+# large_value_rewrite_batch_rows: rows per transaction for ALTER TABLE ... REWRITE STORAGE; at most half
+#   of max_mutations_per_transaction. Default 200.
+# large_value_resolve_batch_bytes: decoded bytes of compressed and out-of-line values one read or rewrite
+#   batch resolves at a time, so large compressible values cannot make one read hold gigabytes; <= 0
+#   removes the bound. Node-local; never changes a result. Default 67108864 (64 MiB).
 # branch_snapshot_hold_lease_ms: lease window for a branch's snapshot-floor hold on its parent's MVCC
 #   history (the leader-owned renewer renews well inside it); must be > 0. Default 300000 (5 min).
 # max_index_columns: 32
 # max_index_include_tuple_bytes: 4096
 # max_mutations_per_transaction: 20000
+# large_value_threshold_bytes: 2048
+# large_value_compression_enabled: true
+# large_value_compression_min_saving_percent: 12
+# large_value_rewrite_batch_rows: 200
+# large_value_resolve_batch_bytes: 67108864
 # branch_snapshot_hold_lease_ms: 300000
 
 # ── Advisory table statistics ─────────────────────────────────────────────────

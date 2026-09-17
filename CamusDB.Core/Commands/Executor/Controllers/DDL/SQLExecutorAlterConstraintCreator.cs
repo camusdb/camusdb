@@ -47,6 +47,20 @@ internal sealed class SQLExecutorAlterConstraintCreator : SQLExecutorBaseCreator
             );
         }
 
+        if (ast.nodeType == NodeType.AlterTableSetColumnStorage)
+        {
+            return new AlterConstraintTicket(
+                databaseName: sqlTicket.DatabaseName,
+                tableName: tableName,
+                constraintName: "",
+                expression: null,
+                referencedColumns: null,
+                operation: AlterConstraintOperation.SetStorage,
+                columnName: ast.rightAst!.yytext!,
+                storage: ColumnStorageStrategies.Parse(ast.yytext!)
+            );
+        }
+
         if (ast.nodeType == NodeType.AlterTableDropNotNull)
         {
             string columnName = ast.rightAst!.yytext!;

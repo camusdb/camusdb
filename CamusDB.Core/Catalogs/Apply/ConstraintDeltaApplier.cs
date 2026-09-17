@@ -71,6 +71,56 @@ internal static class ConstraintDeltaApplier
     }
 
     /// <summary>
+    /// Applies a <see cref="SchemaOp.SetColumnStorage"/> delta: replaces the target column with a copy
+    /// carrying the new strategy. Idempotent. Does not bump <c>TableSchema.Version</c> and does not
+    /// touch stored rows: the strategy decides only the form of future writes. Rejects a column type
+    /// with no variable-length payload with <see cref="CamusDBErrorCodes.ColumnStorageNotApplicable"/>,
+    /// so validation on the proposer and apply on every node reach the same answer.
+    /// </summary>
+    internal static TableSchema ApplySetColumnStorage(Schema schema, SchemaSetColumnStoragePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        if (tableSchema.Columns is null)
+            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
+
+        int idx = tableSchema.Columns.FindIndex(c => string.Equals(c.Name, payload.ColumnName, StringComparison.OrdinalIgnoreCase));
+        if (idx < 0)
+            throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ColumnName}' does not exist on table '{payload.TableName}'");
+
+        TableColumnSchema old = tableSchema.Columns[idx];
+        tableSchema.Columns[idx] = WithStorage(old, payload.Storage);
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// Returns a copy of <paramref name="column"/> with <paramref name="storage"/>, after checking the
+    /// column type can carry a strategy. Shared by the replicated apply and the single-node path.
+    /// </summary>
+    internal static TableColumnSchema WithStorage(TableColumnSchema column, ColumnStorageStrategy storage)
+    {
+        if (!TableColumnSchema.SupportsStorageStrategy(column.Type))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ColumnStorageNotApplicable,
+                $"Column '{column.Name}' of type {column.Type} has no variable-length value, so it cannot take a storage strategy");
+
+        return new TableColumnSchema(
+            id: column.Id,
+            name: column.Name,
+            type: column.Type,
+            notNull: column.NotNull,
+            defaultValue: column.DefaultValue,
+            state: column.State,
+            maxLength: column.MaxLength,
+            arrayElementType: column.ArrayElementType,
+            defaultFunction: column.DefaultFunction,
+            notNullConstraintName: column.NotNullConstraintName,
+            comment: column.Comment,
+            storage: storage);
+    }
+
+    /// <summary>
     /// Applies a SetColumnNotNull delta. Replaces the target column with an updated copy that has
     /// the new <c>NotNull</c> flag and <c>NotNullConstraintName</c>. Idempotent: setting the flag
     /// to its current value is a no-op. Does not bump <c>TableSchema.Version</c> because the NOT
@@ -100,7 +150,8 @@ internal static class ConstraintDeltaApplier
             arrayElementType: old.ArrayElementType,
             defaultFunction: old.DefaultFunction,
             notNullConstraintName: payload.ConstraintName,
-            comment: old.Comment
+            comment: old.Comment,
+            storage: old.Storage
         );
         return tableSchema;
     }

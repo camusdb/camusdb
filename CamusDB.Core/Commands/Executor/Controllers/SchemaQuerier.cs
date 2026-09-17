@@ -591,6 +591,7 @@ internal sealed class SchemaQuerier
             createTableSql.Append(' ');
             createTableSql.Append(GetSQLConstraint(column));
             createTableSql.Append(GetSQLDefault(column));
+            createTableSql.Append(GetSQLStorage(column));
             createTableSql.Append(GetSQLComment(column.Comment));
             createTableSql.Append(',');
             i++;
@@ -1217,16 +1218,23 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
-    /// Renders a column's type as re-parseable CREATE TABLE syntax. Strings carry their explicit
-    /// <c>MaxLength</c> as <c>STRING(n)</c> (bare <c>STRING</c> when unbounded/default-capped);
-    /// arrays render as <c>ARRAY(element)</c>. Bytes has no sized SQL form, so it always renders
-    /// bare <c>BYTES</c>.
+    /// Renders a column's type as re-parseable CREATE TABLE syntax. Strings and bytes carry their
+    /// explicit <c>MaxLength</c> as <c>STRING(n)</c> / <c>BYTES(n)</c>, and render bare when no size
+    /// was declared; arrays render as <c>ARRAY(element)</c>.
+    ///
+    /// <para>The size is not cosmetic: the write path enforces <c>MaxLength</c>, and a missing size
+    /// means the default ceiling (<see cref="CamusDBConstants.DefaultStringMaxLength"/> /
+    /// <see cref="CamusDBConstants.DefaultBytesMaxLength"/>). Dropping it here would make DDL taken from
+    /// <c>SHOW CREATE TABLE</c> — a logical dump, a schema comparison — re-create the column with a
+    /// different limit. <c>MaxLength</c> on any other type is ignored by enforcement, so it is not
+    /// rendered.</para>
     /// </summary>
     private static string GetSQLType(TableColumnSchema column)
     {
         return column.Type switch
         {
-            ColumnType.String => column.MaxLength is int n ? $"STRING({n.ToString(CultureInfo.InvariantCulture)})" : "STRING",
+            ColumnType.String or ColumnType.Bytes when column.MaxLength is int n
+                => $"{ScalarSQLType(column.Type)}({n.ToString(CultureInfo.InvariantCulture)})",
             ColumnType.Array => $"ARRAY({ScalarSQLType(column.ArrayElementType ?? ColumnType.Null)})",
             _ => ScalarSQLType(column.Type),
         };
@@ -1265,6 +1273,15 @@ internal sealed class SchemaQuerier
 
         return "NULL";
     }
+
+    /// <summary>
+    /// Renders a <c>STORAGE &lt;strategy&gt;</c> clause for a column whose strategy was set explicitly,
+    /// or an empty string. A column that never had one stays unrendered, so the DDL of a table created
+    /// before strategies existed is unchanged; an explicit <c>EXTENDED</c> is rendered, because the
+    /// user wrote it.
+    /// </summary>
+    private static string GetSQLStorage(TableColumnSchema column)
+        => column.Storage is { } storage ? " STORAGE " + ColumnStorageStrategies.ToSql(storage) : "";
 
     /// <summary>
     /// Renders a trailing <c>COMMENT '…'</c> clause, or an empty string when

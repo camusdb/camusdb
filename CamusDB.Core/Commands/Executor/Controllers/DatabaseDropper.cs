@@ -12,6 +12,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -318,7 +319,7 @@ internal sealed class DatabaseDropper
                 break;
         }
 
-        // Phase B: build the row/index bucket prefixes and exact stats keys.
+        // Phase B: build the row, large-value and index bucket prefixes and exact stats keys.
         List<(string bucket, string keyPrefix)> rowIndexPrefixes = [];
         List<string> exactKeys = [];
         HashSet<string> coveredTableIds = [];
@@ -327,6 +328,7 @@ internal sealed class DatabaseDropper
         {
             coveredTableIds.Add(tableId);
             rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.RowSpaceOf(id, tableId)));
+            rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.LargeValueSpaceOf(id, tableId)));
             exactKeys.Add($"{id}:stats:{tableId}");
             foreach (string indexId in indexIds)
                 rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.IndexSpaceOf(id, tableId, indexId)));
@@ -340,6 +342,7 @@ internal sealed class DatabaseDropper
                 if (table.Id is null || coveredTableIds.Contains(table.Id))
                     continue;
                 rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.RowSpaceOf(id, table.Id)));
+                rowIndexPrefixes.Add(BucketOf(KvKeyBuilder.LargeValueSpaceOf(id, table.Id)));
                 exactKeys.Add($"{id}:stats:{table.Id}");
                 if (table.Indexes is not null)
                     foreach (TableIndexSchema index in table.Indexes)
@@ -455,11 +458,12 @@ internal sealed class DatabaseDropper
             logger.LogWarning(ex, "Failed to read keyspace catalog for orphan table {TableId} in database {Id}", tableId, dbId);
         }
 
-        // Purge row + index buckets, and delete the stats/catalog/meta keys — all verified. The orphan
+        // Purge row, large-value and index buckets, and delete the stats/catalog/meta keys — all verified. The orphan
         // record is NOT touched here; it is the recovery marker and is deleted only if everything else
         // is confirmed gone, so an incomplete purge leaves the record for a later sweep to finish.
         bool complete = catalogRead;
         complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.RowSpaceOf(dbId, dataId), ct).ConfigureAwait(false);
+        complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.LargeValueSpaceOf(dbId, dataId), ct).ConfigureAwait(false);
         foreach (string indexId in indexIds)
             complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.IndexSpaceOf(dbId, dataId, indexId), ct).ConfigureAwait(false);
 
@@ -467,6 +471,7 @@ internal sealed class DatabaseDropper
         {
             $"{dbId}:stats:{tableId}",
             catalogKey,
+            MetaKeys.StorageRewriteKey(dbId, dataId),
             $"{dbId}/meta/keyspace:{tableId}",
             $"{dbId}/meta/table:{tableId}",
         })
@@ -522,11 +527,13 @@ internal sealed class DatabaseDropper
 
         bool complete = catalogRead;
         complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.RowSpaceOf(dbId, retiredStorageId), ct).ConfigureAwait(false);
+        complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.LargeValueSpaceOf(dbId, retiredStorageId), ct).ConfigureAwait(false);
 
         foreach (string indexId in indexIds)
             complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.IndexSpaceOf(dbId, retiredStorageId, indexId), ct).ConfigureAwait(false);
 
         complete &= await DeleteExactVerifiedAsync(kahuna, catalogKey, ct).ConfigureAwait(false);
+        complete &= await DeleteExactVerifiedAsync(kahuna, MetaKeys.StorageRewriteKey(dbId, retiredStorageId), ct).ConfigureAwait(false);
 
         if (!complete)
             return false;

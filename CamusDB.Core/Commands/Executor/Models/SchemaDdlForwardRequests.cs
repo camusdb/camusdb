@@ -33,6 +33,10 @@ public sealed class ColumnInfoRequest
     /// <summary>Inline column comment; null when none was declared. Without it a forwarded
     /// CREATE TABLE / ADD COLUMN would silently drop the comment on the leader.</summary>
     public string? Comment { get; set; }
+
+    /// <summary>Inline column storage strategy; null when none was declared. Without it a forwarded
+    /// CREATE TABLE / ADD COLUMN would silently reset the column to the default strategy.</summary>
+    public ColumnStorageStrategy? Storage { get; set; }
 }
 
 /// <summary>
@@ -135,6 +139,9 @@ public sealed class ForwardAlterConstraintRequest
     /// <summary>Target column for SET/DROP NOT NULL; null for CHECK add/drop. Without it the
     /// leader cannot resolve the column and the NOT NULL alter fails.</summary>
     public string? ColumnName { get; set; }
+
+    /// <summary>Target strategy for SET STORAGE; null for every other operation.</summary>
+    public ColumnStorageStrategy? Storage { get; set; }
 }
 
 public sealed class ForwardRenameTableRequest

@@ -392,6 +392,7 @@ combination silently.
 | `range_lock_heartbeat_interval_ms` ≥ `range_lock_expires_ms` (when expiry > 0) | `InvalidConfig` |
 | `spill_threshold_rows` ≤ 0 | `InvalidConfig` |
 | `spill_merge_fan_in` ≤ 0 | `InvalidConfig` |
+| `large_value_rewrite_batch_rows` ≤ 0, or above half of `max_mutations_per_transaction` (when the limit > 0) | `InvalidConfig` |
 | Unknown `kahuna` key | `InvalidConfig` |
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |

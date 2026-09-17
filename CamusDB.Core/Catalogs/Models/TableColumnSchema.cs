@@ -86,6 +86,23 @@ public sealed class TableColumnSchema
     /// </summary>
     public string? Comment { get; }
 
+    /// <summary>
+    /// How the writer may compress or move a large value of this column out of the row. Null means
+    /// <see cref="ColumnStorageStrategy.Extended"/>, so a schema persisted before the strategy existed
+    /// loads unchanged. Meaningful only for <c>String</c>, <c>Bytes</c> and <c>Array</c> columns. A
+    /// write-time decision only: a reader follows the per-cell marks in the stored row, never this
+    /// value. Like <see cref="Comment"/>, every rebuild-copy of a column must pass it through or the
+    /// strategy is silently reset to the default.
+    /// </summary>
+    public ColumnStorageStrategy? Storage { get; }
+
+    /// <summary>The effective strategy: <see cref="Storage"/>, or <see cref="ColumnStorageStrategy.Extended"/> when unset.</summary>
+    public ColumnStorageStrategy EffectiveStorage => Storage ?? ColumnStorageStrategy.Extended;
+
+    /// <summary>True for the column types whose values have a variable-length payload that a storage strategy can act on.</summary>
+    public static bool SupportsStorageStrategy(ColumnType type) =>
+        type is ColumnType.String or ColumnType.Bytes or ColumnType.Array;
+
     public TableColumnSchema(
         string id,
         string name,
@@ -97,7 +114,8 @@ public sealed class TableColumnSchema
         ColumnType? arrayElementType = null,
         string? defaultFunction = null,
         string? notNullConstraintName = null,
-        string? comment = null
+        string? comment = null,
+        ColumnStorageStrategy? storage = null
     )
     {
         Id = id;
@@ -111,5 +129,6 @@ public sealed class TableColumnSchema
         DefaultFunction = defaultFunction;
         NotNullConstraintName = notNullConstraintName;
         Comment = comment;
+        Storage = storage;
     }
 }

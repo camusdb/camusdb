@@ -69,7 +69,9 @@ internal static class ElementStateApplier
                 maxLength: current.MaxLength,
                 arrayElementType: current.ArrayElementType,
                 defaultFunction: current.DefaultFunction,
-                notNullConstraintName: current.NotNullConstraintName
+                notNullConstraintName: current.NotNullConstraintName,
+                comment: current.Comment,
+                storage: current.Storage
             );
         }
 

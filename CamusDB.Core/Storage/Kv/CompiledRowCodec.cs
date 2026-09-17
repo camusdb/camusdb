@@ -33,6 +33,14 @@ namespace CamusDB.Core.Storage.Kv;
 /// </code>
 ///
 /// <para>
+/// Bit 31 of <c>schemaVersion</c> marks a row whose variable cells may be compressed or moved out of
+/// line; such a row ends with a storage-form trailer. <see cref="RowStorageForms"/> owns that extension.
+/// The codec only masks the bit when it compares versions, and refuses to read a marked cell: the store
+/// resolves every cell a caller needs before the bytes reach a decoder (see
+/// <see cref="KvTableStore.ResolveLargeValuesAsync"/>).
+/// </para>
+///
+/// <para>
 /// A NULL cell of a fixed-width column still occupies its fixed slot so that fixed offsets stay
 /// compile-time constant and projected fixed reads are O(1). A NULL variable cell writes no payload
 /// but keeps its (zero-length) offset-directory entry, so a NULL string and an empty string are
@@ -217,6 +225,362 @@ internal sealed class CompiledRowCodec
         buffer[0] = (byte)BranchKvKind.Value;
         WritePayload(buffer.AsSpan(1), values);
         return buffer;
+    }
+
+    /// <summary>
+    /// Encodes one row into its Kahuna storage value under a <see cref="LargeValuePolicy"/>: each
+    /// variable cell is stored raw, compressed inline, or as a pointer to a separately written value,
+    /// following the order PostgreSQL uses — compress first when the column strategy allows it, then
+    /// compare the <em>resulting</em> size with the threshold. So a value that compresses well stays
+    /// inline and costs no second key.
+    ///
+    /// <para>A row whose cells all stay raw is byte-identical to <see cref="EncodeStorageValue(ReadOnlySpan{ValueSlot})"/>
+    /// and allocates nothing more: the policy is checked against each cell's size before any value bytes
+    /// are produced.</para>
+    ///
+    /// <para><paramref name="carrySource"/> and <paramref name="carryColumns"/> serve an update that
+    /// leaves a large column untouched. A column marked in <paramref name="carryColumns"/> copies its
+    /// stored cell, marks included, from <paramref name="carrySource"/> — the old row payload, which must
+    /// have been written under this same schema version — and its slot in <paramref name="values"/> is
+    /// ignored. A carried out-of-line pointer keeps naming the same key, so the large value itself is not
+    /// rewritten; that is the write-amplification win for an update of a small column.</para>
+    /// </summary>
+    public EncodedRow EncodeStorageValue(
+        ReadOnlySpan<ValueSlot> values,
+        LargeValuePolicy policy,
+        ReadOnlySpan<byte> carrySource = default,
+        ReadOnlySpan<bool> carryColumns = default)
+    {
+        if (values.Length != ColumnCount)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Row has {values.Length} values but schema version {SchemaVersion} has {ColumnCount} columns");
+
+        bool anyCarry = carryColumns.IndexOf(true) >= 0;
+        if (variableColumnCount == 0 || (!anyCarry && !AnyCellMayChange(values, policy)))
+            return new EncodedRow(EncodeStorageValue(values), null);
+
+        RowStorageForms.TrailerLayout carryLayout = default;
+        if (anyCarry)
+        {
+            if (carryColumns.Length != ColumnCount)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Carried-column mask does not match the row layout");
+
+            uint carryWord = BinaryPrimitives.ReadUInt32LittleEndian(carrySource);
+            if ((carryWord & RowStorageForms.VersionMask) != (uint)SchemaVersion)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"A carried cell must come from a row of schema version {SchemaVersion}");
+
+            if (RowStorageForms.HasTrailer(carrySource))
+                carryLayout = RowStorageForms.ReadLayout(carrySource);
+        }
+
+        CellPlan[] cells = new CellPlan[variableColumnCount];
+        List<LargeValueWrite>? outOfLine = null;
+        bool anyMark = false;
+        int variableAreaSize = 0;
+
+        for (int i = 0; i < columns.Length; i++)
+        {
+            ColumnPlan plan = columns[i];
+            if (plan.Class != StorageClass.Variable)
+                continue;
+
+            int v = plan.VariableOrdinal;
+
+            if (anyCarry && carryColumns[i])
+            {
+                ReadOnlySpan<byte> carried = GetCarriedCell(carrySource, carryLayout, v, out bool carriedOutOfLine, out bool carriedCompressed, out bool carriedNull);
+                cells[v] = new CellPlan { Carry = true, CarryNull = carriedNull, OutOfLine = carriedOutOfLine, Compressed = carriedCompressed, Size = carried.Length };
+                variableAreaSize += carried.Length;
+                anyMark |= carriedOutOfLine | carriedCompressed;
+                continue;
+            }
+
+            ref readonly ValueSlot slot = ref values[i];
+            if (slot.IsNull)
+                continue;
+
+            int rawSize = VariablePayloadSize(in slot, plan.Type, plan.ArrayElementType);
+            ColumnStorageStrategy strategy = policy.StrategyOf(i);
+
+            bool mayCompress = policy.CompressionEnabled
+                && strategy is ColumnStorageStrategy.Extended or ColumnStorageStrategy.Main
+                && rawSize >= LargeValueCompression.MinCompressibleBytes;
+
+            bool mayMoveOut = policy.ThresholdBytes > 0
+                && strategy is ColumnStorageStrategy.Extended or ColumnStorageStrategy.External
+                && v <= RowStorageForms.MaxOutOfLineOrdinal
+                && rawSize >= policy.ThresholdBytes;
+
+            if (!mayCompress && !mayMoveOut)
+            {
+                variableAreaSize += rawSize;
+                continue;
+            }
+
+            byte[] raw = MaterializeVariable(in slot, plan.Type, plan.ArrayElementType, rawSize);
+            byte[] stored = raw;
+            bool compressed = false;
+
+            if (mayCompress && LargeValueCompression.TryCompress(raw, policy.MinSavingPercent, out byte[]? block))
+            {
+                stored = block!;
+                compressed = true;
+            }
+
+            if (mayMoveOut && stored.Length >= policy.ThresholdBytes)
+            {
+                byte[] storageValue = new byte[1 + stored.Length];
+                storageValue[0] = (byte)BranchKvKind.Value;
+                stored.CopyTo(storageValue, 1);
+
+                (outOfLine ??= []).Add(new LargeValueWrite(v, storageValue));
+                cells[v] = new CellPlan { OutOfLine = true, Compressed = compressed, RawLength = raw.Length, Bytes = stored, Size = RowStorageForms.PointerSize };
+                variableAreaSize += RowStorageForms.PointerSize;
+                anyMark = true;
+                continue;
+            }
+
+            if (compressed)
+            {
+                cells[v] = new CellPlan { Compressed = true, RawLength = raw.Length, Bytes = stored, Size = RowStorageForms.CompressedPrefixSize + stored.Length };
+                variableAreaSize += RowStorageForms.CompressedPrefixSize + stored.Length;
+                anyMark = true;
+                continue;
+            }
+
+            // Compression did not pay and the value stays inline: keep the materialized bytes so the
+            // write pass does not encode the value a second time.
+            cells[v] = new CellPlan { Bytes = raw, RawLength = raw.Length, Size = raw.Length };
+            variableAreaSize += raw.Length;
+        }
+
+        int payloadSize = headerSize + variableAreaSize + (anyMark ? RowStorageForms.TrailerSize(variableColumnCount) : 0);
+        byte[] buffer = new byte[1 + payloadSize];
+        buffer[0] = (byte)BranchKvKind.Value;
+        WritePayloadWithForms(buffer.AsSpan(1), values, cells, anyMark, carrySource, carryLayout);
+
+        return new EncodedRow(buffer, outOfLine);
+    }
+
+    /// <summary>
+    /// Returns the stored cell of variable ordinal <paramref name="variableOrdinal"/> in a carried
+    /// row, with its marks. A carried cell is copied verbatim, so its marks travel with it.
+    /// </summary>
+    private ReadOnlySpan<byte> GetCarriedCell(
+        ReadOnlySpan<byte> carrySource,
+        in RowStorageForms.TrailerLayout carryLayout,
+        int variableOrdinal,
+        out bool outOfLine,
+        out bool compressed,
+        out bool isNull)
+    {
+        int storedOrdinal = StoredOrdinalOfVariable(variableOrdinal);
+        isNull = GetBit(carrySource.Slice(nullBitmapOffset, nullBitmapBytes), columns[storedOrdinal].NullBitIndex);
+
+        int start = variableOrdinal == 0 ? 0 : (int)BinaryPrimitives.ReadUInt32LittleEndian(carrySource.Slice(variableOffsetsOffset + (variableOrdinal - 1) * 4, 4));
+        int end = (int)BinaryPrimitives.ReadUInt32LittleEndian(carrySource.Slice(variableOffsetsOffset + variableOrdinal * 4, 4));
+
+        if (carryLayout.VariableCount > 0)
+        {
+            outOfLine = carryLayout.IsOutOfLine(carrySource, variableOrdinal);
+            compressed = carryLayout.IsCompressed(carrySource, variableOrdinal);
+        }
+        else
+        {
+            outOfLine = false;
+            compressed = false;
+        }
+
+        return carrySource.Slice(headerSize + start, end - start);
+    }
+
+    private int StoredOrdinalOfVariable(int variableOrdinal)
+    {
+        for (int i = 0; i < columns.Length; i++)
+        {
+            if (columns[i].Class == StorageClass.Variable && columns[i].VariableOrdinal == variableOrdinal)
+                return i;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"No variable column at ordinal {variableOrdinal}");
+    }
+
+    /// <summary>The per-cell decision of <see cref="EncodeStorageValue(ReadOnlySpan{ValueSlot}, LargeValuePolicy, ReadOnlySpan{byte}, ReadOnlySpan{bool})"/>.</summary>
+    private struct CellPlan
+    {
+        /// <summary>Stored bytes to write: raw bytes, the LZ4 block of a compressed cell, or the out-of-line stored bytes the pointer names.</summary>
+        public byte[]? Bytes;
+        public int RawLength;
+        public int Size;
+        public bool OutOfLine;
+        public bool Compressed;
+        public bool Carry;
+        public bool CarryNull;
+    }
+
+    private static byte[] MaterializeVariable(in ValueSlot slot, ColumnType type, ColumnType arrayElementType, int size)
+    {
+        if (type == ColumnType.Bytes)
+            return slot.AsBytes ?? [];
+
+        byte[] raw = new byte[size];
+        WriteVariablePayload(raw, type, arrayElementType, in slot);
+        return raw;
+    }
+
+    private void WritePayloadWithForms(
+        Span<byte> payload,
+        ReadOnlySpan<ValueSlot> values,
+        CellPlan[] cells,
+        bool anyMark,
+        ReadOnlySpan<byte> carrySource,
+        in RowStorageForms.TrailerLayout carryLayout)
+    {
+        uint versionWord = (uint)SchemaVersion;
+        if (anyMark)
+            versionWord |= RowStorageForms.TrailerFlag;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload, versionWord);
+
+        int variableCursor = 0;
+        int variableAreaOffset = headerSize;
+
+        for (int i = 0; i < columns.Length; i++)
+        {
+            ColumnPlan plan = columns[i];
+            ref readonly ValueSlot slot = ref values[i];
+
+            if (plan.Class == StorageClass.Variable)
+            {
+                ref CellPlan cell = ref cells[plan.VariableOrdinal];
+                Span<byte> dest = payload[(variableAreaOffset + variableCursor)..];
+
+                if (cell.Carry)
+                {
+                    if (cell.CarryNull)
+                        SetBit(payload.Slice(nullBitmapOffset, nullBitmapBytes), plan.NullBitIndex);
+
+                    ReadOnlySpan<byte> carried = GetCarriedCell(carrySource, carryLayout, plan.VariableOrdinal, out _, out _, out _);
+                    carried.CopyTo(dest);
+                    variableCursor += carried.Length;
+                }
+                else if (slot.IsNull)
+                {
+                    SetBit(payload.Slice(nullBitmapOffset, nullBitmapBytes), plan.NullBitIndex);
+                }
+                else if (cell.OutOfLine)
+                {
+                    RowStorageForms.WritePointer(dest, cell.RawLength, cell.Bytes!);
+                    variableCursor += RowStorageForms.PointerSize;
+                }
+                else if (cell.Compressed)
+                {
+                    byte[] block = cell.Bytes!;
+                    BinaryPrimitives.WriteUInt32LittleEndian(dest, (uint)cell.RawLength);
+                    block.CopyTo(dest[RowStorageForms.CompressedPrefixSize..]);
+                    variableCursor += RowStorageForms.CompressedPrefixSize + block.Length;
+                }
+                else if (cell.Bytes is not null)
+                {
+                    cell.Bytes.CopyTo(dest);
+                    variableCursor += cell.Bytes.Length;
+                }
+                else
+                {
+                    variableCursor += WriteVariablePayload(dest, plan.Type, plan.ArrayElementType, in slot);
+                }
+
+                BinaryPrimitives.WriteUInt32LittleEndian(payload.Slice(variableOffsetsOffset + plan.VariableOrdinal * 4, 4), (uint)variableCursor);
+                continue;
+            }
+
+            if (slot.IsNull)
+            {
+                SetBit(payload.Slice(nullBitmapOffset, nullBitmapBytes), plan.NullBitIndex);
+                continue;
+            }
+
+            if (plan.Class == StorageClass.Fixed)
+                WriteFixed(payload.Slice(plan.FixedOffset, plan.FixedWidth), plan.Type, in slot);
+            else if (slot.AsBool)
+                SetBit(payload.Slice(boolBitmapOffset, boolBitmapBytes), plan.BoolBitIndex);
+        }
+
+        if (!anyMark)
+            return;
+
+        int trailer = variableAreaOffset + variableCursor;
+        int bitmapBytes = CeilDiv(variableColumnCount, 8);
+        for (int v = 0; v < cells.Length; v++)
+        {
+            if (cells[v].OutOfLine)
+                SetBit(payload.Slice(trailer, bitmapBytes), v);
+            if (cells[v].Compressed)
+                SetBit(payload.Slice(trailer + bitmapBytes, bitmapBytes), v);
+        }
+
+        int tail = trailer + 2 * bitmapBytes;
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.Slice(tail, 4), (uint)variableColumnCount);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.Slice(tail + 4, 4), (uint)variableOffsetsOffset);
+    }
+
+    /// <summary>
+    /// True when some non-null variable value of <paramref name="values"/> is large enough for
+    /// <paramref name="policy"/> to compress it or move it out of line. A row of short values answers
+    /// false after a length check per cell, so it stays on the plain single-allocation encode path.
+    /// </summary>
+    internal bool AnyCellMayChange(ReadOnlySpan<ValueSlot> values, LargeValuePolicy policy)
+    {
+        for (int i = 0; i < columns.Length; i++)
+        {
+            ColumnPlan plan = columns[i];
+            if (plan.Class != StorageClass.Variable || values[i].IsNull)
+                continue;
+
+            int minBytes = policy.MinCandidateBytes(i);
+            if (minBytes > 0 && VariablePayloadSizeAtLeast(in values[i], plan.Type, plan.ArrayElementType, minBytes))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The stored-row counterpart of <see cref="AnyCellMayChange"/>: true when an unmarked stored row has
+    /// a non-null variable cell large enough for <paramref name="policy"/> to store it in another form.
+    /// A row that answers false is already in the form <paramref name="policy"/> would write, so a
+    /// storage rewrite can skip it without decoding a single value.
+    /// </summary>
+    internal bool AnyStoredCellMayChange(ReadOnlySpan<byte> payload, LargeValuePolicy policy)
+    {
+        for (int i = 0; i < columns.Length; i++)
+        {
+            ColumnPlan plan = columns[i];
+            if (plan.Class != StorageClass.Variable || IsNull(payload, i))
+                continue;
+
+            int minBytes = policy.MinCandidateBytes(i);
+            if (minBytes > 0 && GetVariableSlice(payload, i).Length >= minBytes)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Cheap lower-bound size test: a UTF-16 string of N chars is at least N UTF-8 bytes, so most
+    /// strings are decided without counting their encoded bytes.
+    /// </summary>
+    private static bool VariablePayloadSizeAtLeast(in ValueSlot slot, ColumnType type, ColumnType arrayElementType, int minBytes)
+    {
+        if (type == ColumnType.String)
+        {
+            string text = slot.AsString ?? "";
+            if (text.Length >= minBytes)
+                return true;
+            if (text.Length * 3 < minBytes)
+                return false;
+        }
+
+        return VariablePayloadSize(in slot, type, arrayElementType) >= minBytes;
     }
 
     /// <summary>
@@ -408,6 +772,12 @@ internal sealed class CompiledRowCodec
     public ReadOnlySpan<byte> GetVariableSlice(ReadOnlySpan<byte> payload, int ordinal)
     {
         int varOrdinal = columns[ordinal].VariableOrdinal;
+
+        // One byte test on the common path. A marked row must have had the cells a caller reads
+        // resolved by the store; reading a pointer or an LZ4 block as a value would return garbage.
+        if ((payload[3] & 0x80) != 0)
+            ThrowIfMarked(payload, varOrdinal);
+
         int start = varOrdinal == 0 ? 0 : (int)BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(variableOffsetsOffset + (varOrdinal - 1) * 4, 4));
         int end = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload.Slice(variableOffsetsOffset + varOrdinal * 4, 4));
         return payload.Slice(headerSize + start, end - start);
@@ -468,9 +838,23 @@ internal sealed class CompiledRowCodec
         if (payload.Length < headerSize)
             throw Corrupt($"row payload {payload.Length} bytes is shorter than the {headerSize}-byte header for schema version {SchemaVersion}");
 
-        uint storedVersion = BinaryPrimitives.ReadUInt32LittleEndian(payload);
+        uint versionWord = BinaryPrimitives.ReadUInt32LittleEndian(payload);
+        uint storedVersion = versionWord & RowStorageForms.VersionMask;
         if (storedVersion != (uint)SchemaVersion)
             throw Corrupt($"row schema version {storedVersion} does not match codec version {SchemaVersion}");
+
+        int variableAreaEnd = payload.Length;
+        if ((versionWord & RowStorageForms.TrailerFlag) != 0)
+        {
+            if (variableColumnCount == 0)
+                throw Corrupt($"row of schema version {SchemaVersion} has no variable columns but carries a storage-form trailer");
+
+            RowStorageForms.TrailerLayout layout = RowStorageForms.ReadLayout(payload);
+            if (layout.VariableCount != variableColumnCount || layout.OffsetsOffset != variableOffsetsOffset)
+                throw Corrupt($"storage-form trailer does not match the layout of schema version {SchemaVersion}");
+
+            variableAreaEnd = layout.OutOfLineBitmapOffset;
+        }
 
         if (variableColumnCount == 0)
         {
@@ -488,8 +872,8 @@ internal sealed class CompiledRowCodec
             prev = end;
         }
 
-        if (headerSize + prev != payload.Length)
-            throw Corrupt($"variable area end {headerSize + prev} does not match payload length {payload.Length}");
+        if (headerSize + prev != variableAreaEnd)
+            throw Corrupt($"variable area end {headerSize + prev} does not match payload length {variableAreaEnd}");
     }
 
     // ─────────────────────────────── Arrays ───────────────────────────────
@@ -715,6 +1099,19 @@ internal sealed class CompiledRowCodec
         BinaryPrimitives.ReadInt32LittleEndian(src),
         BinaryPrimitives.ReadInt32LittleEndian(src[4..]),
         BinaryPrimitives.ReadInt32LittleEndian(src[8..]));
+
+    private void ThrowIfMarked(ReadOnlySpan<byte> payload, int variableOrdinal)
+    {
+        int bitmapBytes = CeilDiv(variableColumnCount, 8);
+        int outOfLineOffset = payload.Length - RowStorageForms.TrailerTailSize - 2 * bitmapBytes;
+        int bit = 1 << (variableOrdinal & 7);
+
+        if ((payload[outOfLineOffset + (variableOrdinal >> 3)] & bit) != 0 ||
+            (payload[outOfLineOffset + bitmapBytes + (variableOrdinal >> 3)] & bit) != 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.LargeValueNotResolved,
+                $"variable column {variableOrdinal} of a schema version {SchemaVersion} row was read before its stored value was resolved");
+    }
 
     private static CamusDBException Corrupt(string message) => new(CamusDBErrorCodes.SystemSpaceCorrupt, message);
 }

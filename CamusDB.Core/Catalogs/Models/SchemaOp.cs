@@ -164,5 +164,15 @@ public enum SchemaOp
     /// change how a row is encoded, which is also why nothing may test "did this apply?" by looking
     /// at the version.</para>
     /// </summary>
-    TruncateTable = 22
+    TruncateTable = 22,
+
+    /// <summary>
+    /// Set the storage strategy of one column (payload: <c>SchemaSetColumnStoragePayload</c>), from
+    /// <c>ALTER TABLE ... ALTER COLUMN ... SET STORAGE</c>.
+    ///
+    /// <para>Idempotent on apply: a replay sets the same value again. Does not bump
+    /// <c>TableSchema.Version</c> — a strategy decides only how future rows are written, and a reader
+    /// follows the marks each stored cell carries — and it rewrites no stored row.</para>
+    /// </summary>
+    SetColumnStorage = 23
 }

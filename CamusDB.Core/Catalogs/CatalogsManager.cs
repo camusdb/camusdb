@@ -358,6 +358,13 @@ public sealed class CatalogsManager
         string constraintName)
         => await elements.ReplicateDropCheckConstraintAsync(database, tableName, constraintName).ConfigureAwait(false);
 
+    public async Task ReplicateSetColumnStorageAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string columnName,
+        ColumnStorageStrategy storage)
+        => await elements.ReplicateSetColumnStorageAsync(database, tableName, columnName, storage).ConfigureAwait(false);
+
     public async Task ReplicateSetColumnNotNullAsync(
         DatabaseDescriptor database,
         string tableName,

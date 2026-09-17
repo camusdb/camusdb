@@ -43,6 +43,8 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(List<CheckConstraintSchema>))]
 [JsonSerializable(typeof(SchemaCheckConstraintPayload))]
 [JsonSerializable(typeof(SchemaSetColumnNotNullPayload))]
+[JsonSerializable(typeof(SchemaSetColumnStoragePayload))]
+[JsonSerializable(typeof(ColumnStorageStrategy))]
 [JsonSerializable(typeof(SchemaSetTableSettingsPayload))]
 [JsonSerializable(typeof(CommentTarget))]
 [JsonSerializable(typeof(SchemaSetCommentPayload))]

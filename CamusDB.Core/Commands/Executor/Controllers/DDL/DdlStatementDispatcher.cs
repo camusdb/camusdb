@@ -471,6 +471,7 @@ internal sealed class DdlStatementDispatcher
             case NodeType.AlterTableDropConstraint:
             case NodeType.AlterTableSetNotNull:
             case NodeType.AlterTableDropNotNull:
+            case NodeType.AlterTableSetColumnStorage:
                 {
                     TableDescriptor tableForConstraint = await context.TableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
 
@@ -494,6 +495,31 @@ internal sealed class DdlStatementDispatcher
                     // creation; the schema-dependent half runs inside AlterTableSettings.
                     AlterTableSettingsTicket settingsTicket = sqlExecutor.CreateAlterTableSettingsTicket(ticket, ast);
                     return await tableSettings.AlterTableSettings(database, settingsTicket).ConfigureAwait(false);
+                }
+
+            case NodeType.AlterTableRewriteStorage:
+                {
+                    // Refused for the same reason as TRUNCATE, plus one of its own. The rewrite commits
+                    // its batches in transactions of its own, so a later ROLLBACK of the caller's
+                    // transaction cannot undo them. And a Serializable caller holds locks on every row it
+                    // read or wrote: each batch over those rows waits out the lock deadline, fails, and is
+                    // deferred, so the statement burns minutes on a large table, converts none of those
+                    // rows, and still reports success.
+                    if (ticket.TxnState is { IsSessionOwned: true })
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                            "ALTER TABLE ... REWRITE STORAGE cannot run inside an explicit transaction: it commits " +
+                            "its batches in transactions of its own, which a later ROLLBACK cannot undo. " +
+                            "Commit or roll back first, then run it.");
+
+                    // Runs as ordinary bounded transactions on this node, not as a replicated schema
+                    // change: it rewrites row data under the current rules and changes no metadata.
+                    TableDescriptor tableToRewrite = await context.TableOpener.Open(database, ast.leftAst!.yytext!).ConfigureAwait(false);
+                    MaterializedViewAccessGuard.RequireWritable(tableToRewrite);
+
+                    StorageRewriter rewriter = new(context.Logger);
+                    await rewriter.RewriteAsync(database, tableToRewrite, inline: ast.yytext == "inline").ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
                 }
 
             case NodeType.AlterTableResetSetting:

@@ -671,6 +671,36 @@ public class ConfigDefinition
     public int MaxMutationsPerTransaction { get; set; } = 20_000;
 
     /// <summary>
+    /// Stored size (bytes) at or above which a large column value moves out of its row. &lt;= 0 keeps
+    /// every new value inline. Default 2048. Maps to <c>CamusDBOptions.LargeValueThresholdBytes</c>.
+    /// </summary>
+    public int LargeValueThresholdBytes { get; set; } = 2048;
+
+    /// <summary>
+    /// Whether the writer may LZ4-compress large column values. Default true. Maps to
+    /// <c>CamusDBOptions.LargeValueCompressionEnabled</c>.
+    /// </summary>
+    public bool LargeValueCompressionEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Minimum percent a compressed value must save to be kept. Default 12. Maps to
+    /// <c>CamusDBOptions.LargeValueCompressionMinSavingPercent</c>.
+    /// </summary>
+    public int LargeValueCompressionMinSavingPercent { get; set; } = 12;
+
+    /// <summary>
+    /// Rows per transaction for <c>ALTER TABLE ... REWRITE STORAGE</c>. Default 200. Maps to
+    /// <c>CamusDBOptions.LargeValueRewriteBatchRows</c>.
+    /// </summary>
+    public int LargeValueRewriteBatchRows { get; set; } = 200;
+
+    /// <summary>
+    /// Decoded bytes of large values one read resolves at a time; <c>&lt;= 0</c> removes the bound.
+    /// Default 64 MiB. Maps to <c>CamusDBOptions.LargeValueResolveBatchBytes</c>.
+    /// </summary>
+    public long LargeValueResolveBatchBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>
     /// Max nesting depth for view-over-view expansion; a backstop behind the DDL-time cycle check.
     /// Default 32. Maps to <c>CamusDBOptions.MaxViewExpansionDepth</c>.
     /// </summary>
@@ -1364,6 +1394,17 @@ public class ConfigDefinition
                 $"'materialized_view_refresh_chunk_rows' ({MaterializedViewRefreshChunkRows}) must be at most half of " +
                 $"'max_mutations_per_transaction' ({MaxMutationsPerTransaction}); each refreshed row costs one mutation " +
                 "per index, so a chunk near the cap fails on any indexed materialized view");
+
+        if (LargeValueRewriteBatchRows <= 0)
+            throw Invalid($"'large_value_rewrite_batch_rows' ({LargeValueRewriteBatchRows}) must be greater than zero");
+
+        // A rewritten row costs its row key plus one mutation per out-of-line value, so a batch near the
+        // mutation cap fails on the first wide row. Require the same 2x margin as a refresh chunk.
+        if (MaxMutationsPerTransaction > 0 && (long)LargeValueRewriteBatchRows * 2 > MaxMutationsPerTransaction)
+            throw Invalid(
+                $"'large_value_rewrite_batch_rows' ({LargeValueRewriteBatchRows}) must be at most half of " +
+                $"'max_mutations_per_transaction' ({MaxMutationsPerTransaction}); each rewritten row costs one mutation " +
+                "per out-of-line value plus the row itself");
 
         // The storage layer sheds a participant write that ages past ~1 s in its pre-dispatch
         // queue and answers MustRetry; a finalize budget that cannot absorb at least two shed

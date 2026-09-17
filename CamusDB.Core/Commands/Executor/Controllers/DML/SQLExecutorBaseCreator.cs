@@ -965,6 +965,12 @@ internal abstract class SQLExecutorBaseCreator
             return;
         }
 
+        if (constraintsList.nodeType == NodeType.ConstraintStorage)
+        {
+            constraintTypes.Add((ColumnConstraintType.Storage, new ColumnValue(ColumnType.String, constraintsList.yytext ?? "")));
+            return;
+        }
+
         if (constraintsList.nodeType == NodeType.ConstraintComment)
         {
             constraintTypes.Add((ColumnConstraintType.Comment,
@@ -1024,6 +1030,32 @@ internal abstract class SQLExecutorBaseCreator
         {
             if (type == ColumnConstraintType.NotNull && value?.StrValue is { Length: > 0 } name)
                 return name;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the storage strategy declared inline with <c>STORAGE &lt;strategy&gt;</c>, or null when
+    /// none was declared. Rejects a strategy on a column type with no variable-length value with
+    /// <see cref="CamusDBErrorCodes.ColumnStorageNotApplicable"/>, so a strategy that could never apply
+    /// is not silently kept.
+    /// </summary>
+    protected static ColumnStorageStrategy? GetStorageFromConstraints(
+        List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes, ColumnType columnType, string columnName)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type != ColumnConstraintType.Storage)
+                continue;
+
+            ColumnStorageStrategy strategy = ColumnStorageStrategies.Parse(value?.StrValue ?? "");
+            if (!TableColumnSchema.SupportsStorageStrategy(columnType))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ColumnStorageNotApplicable,
+                    $"Column '{columnName}' of type {columnType} has no variable-length value, so it cannot take a storage strategy");
+
+            return strategy;
         }
 
         return null;

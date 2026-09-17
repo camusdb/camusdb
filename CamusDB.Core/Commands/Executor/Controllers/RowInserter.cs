@@ -194,6 +194,10 @@ internal sealed class RowInserter
         CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
         List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
 
+        // The storage rules for large values are read once per statement from the current options
+        // snapshot, so a published setting change governs the next statement.
+        LargeValuePolicy largeValuePolicy = LargeValuePolicy.For(schemaColumns, state.Database.Options);
+
         // Index writability is fixed for the statement (the transaction pins the schema version),
         // so filter once here instead of re-evaluating per index per row.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
@@ -236,11 +240,14 @@ internal sealed class RowInserter
                 }
             }
 
+            EncodedRow encoded = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, values), largeValuePolicy);
+
             chunk.Add(new KvTableStore.RowWrite
             {
                 RowId = rowId,
-                RowData = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, values)),
+                RowData = encoded.StorageValue,
                 IndexEntries = indexEntries,
+                LargeValues = encoded.OutOfLine,
             });
 
             if (chunk.Count >= chunkSize)

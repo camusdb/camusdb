@@ -10,6 +10,7 @@ using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Diagnostics;
@@ -28,6 +29,7 @@ namespace CamusDB.Core.Storage.Kv;
 ///   <item><see cref="KvBranchReader"/> — lineage-aware probes and raw iterators.</item>
 ///   <item><see cref="KvRowAccessor"/> / <see cref="KvIndexAccessor"/> — primary rows and secondary indexes.</item>
 ///   <item><see cref="KvBatchWriter"/> — the set-based insert/update/delete and bulk purges.</item>
+///   <item><see cref="KvLargeValueReader"/> — resolves compressed and out-of-line cells before row bytes are returned.</item>
 ///   <item><see cref="KahunaRetryPolicy"/> and <see cref="KvConflictMessageBuilder"/> — retry rules and conflict diagnostics.</item>
 /// </list>
 ///
@@ -40,7 +42,14 @@ namespace CamusDB.Core.Storage.Kv;
 ///   Unique index:      {dbId}:{tableId}|i:{indexId}/{encodedKey}               -> rowIdHex24 (UTF-8)
 ///   Non-unique index:  {dbId}:{tableId}|i:{indexId}/{encodedKey}{rowIdHex24}   -> rowIdHex24 (UTF-8)
 ///     (rowId appended without separator; it is always exactly 24 lowercase hex chars)
+///   Large value:       {dbId}:{tableId}|v/{rowIdHex24}{ordinalHex4}             -> stored cell bytes
 /// </code>
+///
+/// <para><b>Large values.</b> A row may store a variable-length cell compressed, or as a pointer to
+/// a value under its own <c>|v</c> key (see <see cref="RowStorageForms"/>). Every row read here takes
+/// a <see cref="LargeValueFetch"/>; the default (null) resolves every such cell, so the bytes a caller
+/// gets are always decodable. A write of a large value always accompanies a write of its row key in
+/// the same batch and transaction, and a delete of a row removes the values its pointers name.</para>
 ///
 /// <para><b>Table id format:</b> newly created tables get a <em>short base-62</em> table id allocated
 /// from a per-store persistent monotonic sequence (<c>_system/tableseq</c>) via
@@ -98,6 +107,7 @@ public sealed partial class KvTableStore
     private readonly KvRowAccessor rows;
     private readonly KvIndexAccessor indexes;
     private readonly KvBatchWriter batch;
+    private readonly KvLargeValueReader largeValues;
 
     // Branch lineage stores, in nearest-parent-first order. Retained (rather than only their key
     // builders and readers) because RegisterIndexDirections has to propagate into each ancestor.
@@ -153,6 +163,7 @@ public sealed partial class KvTableStore
         rows = new KvRowAccessor(kahuna, keys, locks, branch, retry);
         indexes = new KvIndexAccessor(kahuna, keys, locks, branch, retry);
         batch = new KvBatchWriter(kahuna, this.logger, keys, branch, retry, messages, options);
+        largeValues = new KvLargeValueReader(keys, branch, options);
 
         if (this.ancestorStores.Length >= BranchMetrics.LineageWarningThreshold)
         {
@@ -177,6 +188,7 @@ public sealed partial class KvTableStore
         retry.ApplyOptions(next);
         locks.ApplyOptions(next);
         batch.ApplyOptions(next);
+        largeValues.ApplyOptions(next);
     }
 
     /// <summary>Key composition and per-index metadata for this table. Read by a descendant's lineage.</summary>
@@ -206,6 +218,13 @@ public sealed partial class KvTableStore
     /// column types are order-safe for range routing (String included, via its ordered ASCII encoding).
     /// </summary>
     public string IndexKeySpace(string indexId) => keys.BuildIndexBucketPrefix(indexId);
+
+    /// <summary>
+    /// The Kahuna key space for this table's out-of-line values (<c>{dbId}:{tableId}|v</c>). Registered
+    /// for key-range routing wherever the row space is, and recorded as a query-result dependency beside
+    /// the row space.
+    /// </summary>
+    public string LargeValueKeySpace => keys.LargeValueBucketPrefix;
 
     /// <summary>
     /// Returns the full KV key for the given row: <c>{dbId}:{tableId}|r/{rowIdHex24}</c>.
@@ -305,27 +324,170 @@ public sealed partial class KvTableStore
     /// <inheritdoc cref="KvRowAccessor.BatchReadCalls"/>
     internal long PrimaryRowBatchReadCalls => rows.BatchReadCalls;
 
-    /// <inheritdoc cref="KvRowAccessor.GetRow"/>
-    public Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
-        => rows.GetRow(tx, rowId, cancellationToken);
+    /// <inheritdoc cref="KvLargeValueReader.FetchCalls"/>
+    internal long LargeValueFetchCalls => largeValues.FetchCalls;
 
-    /// <inheritdoc cref="KvRowAccessor.GetRowsBatch"/>
-    public Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default)
-        => rows.GetRowsBatch(tx, rowIds, cancellationToken);
+    /// <summary>
+    /// Point-reads one row. See <see cref="KvRowAccessor.GetRow"/> for the snapshot, locking and
+    /// ancestry rules. <paramref name="largeValues"/> selects the compressed and out-of-line cells to
+    /// resolve before the bytes are returned; null resolves them all.
+    /// </summary>
+    public async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    {
+        ReadOnlyMemory<byte>? row = await rows.GetRow(tx, rowId, cancellationToken).ConfigureAwait(false);
+        if (row is not { } data || !RowStorageForms.HasTrailer(data.Span) || largeValues is { IsRaw: true })
+            return row;
 
-    /// <inheritdoc cref="KvRowAccessor.GetRowsBatchLockedForMutation"/>
-    public Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default)
-        => rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken);
+        ReadOnlyMemory<byte>?[] batchOfOne = [row];
+        await this.largeValues.ResolveAsync(tx, [rowId], batchOfOne, largeValues, cancellationToken).ConfigureAwait(false);
+        return batchOfOne[0];
+    }
 
-    /// <inheritdoc cref="KvRowAccessor.ScanRows"/>
-    public IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> ScanRows(
+    /// <summary>
+    /// Batch point-read. See <see cref="KvRowAccessor.GetRowsBatch"/>. The out-of-line values of the
+    /// whole batch are fetched in one more round trip, and only when some row needs one.
+    /// </summary>
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    {
+        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatch(tx, rowIds, cancellationToken).ConfigureAwait(false);
+        await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    /// <summary>
+    /// Lock-acquiring batch point-read for a mutation write phase. See
+    /// <see cref="KvRowAccessor.GetRowsBatchLockedForMutation"/>.
+    /// </summary>
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    {
+        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken).ConfigureAwait(false);
+        await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    /// <summary>
+    /// Resolves, in place, the cells <paramref name="largeValues"/> requires in rows that were read
+    /// with <see cref="LargeValueFetch.Raw"/>. Lets a mutation read which keys a row points at first
+    /// and then resolve only the values it must compare.
+    /// </summary>
+    internal Task ResolveLargeValuesAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, ReadOnlyMemory<byte>?[] rowData, LargeValueFetch? largeValues, CancellationToken cancellationToken = default)
+        => this.largeValues.ResolveAsync(tx, rowIds, rowData, largeValues, cancellationToken);
+
+    /// <summary>
+    /// First scan window: once a marked row is seen, up to this many rows are held so their out-of-line
+    /// values are fetched in one batch. Rows before the first marked row stream through unbuffered.
+    /// </summary>
+    private const int LargeValueScanWindowInitial = 16;
+
+    /// <summary>
+    /// Largest scan window, one Kahuna scan page. Each full window doubles the next one up to this size:
+    /// a <c>LIMIT</c> query that stops early holds few extra rows, while a scan that reads the whole
+    /// table pays one fetch per page instead of one per small window.
+    /// </summary>
+    private const int LargeValueScanWindowMax = KvStoreConstants.DefaultPageSize;
+
+    /// <summary>
+    /// Full or bounded table scan in ascending row-id order. See <see cref="KvRowAccessor.ScanRows"/>
+    /// for bounds, snapshot and folding. Rows are streamed; when a row carries marked cells, it and the
+    /// rows after it are held in a window (<see cref="LargeValueScanWindowInitial"/> rows, doubling up to
+    /// <see cref="LargeValueScanWindowMax"/>) so the window's out-of-line values cost one fetch. A window
+    /// also closes before a row that would take its recorded decoded size past
+    /// <see cref="CamusDBOptions.LargeValueResolveBatchBytes"/>, so a window of large compressible values
+    /// never holds more than that bound plus one row; such a window does not grow the next one. A row a
+    /// read-committed re-read finds deleted is skipped.
+    /// </summary>
+    public async IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> ScanRows(
         KvTransaction tx,
         long? maxRows = null,
         ObjectIdValue? afterRowId = null,
-        CancellationToken cancellationToken = default,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
         ObjectIdValue? untilRowId = null,
-        ObjectIdValue? fromRowId = null)
-        => rows.ScanRows(tx, maxRows, afterRowId, cancellationToken, untilRowId, fromRowId);
+        ObjectIdValue? fromRowId = null,
+        LargeValueFetch? largeValues = null)
+    {
+        IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> source =
+            rows.ScanRows(tx, maxRows, afterRowId, cancellationToken, untilRowId, fromRowId);
+
+        if (largeValues is { IsRaw: true })
+        {
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) raw in source.ConfigureAwait(false))
+                yield return raw;
+            yield break;
+        }
+
+        List<ObjectIdValue>? windowIds = null;
+        List<ReadOnlyMemory<byte>?>? windowRows = null;
+        int window = LargeValueScanWindowInitial;
+        long budget = this.largeValues.ResolveBatchBytes;
+        long windowBytes = 0;
+
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in source.ConfigureAwait(false))
+        {
+            if (windowIds is null or { Count: 0 } && !RowStorageForms.HasTrailer(data.Span))
+            {
+                yield return (rowId, data);
+                continue;
+            }
+
+            long rowBytes = RowStorageForms.MarkedRawBytes(data.Span);
+
+            if (budget > 0 && windowIds is { Count: > 0 } && windowBytes + rowBytes > budget)
+            {
+                ReadOnlyMemory<byte>?[] full = [.. windowRows!];
+                await this.largeValues.ResolveAsync(tx, windowIds, full, largeValues, cancellationToken).ConfigureAwait(false);
+
+                for (int i = 0; i < full.Length; i++)
+                {
+                    if (full[i] is { } row)
+                        yield return (windowIds[i], row);
+                }
+
+                windowIds.Clear();
+                windowRows!.Clear();
+                windowBytes = 0;
+
+                if (!RowStorageForms.HasTrailer(data.Span))
+                {
+                    yield return (rowId, data);
+                    continue;
+                }
+            }
+
+            (windowIds ??= new(LargeValueScanWindowInitial)).Add(rowId);
+            (windowRows ??= new(LargeValueScanWindowInitial)).Add(data);
+            windowBytes += rowBytes;
+
+            if (windowIds.Count < window)
+                continue;
+
+            window = Math.Min(window * 2, LargeValueScanWindowMax);
+
+            ReadOnlyMemory<byte>?[] resolved = [.. windowRows];
+            await this.largeValues.ResolveAsync(tx, windowIds, resolved, largeValues, cancellationToken).ConfigureAwait(false);
+
+            for (int i = 0; i < resolved.Length; i++)
+            {
+                if (resolved[i] is { } row)
+                    yield return (windowIds[i], row);
+            }
+
+            windowIds.Clear();
+            windowRows.Clear();
+            windowBytes = 0;
+        }
+
+        if (windowIds is { Count: > 0 })
+        {
+            ReadOnlyMemory<byte>?[] resolved = [.. windowRows!];
+            await this.largeValues.ResolveAsync(tx, windowIds, resolved, largeValues, cancellationToken).ConfigureAwait(false);
+
+            for (int i = 0; i < resolved.Length; i++)
+            {
+                if (resolved[i] is { } row)
+                    yield return (windowIds[i], row);
+            }
+        }
+    }
 
     /// <summary>
     /// Inserts a new row. Acquires a pessimistic exclusive lock then writes the key.

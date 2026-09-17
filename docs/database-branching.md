@@ -85,6 +85,7 @@ casually add or remove slashes or move the `|` (the last `/` ends a Kahuna key s
 row                  {dbId}:{tableId}|r/{rowIdHex24}
 unique index         {dbId}:{tableId}|i:{indexId}/{encodedKey}
 non-unique index     {dbId}:{tableId}|i:{indexId}/{encodedKey}{rowIdHex24}
+large value          {dbId}:{tableId}|v/{rowIdHex24}{ordinalHex4}  -- a compressed or raw cell stored out of its row
 statistics           {dbId}:stats:{tableId}
 
 schema meta bucket   {dbId}/meta
@@ -93,6 +94,7 @@ table schema         {dbId}/meta/table:{tableId}
 table history        {dbId}/meta/history:{tableId}:{version}
 keyspace catalog     {dbId}/meta/keyspace:{tableId}    -- grow-only list of every index id ever allocated
 coordinator jobs     {dbId}/meta/coordinator:{tableId}~{elementName}
+rewrite cursor       {dbId}/meta/storagerewrite:{storageId}   -- progress of ALTER TABLE ... REWRITE STORAGE
 refresh jobs         {dbId}/meta/mvrefresh:{viewTableId}       -- in-flight materialized-view rebuild; never copied to a branch
 ```
 
@@ -177,6 +179,17 @@ replace); ancestor uniqueness is unaffected by branch state.
 
 Serializable read-write transactions acquire the shared point/range locks in the **level-0**
 keyspace only; ancestor levels are frozen and need no locks.
+
+**Out-of-line values follow the row.** A row may point at a value stored under its own
+`|v` key (see [Large values](storage-layout.md)). The value is resolved by the same rule as the row:
+a batched probe at level 0, then one batched probe per ancestry level at that level's fork timestamp
+for the keys still missing, and a tombstone ends the walk. An inherited row therefore reads its
+inherited values. On the branch, a write stores new values at level 0, an update of a small column
+carries the inherited pointer without writing any value, and a delete or a shrink writes a tombstone
+to the value key — for the same reason a row delete does. `PurgeLocalRowOverlayAsync` removes the
+branch's `|v` overlay together with its `|r` overlay. An `ALTER TABLE ... REWRITE STORAGE` on the
+parent writes new versions only, so a branch forked before it still reads the old versions at its fork
+timestamp.
 
 ---
 

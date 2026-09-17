@@ -78,6 +78,7 @@ internal static class SchemaDeltaApplier
             SchemaOp.AddCheckConstraint => ConstraintDeltaApplier.ApplyAddCheckConstraint(schema, SchemaDeltaApplier.DecodePayload<SchemaCheckConstraintPayload>(entry)),
             SchemaOp.DropCheckConstraint => ConstraintDeltaApplier.ApplyDropCheckConstraint(schema, SchemaDeltaApplier.DecodePayload<SchemaCheckConstraintPayload>(entry)),
             SchemaOp.SetColumnNotNull => ConstraintDeltaApplier.ApplySetColumnNotNull(schema, SchemaDeltaApplier.DecodePayload<SchemaSetColumnNotNullPayload>(entry)),
+            SchemaOp.SetColumnStorage => ConstraintDeltaApplier.ApplySetColumnStorage(schema, SchemaDeltaApplier.DecodePayload<SchemaSetColumnStoragePayload>(entry)),
             SchemaOp.SetTableSettings => TableDeltaApplier.ApplySetTableSettings(schema, SchemaDeltaApplier.DecodePayload<SchemaSetTableSettingsPayload>(entry)),
             SchemaOp.SetComment => TableDeltaApplier.ApplySetComment(schema, SchemaDeltaApplier.DecodePayload<SchemaSetCommentPayload>(entry)),
             SchemaOp.CreateView => ViewDeltaApplier.ApplyCreateView(schema, SchemaDeltaApplier.DecodePayload<SchemaViewPayload>(entry), replacing: false),

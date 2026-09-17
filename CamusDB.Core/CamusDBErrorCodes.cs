@@ -95,6 +95,14 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string StatementTooDeeplyNested = "CADB0413";
 
+    /// <summary>
+    /// A column storage strategy (<c>STORAGE PLAIN | MAIN | EXTERNAL | EXTENDED</c>) was given for a
+    /// column whose type has no variable-length payload. Only <c>string</c>, <c>bytes</c> and array
+    /// columns can be compressed or moved out of the row, so a strategy on any other type would be a
+    /// setting with no effect. A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string ColumnStorageNotApplicable = "CADB0414";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -421,10 +429,11 @@ public static class CamusDBErrorCodes
     /// A statement that owns its own internal transaction was issued inside an explicit,
     /// caller-owned transaction.
     ///
-    /// <para><c>TRUNCATE</c> is the one statement in this class today. It commits a replicated
-    /// schema entry, and that entry cannot be rolled back by a later <c>ROLLBACK</c> of the
-    /// caller's transaction — so accepting it there would promise rollback semantics the engine
-    /// cannot honor. Commit or roll back first, then run the statement. Maps to HTTP 400.</para>
+    /// <para>Two statements are in this class today. <c>TRUNCATE</c> commits a replicated schema
+    /// entry, and <c>ALTER TABLE ... REWRITE STORAGE</c> commits its row batches in transactions of
+    /// its own. Neither can be rolled back by a later <c>ROLLBACK</c> of the caller's transaction —
+    /// so accepting them there would promise rollback semantics the engine cannot honor. Commit or
+    /// roll back first, then run the statement. Maps to HTTP 400.</para>
     /// </summary>
     public const string StatementNotAllowedInTransaction = "CADB0538";
 
@@ -445,6 +454,23 @@ public static class CamusDBErrorCodes
     /// the branch from the parent. Maps to HTTP 410 (the frozen view is gone).</para>
     /// </summary>
     public const string BranchSnapshotProtectionLost = "CADB0539";
+
+    /// <summary>
+    /// A stored large value could not be read back: an LZ4 payload failed to decompress, a
+    /// decompressed payload did not have the recorded length, or an out-of-line value was missing or
+    /// did not match the checksum its row recorded after every retry. A concurrent update can make
+    /// one read see a new value beside an old row, and that case is retried before this code is
+    /// raised, so the code means damaged data, not a race. Maps to HTTP 500.
+    /// </summary>
+    public const string LargeValueCorrupt = "CADB0540";
+
+    /// <summary>
+    /// A decoder read a cell that still holds an out-of-line pointer or a compressed payload. The
+    /// store resolves every cell a query needs before the row reaches a decoder, so this code means
+    /// a read path passed a narrower column set to the store than it then decoded. It is an engine
+    /// defect, raised loudly so the pointer bytes never reach a result. Maps to HTTP 500.
+    /// </summary>
+    public const string LargeValueNotResolved = "CADB0541";
 
     public const string InvalidConfig = "CADB0600";
 
@@ -577,6 +603,7 @@ public static class CamusDBErrorCodes
         VectorDimensionMismatch => 400,
         InvalidVectorValue => 400,
         StatementTooDeeplyNested => 400,
+        ColumnStorageNotApplicable => 400,
         InvalidAsOfSystemTime => 400,
         CommentTooLong => 400,
         UnsupportedAuthPlugin => 400,

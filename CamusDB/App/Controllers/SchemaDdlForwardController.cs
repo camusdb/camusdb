@@ -529,7 +529,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 expression: req.Expression,
                 referencedColumns: req.ReferencedColumns,
                 operation: req.Operation,
-                columnName: req.ColumnName
+                columnName: req.ColumnName,
+                storage: req.Storage
             );
 
             ExecuteDDLSQLResult result = await executor.AlterConstraint(ticket).ConfigureAwait(false);
@@ -660,7 +661,7 @@ public sealed class SchemaDdlForwardController : CommandsController
 
     private static ColumnInfo MapColumn(ColumnInfoRequest r) =>
         new(r.Name, r.Type, r.NotNull, r.Default, r.MaxLength, r.ArrayElementType,
-            r.DefaultFunction, r.NotNullConstraintName, r.Comment);
+            r.DefaultFunction, r.NotNullConstraintName, r.Comment, r.Storage);
 
     private static ColumnInfo[] MapColumns(ColumnInfoRequest[] cols) =>
         cols.Select(MapColumn).ToArray();

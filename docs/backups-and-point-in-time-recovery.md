@@ -145,3 +145,7 @@ restored image:
 - **Retention cost.** Retained WAL is roughly `pitr_window_seconds × write throughput`, plus the base
   images overlapping the window. Choose the window from how far back you realistically need to recover.
 - **Local filesystem only** in this version — there is no object-storage backup target yet.
+- **Large values are included.** A compressed or out-of-line column value (see
+  [Large values](storage-layout.md)) is ordinary data in the store. A backup captures the whole store
+  and the WAL, not a list of key spaces, so it needs no extra step, and a restore to any point reads
+  each row with the values it pointed at then.

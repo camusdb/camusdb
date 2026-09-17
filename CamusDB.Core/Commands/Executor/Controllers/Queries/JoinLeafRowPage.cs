@@ -115,7 +115,7 @@ internal sealed class JoinLeafRowPage
             TableDescriptor table = source.Table;
 
             ReadOnlyMemory<byte>?[] batch = await table.Store.GetRowsBatchLockedForMutation(
-                plan.Ticket.TxnState, rowIds, cancellationToken).ConfigureAwait(false);
+                plan.Ticket.TxnState, rowIds, cancellationToken, LargeValueFetch.Columns(table.Schema, required)).ConfigureAwait(false);
 
             for (int i = 0; i < rowIds.Count; i++)
             {

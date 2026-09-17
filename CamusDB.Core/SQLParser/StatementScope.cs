@@ -79,6 +79,7 @@ public static class StatementScope
         NodeType.AlterTableRenameTo or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex or
         NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableDropConstraint or
         NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull or
+        NodeType.AlterTableSetColumnStorage or NodeType.AlterTableRewriteStorage or
         NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or
         NodeType.CreateView or NodeType.CreateOrReplaceView or
         NodeType.DropView or NodeType.DropViewIfExists or

@@ -46,6 +46,10 @@ A timestamp string with no timezone is interpreted as UTC.
 - The snapshot is fixed for the entire statement, so joins and subqueries all observe the same point
   in time.
 - Historical reads are lock-free and never block writers.
+- A compressed or out-of-line value is read at the same timestamp as its row. An
+  `ALTER TABLE ... REWRITE STORAGE` writes new versions and never modifies old ones, so a historical
+  read before the rewrite returns the same values as a read after it. See
+  [Large values](storage-layout.md).
 
 ## How it works
 

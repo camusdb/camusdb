@@ -723,7 +723,8 @@ internal sealed class MaterializedViewRefresher
             arrayElementType: column.ArrayElementType,
             defaultFunction: column.DefaultFunction,
             notNullConstraintName: column.NotNullConstraintName,
-            comment: column.Comment))];
+            comment: column.Comment,
+            storage: column.Storage))];
 
         Dictionary<string, string> nameByColumnId = new(StringComparer.Ordinal);
         foreach (TableColumnSchema column in view.Columns ?? [])

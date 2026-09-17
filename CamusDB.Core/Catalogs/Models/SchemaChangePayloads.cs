@@ -200,6 +200,12 @@ public sealed class SchemaColumnPayload
     /// </summary>
     public string? Comment { get; set; }
 
+    /// <summary>
+    /// Column storage strategy. Null when unset, which means the default; an entry written before the
+    /// strategy existed deserializes to null and so keeps the default.
+    /// </summary>
+    public ColumnStorageStrategy? Storage { get; set; }
+
     public static SchemaColumnPayload FromColumnInfo(ColumnInfo column)
     {
         return new()
@@ -213,6 +219,7 @@ public sealed class SchemaColumnPayload
             ArrayElementType = column.ArrayElementType,
             NotNullConstraintName = column.NotNullConstraintName,
             Comment = column.Comment,
+            Storage = column.Storage,
         };
     }
 }
@@ -368,6 +375,20 @@ public sealed class SchemaCheckConstraintPayload
     /// Column identifiers referenced by the condition. Empty for Drop operations.
     /// </summary>
     public string[] ReferencedColumns { get; set; } = [];
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetColumnStorage"/>: the target column and its new storage
+/// strategy. The column is matched by name, case-insensitively, like every other column delta.
+/// </summary>
+public sealed class SchemaSetColumnStoragePayload
+{
+    public string TableName { get; set; } = "";
+
+    public string ColumnName { get; set; } = "";
+
+    /// <summary>The new strategy for the column's future writes.</summary>
+    public ColumnStorageStrategy Storage { get; set; }
 }
 
 /// <summary>

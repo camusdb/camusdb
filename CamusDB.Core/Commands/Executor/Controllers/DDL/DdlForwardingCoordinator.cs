@@ -323,6 +323,12 @@ internal sealed class DdlForwardingCoordinator
             return col?.NotNull == false;
         }
 
+        if (ticket.Operation == AlterConstraintOperation.SetStorage)
+        {
+            TableColumnSchema? col = ts.Columns?.FirstOrDefault(c => string.Equals(c.Name, ticket.ColumnName, StringComparison.OrdinalIgnoreCase));
+            return col is not null && col.EffectiveStorage == ticket.Storage;
+        }
+
         bool constraintExists = ts.CheckConstraints?.Any(c => string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase)) == true;
         return ticket.Operation == AlterConstraintOperation.AddCheck ? constraintExists : !constraintExists;
     }

@@ -36,6 +36,13 @@ Below, **K is the number of secondary indexes** — the primary key is already c
 | `DELETE` one row from a table with K secondary indexes | `2 + K` |
 | Touching the same row N times in one transaction | N × (per-row cost) |
 
+**An out-of-line value is one more mutation.** A `string`, `bytes` or array value stored outside its
+row (see [Large values](storage-layout.md)) lives under its own key. An `INSERT` or `DELETE` of a row
+with `k` out-of-line values therefore costs `k` more mutations: `2 + K + k`. An `UPDATE` that does not
+change a large value costs nothing extra, because the value's key is not rewritten. A table with 4
+large columns stored out of line and no secondary index costs 6 mutations per inserted row, so the
+default budget admits 3,333 rows per statement instead of 10,000.
+
 So the largest single-statement row count the default budget admits is
 `floor(20000 / (2 + K))`: **10,000** rows with no secondary index, **6,666** with one. A covering
 index costs the same as a plain one — its stored columns ride inside the entry it already writes.

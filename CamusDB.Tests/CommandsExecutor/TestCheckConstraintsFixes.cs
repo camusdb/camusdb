@@ -406,4 +406,42 @@ public sealed class TestCheckConstraintsFixes : BaseTest
             "SET/DROP NOT NULL target column must survive the wire round-trip, else the leader can't resolve it");
         Assert.AreEqual(AlterConstraintOperation.SetNotNull, round.Operation);
     }
+
+    [Test]
+    public void ForwardAlterConstraintRequest_RoundTrips_SetStorage()
+    {
+        JsonSerializerOptions opts = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
+        };
+
+        ForwardAlterConstraintRequest req = new()
+        {
+            DatabaseName = "db",
+            TableName = "docs",
+            Operation = AlterConstraintOperation.SetStorage,
+            ColumnName = "body",
+            Storage = ColumnStorageStrategy.External,
+        };
+
+        ForwardAlterConstraintRequest round = JsonSerializer.Deserialize<ForwardAlterConstraintRequest>(
+            JsonSerializer.Serialize(req, opts), opts)!;
+
+        Assert.AreEqual(AlterConstraintOperation.SetStorage, round.Operation);
+        Assert.AreEqual("body", round.ColumnName);
+        Assert.AreEqual(ColumnStorageStrategy.External, round.Storage,
+            "the strategy must survive the wire round-trip, else the leader would apply the default");
+
+        ForwardCreateTableRequest create = new()
+        {
+            DatabaseName = "db",
+            TableName = "docs",
+            Columns = [new ColumnInfoRequest { Name = "body", Type = ColumnType.String, Storage = ColumnStorageStrategy.Plain }],
+        };
+
+        ForwardCreateTableRequest createRound = JsonSerializer.Deserialize<ForwardCreateTableRequest>(
+            JsonSerializer.Serialize(create, opts), opts)!;
+        Assert.AreEqual(ColumnStorageStrategy.Plain, createRound.Columns[0].Storage);
+    }
 }

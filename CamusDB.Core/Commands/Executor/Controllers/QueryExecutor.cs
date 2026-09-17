@@ -686,12 +686,15 @@ internal sealed class QueryExecutor
 
         long scanned = 0, survivors = 0;
 
+        // The fragment decodes with requiredColumns and ships the surviving rows' bytes; the coordinator
+        // decodes them with the same set, so cells outside it may stay unresolved on the wire.
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
             snapshotTx,
             maxRows: maxRows,
             cancellationToken: cancellationToken,
             untilRowId: untilRowId,
-            fromRowId: fromRowId).ConfigureAwait(false))
+            fromRowId: fromRowId,
+            largeValues: LargeValueFetch.Columns(table.Schema, requiredColumns)).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -815,7 +818,8 @@ internal sealed class QueryExecutor
             snapshotTx,
             cancellationToken: cancellationToken,
             untilRowId: untilRowId,
-            fromRowId: fromRowId).ConfigureAwait(false))
+            fromRowId: fromRowId,
+            largeValues: LargeValueFetch.Columns(table.Schema, requiredColumns)).ConfigureAwait(false))
         {
             if (data.Length == 0)
                 continue;
@@ -1187,7 +1191,7 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
-        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
         if (data is null || data.Value.Length == 0)
             yield break;
 
@@ -1317,7 +1321,7 @@ internal sealed class QueryExecutor
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page, cancellationToken).ConfigureAwait(false);
+                ticket.TxnState, page, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1445,7 +1449,7 @@ internal sealed class QueryExecutor
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
-                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken).ConfigureAwait(false);
+                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
                 if (data is null || data.Value.Length == 0)
                     continue;
 
@@ -1489,7 +1493,7 @@ internal sealed class QueryExecutor
                     if (!seen.Add(rowId))
                         continue;
 
-                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId, cancellationToken).ConfigureAwait(false);
+                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
                     if (data is null || data.Value.Length == 0)
                         continue;
 

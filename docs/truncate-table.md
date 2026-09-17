@@ -256,7 +256,7 @@ span plan never described). The stale run's records are cleaned up in the backgr
 | `CADB0525` | `ViewNotUpdatable` | The target is a view or a materialized view. |
 | `CADB0534` | `ConcurrentSchemaChange` | Another contents change won the race. Retryable. |
 | `CADB0537` | `SnapshotPrecedesContentsGeneration` | A time-travel read named a point before the current contents began. |
-| `CADB0538` | `StatementNotAllowedInTransaction` | `TRUNCATE` was issued inside an explicit transaction. |
+| `CADB0538` | `StatementNotAllowedInTransaction` | `TRUNCATE` was issued inside an explicit transaction. `ALTER TABLE ... REWRITE STORAGE` is refused the same way. |
 
 ---
 

@@ -53,6 +53,13 @@ public sealed class ColumnInfo
     /// </summary>
     public string? Comment { get; }
 
+    /// <summary>
+    /// Storage strategy declared inline with <c>STORAGE PLAIN | MAIN | EXTERNAL | EXTENDED</c>.
+    /// Null when the column was declared without one, which means the default
+    /// (<see cref="ColumnStorageStrategy.Extended"/>).
+    /// </summary>
+    public ColumnStorageStrategy? Storage { get; }
+
     public ColumnInfo(
         string name,
         ColumnType type,
@@ -62,7 +69,8 @@ public sealed class ColumnInfo
         ColumnType? arrayElementType = null,
         string? defaultFunction = null,
         string? notNullConstraintName = null,
-        string? comment = null
+        string? comment = null,
+        ColumnStorageStrategy? storage = null
     )
     {
         Name = name;
@@ -74,5 +82,6 @@ public sealed class ColumnInfo
         DefaultFunction = defaultFunction;
         NotNullConstraintName = notNullConstraintName;
         Comment = comment;
+        Storage = storage;
     }
 }

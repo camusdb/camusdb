@@ -110,6 +110,12 @@ public sealed class TestSchemaChangeLogEntryCodec
             SwapToTableId = "A1",
             ExpectedMetadataGeneration = 4
         });
+        yield return (SchemaOp.SetColumnStorage, new SchemaSetColumnStoragePayload
+        {
+            TableName = "robots",
+            ColumnName = "name",
+            Storage = ColumnStorageStrategy.External
+        });
         yield return (SchemaOp.TruncateTable, new SchemaTruncateTablePayload
         {
             TableId = "A0",

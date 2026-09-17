@@ -43,6 +43,14 @@ public sealed partial class KvTableStore
         /// index applicable to this row.
         /// </summary>
         public IReadOnlyList<IndexWrite>? IndexEntries { get; init; }
+
+        /// <summary>
+        /// The row's out-of-line values, as produced beside <see cref="RowData"/> by
+        /// <see cref="CompiledRowCodec.EncodeStorageValue(ReadOnlySpan{ValueSlot}, LargeValuePolicy, ReadOnlySpan{byte}, ReadOnlySpan{bool})"/>,
+        /// or <see langword="null"/> when every cell is inline. Written in the same batch and
+        /// transaction as the row, so a committed row never points at an absent value.
+        /// </summary>
+        public IReadOnlyList<LargeValueWrite>? LargeValues { get; init; }
     }
 
     /// <summary>
@@ -89,6 +97,21 @@ public sealed partial class KvTableStore
         /// no indexed value changed.
         /// </summary>
         public IReadOnlyList<IndexWrite>? NewIndexEntries { get; init; }
+
+        /// <summary>
+        /// Out-of-line values to write (a new pointer, or an overwrite of a changed value at the same
+        /// ordinal), or <see langword="null"/>. A value carried unchanged from the old row is not listed
+        /// here: its key is left untouched, which is what makes an update of a small column cheap.
+        /// </summary>
+        public IReadOnlyList<LargeValueWrite>? LargeValues { get; init; }
+
+        /// <summary>
+        /// Variable ordinals whose old out-of-line value the new row no longer points at, or
+        /// <see langword="null"/>. Removed in the same batch — physically on a root database, by
+        /// tombstone on a branch. An ordinal that is also in <see cref="LargeValues"/> must not appear
+        /// here.
+        /// </summary>
+        public IReadOnlyList<int>? LargeValueDeletes { get; init; }
     }
 
     /// <summary>
@@ -103,6 +126,13 @@ public sealed partial class KvTableStore
         /// writable index applicable to this row.
         /// </summary>
         public IReadOnlyList<IndexDelete>? IndexEntries { get; init; }
+
+        /// <summary>
+        /// Variable ordinals of the row's out-of-line values, read from the stored row's pointers
+        /// (<see cref="RowStorageForms.OutOfLineOrdinals"/>), or <see langword="null"/> when it has none.
+        /// Deleting is pointer-driven: the keys are named, never found by a scan.
+        /// </summary>
+        public IReadOnlyList<int>? LargeValueOrdinals { get; init; }
     }
 
     /// <summary>One secondary-index entry for a row in a batch delete.</summary>

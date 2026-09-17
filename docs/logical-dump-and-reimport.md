@@ -170,6 +170,12 @@ Two hard limits bound the batch whatever the throughput says:
 - **The transport message size.** gRPC accepts 4 MiB per message; the HTTP API accepts 30 MB per
   body. A wide-row table reaches the gRPC limit long before the mutation limit.
 
+A table with large values needs a small batch. A dump writes each value in full into the SQL, whatever
+form it has in the store, so a table with 1 MB values reaches the gRPC limit at about 3 rows per
+statement. A large value stored out of line also costs one more mutation per row when it is reloaded
+(see [Large values](storage-layout.md#transaction-limits)). A reimported row is written under the
+current storage rules, so a reload also converts the table to the current form.
+
 ### Should you defer the indexes?
 
 `--defer-indexes` writes each table's `CREATE INDEX` statements after its rows, so the rows load into

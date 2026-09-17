@@ -8,6 +8,7 @@
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -58,6 +59,7 @@ internal sealed class TableConstraintAlterer
             AlterConstraintOperation.DropConstraint => await DropConstraint(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
             AlterConstraintOperation.SetNotNull => await SetNotNull(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
             AlterConstraintOperation.DropNotNull => await DropNotNull(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
+            AlterConstraintOperation.SetStorage => await SetStorage(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter constraint operation '{ticket.Operation}'")
         };
     }
@@ -228,6 +230,83 @@ internal sealed class TableConstraintAlterer
         return true;
     }
 
+    /// <summary>
+    /// <c>ALTER TABLE ... ALTER COLUMN ... SET STORAGE</c>. Replaces the column with a copy carrying the
+    /// new strategy and persists or replicates the schema; it never reads or rewrites a stored row.
+    /// That is deliberate: an implicit table rewrite hidden inside an ALTER would make a metadata change
+    /// take time proportional to the table. Existing rows keep their stored form until a write touches
+    /// them or <c>ALTER TABLE ... REWRITE STORAGE</c> converts them.
+    /// </summary>
+    private async Task<bool> SetStorage(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterConstraintTicket ticket,
+        bool isClusterMode)
+    {
+        string columnName = ticket.ColumnName!;
+        ColumnStorageStrategy storage = ticket.Storage!.Value;
+
+        TableColumnSchema? column = table.Schema.Columns?.FirstOrDefault(c =>
+            string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+        if (column is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.UnknownColumn,
+                $"Column '{columnName}' does not exist on table '{table.Name}'");
+
+        // Checked here too, so the single-node path refuses before it opens a transaction.
+        ConstraintDeltaApplier.WithStorage(column, storage);
+
+        if (isClusterMode)
+        {
+            await catalogs.ReplicateSetColumnStorageAsync(database, ticket.TableName, columnName, storage).ConfigureAwait(false);
+        }
+        else
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+            int revertIdx = -1;
+            TableColumnSchema? revertColumn = null;
+            try
+            {
+                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+                try
+                {
+                    List<TableColumnSchema> columns = table.Schema.Columns!;
+                    int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+                    if (idx < 0)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.UnknownColumn,
+                            $"Column '{columnName}' does not exist on table '{table.Name}'");
+
+                    TableColumnSchema old = columns[idx];
+                    revertIdx = idx;
+                    revertColumn = old;
+                    columns[idx] = ConstraintDeltaApplier.WithStorage(old, storage);
+                }
+                finally
+                {
+                    database.Schema.ReleaseLock();
+                }
+
+                await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+                revertColumn = null;
+            }
+            finally
+            {
+                if (revertColumn is not null)
+                    await RevertColumnAsync(database, table, revertIdx, revertColumn).ConfigureAwait(false);
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            }
+        }
+
+        if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+            logger.LogInformation("Storage of column '{Column}' of table '{Table}' set to {Storage}", columnName, ticket.TableName, storage);
+        return true;
+    }
+
     private async Task<bool> SetNotNull(
         CatalogsManager catalogs,
         DatabaseDescriptor database,
@@ -285,7 +364,8 @@ internal sealed class TableConstraintAlterer
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: constraintName,
-                        comment: old.Comment
+                        comment: old.Comment,
+                        storage: old.Storage
                     );
                 }
                 finally
@@ -362,7 +442,8 @@ internal sealed class TableConstraintAlterer
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: null,
-                        comment: old.Comment
+                        comment: old.Comment,
+                        storage: old.Storage
                     );
                 }
                 finally

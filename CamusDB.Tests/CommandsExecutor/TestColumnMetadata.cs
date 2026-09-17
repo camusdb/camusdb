@@ -267,6 +267,77 @@ internal sealed class TestColumnMetadata : SharedNodeBaseTest
         StringAssert.Contains("positive integer", ex.Message);
     }
 
+    /// <summary>
+    /// The ticket path (HTTP / gRPC) carries <c>MaxLength</c> without the grammar's positive-size check.
+    /// A non-positive size must be refused there too, or it reaches the schema and SHOW CREATE TABLE
+    /// renders DDL such as <c>BYTES(0)</c> that the parser refuses.
+    /// </summary>
+    [TestCase(ColumnType.Bytes, 0)]
+    [TestCase(ColumnType.Bytes, -1)]
+    [TestCase(ColumnType.String, 0)]
+    [NonParallelizable]
+    public async Task SizedColumn_ViaCreateTableTicket_NonPositiveSize_IsRejected(ColumnType type, int size)
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.CreateTable(new CreateTableTicket(
+                databaseName: dbname, tableName: "t",
+                columns: new ColumnInfo[]
+                {
+                    new("id",      ColumnType.Id, notNull: true),
+                    new("payload", type,          maxLength: size),
+                },
+                constraints: new ConstraintInfo[]
+                {
+                    new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+                },
+                ifNotExists: false)));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        StringAssert.Contains("positive integer", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task BytesSized_ViaAlterTableTicket_ZeroSize_IsRejected()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+        await ExecDDL(executor, db, "CREATE TABLE t (id OID NOT NULL, PRIMARY KEY (id))");
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.AlterTable(new AlterTableTicket(
+                dbname, "t", AlterTableOperation.AddColumn, new ColumnInfo("payload", ColumnType.Bytes, maxLength: 0))));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        StringAssert.Contains("positive integer", ex.Message);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task MaxLengthOnNonSizedType_ViaTicket_IsIgnored()
+    {
+        // MaxLength only has meaning for string and bytes. A client that sends one on another type
+        // is not refused, and the value does not change how the column renders.
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, CatalogsManager catalogs) = await Setup();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname, tableName: "t",
+            columns: new ColumnInfo[]
+            {
+                new("id", ColumnType.Id,        notNull: true),
+                new("n",  ColumnType.Integer64, maxLength: 0),
+            },
+            constraints: new ConstraintInfo[]
+            {
+                new(ConstraintType.PrimaryKey, "~pk", new ColumnIndexInfo[] { new("id", OrderType.Ascending) }),
+            },
+            ifNotExists: false));
+
+        TableColumnSchema col = catalogs.GetTableSchema(db, "t").Columns!.Find(c => c.Name == "n")!;
+        Assert.AreEqual(ColumnType.Integer64, col.Type);
+    }
+
     // ── array<T> — element type plumbing ─────────────────────────────────────
 
     [Test]
