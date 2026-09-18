@@ -19,14 +19,18 @@
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 %left TADD TMINUS
-%left TMULT TDIV
+%left TMULT TDIV TMOD
 /* IS (IS NULL / IS NOT NULL), IN, and the qualified-name dot bind tighter than any binary operator.
    Without a precedence they produced shift/reduce warnings that gppg resolved by its default shift —
    which is already the intended parse (a AND b IS NULL -> a AND (b IS NULL); a.b as one name). Declaring
    their precedence makes that resolution explicit and removes the warnings without changing any parse. */
 %left TIS TIN TDOT
+/* The postfix operators bind tightest of all, as in PostgreSQL: `a + b::int` casts only b,
+   `a + b[1]` subscripts only b, and `NOT x::bool` negates the cast value. Declaring them above every
+   binary operator makes each such shift/reduce choice resolve to a shift. */
+%left TCOLONCOLON LBRACKET
 
-%token TBYTESLIT LBRACKET RBRACKET
+%token TBYTESLIT LBRACKET RBRACKET TMOD TCOLONCOLON
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
@@ -1261,6 +1265,9 @@ expr       : equals_expr { $$.n = $1.n; }
            | sub_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
            | div_expr { $$.n = $1.n; }
+           | mod_expr { $$.n = $1.n; }
+           | postfix_cast_expr { $$.n = $1.n; }
+           | subscript_expr { $$.n = $1.n; }
            | like_expr { $$.n = $1.n; }
            | ilike_expr { $$.n = $1.n; }
            | regex_match_expr { $$.n = $1.n; }
@@ -1315,6 +1322,9 @@ between_bound : simple_expr { $$.n = $1.n; }
               | between_bound TMINUS between_bound { $$.n = new(NodeType.ExprSub, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TMULT between_bound { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TDIV between_bound { $$.n = new(NodeType.ExprDiv, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TMOD between_bound { $$.n = NodeAst.ModCall($1.n, $3.n); }
+              | between_bound TCOLONCOLON cast_target_type { $$.n = new(NodeType.ExprCast, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound LBRACKET condition RBRACKET { $$.n = new(NodeType.ExprSubscript, $1.n, $3.n, null, null, null, null, null, null); }
               ;
 
 and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, null, null, null, null, null, null); }
@@ -1355,6 +1365,22 @@ mult_expr : condition TMULT condition { $$.n = new(NodeType.ExprMult, $1.n, $3.n
 
 div_expr  : condition TDIV  condition { $$.n = new(NodeType.ExprDiv,  $1.n, $3.n, null, null, null, null, null, null); }
           ;
+
+/* `a % b` is a call to mod(a, b), not a node of its own: one evaluator and one return-type rule then
+   serve both spellings, so they cannot disagree about NULL, zero divisors, the sign of the result or
+   integer-versus-float typing. The cost is cosmetic — a rendered view body or EXPLAIN shows mod(a, b). */
+mod_expr  : condition TMOD condition { $$.n = NodeAst.ModCall($1.n, $3.n); }
+          ;
+
+/* `x::type` builds the very ExprCast node that CAST(x AS type) builds, so every consumer of a cast
+   handles it with no change. It is left-associative, so x::text::int casts twice. */
+postfix_cast_expr : condition TCOLONCOLON cast_target_type { $$.n = new(NodeType.ExprCast, $1.n, $3.n, null, null, null, null, null, null); }
+                  ;
+
+/* `x[i]` on an array value, 1-based. The operand is any condition, so a column, a call, a cast,
+   a parenthesised ARRAY[...] or another subscript all work; the bracket delimits the index. */
+subscript_expr : condition LBRACKET condition RBRACKET { $$.n = new(NodeType.ExprSubscript, $1.n, $3.n, null, null, null, null, null, null); }
+               ;
 
 like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n, null, null, null, null, null, null); }
           ;
@@ -1498,8 +1524,10 @@ array_literal : TTYPE_ARRAY LBRACKET RBRACKET { $$.n = new(NodeType.ArrayLiteral
               | TTYPE_ARRAY LBRACKET array_element_list RBRACKET { $$.n = new(NodeType.ArrayLiteral, $3.n, null, null, null, null, null, null, null); }
               ;
 
-array_element_list : array_element_list TCOMMA simple_expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
-                   | simple_expr { $$.n = $1.n; $$.s = $1.s; }
+/* Each element is a full expression, as in PostgreSQL: ARRAY[n::text, upper(s), a + 1]. The brackets
+   and commas delimit every element, the same way they delimit a function's arguments. */
+array_element_list : array_element_list TCOMMA expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+                   | expr { $$.n = $1.n; $$.s = $1.s; }
                    ;
 
 bool    : TTRUE { $$.n = NodeAst.True; }

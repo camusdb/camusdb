@@ -695,4 +695,18 @@ public enum NodeType
     /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
     /// </summary>
     AlterTableRewriteStorage,
+
+    /// <summary>
+    /// An array subscript, <c>value[index]</c>. <c>leftAst</c> is the array expression and
+    /// <c>rightAst</c> the index expression. The index counts from 1, as in PostgreSQL. An index
+    /// outside the array, a NULL index, or a NULL array gives NULL, not an error; a non-array
+    /// operand or a non-integer index is an error.
+    ///
+    /// <para>Visitors treat it as an ordinary binary node: both children are expressions that can
+    /// reference columns, so a walker that skips it would miss a column the index or the array
+    /// reads.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
+    /// </summary>
+    ExprSubscript,
 }

@@ -117,6 +117,29 @@ Current (v1) limitations:
   one element type.
 - Elements may be `NULL` regardless of the declared element type.
 
+Read one element with a subscript, `tags[1]`. The first element is `1`, and an index outside the array
+gives `NULL`. See [PostgreSQL expression syntax](sql-expression-syntax.md#array-subscripts).
+
+Three functions read an array as a whole:
+
+| Function | Returns | Notes |
+|---|---|---|
+| `cardinality(a)` | `int64` | The number of elements, `NULL` elements included. `0` for an empty array. |
+| `array_length(a, 1)` | `int64` | The same count, but `NULL` for an empty array, as in PostgreSQL. Any dimension other than `1` gives `NULL`. |
+| `array_contains(a, v)` | `bool` | `true` when `v` is an element of `a`. |
+
+All three return `NULL` for a `NULL` array. To count an empty array as `0`, use `cardinality`, not
+`array_length`. `array_contains(a, v)` gives the same answer as `v IN (...)` over
+the elements of `a`:
+
+- An empty array gives `false`, even when `v` is `NULL`.
+- A `NULL` value gives `NULL`.
+- No match gives `NULL` when the array holds a `NULL` element, and `false` otherwise.
+- Numbers compare by value, so `array_contains(ARRAY[1, 2], 2.0)` is `true`. A value of another type is
+  a non-match, not an error.
+
+PostgreSQL writes the same test as `v = ANY (a)`. CamusDB does not support `ANY`, `ALL`, `@>` or `<@` yet.
+
 ---
 
 ## Literal and value formats
@@ -140,7 +163,9 @@ How a value is written depends on the path. **The SQL literal form and the JSON 
 
 Numeric literals are parsed with the invariant culture (`.` is always the decimal separator,
 independent of server locale). Date/datetime strings are parsed as UTC; a value with no timezone is
-assumed to be UTC. Unparseable date/datetime/bytes literals raise `InvalidInput`.
+assumed to be UTC. Unparseable date/datetime/bytes literals raise `InvalidInput`. A decimal number
+can group its digits with underscores, `200_000`; see
+[PostgreSQL expression syntax](sql-expression-syntax.md#digit-separators).
 
 #### String literals
 
@@ -187,14 +212,17 @@ it keeps that meaning, which is why bytes got their own syntax. The legacy form 
 string whose text starts with `0x` still coerces on insert, but only where the target column type is
 known; `X'…'` carries its type on its own.
 
-An array literal is written `ARRAY[a, b, c]`. Its element type is inferred from the first non-NULL
-element and every other element must agree, so `ARRAY[1, 'two']` is an error. Elements coerce to the
+An array literal is written `ARRAY[a, b, c]`. Each element can be any expression: a literal, a column,
+a cast, a function call or arithmetic, as in `ARRAY[n::string, upper(name), n + 1]`. Its element type
+is inferred from the first non-NULL element and every other element must agree, so `ARRAY[1, 'two']`
+is an error. Elements coerce to the
 column's declared element type the same way scalars do, so `ARRAY[1, 2]` is accepted by an
 `array(float64)` column. `ARRAY[]` is empty and adopts the column's element type. Nested arrays
 (`ARRAY[ARRAY[1]]`) are rejected.
 
 `CAST` works for all scalar types, e.g. `CAST('2026-01-01' AS date)`, `CAST(x AS float32)`,
-`CAST('0xFF00' AS bytes)`.
+`CAST('0xFF00' AS bytes)`. The PostgreSQL shorthand `x::type` is the same as `CAST(x AS type)`; see
+[PostgreSQL expression syntax](sql-expression-syntax.md#the--cast).
 
 ### Over HTTP / JSON
 

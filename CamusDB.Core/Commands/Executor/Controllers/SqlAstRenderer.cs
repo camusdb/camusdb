@@ -61,12 +61,15 @@ internal class SqlAstRenderer
     /// <summary>
     /// True for nodes that are self-delimiting as an operand and never need wrapping parentheses:
     /// leaves (identifiers, literals) and constructs that carry their own bracketing (function
-    /// calls, CAST, CASE, and a parenthesized subquery).
+    /// calls, CAST, CASE, <c>ARRAY[…]</c>, and a parenthesized subquery). A subscript counts too:
+    /// the postfix <c>[…]</c> binds tighter than every operator, so <c>a[1] + 1</c> re-parses as
+    /// <c>(a[1]) + 1</c>.
     /// </summary>
     protected virtual bool IsAtomic(NodeAst e) => e.nodeType is
         NodeType.Identifier or NodeType.Integer or NodeType.Float or NodeType.Bool or
         NodeType.Null or NodeType.String or NodeType.ObjectIdLiteral or
         NodeType.ExprFuncCall or NodeType.ExprCast or NodeType.ExprCase or
+        NodeType.ArrayLiteral or NodeType.ExprSubscript or
         NodeType.Placeholder;
 
     /// <summary>Renders <paramref name="e"/> as an operand, wrapping compound expressions in parens.</summary>
@@ -199,6 +202,21 @@ internal class SqlAstRenderer
                 sb.Append(" AS ").Append(RenderCastType(expr.rightAst!)).Append(')');
                 return;
 
+            // ── ARRAY[…] and subscripts ─────────────────────────────────────────
+            case NodeType.ArrayLiteral:
+                sb.Append("ARRAY[");
+                if (expr.leftAst is not null)
+                    RenderArgList(sb, expr.leftAst);
+                sb.Append(']');
+                return;
+
+            case NodeType.ExprSubscript:
+                RenderOperand(sb, expr.leftAst!);
+                sb.Append('[');
+                RenderNode(sb, expr.rightAst!);
+                sb.Append(']');
+                return;
+
             // ── CASE … WHEN … THEN … [ELSE …] END ───────────────────────────────
             // Self-delimiting: the WHEN/THEN/ELSE/END keywords bound each sub-expression, so no
             // operand needs wrapping parens for a faithful re-parse.
@@ -251,7 +269,12 @@ internal class SqlAstRenderer
         sb.Append(')');
     }
 
-    /// <summary>Renders a comma-separated argument/value list from an <c>ExprList</c> tree.</summary>
+    /// <summary>
+    /// Renders a comma-separated list from an <c>ExprList</c> tree (an IN list or ARRAY elements) or
+    /// an <c>ExprArgumentList</c> tree (the arguments of a call with two or more of them). Both are
+    /// left-deep chains of the same shape; a nested call keeps its own list under its
+    /// <c>ExprFuncCall</c>, so flattening never merges two calls' arguments.
+    /// </summary>
     protected void RenderArgList(StringBuilder sb, NodeAst list)
     {
         bool first = true;
@@ -260,7 +283,7 @@ internal class SqlAstRenderer
 
     private void RenderArgListInner(StringBuilder sb, NodeAst node, ref bool first)
     {
-        if (node.nodeType == NodeType.ExprList)
+        if (node.nodeType is NodeType.ExprList or NodeType.ExprArgumentList)
         {
             if (node.leftAst is not null) RenderArgListInner(sb, node.leftAst, ref first);
             if (node.rightAst is not null) RenderArgListInner(sb, node.rightAst, ref first);

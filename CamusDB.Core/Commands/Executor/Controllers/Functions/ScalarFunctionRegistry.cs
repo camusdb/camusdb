@@ -52,6 +52,7 @@ internal sealed class ScalarFunctionRegistry
         NullScalarFunctions.Register(registry);
         RegexScalarFunctions.Register(registry);
         SessionScalarFunctions.Register(registry);
+        ArrayScalarFunctions.Register(registry);
         return registry;
     }
 }

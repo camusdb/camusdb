@@ -489,7 +489,69 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.ExprCase)
             return InferCaseType(target, innerBound, innerResolver);
 
+        if (target.nodeType == NodeType.ExprSubscript)
+            return InferSubscriptType(target.leftAst!, innerBound, innerResolver);
+
         return ColumnType.String;
+    }
+
+    /// <summary>
+    /// The static type of <c>array[index]</c> is the array's element type. It is known for an array
+    /// column of a base table (its declared element type) and for an <c>ARRAY[…]</c> literal (the type
+    /// of its first non-NULL literal element, the same rule evaluation uses). For any other operand
+    /// the type is only known per row, so this falls back to <see cref="ColumnType.String"/>, like the
+    /// other expressions this builder cannot type statically.
+    /// </summary>
+    private static ColumnType InferSubscriptType(
+        NodeAst arrayOperand,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        if (arrayOperand.nodeType == NodeType.Identifier && arrayOperand.yytext is not null)
+        {
+            string lookupKey = innerResolver.ResolveRowLookupKey(arrayOperand.yytext);
+
+            foreach (BoundTableSource source in innerBound.Sources)
+            {
+                foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
+                {
+                    if (column.Type == ColumnType.Array
+                        && SchemaElementStateRules.IsReadable(column)
+                        && (lookupKey == column.Name || MatchesQualifiedKey(lookupKey, source.Alias, column.Name)))
+                        return column.ArrayElementType ?? ColumnType.String;
+                }
+            }
+
+            return ColumnType.String;
+        }
+
+        if (arrayOperand.nodeType == NodeType.ArrayLiteral)
+        {
+            NodeAst? first = FirstNonNullArrayElement(arrayOperand.leftAst);
+            return first?.nodeType switch
+            {
+                NodeType.Integer => ColumnType.Integer64,
+                NodeType.Float => ColumnType.Float64,
+                NodeType.Bool => ColumnType.Bool,
+                NodeType.BytesLiteral => ColumnType.Bytes,
+                NodeType.ObjectIdLiteral => ColumnType.Id,
+                _ => ColumnType.String,
+            };
+        }
+
+        return ColumnType.String;
+    }
+
+    /// <summary>Returns the first element of an array literal's element list that is not a NULL literal.</summary>
+    private static NodeAst? FirstNonNullArrayElement(NodeAst? list)
+    {
+        if (list is null)
+            return null;
+
+        if (list.nodeType != NodeType.ExprList)
+            return list.nodeType == NodeType.Null ? null : list;
+
+        return FirstNonNullArrayElement(list.leftAst) ?? FirstNonNullArrayElement(list.rightAst);
     }
 
     /// <summary>

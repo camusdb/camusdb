@@ -15,6 +15,7 @@ Built-in function groups:
 | `IdScalarFunctions` | `GEN_ID()` — generates a new ObjectId |
 | `JsonScalarFunctions` | `JSON_EXTRACT`, `JSON_SET`, `JSON_REMOVE` — JSON field access and mutation |
 | `SessionScalarFunctions` | `CURRENT_DATABASE()`, `CURRENT_USER()`, `CURRENT_ROLE()`, `IS_SUPERUSER()` — the session the statement runs in |
+| `ArrayScalarFunctions` | `CARDINALITY(array)`, `ARRAY_LENGTH(array, dim)`, `ARRAY_CONTAINS(array, value)` — an array read as a whole, for length and membership checks |
 
 `ScalarFunctionDescriptor` carries the function name(s), arity constraints, and the delegate that implements the function.
 `ScalarFunctionArguments` is the helper that evaluates argument expressions before passing them to the function delegate.

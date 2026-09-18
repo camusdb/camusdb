@@ -31,6 +31,25 @@ internal partial class sqlScanner
 	}
 
 	/// <summary>
+	/// Removes the grouping underscores from a numeric literal, so <c>200_000</c> reaches the parser
+	/// as <c>200000</c>. The lexer rules admit an underscore only between two digits, so removing
+	/// every one cannot join or split a number. Stripping here, before the token text is stored,
+	/// means every consumer of a numeric token — literal evaluation, <c>LIMIT</c>, <c>string(N)</c>,
+	/// the negative-literal rules — sees plain digits and needs no change.
+	/// </summary>
+	private static string StripDigitSeparators(string text) =>
+		text.Contains('_') ? text.Replace("_", "") : text;
+
+	/// <summary>
+	/// The error for a number with a misplaced underscore (<c>200_</c>, <c>2__0</c>, <c>1_.5</c>).
+	/// Thrown from the scanner action instead of left to the parser: otherwise the text lexes as a
+	/// number followed by an identifier, and the parser reports an unrelated unexpected token.
+	/// </summary>
+	private CamusDBException InvalidNumericLiteral(string text) =>
+		new(CamusDBErrorCodes.SqlSyntaxError,
+			$"(line {yyline}, col {yycol + 1}) Invalid numeric literal '{text}': an underscore must sit between two digits");
+
+	/// <summary>
 	/// Called by the scanner on EOF. Raises an error if EOF arrives inside a block comment
 	/// (i.e. the scanner is still in BLOCKCOMMENT state), which means the opening <c>/*</c>
 	/// was never closed. Always returns true to signal end-of-input.

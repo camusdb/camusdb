@@ -629,6 +629,9 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprSub:
             case NodeType.ExprMult:
             case NodeType.ExprDiv:
+            case NodeType.ExprSubscript:
+            case NodeType.ArrayLiteral:
+            case NodeType.ExprList:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
             case NodeType.ExprRegexMatch:
@@ -875,6 +878,9 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprSub:
             case NodeType.ExprMult:
             case NodeType.ExprDiv:
+            case NodeType.ExprSubscript:
+            case NodeType.ArrayLiteral:
+            case NodeType.ExprList:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
             case NodeType.ExprRegexMatch:

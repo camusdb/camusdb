@@ -36,8 +36,10 @@ internal abstract class SQLExecutorBaseCreator
     /// immutable and their value is a pure function of <c>yytext</c>, and <see cref="ColumnValue"/> is
     /// immutable so one instance can back every row. Keyed weakly like <see cref="Utf8LiteralCache"/>
     /// so a parsed query being GC'd drops its cached values. Only successful evaluations are cached —
-    /// a malformed literal keeps throwing on every evaluation, unchanged. Array literals are excluded:
-    /// their elements may reference row columns.
+    /// a malformed literal keeps throwing on every evaluation, unchanged. An array literal is cached
+    /// only when every element is itself a constant literal (<see cref="IsConstantArrayElementList"/>):
+    /// an element may otherwise reference a row column, or a bind placeholder whose value changes
+    /// between executions of the same cached tree.
     /// </summary>
     private static readonly ConditionalWeakTable<NodeAst, ColumnValue> LiteralValueCache = new();
 
@@ -323,10 +325,15 @@ internal abstract class SQLExecutorBaseCreator
     private static ColumnValue EvalArrayLiteral(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
     {
+        if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
+            return cached;
+
         List<ColumnValue> elements = new();
-        CollectArrayElements(expr.leftAst, row, parameters, elements);
+        CollectArrayElements(expr.leftAst, row, parameters, rowNameResolver, queryRow, elements);
 
         ColumnType elementType = ColumnType.Null;
 
@@ -341,17 +348,46 @@ internal abstract class SQLExecutorBaseCreator
                 elementType = element.Type;
         }
 
-        return ColumnValue.FromArray(elementType, elements);
+        ColumnValue array = ColumnValue.FromArray(elementType, elements);
+
+        // A constant list such as ARRAY['paid', 'shipped'] is otherwise rebuilt for every row it
+        // is evaluated against.
+        return IsConstantArrayElementList(expr.leftAst) ? CacheLiteralValue(expr, array) : array;
+    }
+
+    /// <summary>
+    /// True when an array literal's element list holds only constant literals, so its value is the
+    /// same for every row and every execution. Placeholders are not constant: a cached statement tree
+    /// is shared by executions that bind different values.
+    /// </summary>
+    private static bool IsConstantArrayElementList(NodeAst? node)
+    {
+        while (node is not null && node.nodeType == NodeType.ExprList)
+        {
+            if (!IsConstantArrayElementList(node.rightAst))
+                return false;
+
+            node = node.leftAst;
+        }
+
+        return node is null || node.nodeType is
+            NodeType.Integer or NodeType.Float or NodeType.String or NodeType.Bool or
+            NodeType.Null or NodeType.BytesLiteral or NodeType.ObjectIdLiteral;
     }
 
     /// <summary>
     /// Flattens the left-leaning <see cref="NodeType.ExprList"/> tree the grammar builds for an array
-    /// literal into evaluated elements, in source order.
+    /// literal into evaluated elements, in source order. An element is any expression, so each one
+    /// is evaluated with the caller's row-name resolver and row: without them a qualified column
+    /// (<c>t.n</c>) or a column of a joined row would not resolve inside the brackets, although it
+    /// resolves one level up.
     /// </summary>
     private static void CollectArrayElements(
         NodeAst? node,
         IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow,
         List<ColumnValue> elements)
     {
         if (node is null)
@@ -359,12 +395,12 @@ internal abstract class SQLExecutorBaseCreator
 
         if (node.nodeType == NodeType.ExprList)
         {
-            CollectArrayElements(node.leftAst, row, parameters, elements);
-            CollectArrayElements(node.rightAst, row, parameters, elements);
+            CollectArrayElements(node.leftAst, row, parameters, rowNameResolver, queryRow, elements);
+            CollectArrayElements(node.rightAst, row, parameters, rowNameResolver, queryRow, elements);
             return;
         }
 
-        elements.Add(EvalExpr(node, row, parameters));
+        elements.Add(EvalExpr(node, row, parameters, rowNameResolver, queryRow));
     }
 
     /// <summary>
@@ -402,7 +438,7 @@ internal abstract class SQLExecutorBaseCreator
                 return EvalBytesLiteral(expr);
 
             case NodeType.ArrayLiteral:
-                return EvalArrayLiteral(expr, row, parameters);
+                return EvalArrayLiteral(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.Bool:
                 return EvalBoolLiteral(expr);
@@ -464,6 +500,9 @@ internal abstract class SQLExecutorBaseCreator
 
             case NodeType.ExprCast:
                 return EvalCastNode(expr, row, parameters, rowNameResolver, queryRow);
+
+            case NodeType.ExprSubscript:
+                return EvalSubscriptNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprCase:
                 return EvalCaseNode(expr, row, parameters, rowNameResolver, queryRow);
@@ -689,6 +728,43 @@ internal abstract class SQLExecutorBaseCreator
     {
         ColumnValue input = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
         return CastScalarFunctions.CastExpression("cast", input, expr.rightAst!);
+    }
+
+    /// <summary>
+    /// Evaluates <c>array[index]</c> with PostgreSQL's rules: the index counts from 1, and an index
+    /// outside the array gives NULL rather than an error, as does a NULL array or a NULL index. Only
+    /// the operand types are errors — subscripting a non-array, or indexing with a non-integer — since
+    /// those are mistakes in the statement, not properties of one row's data.
+    /// </summary>
+    private static ColumnValue EvalSubscriptNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue array = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue index = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        if (array.Type != ColumnType.Array && array.Type != ColumnType.Null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Cannot subscript a value of type {array.Type}; only an array can be subscripted");
+
+        if (index.Type != ColumnType.Integer64 && index.Type != ColumnType.Null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"An array subscript must be an integer, got {index.Type}");
+
+        if (array.Type == ColumnType.Null || index.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
+        IReadOnlyList<ColumnValue> elements = array.ArrayValues!;
+        long position = index.LongValue;
+
+        return position >= 1 && position <= elements.Count
+            ? elements[(int)(position - 1)]
+            : ColumnValue.Null;
     }
 
     private static ColumnValue EvalCaseNode(

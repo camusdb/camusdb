@@ -128,9 +128,18 @@ RBrace          \}
 Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
 Space           [ \t]
-Number          ("-"?[0-9]+)|("-"?[0][x][0-9A-Fa-f]+)
-Exponent        (e|E)("+"|"-")?([0-9]+)
-Decimal         (("-"?)([0-9]+)(\.)([0-9]+){Exponent}?)|(("-"?)([0-9]+){Exponent})
+/* A digit run may carry single underscores between digits for grouping, as in 200_000 or
+   1_000.000_5. The underscores are stripped before the text reaches the parser (see StripDigitSeparators).
+   Hex integers keep the plain form. */
+Digits          [0-9]+(_[0-9]+)*
+Number          ("-"?{Digits})|("-"?[0][x][0-9A-Fa-f]+)
+Exponent        (e|E)("+"|"-")?({Digits})
+Decimal         (("-"?)({Digits})(\.)({Digits}){Exponent}?)|(("-"?)({Digits}){Exponent})
+/* A number with a misplaced underscore: trailing (200_), doubled (2__0), or before a point or an
+   exponent (1_.5, 1_e5). It is never longer than a valid literal only when the text is valid, and
+   a tie goes to the earlier {Number}/{Decimal} rule, so valid literals never reach it. Without it,
+   200_ would lex as the number 200 followed by the identifier _. */
+BadNumber       ("-"?)[0-9][0-9_.]*_[a-zA-Z0-9_]*
 StrChs          [^\\\"\a\b\f\n\r\t\v\0]
 StrChs2          [^\\\'\a\b\f\n\r\t\v\0]
 DotChr          [^\r\n]
@@ -159,6 +168,8 @@ TAdd            \+
 TMult           \*
 TMinus          \-
 TDiv            /
+TMod            %
+TColonColon     ::
 TComma          ,
 TEquals         =
 TNotEquals      <>
@@ -189,9 +200,11 @@ TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 
 /* Scanner body */
 
-{Number}		{ yylval.s = yytext; return (int)Token.TDIGIT; }
+{Number}		{ yylval.s = StripDigitSeparators(yytext); return (int)Token.TDIGIT; }
 
-{Decimal}		{ yylval.s = yytext; return (int)Token.TFLOAT; }
+{Decimal}		{ yylval.s = StripDigitSeparators(yytext); return (int)Token.TFLOAT; }
+
+{BadNumber}		{ throw InvalidNumericLiteral(yytext); }
 
 {BytesLiteral}	{ yylval.s = yytext; return (int)Token.TBYTESLIT; }
 
@@ -427,6 +440,10 @@ TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 {TMult} { return (int)Token.TMULT; }
 
 {TDiv} { return (int)Token.TDIV; }
+
+{TMod} { return (int)Token.TMOD; }
+
+{TColonColon} { return (int)Token.TCOLONCOLON; }
 
 {LineComment}               /* skip */
 

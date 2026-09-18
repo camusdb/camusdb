@@ -87,6 +87,19 @@ public sealed class NodeAst
     public static NodeAst FromLong(long value) =>
         new(NodeType.Integer, null, null, null, null, null, null, null, value.ToString());
 
+    /// <summary>
+    /// Builds the tree for the <c>%</c> operator: a call to the <c>mod</c> scalar function with the
+    /// two operands as its arguments, shaped exactly as the parser shapes a written
+    /// <c>mod(dividend, divisor)</c>. Sharing the function keeps one evaluator and one
+    /// return-type rule for both spellings. A rendered view body or EXPLAIN therefore shows
+    /// <c>mod(a, b)</c> where the user wrote <c>a % b</c>; the two are equivalent.
+    /// </summary>
+    public static NodeAst ModCall(NodeAst dividend, NodeAst divisor) =>
+        new(NodeType.ExprFuncCall,
+            new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, "mod"),
+            new NodeAst(NodeType.ExprArgumentList, dividend, divisor, null, null, null, null, null, null),
+            null, null, null, null, null, null);
+
     // ── Literal sentinels ────────────────────────────────────────────────────
 
     public static readonly NodeAst Null = Leaf(NodeType.Null, "null");

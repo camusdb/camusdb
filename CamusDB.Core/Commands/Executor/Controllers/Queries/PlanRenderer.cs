@@ -375,6 +375,14 @@ public static class PlanRenderer
 
             NodeType.ExprCast => $"CAST({RenderExpr(expr.leftAst!)} AS {expr.rightAst?.yytext ?? "?"})",
 
+            // Argument lists and ARRAY/IN element lists are left-deep chains; render them flat.
+            NodeType.ExprArgumentList or NodeType.ExprList =>
+                $"{RenderExpr(expr.leftAst!)}, {RenderExpr(expr.rightAst!)}",
+
+            NodeType.ArrayLiteral => $"ARRAY[{(expr.leftAst is null ? "" : RenderExpr(expr.leftAst))}]",
+
+            NodeType.ExprSubscript => $"{RenderExpr(expr.leftAst!)}[{RenderExpr(expr.rightAst!)}]",
+
             NodeType.ExprCase => RenderCase(expr),
 
             NodeType.ExprInSubquery => $"{RenderExpr(expr.leftAst!)} IN (SELECT ...)",

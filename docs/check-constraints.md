@@ -141,6 +141,27 @@ Key points:
   (`CamusDBConfig.RegexMatchTimeoutMs`, default 250 ms); a pathological pattern fails rather than
   hanging. Compiled patterns are cached (`CamusDBConfig.RegexCacheMaxEntries`).
 
+### Array columns
+
+A check can test an `array(T)` column as a whole with `cardinality` (its length) and
+`array_contains` (whether it holds a value), or test one position with a subscript:
+
+```sql
+CREATE TABLE posts (
+  id   int64 PRIMARY KEY,
+  tags array(string) CHECK (cardinality(tags) <= 3 AND NOT array_contains(tags, 'banned'))
+);
+```
+
+Both functions give NULL for a NULL array, so the check accepts a NULL array.
+
+Use `cardinality`, not `array_length`, for a length rule. `array_length(tags, 1)` is NULL for an
+empty array, as in PostgreSQL, so `CHECK (array_length(tags, 1) >= 1)` does **not** reject an empty
+array: the condition is UNKNOWN and the check passes. `CHECK (cardinality(tags) >= 1)` rejects it. `array_contains`
+follows the `IN` rule, so an array with a NULL element and no match gives UNKNOWN, and a check on
+`NOT array_contains(...)` then accepts the row — the same as a check on `NOT IN`. See
+[Data types → Arrays](data-types.md#arrays).
+
 ### Type coercion in a check
 
 Two coercions make the natural SQL work without explicit `CAST`, exactly as the WHERE path does:
