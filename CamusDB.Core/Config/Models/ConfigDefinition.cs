@@ -917,6 +917,13 @@ public class ConfigDefinition
     public int SessionReaperIntervalMs { get; set; } = 300_000;
 
     /// <summary>
+    /// How long an expired session record is kept before the sweep deletes it, in milliseconds, so a
+    /// live stream can still tell an expired session from a revoked one. Must be &gt;= 0. Default
+    /// 300 000 (five minutes). Maps to <c>CamusDBOptions.ExpiredSessionRetentionMs</c>.
+    /// </summary>
+    public int ExpiredSessionRetentionMs { get; set; } = 300_000;
+
+    /// <summary>
     /// Whether SQL responses carry advisory routing metadata for clients that negotiated it.
     /// Default <c>true</c>. Maps to <c>CamusDBOptions.SqlRoutingAdviceEnabled</c>.
     /// </summary>
@@ -1371,6 +1378,9 @@ public class ConfigDefinition
 
         if (AuthenticationCacheMaxEntries < 1)
             throw Invalid($"'authentication_cache_max_entries' must be >= 1, got {AuthenticationCacheMaxEntries}");
+
+        if (ExpiredSessionRetentionMs < 0)
+            throw Invalid($"'expired_session_retention_ms' must be >= 0 ms, got {ExpiredSessionRetentionMs}");
 
         if (AccessTokenTtl <= 0)
             throw Invalid($"'access_token_ttl' must be > 0 ms, got {AccessTokenTtl}");

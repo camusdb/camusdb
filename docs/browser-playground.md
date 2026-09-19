@@ -22,7 +22,7 @@ The host project is `CamusDB.Wasm/`.
 it builds only the target that matches its own framework, so the server and the tests build
 `net10.0` only. The browser target:
 
-- resolves the browser build of `Kahuna.Core` (version 1.9.0 or later). That build has no
+- resolves the browser build of `Kahuna.Core` (version 1.9.2 or later). That build has no
   ASP.NET Core, no gRPC transports, no RocksDB or SQLite, and no Blake3. It runs Raft scheduling as
   async continuations on the page's event loop, not on worker threads;
 - defines `CAMUSDB_BROWSER`. Only two places use it: the cluster constructors of `EmbeddedKahuna`,
@@ -53,9 +53,14 @@ cd artifacts/wasm/wwwroot && python3 -m http.server 8080
 
 Then open <http://localhost:8080/>. To deploy, copy the `wwwroot` directory to any static host.
 
-The download is about 12 MB with brotli compression. Trimming is off, because Nixie creates actors
-through reflection and the trimmer removes their constructors. Trimming will be turned on when the
-dependencies are trim-safe.
+The download is about 4.4 MB with brotli compression, with trimming on. Trimming needs trim-safe
+dependencies: Nixie 1.3.2 annotates the actor constructors it creates by reflection, and Kahuna.Core
+1.9.2 gives Kommander and Kahuna source-generated JSON contexts. Before 1.9.2, a trimmed build either
+failed to create an actor or hung for 60 s in `JoinCluster`, because a trimmed application turns off
+reflection-based `System.Text.Json`.
+
+A trimmed publish leaves trimmed framework files in `CamusDB.Wasm/obj`. Delete `obj/` and `bin/`
+before a publish that turns trimming off again, or the runtime fails with a `TypeLoadException`.
 
 ## Tests
 

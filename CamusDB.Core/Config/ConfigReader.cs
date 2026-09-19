@@ -169,6 +169,7 @@ public class ConfigReader
         "login_max_attempts_per_source_per_minute",
         "login_rate_limit_max_entries",
         "session_reaper_interval_ms",
+        "expired_session_retention_ms",
         "sql_routing_advice_enabled",
         "sql_routing_advice_ttl_ms",
         "authentication_cache_ttl",

@@ -505,8 +505,10 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         // a realistic one. Built into the engine rather than set afterwards: an executor captures its
         // options at construction, so assigning the setting later would be a no-op that still passed.
         // Two seconds rather than milliseconds because the setup below must log in before it lapses.
+        // No retention, so "expired" and "due for the sweep" are the same instant here; the retention
+        // window has its own test below.
         (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser(
-            Options with { AccessTokenTtl = TimeSpan.FromSeconds(2) });
+            Options with { AccessTokenTtl = TimeSpan.FromSeconds(2), ExpiredSessionRetentionMs = 0 });
 
         await RunDdl(executor, "", "CREATE USER sleeper IDENTIFIED BY 'sleeper-pw-12'", root);
         await RunDdl(executor, "", "CREATE USER awake IDENTIFIED BY 'awake-pw-1234'", root);
@@ -533,6 +535,29 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         // Idempotent, and it stops when there is nothing left: every node runs this concurrently and
         // none of them coordinates, so a second pass over the same records must be a quiet no-op.
         Assert.AreEqual(0, await executor.ReapExpiredSessionsAsync());
+    }
+
+    /// <summary>
+    /// An expired session record is kept for the retention window before the sweep takes it. The
+    /// record is how a long-lived stream tells "my session expired" from "my session was logged out" —
+    /// both leave a token that no longer resolves, but only the second deletes the record early — so a
+    /// sweep that deleted at the instant of expiry would erase the difference.
+    /// </summary>
+    [Test]
+    public async Task ExpiredSessions_AreKeptForTheRetentionWindow()
+    {
+        (_, CommandExecutor executor, Principal root) = await SetupWithSuperuser(
+            Options with { AccessTokenTtl = TimeSpan.FromSeconds(2), ExpiredSessionRetentionMs = 600_000 });
+
+        await RunDdl(executor, "", "CREATE USER sleeper IDENTIFIED BY 'sleeper-pw-12'", root);
+        LoginResult dying = await executor.LoginAsync("sleeper", "sleeper-pw-12");
+
+        await Task.Delay(2500);
+
+        // Retention keeps the record; it must not keep the token alive.
+        Assert.ThrowsAsync<CamusDBException>(async () => await executor.ResolvePrincipalAsync(dying.Token));
+
+        Assert.AreEqual(0, await executor.ReapExpiredSessionsAsync(), "a record inside its retention window was swept");
     }
 
     [Test]

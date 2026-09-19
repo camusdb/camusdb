@@ -11,6 +11,7 @@ using System.Diagnostics;
 using Grpc.Core;
 using Microsoft.Extensions.Hosting;
 using CamusDB.Core;
+using CamusDB.Core.Auth;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.CommandsExecutor;
@@ -151,13 +152,18 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         GrpcTransportSecurity.EnsureSecureTransport(context, options);
 
+        return await executor.ResolvePrincipalAsync(BearerOf(context)).ConfigureAwait(false);
+    }
+
+    /// <summary>The token in the call's <c>authorization</c> metadata, or null when it carries none.</summary>
+    private static string? BearerOf(ServerCallContext context)
+    {
         string? authorization = context.RequestHeaders.GetValue("authorization");
-        string? bearer = authorization is not null
-                         && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+
+        return authorization is not null
+               && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
             ? authorization["Bearer ".Length..].Trim()
             : null;
-
-        return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
     }
 
     // ─── ExecuteQuery (server-streaming) ─────────────────────────────────────
@@ -604,26 +610,40 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// half-closed stream cannot orphan it; in-flight autocommit work rolls back via each op's own
     /// handler.</para>
     /// </summary>
-    public override async Task BatchExecute(
+    public override Task BatchExecute(
+        IAsyncStreamReader<BatchExecuteRequest> requestStream,
+        IServerStreamWriter<BatchExecuteResponse> responseStream,
+        ServerCallContext context)
+        // Through the same boundary as every other method, so a stream that ends over its authority
+        // ends as UNAUTHENTICATED with the domain code attached. A raw exception reaches the client
+        // as UNKNOWN, which its token handling does not recognise — so it never logs in again, and
+        // reopens the stream with the same rejected token.
+        => InvokeStreamingAsync(() => BatchExecuteCoreAsync(requestStream, responseStream, context));
+
+    private async Task BatchExecuteCoreAsync(
         IAsyncStreamReader<BatchExecuteRequest> requestStream,
         IServerStreamWriter<BatchExecuteResponse> responseStream,
         ServerCallContext context)
     {
+        // Authenticate once here so a missing or invalid token fails the entire batch call before any
+        // op runs — the fail-closed shape this path has always had. The answer is not kept for the
+        // life of the stream, and the stream does not die with its token either: see StreamAuthority.
+        using StreamAuthority? authority = await OpenStreamAuthorityAsync(context).ConfigureAwait(false);
+
         // BatchExecute is a long-lived duplex stream that a multiplexing client keeps open across many
         // operations, blocking below in ReadAllAsync between requests. context.CancellationToken only
         // fires on CLIENT disconnect, so on a graceful SERVER shutdown Kestrel would otherwise wait for
         // this "active" streaming call the full host ShutdownTimeout (~30s). Link the host's
         // ApplicationStopping token so shutdown ends the read loop promptly; the finally block still rolls
         // back any transaction left open on the stream.
-        using CancellationTokenSource shutdownLinked =
-            CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, appLifetime.ApplicationStopping);
+        //
+        // The third token ends an idle stream whose authority is found gone by the scheduled expiry
+        // lookup; without it such a stream would sit open until an operation that may never come.
+        using CancellationTokenSource shutdownLinked = CancellationTokenSource.CreateLinkedTokenSource(
+            context.CancellationToken,
+            appLifetime.ApplicationStopping,
+            authority?.AuthorityEnded ?? CancellationToken.None);
         CancellationToken ct = shutdownLinked.Token;
-
-        // Resolve once here so a missing or invalid token fails the entire batch call before any op
-        // runs — the fail-closed shape this path has always had. What has changed is that the answer is
-        // no longer kept for the life of the stream: see BatchStreamPrincipal.
-        BatchStreamPrincipal streamPrincipal = new();
-        await PrincipalForBatchOpAsync(context, streamPrincipal).ConfigureAwait(false);
 
         SemaphoreSlim writeLock = new(1, 1);
         int maxInFlight = Math.Max(1, options.GrpcBatchMaxInFlight);
@@ -675,7 +695,25 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 // instead of waiting for the client to open a new one. Resolved here, ahead of the two
                 // reservations below, because a token that has become invalid must fail without first
                 // taking a slot it will never release.
-                Principal? opPrincipal = await PrincipalForBatchOpAsync(context, streamPrincipal).ConfigureAwait(false);
+                Principal? opPrincipal;
+                try
+                {
+                    opPrincipal = authority is null
+                        ? null
+                        : await executor.ResolveStreamPrincipalAsync(authority).ConfigureAwait(false);
+                }
+                catch (CamusDBException ex) when (ex.Code != CamusDBErrorCodes.AuthenticationFailed)
+                {
+                    // The catalog could not be read. That says nothing about the authority, so it costs
+                    // this one op and not the stream — and every transaction pinned to it.
+                    CommandFailureLog.LogFailure(logger, ex);
+                    await TryWriteBatchAsync(responseStream, writeLock, new BatchExecuteResponse
+                    {
+                        RequestId = req.RequestId,
+                        Error = new BatchError { Code = ex.Code, Message = ex.Message },
+                    }, ct).ConfigureAwait(false);
+                    continue;
+                }
 
                 // Memory-bound only. The execution limit (inFlight) is acquired inside the op, AFTER its
                 // chain predecessor completes, so an op queued behind its transaction's chain never pins
@@ -717,6 +755,18 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Client dropped the stream. In-flight ops observe ct and roll back their own autocommit
             // work; drain best-effort so nothing is left running.
             try { await tracker.DrainAsync().ConfigureAwait(false); } catch { /* handled per-op */ }
+
+            // Cancelled by the authority ending, not by the client leaving: the client is still there
+            // and must learn why, so that it logs in again instead of waiting on a closed stream.
+            if (authority is { HasEnded: true })
+                throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
+        }
+        catch (IOException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            // The same event as above, seen from the transport: a client that went away without closing
+            // its stream aborts the read instead of cancelling it. It is not a server fault, so it is
+            // kept out of the error boundary, which would log it as one on every client exit.
+            try { await tracker.DrainAsync().ConfigureAwait(false); } catch { /* handled per-op */ }
         }
         finally
         {
@@ -730,68 +780,28 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     }
 
     /// <summary>
-    /// The authorization snapshot one <see cref="BatchExecute"/> stream is currently working under,
-    /// plus what is needed to notice that it has gone out of date.
+    /// Authenticates a <see cref="BatchExecute"/> stream from its opening metadata, or returns null
+    /// when authentication is off.
     ///
-    /// <para>A local of the call, so it is freed with the stream. Written and read only from the read
-    /// loop, which is single-threaded, so it needs no synchronization of its own.</para>
+    /// <para><b>Why a batch stream needs more than a resolved principal.</b> This stream is long-lived by
+    /// design — a multiplexing client keeps one open across a whole session — and it presents a token
+    /// exactly once, when it opens. Two opposite mistakes are available. Keeping the principal resolved
+    /// at open makes it the authorization for every operation until the client reconnects, so a
+    /// <c>GRANT</c> takes a token lifetime to arrive and a revocation never does. Resolving that one
+    /// token again per operation fixes both and ends every healthy stream at the token's expiry, along
+    /// with the transactions pinned to it. <see cref="StreamAuthority"/> is the model that avoids both:
+    /// authorization is refreshed per operation within
+    /// <see cref="CamusDBOptions.AuthenticationCacheTtl"/>, a logout, revocation, password change or
+    /// dropped account ends the stream, and an ordinary token expiry does not.</para>
     /// </summary>
-    private sealed class BatchStreamPrincipal
-    {
-        /// <summary>The resolved principal, or null when authentication is off.</summary>
-        internal Principal? Principal;
-
-        /// <summary><see cref="Environment.TickCount64"/> at which the snapshot must be resolved again.</summary>
-        internal long RefreshAtTicks;
-
-        /// <summary>The authentication catalog generation the snapshot was resolved under.</summary>
-        internal long Generation;
-    }
-
-    /// <summary>
-    /// Returns the principal the next batched operation should run as, resolving it again when the
-    /// current snapshot has aged out or the authentication catalog has moved underneath it.
-    ///
-    /// <para><b>Why a batch stream needs this at all.</b> This stream is long-lived by design — a
-    /// multiplexing client keeps one open across a whole session — so an authorization snapshot taken
-    /// when it opened would be the authorization for every operation until the client reconnects. In
-    /// practice that is the token's own lifetime, because re-login is the only refresh, and it is why a
-    /// <c>GRANT</c> appeared to take about fifteen minutes to reach such a client. Every other transport
-    /// resolves per request and was never affected.</para>
-    ///
-    /// <para>The check costs one clock read and one field read per operation. A full resolve happens at
-    /// most once per <see cref="CamusDBOptions.AuthenticationCacheTtl"/> per stream, and it goes through
-    /// the same per-node principal cache every other transport uses — so this transport now carries the
-    /// same staleness bound as the rest, rather than none.</para>
-    ///
-    /// <para>The generation check is what makes a change on this node apply to the very next operation
-    /// instead of at the end of that window. It is a plain field read, so it is free to consult.</para>
-    ///
-    /// <para>A resolve that fails — the session was logged out, revoked, or its account dropped — throws,
-    /// which ends the stream. That is deliberate: the alternative is a stream that keeps working on
-    /// authority that no longer exists, which is what it did before.</para>
-    /// </summary>
-    private async Task<Principal?> PrincipalForBatchOpAsync(ServerCallContext context, BatchStreamPrincipal state)
+    private async Task<StreamAuthority?> OpenStreamAuthorityAsync(ServerCallContext context)
     {
         if (!options.AuthenticationEnabled)
             return null;
 
-        long generation = executor.AuthorizationGeneration;
+        GrpcTransportSecurity.EnsureSecureTransport(context, options);
 
-        if (state.Principal is not null
-            && Environment.TickCount64 < state.RefreshAtTicks
-            && generation == state.Generation)
-        {
-            return state.Principal;
-        }
-
-        Principal? resolved = await ResolvePrincipalAsync(context).ConfigureAwait(false);
-
-        state.Principal = resolved;
-        state.Generation = generation;
-        state.RefreshAtTicks = Environment.TickCount64 + (long)options.AuthenticationCacheTtl.TotalMilliseconds;
-
-        return resolved;
+        return await executor.OpenStreamAuthorityAsync(BearerOf(context)).ConfigureAwait(false);
     }
 
     /// <summary>

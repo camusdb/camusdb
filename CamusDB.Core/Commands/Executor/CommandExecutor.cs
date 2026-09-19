@@ -1219,6 +1219,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>Resolves a bearer token to a <see cref="Principal"/>, or throws AuthenticationFailed.</summary>
     public Task<Principal> ResolvePrincipalAsync(string? bearer) => RequireAuthService().ResolvePrincipalAsync(bearer);
 
+    /// <summary>Authenticates a long-lived stream from its opening token and returns the authority
+    /// its operations resolve their principal from (see <see cref="AuthService.OpenStreamAuthorityAsync"/>).
+    /// The caller disposes it when the stream closes.</summary>
+    public Task<StreamAuthority> OpenStreamAuthorityAsync(string? bearer) => RequireAuthService().OpenStreamAuthorityAsync(bearer);
+
+    /// <summary>The principal a stream's next operation runs as; a token that merely expired does not
+    /// end the stream, a revoked one does (see <see cref="AuthService.ResolveStreamPrincipalAsync"/>).</summary>
+    public ValueTask<Principal> ResolveStreamPrincipalAsync(StreamAuthority authority) => RequireAuthService().ResolveStreamPrincipalAsync(authority);
+
     /// <summary>Revokes the presented token (logout).</summary>
     public Task LogoutAsync(string? bearer) => RequireAuthService().LogoutAsync(bearer);
 

@@ -183,6 +183,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # Set to 0 or less to switch the sweep off.
 # session_reaper_interval_ms: 300000
 
+# How long an expired session record is kept before the sweep deletes it. A long-lived gRPC stream may
+# outlive its token when the token merely ran out, but a logout or a revocation must still end it. At
+# the moment of expiry the stream looks its session record up: present and unrevoked means an ordinary
+# expiry. This window is how long that lookup has to happen, so keep it well above clock skew between
+# nodes. A stream that misses the window is ended and the client logs in again.
+# expired_session_retention_ms: 300000
+
 # Release of an abandoned transaction's holdings. A rollback the storage node answers with "unknown
 # transaction" — no session, no retained outcome, no durable record — releases nothing, because the
 # working set it finalizes from died with the session. The staged writes and point locks that

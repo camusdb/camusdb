@@ -1,12 +1,13 @@
 # Pin the build stage to the NATIVE build platform: running the .NET SDK under QEMU
-# emulation throws MSB4184 GetTargetPlatformIdentifier(''). The framework-dependent
-# publish is portable and carries per-RID native assets selected at load time.
+# emulation throws MSB4184 GetTargetPlatformIdentifier(''). The publish still targets
+# the image's architecture: crossgen2 cross-compiles ReadyToRun code for TARGETARCH
+# from the native SDK, so no emulation is needed.
 FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
 
+# Set by BuildKit to the architecture of the image being built (amd64, arm64).
+ARG TARGETARCH
+
 RUN rm -fr /src && mkdir -p /src
-# Package sources: nuget.org plus the repo-local pre-release feed (.localnuget/, see nuget.config).
-COPY nuget.config /src/
-COPY .localnuget /src/.localnuget/
 COPY CamusDB.Core /src/CamusDB.Core/
 COPY CamusDB.Grpc.Contracts /src/CamusDB.Grpc.Contracts/
 COPY CamusDB /src/CamusDB/
@@ -16,7 +17,18 @@ COPY CamusDB /src/CamusDB/
 # (MSB4184: GetTargetPlatformIdentifier('') cannot be evaluated).
 RUN find /src \( -type d -name obj -o -type d -name bin \) -prune -exec rm -rf {} +
 
-RUN cd /src/CamusDB/ && dotnet publish --no-self-contained --configuration Release -p:RunAnalyzers=false -o /app
+# ReadyToRun precompiles the app and its NuGet dependencies to native code, which cuts JIT work on
+# the first requests after a node starts or rejoins. Tiered compilation stays on, so hot methods are
+# still recompiled with dynamic PGO and steady-state throughput is unchanged. R2R code is per-RID,
+# so the publish targets the image's architecture and carries only that RID's native assets.
+RUN case "$TARGETARCH" in \
+      amd64) RID=linux-x64 ;; \
+      arm64) RID=linux-arm64 ;; \
+      *) echo "Unsupported TARGETARCH '$TARGETARCH' (build with BuildKit: amd64 or arm64)" >&2; exit 1 ;; \
+    esac \
+  && cd /src/CamusDB/ \
+  && dotnet publish --configuration Release --runtime "$RID" --no-self-contained \
+       -p:PublishReadyToRun=true -p:RunAnalyzers=false -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app

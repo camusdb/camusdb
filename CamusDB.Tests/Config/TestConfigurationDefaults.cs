@@ -123,6 +123,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual("", CamusDBOptions.Default.AccessTokenServerKey, nameof(CamusDBOptions.Default.AccessTokenServerKey));
         Assert.AreEqual(TimeSpan.FromMinutes(15), CamusDBOptions.Default.AccessTokenTtl, nameof(CamusDBOptions.Default.AccessTokenTtl));
         Assert.AreEqual(TimeSpan.FromSeconds(1), CamusDBOptions.Default.AuthenticationCacheTtl, nameof(CamusDBOptions.Default.AuthenticationCacheTtl));
+        Assert.AreEqual(300_000, CamusDBOptions.Default.ExpiredSessionRetentionMs, nameof(CamusDBOptions.Default.ExpiredSessionRetentionMs));
         Assert.AreEqual(8, CamusDBOptions.Default.LoginKdfMaxConcurrency, nameof(CamusDBOptions.Default.LoginKdfMaxConcurrency));
         Assert.AreEqual(20, CamusDBOptions.Default.LoginMaxAttemptsPerMinute, nameof(CamusDBOptions.Default.LoginMaxAttemptsPerMinute));
         Assert.AreEqual(10_000, CamusDBOptions.Default.AuthenticationCacheMaxEntries, nameof(CamusDBOptions.Default.AuthenticationCacheMaxEntries));

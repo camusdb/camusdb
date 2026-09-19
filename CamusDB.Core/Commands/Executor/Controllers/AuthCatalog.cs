@@ -86,6 +86,10 @@ public sealed class AuthCatalog
     
     private string GenerationKey => $"{keyPrefix}auth/generation";
 
+    // Deliberately not under the "auth/session:" prefix: every scan that walks sessions would
+    // otherwise try to deserialize this counter as a session record.
+    private string SessionRevocationEpochKey => $"{keyPrefix}auth/revocation-epoch";
+
     private AuthCatalog(IKahuna kahuna, KvTransactionsManager transactions, string keyPrefix, bool isClusterMode)
     {
         this.kahuna = kahuna;
@@ -332,6 +336,33 @@ public sealed class AuthCatalog
         long next = (current is { Length: 8 } ? BitConverter.ToInt64(current) : 0) + 1;
         await SetKeyLockedAsync(tx, GenerationKey, BitConverter.GetBytes(next), ifAbsent: false).ConfigureAwait(false);
         return next;
+    }
+
+    /// <summary>
+    /// How many times every session was revoked at once (<see cref="RevokeAllSessionsAsync"/>), read
+    /// from storage.
+    ///
+    /// <para><b>Why a counter, when the revocation already deletes the sessions.</b> A deleted session
+    /// is evidence only while something still looks the session up. A long-lived stream whose token
+    /// expired in the ordinary way no longer has a session to look up — the record is gone whether or
+    /// not anyone revoked it — so it compares this counter with the value it captured when it opened
+    /// instead. It is durable and never reaped, so the evidence outlives any stream.</para>
+    ///
+    /// <para>It moves only in the transaction that also moves the coherence generation, so a caller
+    /// may skip this read while <see cref="LocalGeneration"/> is unchanged since its last one, provided
+    /// it read the generation <b>before</b> the epoch.</para>
+    /// </summary>
+    public async Task<long> ReadSessionRevocationEpochAsync()
+    {
+        byte[]? value = await GetAuthValueStrictAsync(SessionRevocationEpochKey).ConfigureAwait(false);
+        return value is { Length: 8 } ? BitConverter.ToInt64(value) : 0;
+    }
+
+    private async Task IncrementSessionRevocationEpochLockedAsync(KvTransaction tx)
+    {
+        byte[]? current = await LockAndReadAsync(tx, SessionRevocationEpochKey).ConfigureAwait(false);
+        long next = (current is { Length: 8 } ? BitConverter.ToInt64(current) : 0) + 1;
+        await SetKeyLockedAsync(tx, SessionRevocationEpochKey, BitConverter.GetBytes(next), ifAbsent: false).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -594,6 +625,9 @@ public sealed class AuthCatalog
 
             await RunInTransactionAsync(async tx =>
             {
+                // Same transaction as the generation, so the two move together: a reader that sees an
+                // unchanged generation may conclude the revocation epoch is unchanged too.
+                await IncrementSessionRevocationEpochLockedAsync(tx).ConfigureAwait(false);
                 newGeneration = await IncrementGenerationLockedAsync(tx).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -955,6 +989,20 @@ public sealed class AuthCatalog
         return value is null ? null : MetaJsonSerializer.Deserialize(value, MetaJsonContext.Default.SessionRecord);
     }
 
+    /// <summary>
+    /// Reads a session like <see cref="TryGetSessionAsync"/>, but returns null only when storage
+    /// positively reports the record absent; a read that failed throws instead.
+    ///
+    /// <para>For a caller that treats absence as <b>evidence</b> — a stream deciding whether its session
+    /// was revoked or merely expired reads "absent" as "revoked". The lenient read folds a failed read
+    /// into null, which there would turn a storage hiccup into a revocation.</para>
+    /// </summary>
+    public async Task<SessionRecord?> TryGetSessionStrictAsync(string tokenId)
+    {
+        byte[]? value = await GetAuthValueStrictAsync(SessionKey(tokenId)).ConfigureAwait(false);
+        return value is null ? null : MetaJsonSerializer.Deserialize(value, MetaJsonContext.Default.SessionRecord);
+    }
+
     /// <summary>Deletes a session (logout / revoke). Idempotent.</summary>
     public async Task DeleteSessionAsync(string tokenId)
     {
@@ -979,10 +1027,21 @@ public sealed class AuthCatalog
     /// <para>The scan is taken first and the deletes follow it, rather than deleting inside the
     /// iteration, because a locked delete against the range being scanned would contend with the scan's
     /// own read of it.</para>
+    ///
+    /// <para><b>An expired record is kept for <paramref name="retention"/> before it goes.</b> It can no
+    /// longer authenticate anyone, but it is still evidence: a long-lived stream that reaches its
+    /// token's expiry looks the record up once, and finding it there and unrevoked is how it tells an
+    /// ordinary expiry from a logout or a revocation, all of which delete the record early. Reaping at
+    /// the instant of expiry would erase that difference before the stream could look. The window also
+    /// absorbs clock skew between the node that stamped the expiry and the node that sweeps.</para>
     /// </summary>
-    /// <param name="now">The instant to judge expiry against; a record expiring exactly now is reaped.</param>
-    public async Task<int> ReapExpiredSessionsAsync(DateTime now)
+    /// <param name="now">The instant to judge expiry against.</param>
+    /// <param name="retention">How long past its expiry a record is kept; a record whose expiry plus
+    /// this is exactly <paramref name="now"/> is reaped.</param>
+    public async Task<int> ReapExpiredSessionsAsync(DateTime now, TimeSpan retention)
     {
+        DateTime reapBefore = now - retention;
+
         List<string> expired = [];
 
         ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = kahuna.LocateAndScanRange(
@@ -1004,7 +1063,7 @@ public sealed class AuthCatalog
                 continue;
 
             SessionRecord session = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SessionRecord);
-            if (session.ExpiresAt <= now)
+            if (session.ExpiresAt <= reapBefore)
                 expired.Add(key);
         }
 
@@ -1040,6 +1099,32 @@ public sealed class AuthCatalog
         ).ConfigureAwait(false);
 
         return type == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
+    }
+
+    /// <summary>
+    /// Reads a value, telling "absent" apart from "could not be read": null only for a key storage
+    /// reports as missing or deleted, and <see cref="CamusDBErrorCodes.TransactionMustRetry"/> for any
+    /// other outcome. <see cref="GetAuthValueAsync"/> returns null for both.
+    /// </summary>
+    private async Task<byte[]?> GetAuthValueStrictAsync(string key)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
+            HLCTimestamp.Zero,
+            key,
+            -1,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None
+        ).ConfigureAwait(false);
+
+        return type switch
+        {
+            KeyValueResponseType.Get => entry?.Value,
+            KeyValueResponseType.DoesNotExist => null,
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"The authentication catalog could not be read ({type}); retry the operation"),
+        };
     }
 
     // -----------------------------------------------------------------------

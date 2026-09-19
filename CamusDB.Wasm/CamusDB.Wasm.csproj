@@ -13,11 +13,12 @@
     <!-- Required by the JSExport source generator. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <NoWarn>$(NoWarn);NU1903;CS0436</NoWarn>
-    <!-- Trimming is off until the dependencies are trim-safe. Nixie creates actors with
-         Activator.CreateInstance, so a trimmed build loses their constructors and the node fails
-         to start (MissingMethodException on Nixie.Actors.NobodyActor). Untrimmed, the bundle is
-         about 12 MB with brotli. -->
-    <PublishTrimmed>false</PublishTrimmed>
+    <!-- Trimming needs trim-safe dependencies: Nixie annotates the actor constructors it creates
+         by reflection (1.3.2), and Kommander and Kahuna serialize their JSON through source-generated
+         contexts (Kahuna.Core 1.9.2). It cuts the bundle from about 12 MB to 4.4 MB with brotli.
+         A trimmed publish leaves trimmed framework files in obj/, so delete obj/ and bin/ before a
+         publish that turns trimming off again. -->
+    <PublishTrimmed>true</PublishTrimmed>
   </PropertyGroup>
 
   <ItemGroup>

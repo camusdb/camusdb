@@ -261,6 +261,7 @@ public static class ConfigResolver
         LoginMaxAttemptsPerSourcePerMinute = config.LoginMaxAttemptsPerSourcePerMinute,
         LoginRateLimitMaxEntries = config.LoginRateLimitMaxEntries,
         SessionReaperIntervalMs = config.SessionReaperIntervalMs,
+        ExpiredSessionRetentionMs = config.ExpiredSessionRetentionMs,
         SqlRoutingAdviceEnabled = config.SqlRoutingAdviceEnabled,
         SqlRoutingAdviceTtlMs = config.SqlRoutingAdviceTtlMs,
         AuthenticationCacheTtl = TimeSpan.FromMilliseconds(config.AuthenticationCacheTtl),

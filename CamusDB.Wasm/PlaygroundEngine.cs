@@ -109,11 +109,22 @@ public static partial class PlaygroundEngine
     /// </summary>
     [JSExport]
     public static async Task<string> ExecuteAsync(string script)
+        => await ExecuteInDatabaseAsync(script, DatabaseName).ConfigureAwait(false);
+
+    /// <summary>
+    /// Runs every statement of <paramref name="script"/> in order against
+    /// <paramref name="databaseName"/>. Server-level statements such as <c>CREATE DATABASE</c>,
+    /// <c>CREATE DATABASE ... BRANCH FROM</c>, and <c>SHOW DATABASES</c> still resolve their own
+    /// target and do not open the context database.
+    /// </summary>
+    [JSExport]
+    public static async Task<string> ExecuteInDatabaseAsync(string script, string? databaseName)
     {
         await gate.WaitAsync().ConfigureAwait(false);
         try
         {
             session ??= await Session.StartAsync().ConfigureAwait(false);
+            string contextDatabase = NormalizeDatabaseName(databaseName);
 
             ArrayBufferWriter<byte> buffer = new();
             using (Utf8JsonWriter writer = new(buffer))
@@ -122,7 +133,7 @@ public static partial class PlaygroundEngine
 
                 foreach (string statement in SqlScriptSplitter.Split(script))
                 {
-                    if (!await session.RunAsync(statement, writer).ConfigureAwait(false))
+                    if (!await session.RunAsync(statement, contextDatabase, writer).ConfigureAwait(false))
                         break;
                 }
 
@@ -136,6 +147,9 @@ public static partial class PlaygroundEngine
             gate.Release();
         }
     }
+
+    private static string NormalizeDatabaseName(string? databaseName)
+        => string.IsNullOrWhiteSpace(databaseName) ? DatabaseName : databaseName.Trim();
 
     /// <summary>One engine: the embedded node, the database registry and the executor over them.</summary>
     private sealed class Session : IAsyncDisposable
@@ -211,21 +225,22 @@ public static partial class PlaygroundEngine
         /// <summary>
         /// Runs one statement and writes its outcome object. Returns false when the statement failed.
         /// </summary>
-        public async Task<bool> RunAsync(string sql, Utf8JsonWriter writer)
+        public async Task<bool> RunAsync(string sql, string databaseName, Utf8JsonWriter writer)
         {
             Stopwatch stopwatch = Stopwatch.StartNew();
 
             writer.WriteStartObject();
             writer.WriteString("sql", sql);
+            writer.WriteString("database", databaseName);
 
             try
             {
                 NodeType root = executor.ParseSql(sql).nodeType;
 
                 if (StatementScope.ReturnsRows(root))
-                    await QueryAsync(sql, root, writer).ConfigureAwait(false);
+                    await QueryAsync(sql, databaseName, root, writer).ConfigureAwait(false);
                 else
-                    await NonQueryAsync(sql, root, writer).ConfigureAwait(false);
+                    await NonQueryAsync(sql, databaseName, root, writer).ConfigureAwait(false);
 
                 writer.WriteNumber("ms", stopwatch.Elapsed.TotalMilliseconds);
                 writer.WriteEndObject();
@@ -242,7 +257,7 @@ public static partial class PlaygroundEngine
             }
         }
 
-        private async Task QueryAsync(string sql, NodeType root, Utf8JsonWriter writer)
+        private async Task QueryAsync(string sql, string databaseName, NodeType root, Utf8JsonWriter writer)
         {
             QuerySchemaHolder schema = new();
             List<QueryResultRow> rows = [];
@@ -251,7 +266,7 @@ public static partial class PlaygroundEngine
             {
                 // Reads the registry or this process's own state: no database, no transaction.
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
-                    new ExecuteSQLTicket(txnState: null!, database: DatabaseName, sql: sql, parameters: null),
+                    new ExecuteSQLTicket(txnState: null!, database: databaseName, sql: sql, parameters: null),
                     schemaOut: schema).ConfigureAwait(false);
 
                 await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
@@ -263,12 +278,12 @@ public static partial class PlaygroundEngine
                 {
                     rows.Clear();
 
-                    DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName).ConfigureAwait(false);
+                    DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
                     KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: true, cancellationToken: ct).ConfigureAwait(false);
                     try
                     {
                         (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
-                            new ExecuteSQLTicket(txnState: tx, database: DatabaseName, sql: sql, parameters: null),
+                            new ExecuteSQLTicket(txnState: tx, database: databaseName, sql: sql, parameters: null),
                             schemaOut: schema).ConfigureAwait(false);
 
                         // Buffer every row before the commit, so a retried attempt starts from nothing.
@@ -306,7 +321,7 @@ public static partial class PlaygroundEngine
             writer.WriteEndArray();
         }
 
-        private async Task NonQueryAsync(string sql, NodeType root, Utf8JsonWriter writer)
+        private async Task NonQueryAsync(string sql, string databaseName, NodeType root, Utf8JsonWriter writer)
         {
             int affected = 0;
             string? warning = null;
@@ -315,19 +330,19 @@ public static partial class PlaygroundEngine
             {
                 // Names its own target and writes the shared registry: no database, no transaction.
                 ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(
-                    new ExecuteSQLTicket(txnState: null!, database: DatabaseName, sql: sql, parameters: null)).ConfigureAwait(false);
+                    new ExecuteSQLTicket(txnState: null!, database: databaseName, sql: sql, parameters: null)).ConfigureAwait(false);
                 warning = result.Warning;
             }
             else
             {
                 await RetryAsync(async ct =>
                 {
-                    DatabaseDescriptor database = await executor.OpenDatabase(DatabaseName).ConfigureAwait(false);
+                    DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
                     KvTransaction tx = await database.Transactions.BeginAsync(cancellationToken: ct).ConfigureAwait(false);
                     try
                     {
                         ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(
-                            new ExecuteSQLTicket(txnState: tx, database: DatabaseName, sql: sql, parameters: null)).ConfigureAwait(false);
+                            new ExecuteSQLTicket(txnState: tx, database: databaseName, sql: sql, parameters: null)).ConfigureAwait(false);
 
                         await CommitOrReleaseAsync(result.Database, database, tx, ct).ConfigureAwait(false);
 

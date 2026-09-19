@@ -178,7 +178,9 @@ internal sealed class UserAdminService
             return 0;
 
         AuthCatalog catalog = await GetAuthCatalogAsync().ConfigureAwait(false);
-        return await catalog.ReapExpiredSessionsAsync(DateTime.UtcNow).ConfigureAwait(false);
+        return await catalog.ReapExpiredSessionsAsync(
+            DateTime.UtcNow,
+            TimeSpan.FromMilliseconds(Math.Max(0, currentOptions.ExpiredSessionRetentionMs))).ConfigureAwait(false);
     }
 
     /// <summary>

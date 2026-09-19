@@ -1482,6 +1482,10 @@ public sealed record CamusDBOptions
     /// Absolute lifetime of an access token. Short by design — there is no sliding expiry or refresh
     /// token initially; re-login is the refresh. Expired tokens are rejected with
     /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/>.
+    ///
+    /// <para>The lifetime bounds how long a token may be <em>presented</em>. A long-lived stream that
+    /// presented it while it was valid is not ended by the expiry alone, only by a logout, a
+    /// revocation, a password change or a dropped account — see <see cref="Auth.StreamAuthority"/>.</para>
     /// </summary>
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public TimeSpan AccessTokenTtl { get; init; } = TimeSpan.FromMinutes(15);
@@ -1558,6 +1562,23 @@ public sealed record CamusDBOptions
     /// </summary>
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
     public int SessionReaperIntervalMs { get; init; } = 300_000;
+
+    /// <summary>
+    /// How long a session record is kept after its absolute expiry before the sweep deletes it.
+    ///
+    /// <para>An expired record authenticates nobody, but it is evidence. A long-lived stream is allowed
+    /// to outlive its token, provided the token merely ran out; a logout or a revocation must still end
+    /// it. Both leave the same trace at the token level — the token stops resolving — so at the moment
+    /// of expiry the stream looks the record up: present and unrevoked means an ordinary expiry,
+    /// anything else means the session was ended early. This window is how long that lookup has to
+    /// happen, so it must comfortably exceed clock skew between nodes plus how late a busy node may run
+    /// the lookup. A stream that misses the window is ended, which is safe but disruptive.</para>
+    ///
+    /// <para>Cluster-scoped because any node may sweep, and the shortest setting in the fleet is the
+    /// one that takes effect. Read per sweep, but the sweep's owner is built once.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public int ExpiredSessionRetentionMs { get; init; } = 300_000;
 
     /// <summary>
     /// Whether this node attaches advisory routing metadata to SQL responses for clients that

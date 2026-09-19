@@ -358,6 +358,36 @@ That is the whole bound, and it covers every transport. Note that a long-lived g
 included: it re-resolves its own authorization on the same schedule, rather than keeping whatever was
 true when the stream opened.
 
+### A gRPC batch stream and the lifetime of its token
+
+A `BatchExecute` stream presents a token once, in the metadata it opens with, and is meant to stay
+open for a whole client session. A token lives 15 minutes by default. The rule that reconciles the two:
+
+> **A token's lifetime bounds how long it can be presented. It does not bound a stream that presented
+> it while it was valid.**
+
+- **An ordinary expiry does not end the stream.** At the instant its token expires, the stream looks
+  its session record up. A record that is present and unrevoked means the session ended by the clock
+  alone. From then on the stream resolves its authorization from the *account* it authenticated as, on
+  the same `authentication_cache_ttl` schedule — so a `GRANT` or a `REVOKE` still reaches its next
+  operation.
+- **Everything that ends a session early still ends the stream:** `/logout`, `FLUSH SESSIONS`, a
+  password change, `DROP USER`. A user that is dropped and created again under the same name does not
+  inherit the stream, because the stream is bound to the account's immutable id. Inside the token's
+  lifetime the stream notices on its next operation. An idle stream notices at the expiry at the
+  latest, and the server then closes it.
+- **A stream that ends this way ends with status `UNAUTHENTICATED`** and the `CADB0516` code, which
+  is the signal for a client to discard its token, log in again, and open a new stream.
+
+The session sweep keeps an expired record for `expired_session_retention_ms` (default five minutes)
+before it deletes it. The record is the only evidence that separates an expiry from a logout, because
+a logout deletes it early. The stream does its lookup at the expiry, so the window only has to cover
+clock skew between nodes and a late timer. A stream that misses the window is ended: missing evidence
+is read as a revocation, never as a pass.
+
+A new stream always needs a token that resolves. A client must therefore still renew its token before
+`expiresAtUnixMs` for the streams it opens later, and for every unary call.
+
 ### What `FLUSH PRIVILEGES` adds
 
 It forces this node to re-read the user and grant catalog from storage, and to discard every
@@ -391,6 +421,7 @@ Beyond the environment variables in §1, these tune the security/performance tra
 | --- | --- | --- |
 | `AccessTokenTtl` | 15 min | Absolute token lifetime. |
 | `AuthenticationCacheTtl` | 1 s | Max staleness of a per-node authorization cache hit; a cross-node revoke takes effect within this window (§5a). A change made on the node itself applies to the next request regardless. Set to 0 for immediate cross-node revocation at a per-request lookup cost. |
+| `ExpiredSessionRetentionMs` | 5 min | How long the session sweep keeps an expired session record. A live gRPC batch stream uses the record at the moment of expiry to tell an expired session from a revoked one (§5a). Keep it well above inter-node clock skew. |
 | `PasswordHashIterations` | 600,000 | PBKDF2-HMAC-SHA256 work factor (stored per credential, so raising it never breaks existing hashes). |
 | `LoginKdfMaxConcurrency` | 8 | Cap on concurrent password verifications, so a login flood cannot exhaust CPU. |
 | `LoginMaxAttemptsPerMinute` | 20 | Per-account login rate limit (`429` on exceed). |

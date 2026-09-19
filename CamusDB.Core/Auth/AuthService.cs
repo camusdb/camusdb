@@ -201,7 +201,11 @@ public sealed class AuthService
         // change as belonging to the generation after it — and the next cache hit would serve it.
         long generationAtRead = catalog.LocalGeneration;
 
-        SessionRecord? session = await catalog.TryGetSessionAsync(tokenId).ConfigureAwait(false);
+        // The strict read: a session that could not be read is not a session that does not exist.
+        // Answering a storage hiccup with "authentication failed" tells every client to throw its
+        // token away and log in again, and ends every long-lived stream on the node; a retryable
+        // failure costs one retry.
+        SessionRecord? session = await catalog.TryGetSessionStrictAsync(tokenId).ConfigureAwait(false);
         if (session is null || session.Revoked || session.ExpiresAt <= DateTime.UtcNow)
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
 
@@ -280,6 +284,262 @@ public sealed class AuthService
     /// saying "drop what you think you know".</para>
     /// </summary>
     public void DropPrincipalCache() => principalCache.Clear();
+
+    // -----------------------------------------------------------------------
+    // Long-lived streams — see StreamAuthority for the two-phase model
+    // -----------------------------------------------------------------------
+
+    private static CamusDBException AuthenticationFailed() =>
+        new(CamusDBErrorCodes.AuthenticationFailed, "Authentication failed");
+
+    /// <summary>
+    /// Authenticates a long-lived stream from the token in its opening metadata, and returns the
+    /// authority every operation on that stream then resolves its principal from. Throws
+    /// <see cref="CamusDBErrorCodes.AuthenticationFailed"/> exactly where
+    /// <see cref="ResolvePrincipalAsync"/> would.
+    ///
+    /// <para>The revocation epoch is read <b>before</b> the session is confirmed present, and the order
+    /// is what makes the pair sound. A revoke-all deletes the sessions first and advances the epoch
+    /// afterwards, so a stream that still found its session is certain to hold an epoch from before
+    /// that revocation's advance, and will see the advance later. Read the other way round, a stream
+    /// could capture the new epoch and a session the revocation was about to delete, and outlive it.</para>
+    ///
+    /// <para>Starts the one scheduled lookup described on <see cref="StreamAuthority"/>. The caller owns
+    /// the returned object and must dispose it when the stream closes, which stops that lookup.</para>
+    /// </summary>
+    public async Task<StreamAuthority> OpenStreamAuthorityAsync(string? bearer)
+    {
+        if (!TokenCodec.TryParse(bearer, out string tokenId, out _))
+            throw AuthenticationFailed();
+
+        AuthCatalog catalog = await catalogTask.ConfigureAwait(false);
+
+        long revocationEpoch = await catalog.ReadSessionRevocationEpochAsync().ConfigureAwait(false);
+        long generation = catalog.LocalGeneration;
+
+        Principal principal = await ResolvePrincipalAsync(bearer).ConfigureAwait(false);
+
+        // The resolve above may have been served from the principal cache, which can outlive a deleted
+        // session by up to the cache TTL. A stream is about to hold this authority for far longer than
+        // one request, so its session is confirmed against storage, and its expiry is needed anyway.
+        SessionRecord? session = await catalog.TryGetSessionStrictAsync(tokenId).ConfigureAwait(false);
+        if (session is null || session.Revoked || session.ExpiresAt <= DateTime.UtcNow)
+            throw AuthenticationFailed();
+
+        StreamAuthority authority = new(bearer!, tokenId, session, principal, revocationEpoch);
+        Publish(authority, principal, generation);
+
+        _ = WatchStreamExpiryAsync(authority);
+
+        return authority;
+    }
+
+    /// <summary>
+    /// Returns the principal the stream's next operation runs as, refreshing it when the snapshot has
+    /// aged past <see cref="CamusDBOptions.AuthenticationCacheTtl"/> or the catalog generation moved.
+    ///
+    /// <para>The common case is one clock read and two field reads, completes synchronously, and
+    /// allocates nothing — which is why this returns a <see cref="ValueTask{TResult}"/>: it runs once
+    /// per operation on a multiplexed stream. The generation check is what makes a change on this node
+    /// reach the very next operation instead of the end of the cache window.</para>
+    ///
+    /// <para>Throws <see cref="CamusDBErrorCodes.AuthenticationFailed"/> once the authority has ended,
+    /// and on every call after that. Any other failure is a storage read that did not complete; it
+    /// says nothing about the authority, which stays as it was.</para>
+    /// </summary>
+    public ValueTask<Principal> ResolveStreamPrincipalAsync(StreamAuthority authority)
+    {
+        StreamAuthority.Snapshot? current = authority.Current;
+
+        if (current is not null
+            && !authority.HasEnded
+            && Environment.TickCount64 < current.RefreshAtTicks
+            && AuthorizationGeneration == current.Generation)
+        {
+            return new ValueTask<Principal>(current.Principal);
+        }
+
+        return new ValueTask<Principal>(RefreshStreamAuthorityAsync(authority));
+    }
+
+    private void Publish(StreamAuthority authority, Principal principal, long generation)
+    {
+        authority.Current = new StreamAuthority.Snapshot(
+            principal,
+            Environment.TickCount64 + (long)options.AuthenticationCacheTtl.TotalMilliseconds,
+            generation);
+    }
+
+    /// <summary>
+    /// Resolves the stream's principal again under its gate, moving it from token-bound to
+    /// account-bound when its token's lifetime has run out, or ending it when the authority is gone.
+    /// Shared by the per-operation path and the scheduled expiry lookup, so both reach the same
+    /// verdict by the same steps whichever gets there first.
+    /// </summary>
+    private async Task<Principal> RefreshStreamAuthorityAsync(StreamAuthority authority)
+    {
+        await authority.Gate.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            if (authority.HasEnded)
+                throw AuthenticationFailed();
+
+            // Read before anything it will stamp: a change landing during the reads below then leaves
+            // the snapshot stamped behind its own data, which costs one more refresh and is safe.
+            long generation = AuthorizationGeneration;
+
+            Principal principal = authority.Phase == StreamAuthority.TokenBound
+                ? await ResolveTokenBoundAsync(authority).ConfigureAwait(false)
+                : await ResolveAccountBoundAsync(authority).ConfigureAwait(false);
+
+            Publish(authority, principal, generation);
+            return principal;
+        }
+        finally
+        {
+            authority.Gate.Release();
+
+            // Outside the gate: a listener may run the stream's teardown inline.
+            if (authority.HasEnded)
+                authority.SignalEnded();
+        }
+    }
+
+    /// <summary>
+    /// Inside the token's lifetime, the token itself is the authority and a failed resolve is a
+    /// revocation. At or past the expiry, the session record decides — see <see cref="StreamAuthority"/>.
+    /// </summary>
+    private async Task<Principal> ResolveTokenBoundAsync(StreamAuthority authority)
+    {
+        if (DateTime.UtcNow < authority.ExpiresAt)
+        {
+            try
+            {
+                return await ResolvePrincipalAsync(authority.Bearer).ConfigureAwait(false);
+            }
+            catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.AuthenticationFailed)
+            {
+                // A resolve that started inside the lifetime can finish outside it, and then its
+                // failure is the expiry, not a revocation. Only a failure that is still inside the
+                // lifetime afterwards is evidence that the session was ended early.
+                if (DateTime.UtcNow < authority.ExpiresAt)
+                {
+                    authority.Phase = StreamAuthority.Ended;
+                    throw;
+                }
+            }
+        }
+
+        AuthCatalog catalog = await catalogTask.ConfigureAwait(false);
+        SessionRecord? session = await catalog.TryGetSessionStrictAsync(authority.TokenId).ConfigureAwait(false);
+
+        // Every early ending deletes the record: a logout, a revoke-all, a drop of the account. The
+        // sweep deletes it too, but only after its retention window — so inside the window "absent"
+        // means "ended early", and past it the evidence is gone and the answer must be the safe one.
+        if (session is null || session.Revoked || !TokenCodec.MacEquals(authority.SecretMac, session.SecretMac))
+        {
+            authority.Phase = StreamAuthority.Ended;
+            throw AuthenticationFailed();
+        }
+
+        authority.Phase = StreamAuthority.AccountBound;
+        return await ResolveAccountBoundAsync(authority).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Builds the principal from the account the stream authenticated as, after confirming that the
+    /// account is still the one that authenticated: same immutable id (so a dropped and re-created
+    /// name inherits nothing), same credential epoch (so a password change ends the stream, as it
+    /// ends a token), and no revoke-all since the stream opened.
+    /// </summary>
+    private async Task<Principal> ResolveAccountBoundAsync(StreamAuthority authority)
+    {
+        AuthCatalog catalog = await catalogTask.ConfigureAwait(false);
+
+        UserRecord? user = await catalog.TryGetUserAsync(authority.UserName).ConfigureAwait(false);
+        if (user is null
+            || !string.Equals(user.Id, authority.UserId, StringComparison.Ordinal)
+            || user.CredentialEpoch != authority.CredentialEpoch)
+        {
+            authority.Phase = StreamAuthority.Ended;
+            throw AuthenticationFailed();
+        }
+
+        // The epoch moves only in a transaction that also moves the generation, so it is re-read only
+        // when the generation has. Generation first, epoch second: an advance that lands between the
+        // two reads is then seen by this epoch read, and one that lands after both moves the
+        // generation past the value recorded here.
+        long generation = catalog.LocalGeneration;
+        if (generation != authority.RevocationCheckedAtGeneration)
+        {
+            long revocationEpoch = await catalog.ReadSessionRevocationEpochAsync().ConfigureAwait(false);
+            if (revocationEpoch != authority.RevocationEpoch)
+            {
+                authority.Phase = StreamAuthority.Ended;
+                throw AuthenticationFailed();
+            }
+
+            authority.RevocationCheckedAtGeneration = generation;
+        }
+
+        IReadOnlyList<GrantRecord> grants = await catalog.ListGrantsAsync(authority.UserName).ConfigureAwait(false);
+        return new Principal(authority.UserName, user.IsSuperuser, grants, user.Id);
+    }
+
+    /// <summary>
+    /// The scheduled expiry lookup of one stream: waits for the token's expiry, then runs the same
+    /// refresh an operation would, so that an idle stream decides "expired or ended early" while the
+    /// session record that answers it still exists.
+    ///
+    /// <para>Owned by the <see cref="StreamAuthority"/> it serves and stopped by its disposal. It never
+    /// throws: a verdict is recorded on the authority, and a storage read that fails is retried for as
+    /// long as the record can still exist. Past that, the next operation reaches the safe verdict by
+    /// itself, so there is nothing left for this task to do.</para>
+    /// </summary>
+    private async Task WatchStreamExpiryAsync(StreamAuthority authority)
+    {
+        CancellationToken closed = authority.Closed;
+        TimeSpan longestDelay = TimeSpan.FromHours(1); // Task.Delay caps out near 49 days
+
+        try
+        {
+            while (true)
+            {
+                TimeSpan remaining = authority.ExpiresAt - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                    break;
+
+                await Task.Delay(remaining < longestDelay ? remaining : longestDelay, closed).ConfigureAwait(false);
+            }
+
+            DateTime giveUpAt = authority.ExpiresAt.AddMilliseconds(Math.Max(0, options.ExpiredSessionRetentionMs));
+
+            while (!closed.IsCancellationRequested && authority.Phase == StreamAuthority.TokenBound)
+            {
+                try
+                {
+                    await RefreshStreamAuthorityAsync(authority).ConfigureAwait(false);
+                    return;
+                }
+                catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.AuthenticationFailed)
+                {
+                    return; // the verdict is recorded on the authority, and its stream was signalled
+                }
+                catch (Exception)
+                {
+                    if (DateTime.UtcNow >= giveUpAt)
+                        return;
+
+                    await Task.Delay(TimeSpan.FromSeconds(1), closed).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The stream closed first.
+        }
+    }
 
     /// <summary>Looks up a user record by name, or null when no such user exists.</summary>
     public async Task<UserRecord?> TryGetUserAsync(string name)
