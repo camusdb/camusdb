@@ -213,10 +213,14 @@ public sealed class ClusterSettingsService : IAsyncDisposable
         }
     }
 
-    /// <summary>Current overlay entries — what the cluster carries beyond local configuration.</summary>
-    public IReadOnlyList<(string Key, string Value)> List()
+    /// <summary>
+    /// Current overlay entries — what the cluster carries beyond local configuration. Asynchronous
+    /// because the overlay lock is also held across the overlay scan's await; a blocking wait here
+    /// would park a thread for that I/O.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Key, string Value)>> ListAsync()
     {
-        overlaySync.Wait();
+        await overlaySync.WaitAsync().ConfigureAwait(false);
         try
         {
             return overlay.OrderBy(static kv => kv.Key, StringComparer.Ordinal)

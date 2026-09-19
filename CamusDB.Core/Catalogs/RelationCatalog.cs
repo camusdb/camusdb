@@ -33,7 +33,7 @@ namespace CamusDB.Core.Catalogs;
 /// the schema afterwards, so <see cref="ContentsRetirementStore"/> records it — otherwise its rows
 /// are unreachable rather than deleted.</para>
 ///
-/// <para><b><see cref="RegisterTableSystemObject"/> takes a different lock on purpose.</b> It holds
+/// <para><b><see cref="RegisterTableSystemObjectAsync"/> takes a different lock on purpose.</b> It holds
 /// <c>SystemSchemaSemaphore</c>, not <c>Schema.Semaphore</c>: it maintains the legacy system-schema
 /// index map rather than the replicated schema, and folding it into the schema-lock discipline would
 /// serialize it against DDL it has no relationship with.</para>
@@ -201,7 +201,7 @@ internal sealed class RelationCatalog
         // Restore the system-schema table object and persist it in the DDL transaction, mirroring
         // TableCreator (deferred drop removed it). Without this the live schema has the table but the
         // system schema does not, an asymmetry with the create/drop paths.
-        RegisterTableSystemObject(database, reattached);
+        await RegisterTableSystemObjectAsync(database, reattached).ConfigureAwait(false);
         await SchemaMetaStore.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
 
         // The table is live again — drop the orphan record so the GC leaves the reattached data alone.
@@ -281,7 +281,7 @@ internal sealed class RelationCatalog
 
         TableSchema reattached = GetTableSchema(database, newName);
 
-        RegisterTableSystemObject(database, reattached);
+        await RegisterTableSystemObjectAsync(database, reattached).ConfigureAwait(false);
         await SchemaMetaStore.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
 
         // Copy the captured layouts under the new id so a row written under an older version of the
@@ -333,9 +333,9 @@ internal sealed class RelationCatalog
     /// immutable id. Shared by table creation and relink so both keep <c>SystemSchema.Tables</c> in sync
     /// with the live schema. In-memory only; the caller persists via <see cref="PersistSystemMetaAsync"/>.
     /// </summary>
-    internal void RegisterTableSystemObject(DatabaseDescriptor database, TableSchema tableSchema)
+    internal async Task RegisterTableSystemObjectAsync(DatabaseDescriptor database, TableSchema tableSchema)
     {
-        database.SystemSchemaSemaphore.Wait();
+        await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
             database.SystemSchema.Tables.TryAdd(

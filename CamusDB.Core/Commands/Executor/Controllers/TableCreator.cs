@@ -68,7 +68,7 @@ internal sealed class TableCreator
         // version and the table is born with its indexes at Public — no separate AddIndex round-trips.
         TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx, tableId).ConfigureAwait(false);
 
-        RegisterTableObject(database, tableSchema);
+        await RegisterTableObjectAsync(database, tableSchema).ConfigureAwait(false);
         await catalogs.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
 
         // Build the table descriptor from the now-complete schema (table + indexes) so callers that
@@ -79,12 +79,14 @@ internal sealed class TableCreator
         return true;
     }
 
-    private void RegisterTableObject(DatabaseDescriptor database, TableSchema tableSchema)
+    private async Task RegisterTableObjectAsync(DatabaseDescriptor database, TableSchema tableSchema)
     {
+        // Asynchronous on purpose: TableDropper holds this semaphore across an await, and a blocking
+        // Wait here would park a thread until that I/O finishes (on the single-threaded browser
+        // runtime there is no other thread, so the wait throws instead).
+        await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            database.SystemSchemaSemaphore.Wait();
-
             DatabaseTableObject tableObject = new(
                 type: DatabaseObjectType.Table,
                 id: tableSchema.Id ?? "",

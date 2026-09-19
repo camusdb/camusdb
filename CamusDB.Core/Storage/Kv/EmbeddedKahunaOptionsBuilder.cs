@@ -886,6 +886,11 @@ public static class EmbeddedKahunaOptionsBuilder
     /// </summary>
     internal static long RaftLogFlushUnitHeadroomBytes(EmbeddedKahunaOptions options)
     {
+#if CAMUSDB_BROWSER
+        // The browser build has no RocksDB WAL, so there is no Raft-log flush unit to fit. Both
+        // callers return before this point anyway, because the browser node never shares RocksDB memory.
+        return 0;
+#else
         Kommander.WAL.RocksDbWalTuning defaults = Kommander.WAL.RocksDbWalTuning.Default;
 
         long writeBufferBytes = options.RaftWalShardWriteBufferSizeMb is int writeBufferMb
@@ -895,6 +900,7 @@ public static class EmbeddedKahunaOptionsBuilder
         int merge = options.RaftWalShardMinWriteBufferNumberToMerge ?? defaults.ShardMinWriteBufferNumberToMerge;
 
         return writeBufferBytes * merge + writeBufferBytes;
+#endif
     }
 
     /// <summary>

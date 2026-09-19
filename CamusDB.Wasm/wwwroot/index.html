@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CamusDB Playground</title>
+    <meta name="description" content="Run SQL against the CamusDB engine in your browser. Nothing to install; your data stays in this tab.">
+    <link rel="stylesheet" href="playground.css">
+</head>
+<body>
+    <header class="top">
+        <div class="brand">
+            <span class="logo" aria-hidden="true">◆</span>
+            <span class="name">CamusDB</span>
+            <span class="tag">Playground</span>
+        </div>
+        <div class="status" id="status" role="status" aria-live="polite">
+            <span class="dot"></span><span id="status-text">Loading the engine…</span>
+        </div>
+    </header>
+
+    <main class="layout">
+        <section class="pane editor-pane" aria-label="SQL editor">
+            <p class="intro">
+                This is the real CamusDB engine — parser, planner, executor and storage — running in
+                your browser tab. Nothing is sent to a server. A sample <code>authors</code> and
+                <code>books</code> data set is loaded; a reload starts over.
+            </p>
+
+            <div class="examples" id="examples" aria-label="Example queries"></div>
+
+            <label class="visually-hidden" for="sql">SQL</label>
+            <textarea id="sql" spellcheck="false" autocapitalize="off" autocomplete="off"
+                      placeholder="Write SQL here. Separate statements with ;"></textarea>
+
+            <div class="actions">
+                <button id="run" class="primary" disabled>Run <kbd id="run-key">Ctrl ↵</kbd></button>
+                <button id="reset" disabled title="Drop everything and reload the sample data">Reset data</button>
+            </div>
+        </section>
+
+        <section class="pane results-pane" aria-label="Results">
+            <div id="results" class="results">
+                <p class="empty">Run a query to see results here.</p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="foot">
+        Single-node, in-memory engine compiled to WebAssembly.
+        <a href="https://github.com/camusdb/camusdb">Source</a>
+    </footer>
+
+    <script type="module" src="main.js"></script>
+</body>
+</html>

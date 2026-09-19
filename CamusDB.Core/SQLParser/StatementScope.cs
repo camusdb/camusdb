@@ -122,6 +122,28 @@ public static class StatementScope
         NodeType.ShowClusterSettings;
 
     /// <summary>
+    /// True for the statements that <c>CommandExecutor.ExecuteSQLQuery</c> answers with rows:
+    /// <c>SELECT</c>, the <c>SHOW</c> family, the <c>EXPLAIN</c> family and <c>ANALYZE</c>. Every other
+    /// statement goes to <c>ExecuteNonSQLQuery</c>, which also accepts schema DDL
+    /// (<see cref="IsSchemaDdl"/>).
+    ///
+    /// <para>For a host that takes free-form SQL and must choose the entry point itself, such as the
+    /// browser playground. The REST and gRPC transports do not need it: their clients choose the
+    /// endpoint. The list must match the query executor's dispatch; a statement added there and not
+    /// here goes to the non-query path and is refused as unknown.</para>
+    /// </summary>
+    public static bool ReturnsRows(NodeType nodeType) => nodeType is
+        NodeType.Select or
+        NodeType.Explain or NodeType.ExplainLogical or NodeType.ExplainPhysical or NodeType.ExplainAnalyze or
+        NodeType.AnalyzeTable or
+        NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowStatistics or
+        NodeType.ShowRanges or NodeType.ShowCreateTable or NodeType.ShowDatabase or
+        NodeType.ShowViews or NodeType.ShowMaterializedViews or
+        NodeType.ShowCreateView or NodeType.ShowCreateMaterializedView or
+        NodeType.ShowOrphanTables ||
+        IsServerLevelQuery(nodeType);
+
+    /// <summary>
     /// True for statements that are valid without a context database — every database-scoped
     /// mutation above, plus the server-level queries, which resolve their own target (or none at
     /// all) rather than reading the current database's schema.

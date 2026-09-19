@@ -410,6 +410,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         WireSettingsRestoreBuffer();
     }
 
+#if !CAMUSDB_BROWSER
+    // Cluster mode needs Kahuna's multi-node constructor and the gRPC transports. The browser build
+    // of Kahuna has neither: a browser tab cannot open sockets, so it runs one node only.
+
     /// <summary>
     /// Constructs the embedded engine with externally supplied communication implementations.
     /// Use for cluster mode where real gRPC transports replace in-process fakes.
@@ -455,6 +459,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             loggerFactory
         );
     }
+#endif
 
     /// <summary>
     /// Convenience constructor: in-memory storage, single partition, no persistence.

@@ -38,3 +38,5 @@ CamusDB/Data/
 CamusDB.Cluster.Tests/TestResults
 CamusDB.Workload.Tests/TestResults
 CamusDB.Grpc.Client.Tests/TestResults/
+CamusDB.Wasm/bin
+CamusDB.Wasm/obj

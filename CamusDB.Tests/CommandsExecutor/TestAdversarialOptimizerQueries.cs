@@ -928,13 +928,14 @@ public sealed class TestAdversarialOptimizerQueries : SharedNodeBaseTest
     {
         Fixture f = await SetupAsync();
 
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
         {
             await ExecQuery(f.Database, f.Executor, f.DbName,
                 "SELECT name FROM regions r JOIN customers c ON c.region_id = r.id");
         });
 
-        Console.WriteLine("Ambiguous column rejected with: " + ex.Message);
+        Assert.IsNotNull(ex);
+        Console.WriteLine("Ambiguous column rejected with: " + ex!.Message);
     }
 
     /// <summary>

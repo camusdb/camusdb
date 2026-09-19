@@ -30,6 +30,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// functions is a password hash (there is no salt and no work factor). Use them for checksums, change
 /// detection, bucketing and test data.</para>
 ///
+/// <para>The browser build computes <c>md5</c> with <see cref="Util.Hashes.ManagedMd5"/>, because .NET
+/// on WebAssembly has no MD5. The SHA functions use the platform implementation on every target.</para>
+///
 /// <para>Allocation: the digest goes into a stack buffer and the only heap allocation is the result
 /// string. A short string encodes to UTF-8 on the stack; a long one rents a pooled buffer.</para>
 /// </summary>
@@ -133,7 +136,12 @@ internal static class HashScalarFunctions
 
         int length = kind switch
         {
+#if CAMUSDB_BROWSER
+            // .NET on WebAssembly has no MD5; see ManagedMd5.
+            HashKind.Md5 => Util.Hashes.ManagedMd5.HashData(input, digest),
+#else
             HashKind.Md5 => MD5.HashData(input, digest),
+#endif
             HashKind.Sha1 => SHA1.HashData(input, digest),
             HashKind.Sha256 => SHA256.HashData(input, digest),
             HashKind.Sha512 => SHA512.HashData(input, digest),

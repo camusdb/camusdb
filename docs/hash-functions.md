@@ -34,6 +34,12 @@ CamusDB they return hex text, which is the same as PostgreSQL's `encode(sha256(x
 The digest of `md5(random()::text)` is not the same as in PostgreSQL, because `random()` gives other
 values and the float-to-text format can be different. Only the digest of the same input is the same.
 
+## Browser build
+
+.NET on WebAssembly has no MD5. The browser build of the engine (see
+[browser-playground.md](browser-playground.md)) computes `md5` with its own implementation, which gives
+the same digest.
+
 ## Not for security
 
 MD5 and SHA-1 have known collision attacks. None of these functions is a password hash: they have no

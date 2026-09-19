@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+
+  <!-- The browser playground host: the CamusDB engine running in a browser tab on the default
+       single-threaded browser-wasm runtime. Keep WasmEnableThreads off: the multithreaded runtime
+       needs COOP/COEP headers, does not run under Node, and crashed in its own timer code in testing.
+       The engine builds for this runtime through CamusDB.Core's net10.0-browser target. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-browser</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Required by the JSExport source generator. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);NU1903;CS0436</NoWarn>
+    <!-- Trimming is off until the dependencies are trim-safe. Nixie creates actors with
+         Activator.CreateInstance, so a trimmed build loses their constructors and the node fails
+         to start (MissingMethodException on Nixie.Actors.NobodyActor). Untrimmed, the bundle is
+         about 12 MB with brotli. -->
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
+  </ItemGroup>
+
+</Project>

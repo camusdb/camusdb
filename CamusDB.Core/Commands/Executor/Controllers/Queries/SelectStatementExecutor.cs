@@ -302,7 +302,7 @@ internal sealed class SelectStatementExecutor
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "Cluster settings are not available on this engine");
 
-            return (null!, schemaQuerier.ShowClusterSettings(clusterSettings.List(), UnquoteLikePattern(ast.leftAst?.yytext)));
+            return (null!, schemaQuerier.ShowClusterSettings(await clusterSettings.ListAsync().ConfigureAwait(false), UnquoteLikePattern(ast.leftAst?.yytext)));
         }
 
         // SHOW ORPHAN DATABASES lists recoverable dropped databases from the registry — no db context.

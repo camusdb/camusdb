@@ -221,7 +221,7 @@ internal sealed class TestClusterSettingsStatements : BaseTest
 
             Assert.AreEqual(
                 ("max_mutations_per_transaction", "55555"),
-                reborn.List().Single());
+                (await reborn.ListAsync()).Single());
             Assert.AreEqual(55555, rebornHolder.Current.MaxMutationsPerTransaction);
         }
         finally

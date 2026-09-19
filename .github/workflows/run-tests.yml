@@ -44,3 +44,38 @@ jobs:
             --blame-hang-timeout 180s \
             --blame-crash \
             -- NUnit.MaxParallelWorkers=4
+
+  Browser-Playground-Smoke:
+    # Builds the browser playground host and runs the engine under Node, on the same single-threaded
+    # browser-wasm runtime a browser tab uses. It catches a dependency or engine change that stops
+    # the engine from starting or running SQL in the browser build, which the test suite (net10.0)
+    # cannot see.
+    runs-on: "ubuntu-latest"
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Publish the playground
+        run: dotnet publish CamusDB.Wasm/CamusDB.Wasm.csproj -c Release -o artifacts/wasm
+
+      - name: Run the engine in the browser runtime
+        timeout-minutes: 10
+        run: node CamusDB.Wasm/smoke/smoke.mjs artifacts/wasm/wwwroot

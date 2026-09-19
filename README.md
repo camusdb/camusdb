@@ -68,6 +68,10 @@ The cache is correct before it is fast: a committed write on the same node evict
 
 CamusDB's engine is written in modern C# on .NET: the SQL parser, the query planner and operators, the transaction layer, and the embedded [Kahuna](https://github.com/kahunakv/kahuna) storage node all run in a single .NET process (with [RocksDB](https://rocksdb.org/) underneath for persistence). Because the engine itself is pure .NET, extending it means writing ordinary C#: bring your own NuGet libraries and custom business logic directly into the database layer without crossing a language boundary or fighting a foreign extension API. Reading and debugging the engine is equally direct, and it runs on any platform .NET 10 supports. Clients talk to it over a JSON/HTTP API or a gRPC API with a .NET client library.
 
+### Browser playground
+
+The same engine also compiles to WebAssembly and runs in a browser tab, with nothing to install: a single in-memory node with a SQL editor and a sample data set. See [docs/browser-playground.md](docs/browser-playground.md) to build it and serve it from any static host.
+
 Features
 --------
 - **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, TRUNCATE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, prepared statements, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.

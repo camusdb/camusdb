@@ -205,8 +205,8 @@ public sealed class CatalogsManager
     public async Task RecordRelinkTargetAsync(DatabaseDescriptor database, OrphanTableRecord orphan, string targetId)
         => await relations.RecordRelinkTargetAsync(database, orphan, targetId).ConfigureAwait(false);
 
-    public void RegisterTableSystemObject(DatabaseDescriptor database, TableSchema tableSchema)
-        => relations.RegisterTableSystemObject(database, tableSchema);
+    public Task RegisterTableSystemObjectAsync(DatabaseDescriptor database, TableSchema tableSchema)
+        => relations.RegisterTableSystemObjectAsync(database, tableSchema);
 
     public Task<bool> RenameTable(
         DatabaseDescriptor database, RenameTableTicket ticket, KvTransaction tx,
