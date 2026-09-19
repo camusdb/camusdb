@@ -153,6 +153,8 @@ internal static class QueryHavingWorkspace
                         && ContainsHiddenExpression(expression.rightAst, ticket, outputNames, insideAggregate));
 
             case NodeType.ExprNot:
+
+            case NodeType.ExprNegate:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
             case NodeType.ExprIsTrue:
@@ -333,6 +335,8 @@ internal static class QueryHavingWorkspace
                 return;
 
             case NodeType.ExprNot:
+
+            case NodeType.ExprNegate:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
             case NodeType.ExprIsTrue:

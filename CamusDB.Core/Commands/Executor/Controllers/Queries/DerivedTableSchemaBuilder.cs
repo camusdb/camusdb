@@ -350,6 +350,26 @@ internal static class DerivedTableSchemaBuilder
         List<DerivedColumnSchema> columns = new(query.Projections.Count);
         QueryRowNameResolver innerResolver = new(innerBound.Sources, innerBound.DerivedSources);
 
+        // Each column declares the key its cell has in the result row. The projector derives the same
+        // keys from the same select list (QueryProjectionResolver.GetRowKeys), and for a list that holds
+        // a * it also needs the columns the * expands to — the expansion below is that set.
+        List<NodeAst> expressions = new(query.Projections.Count);
+        List<DerivedColumnSchema>? starColumns = null;
+
+        for (int i = 0; i < query.Projections.Count; i++)
+        {
+            NodeAst expression = query.Projections[i].Expression;
+            expressions.Add(expression);
+
+            if (starColumns is null && QueryExpressionClassifier.UnwrapAlias(expression).nodeType == NodeType.ExprAllFields)
+            {
+                starColumns = [];
+                ExpandAllFields(innerBound, innerResolver, starColumns);
+            }
+        }
+
+        string[] rowKeys = QueryProjectionResolver.GetRowKeys(expressions, starColumns?.Select(column => column.RowKey));
+
         for (int i = 0; i < query.Projections.Count; i++)
         {
             ProjectionItem projection = query.Projections[i];
@@ -357,13 +377,13 @@ internal static class DerivedTableSchemaBuilder
 
             if (target.nodeType == NodeType.ExprAllFields)
             {
-                ExpandAllFields(innerBound, innerResolver, columns);
+                columns.AddRange(starColumns!);
                 continue;
             }
 
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection.Expression, i);
             ColumnType type = InferType(projection.Expression, innerBound, innerResolver);
-            columns.Add(new DerivedColumnSchema(name, type));
+            columns.Add(new DerivedColumnSchema(name, type) { RowKey = rowKeys[i] });
         }
 
         return columns;
@@ -371,7 +391,7 @@ internal static class DerivedTableSchemaBuilder
 
     /// <summary>
     /// Expands a <c>SELECT *</c> into one output column per readable source column, matching the
-    /// exact keys the row cursor produces so positional encoding can look each value up by name.
+    /// exact keys the row cursor produces so positional encoding can look each value up by row key.
     /// <para>
     /// A single-source query streams rows keyed by bare column name, so columns stay bare. A
     /// multi-source query (any join, or extra table alongside a derived/subquery source) is emitted by
@@ -414,13 +434,19 @@ internal static class DerivedTableSchemaBuilder
 
         foreach (BoundDerivedTableSource derived in innerBound.DerivedSources)
         {
+            // A derived table may itself declare two columns with one name; its rows tell them apart
+            // by row key, so the expansion carries the key through rather than the shared name.
             foreach (DerivedColumnSchema col in derived.Columns)
             {
                 string name = qualify
                     ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.Name)
                     : col.Name;
 
-                columns.Add(new DerivedColumnSchema(name, col.Type));
+                string rowKey = qualify
+                    ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.RowKey)
+                    : col.RowKey;
+
+                columns.Add(new DerivedColumnSchema(name, col.Type) { RowKey = rowKey });
             }
         }
     }
@@ -435,6 +461,7 @@ internal static class DerivedTableSchemaBuilder
         IReadOnlyDictionary<string, ColumnValue> evaluatedRow)
     {
         List<DerivedColumnSchema> columns = new(projections.Count);
+        string[] rowKeys = QueryProjectionResolver.GetRowKeys(projections);
 
         for (int i = 0; i < projections.Count; i++)
         {
@@ -442,11 +469,11 @@ internal static class DerivedTableSchemaBuilder
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
 
             // Infer from the evaluated value where possible; fall back to String for unknowns.
-            ColumnType type = evaluatedRow.TryGetValue(name, out ColumnValue? val)
+            ColumnType type = evaluatedRow.TryGetValue(rowKeys[i], out ColumnValue? val)
                 ? (val.Type == ColumnType.Null ? ColumnType.String : val.Type)
                 : ColumnType.String;
 
-            columns.Add(new DerivedColumnSchema(name, type));
+            columns.Add(new DerivedColumnSchema(name, type) { RowKey = rowKeys[i] });
         }
 
         return columns;
@@ -491,6 +518,10 @@ internal static class DerivedTableSchemaBuilder
 
         if (target.nodeType == NodeType.ExprSubscript)
             return InferSubscriptType(target.leftAst!, innerBound, innerResolver);
+
+        // Unary minus keeps its operand's numeric type.
+        if (target.nodeType == NodeType.ExprNegate)
+            return InferType(target.leftAst!, innerBound, innerResolver);
 
         return ColumnType.String;
     }

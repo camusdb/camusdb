@@ -162,6 +162,11 @@ follows the `IN` rule, so an array with a NULL element and no match gives UNKNOW
 `NOT array_contains(...)` then accepts the row — the same as a check on `NOT IN`. See
 [Data types → Arrays](data-types.md#arrays).
 
+The PostgreSQL forms `'banned' <> ALL (tags)` and `'news' = ANY (tags)` also work in a check, with
+the same rules. CamusDB stores them as `NOT array_contains(tags, 'banned')` and
+`array_contains(tags, 'news')`, so `SHOW CREATE TABLE` shows that form. See
+[`= ANY`, `= SOME` and `<> ALL`](sql-expression-syntax.md#-any--some-and--all).
+
 ### Type coercion in a check
 
 Two coercions make the natural SQL work without explicit `CAST`, exactly as the WHERE path does:

@@ -25,6 +25,10 @@
    which is already the intended parse (a AND b IS NULL -> a AND (b IS NULL); a.b as one name). Declaring
    their precedence makes that resolution explicit and removes the warnings without changing any parse. */
 %left TIS TIN TDOT
+/* Unary minus binds tighter than every binary operator and IS, as in PostgreSQL: `-a * b` is
+   `(-a) * b` and `-a IS NULL` is `(-a) IS NULL`. It stays below the postfix cast and subscript, so
+   `-x::int` negates the cast value. UMINUS is a precedence name only; no token carries it. */
+%right UMINUS
 /* The postfix operators bind tightest of all, as in PostgreSQL: `a + b::int` casts only b,
    `a + b[1]` subscripts only b, and `NOT x::bool` negates the cast value. Declaring them above every
    binary operator makes each such shift/reduce choice resolve to a shift. */
@@ -1261,6 +1265,10 @@ expr       : equals_expr { $$.n = $1.n; }
            | and_expr { $$.n = $1.n; }
            | or_expr { $$.n = $1.n; }
            | not_expr { $$.n = $1.n; }
+           | negate_expr { $$.n = $1.n; }
+           | not_between_expr { $$.n = $1.n; }
+           | not_like_expr { $$.n = $1.n; }
+           | not_ilike_expr { $$.n = $1.n; }
            | add_expr { $$.n = $1.n; }
            | sub_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
@@ -1307,6 +1315,11 @@ expr       : equals_expr { $$.n = $1.n; }
 between_expr : condition TBETWEEN between_bound TAND between_bound { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
              ;
 
+/* `x NOT BETWEEN a AND b` is NOT over the positive node (NodeAst.Not). Its bounds are between_bound
+   for the same reason as between_expr's. */
+not_between_expr : condition TNOT TBETWEEN between_bound TAND between_bound { $$.n = NodeAst.Not(new(NodeType.ExprBetween, $1.n, null, $4.n, $6.n, null, null, null, null)); }
+                 ;
+
 /* Arithmetic-level operand used only for BETWEEN bounds; see between_expr for why it exists. The
    arithmetic operators are duplicated here rather than shared with add_expr/sub_expr/mult_expr/div_expr
    because those take `condition` operands, which would re-admit the boolean forms this level exists to
@@ -1323,6 +1336,7 @@ between_bound : simple_expr { $$.n = $1.n; }
               | between_bound TMULT between_bound { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TDIV between_bound { $$.n = new(NodeType.ExprDiv, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TMOD between_bound { $$.n = NodeAst.ModCall($1.n, $3.n); }
+              | TMINUS between_bound %prec UMINUS { $$.n = NodeAst.Negate($2.n); }
               | between_bound TCOLONCOLON cast_target_type { $$.n = new(NodeType.ExprCast, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound LBRACKET condition RBRACKET { $$.n = new(NodeType.ExprSubscript, $1.n, $3.n, null, null, null, null, null, null); }
               ;
@@ -1336,22 +1350,32 @@ or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, nu
 not_expr  : TNOT condition { $$.n = new(NodeType.ExprNot, $2.n, null, null, null, null, null, null, null); }
           ;
 
-equals_expr : condition TEQUALS condition { $$.n = new(NodeType.ExprEquals, $1.n, $3.n, null, null, null, null, null, null); }
+/* Unary minus over any expression. NodeAst.Negate folds a numeric literal operand into a negative
+   literal, so only a non-literal operand builds ExprNegate. The lexer already reads `-5` with no
+   space as one literal token; this rule covers `-col`, `-(a + b)`, `- 5` and `- -5`. */
+negate_expr : TMINUS condition %prec UMINUS { $$.n = NodeAst.Negate($2.n); }
             ;
 
-not_equals_expr : condition TNOTEQUALS condition { $$.n = new(NodeType.ExprNotEquals, $1.n, $3.n, null, null, null, null, null, null); }
+/* The six comparisons build their node through NodeAst.Comparison, which also turns the quantified
+   forms `x = ANY (...)`, `x = SOME (...)` and `x <> ALL (...)` into the membership test each one is.
+   ANY, SOME and ALL are not tokens: they stay identifiers, so `ANY (tags)` reaches the action as an
+   ordinary call, and a column may still be named any, some or all. */
+equals_expr : condition TEQUALS condition { $$.n = NodeAst.Comparison(NodeType.ExprEquals, $1.n, $3.n); }
+            ;
+
+not_equals_expr : condition TNOTEQUALS condition { $$.n = NodeAst.Comparison(NodeType.ExprNotEquals, $1.n, $3.n); }
                 ;
 
-less_than_expr : condition TLESSTHAN condition { $$.n = new(NodeType.ExprLessThan, $1.n, $3.n, null, null, null, null, null, null); }
+less_than_expr : condition TLESSTHAN condition { $$.n = NodeAst.Comparison(NodeType.ExprLessThan, $1.n, $3.n); }
                ;
 
-greater_than_expr : condition TGREATERTHAN condition { $$.n = new(NodeType.ExprGreaterThan, $1.n, $3.n, null, null, null, null, null, null); }
+greater_than_expr : condition TGREATERTHAN condition { $$.n = NodeAst.Comparison(NodeType.ExprGreaterThan, $1.n, $3.n); }
                   ;
 
-greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = new(NodeType.ExprGreaterEqualsThan, $1.n, $3.n, null, null, null, null, null, null); }
+greater_equals_than_expr : condition TGREATERTHANEQUALS condition { $$.n = NodeAst.Comparison(NodeType.ExprGreaterEqualsThan, $1.n, $3.n); }
                          ;
 
-less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = new(NodeType.ExprLessEqualsThan, $1.n, $3.n, null, null, null, null, null, null); }
+less_equals_than_expr : condition TLESSTHANEQUALS condition { $$.n = NodeAst.Comparison(NodeType.ExprLessEqualsThan, $1.n, $3.n); }
                       ;
 
 add_expr  : condition TADD condition { $$.n = new(NodeType.ExprAdd, $1.n, $3.n, null, null, null, null, null, null); }
@@ -1387,6 +1411,13 @@ like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n
 
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null, null); }
            ;
+
+/* `x NOT LIKE p` and `x NOT ILIKE p` are NOT over the positive node (NodeAst.Not). */
+not_like_expr : condition TNOT TLIKE condition { $$.n = NodeAst.Not(new(NodeType.ExprLike, $1.n, $4.n, null, null, null, null, null, null)); }
+              ;
+
+not_ilike_expr : condition TNOT TILIKE condition { $$.n = NodeAst.Not(new(NodeType.ExprILike, $1.n, $4.n, null, null, null, null, null, null)); }
+               ;
 
 regex_match_expr      : condition TREGEXMATCH    condition { $$.n = new(NodeType.ExprRegexMatch,      $1.n, $3.n, null, null, null, null, null, null); } ;
 regex_imatch_expr     : condition TREGEXIMATCH   condition { $$.n = new(NodeType.ExprRegexMatchCi,    $1.n, $3.n, null, null, null, null, null, null); } ;
@@ -1435,8 +1466,14 @@ exists_subquery_expr : TEXISTS query_expr { $$.n = new(NodeType.ExprExistsSubque
 scalar_subquery_expr : query_expr { $$.n = new(NodeType.ExprScalarSubquery, $1.n, null, null, null, null, null, null, null); }
                      ;
 
+/* The third form, a call whose one argument is written as a bare subquery, exists for
+   `x = ANY (SELECT ...)`: after `any(` an argument must be an expression, which a bare SELECT is not.
+   Its argument is the same ExprScalarSubquery node that `any((SELECT ...))` builds, so the rewrite in
+   NodeAst.Comparison sees one shape for both spellings. On any other function it is a call with a
+   scalar-subquery argument, exactly as the doubly parenthesized form already was. */
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }
+           | identifier query_expr { $$.n = new(NodeType.ExprFuncCall, $1.n, new NodeAst(NodeType.ExprScalarSubquery, $2.n, null, null, null, null, null, null, null), null, null, null, null, null, null); }
            ;
 
 cast_expr : TCAST LPAREN condition TAS cast_target_type RPAREN { $$.n = new(NodeType.ExprCast, $3.n, $5.n, null, null, null, null, null, null); }

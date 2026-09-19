@@ -46,6 +46,7 @@ internal sealed class ScalarFunctionRegistry
         DateTimeScalarFunctions.Register(registry);
         MathScalarFunctions.Register(registry);
         StringScalarFunctions.Register(registry);
+        HashScalarFunctions.Register(registry);
         VectorScalarFunctions.Register(registry);
         JsonScalarFunctions.Register(registry);
         CastScalarFunctions.Register(registry);
@@ -53,6 +54,7 @@ internal sealed class ScalarFunctionRegistry
         RegexScalarFunctions.Register(registry);
         SessionScalarFunctions.Register(registry);
         ArrayScalarFunctions.Register(registry);
+        QuantifierScalarFunctions.Register(registry);
         return registry;
     }
 }

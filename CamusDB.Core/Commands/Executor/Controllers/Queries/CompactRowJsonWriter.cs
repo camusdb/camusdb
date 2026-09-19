@@ -23,7 +23,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// canonical reference the codec tests assert against.
 ///
 /// <para>
-/// Values are resolved by schema-column name. When every row in a set shares one
+/// Values are resolved by schema-column row key (<see cref="DerivedColumnSchema.RowKey"/>), never by
+/// display name: two columns may share a name, and a by-name read returns one cell for both. When every row in a set shares one
 /// <see cref="RowLayout"/> (the common case for a scan or join cursor), the schema-name→ordinal
 /// mapping is resolved once via <see cref="WriteRow(Utf8JsonWriter, QueryResultRow, IReadOnlyList{DerivedColumnSchema}, ref RowLayout?, ref int[]?)"/>
 /// so the per-cell path is a direct array index rather than a dictionary lookup.
@@ -57,7 +58,7 @@ public static class CompactRowJsonWriter
                 if (ordinals.Length != schema.Count)
                     ordinals = new int[schema.Count];
                 for (int i = 0; i < schema.Count; i++)
-                    ordinals[i] = queryRow.Layout.IndexOf(schema[i].Name);
+                    ordinals[i] = queryRow.Layout.IndexOf(schema[i].RowKey);
             }
 
             // Per-cell access (not queryRow.Values): a slot- or view-backed row serializes each projected
@@ -78,7 +79,7 @@ public static class CompactRowJsonWriter
             IReadOnlyDictionary<string, ColumnValue> dict = row.Row;
             for (int i = 0; i < schema.Count; i++)
             {
-                dict.TryGetValue(schema[i].Name, out ColumnValue? value);
+                dict.TryGetValue(schema[i].RowKey, out ColumnValue? value);
                 WriteValue(writer, value);
             }
         }

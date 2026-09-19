@@ -28,6 +28,18 @@ public sealed class QueryTicket
 
     public List<NodeAst>? Projection { get; }
 
+    private string[]? projectionRowKeys;
+
+    /// <summary>
+    /// The row key of each <see cref="Projection"/> item, for a select list with no <c>*</c> item
+    /// (<see cref="QueryProjectionResolver.GetRowKeys"/>). Computed once per
+    /// ticket because the operators ask for it per row. The keys of a list that holds a <c>*</c>
+    /// depend on the columns the <c>*</c> expands to, so the projector resolves those itself.
+    /// A concurrent first read computes the same array twice, which is harmless.
+    /// </summary>
+    internal string[] ProjectionRowKeys =>
+        projectionRowKeys ??= QueryProjectionResolver.GetRowKeys(Projection ?? []);
+
     public List<QueryFilter>? Filters { get; }
 
     public NodeAst? Where { get; }

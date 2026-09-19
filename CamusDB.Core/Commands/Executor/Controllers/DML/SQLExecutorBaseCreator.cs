@@ -246,9 +246,16 @@ internal abstract class SQLExecutorBaseCreator
     /// cannot hold. Non-numeric operands are rejected rather than silently coerced — mixed-type
     /// comparison lives in <see cref="CompareValues"/>, which has different (ordering) semantics.
     /// Division by a zero of any type raises an error instead of yielding IEEE infinity/NaN.
+    /// <para>A NULL operand gives NULL, as in <c>mod</c> and standard SQL. The NULL check runs before
+    /// the type check, because NULL is not numeric and the type check would otherwise turn every NULL
+    /// row into a query error. It also runs before the division-by-zero check, so <c>NULL / 0</c> is
+    /// NULL, as in PostgreSQL.</para>
     /// </summary>
     private static ColumnValue EvalArithmetic(NodeType op, ColumnValue left, ColumnValue right)
     {
+        if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
+            return ColumnValue.Null;
+
         if (!IsNumeric(left.Type) || !IsNumeric(right.Type))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -294,6 +301,39 @@ internal abstract class SQLExecutorBaseCreator
         };
 
         return new ColumnValue(resultType, resultType == ColumnType.Float32 ? (float)result : result);
+    }
+
+    /// <summary>
+    /// Applies unary minus. NULL gives NULL, the same rule as <see cref="EvalArithmetic"/>. The
+    /// result keeps the operand's numeric type. Negating <see cref="long.MinValue"/> has no Integer64
+    /// result, so it is an error rather than a silent wrap to itself — the same choice <c>abs</c> makes.
+    /// </summary>
+    internal static ColumnValue EvalNegate(ColumnValue value)
+    {
+        switch (value.Type)
+        {
+            case ColumnType.Null:
+                return ColumnValue.Null;
+
+            case ColumnType.Integer64:
+                if (value.LongValue == long.MinValue)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Integer overflow in unary minus for value {value.LongValue}");
+
+                return new ColumnValue(ColumnType.Integer64, -value.LongValue);
+
+            case ColumnType.Float64:
+                return new ColumnValue(ColumnType.Float64, -value.FloatValue);
+
+            case ColumnType.Float32:
+                return new ColumnValue(ColumnType.Float32, (float)-value.FloatValue);
+
+            default:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"No matching signature for unary operator - for argument type: {value.Type}");
+        }
     }
 
     private static string ArithmeticSymbol(NodeType op) => op switch
@@ -478,6 +518,9 @@ internal abstract class SQLExecutorBaseCreator
             case NodeType.ExprMult:
             case NodeType.ExprDiv:
                 return EvalArithmeticNode(expr, row, parameters, rowNameResolver, queryRow);
+
+            case NodeType.ExprNegate:
+                return EvalNegate(EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow));
 
             case NodeType.ExprFuncCall:
                 // Called directly rather than through a helper: a nested call re-enters this method
@@ -664,8 +707,11 @@ internal abstract class SQLExecutorBaseCreator
         ColumnValue low = EvalExpr(expr.extendedOne!, row, parameters, rowNameResolver, queryRow);
         ColumnValue high = EvalExpr(expr.extendedTwo!, row, parameters, rowNameResolver, queryRow);
 
+        // Same three-valued rule as EvalComparison and CheckEvaluator's BETWEEN: a NULL operand
+        // makes the result UNKNOWN, never false. Returning false here made NOT (x BETWEEN …)
+        // true for NULL rows, which the WHERE filter then returned.
         if (subject.Type == ColumnType.Null || low.Type == ColumnType.Null || high.Type == ColumnType.Null)
-            return ColumnValue.False;
+            return ColumnValue.Null;
 
         return ColumnValue.FromBool(
             CompareValues(subject, low) >= 0 && CompareValues(subject, high) <= 0);
@@ -837,6 +883,14 @@ internal abstract class SQLExecutorBaseCreator
         };
     }
 
+    /// <summary>
+    /// Evaluates <c>LIKE</c>, <c>ILIKE</c> and the four regex match operators.
+    /// A NULL subject or pattern makes the result UNKNOWN (<see cref="ColumnValue.Null"/>) — the
+    /// same rule as <see cref="EvalComparison"/>. The NULL check must precede the String type check:
+    /// before it did, any pattern predicate over a nullable column raised a type error as soon as
+    /// the scan reached a NULL row. The negated regex forms follow the same rule, so <c>NULL !~ p</c>
+    /// is UNKNOWN, not TRUE. A non-NULL, non-String operand is still a type error.
+    /// </summary>
     private static ColumnValue EvalPatternMatchNode(
         NodeAst expr,
         IReadOnlyDictionary<string, ColumnValue> row,
@@ -846,6 +900,9 @@ internal abstract class SQLExecutorBaseCreator
     {
         ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
         ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        if (leftValue.Type == ColumnType.Null || rightValue.Type == ColumnType.Null)
+            return ColumnValue.Null;
 
         switch (expr.nodeType)
         {

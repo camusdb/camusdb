@@ -93,10 +93,11 @@ internal sealed class RowInsertSelector
 
             for (int i = 0; i < sourceColumns.Count; i++)
             {
-                // Resolved by the source's output name — the same name the projection publishes and,
-                // for a join, the {alias}.{column} form the join executor keys its rows by. A name the
-                // cursor did not produce contributes no value, so the target column takes its default.
-                slots[i] = sourceRow.Row.TryGetValue(sourceColumns[i].Name, out ColumnValue? value)
+                // Resolved by the source column's row key — the key the projection stores the cell
+                // under and, for a join, the {alias}.{column} form the join executor keys its rows by.
+                // The display name is not used: two source columns may share it. A key the cursor did
+                // not produce contributes no value, so the target column takes its default.
+                slots[i] = sourceRow.Row.TryGetValue(sourceColumns[i].RowKey, out ColumnValue? value)
                     ? value
                     : null;
             }

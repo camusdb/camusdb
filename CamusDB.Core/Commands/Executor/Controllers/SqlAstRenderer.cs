@@ -127,6 +127,20 @@ internal class SqlAstRenderer
                 RenderOperand(sb, expr.leftAst!);
                 return;
 
+            // A numeric literal operand is always parenthesised: it can itself be negative, and
+            // `--5` would re-lex as a line comment.
+            case NodeType.ExprNegate:
+                sb.Append('-');
+                if (expr.leftAst!.nodeType is NodeType.Integer or NodeType.Float)
+                {
+                    sb.Append('(');
+                    RenderNode(sb, expr.leftAst);
+                    sb.Append(')');
+                }
+                else
+                    RenderOperand(sb, expr.leftAst);
+                return;
+
             // ── arithmetic ──────────────────────────────────────────────────────
             case NodeType.ExprAdd:  RenderBinary(sb, expr, "+"); return;
             case NodeType.ExprSub:  RenderBinary(sb, expr, "-"); return;

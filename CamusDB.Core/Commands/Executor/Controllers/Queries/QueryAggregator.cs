@@ -36,7 +36,12 @@ internal sealed class QueryAggregator
         if (ticket.GroupBy is { Count: > 0 })
             return AggregateGrouped(ticket, dataCursor, _stats, context, context.CancellationToken);
 
-        if (QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket) || HasCompoundProjection(ticket.Projection))
+        // The single-aggregate fast paths below compute projection[0] only. Several aggregates, a
+        // compound over aggregates, or a HAVING that needs hidden aggregates all go through the
+        // workspace, which runs one accumulator over every projection in a single pass.
+        if (ticket.Projection.Count > 1
+            || QueryHavingWorkspace.NeedsExpandedGlobalAggregate(ticket)
+            || HasCompoundProjection(ticket.Projection))
             return AggregateGlobalWorkspace(ticket, dataCursor);
 
         NodeAst funcCall = GetSingleAggregationFuncCall(ticket.Projection);
@@ -575,8 +580,16 @@ internal sealed class QueryAggregator
         }
     }
 
-    private static List<AnalyzedProjection> AnalyzeProjections(List<NodeAst> projection)
+    /// <summary>
+    /// Classifies each select-list item. An item's <c>OutputName</c> is its <b>row key</b>
+    /// (<see cref="QueryTicket.ProjectionRowKeys"/>), not its display name: the workspace row holds one
+    /// cell per key, so two items that share a name (<c>SELECT a.id, b.id … GROUP BY a.id, b.id</c>)
+    /// must not share a cell. The projector reads the cells back by the same keys.
+    /// </summary>
+    private static List<AnalyzedProjection> AnalyzeProjections(QueryTicket ticket)
     {
+        List<NodeAst> projection = ticket.Projection!;
+        string[] rowKeys = ticket.ProjectionRowKeys;
         List<AnalyzedProjection> analyzed = new(projection.Count);
 
         for (int i = 0; i < projection.Count; i++)
@@ -602,7 +615,7 @@ internal sealed class QueryAggregator
 
             analyzed.Add(new AnalyzedProjection(
                 expression,
-                GetProjectionOutputName(expression, i),
+                rowKeys[i],
                 isAggregate,
                 funcCall,
                 isCompound,
@@ -615,7 +628,7 @@ internal sealed class QueryAggregator
 
     private static List<AnalyzedProjection> AnalyzeGroupedWorkspace(QueryTicket ticket)
     {
-        List<AnalyzedProjection> projections = AnalyzeProjections(ticket.Projection!);
+        List<AnalyzedProjection> projections = AnalyzeProjections(ticket);
         HashSet<string> outputNames = new(StringComparer.Ordinal);
 
         foreach (AnalyzedProjection projection in projections)
@@ -644,7 +657,7 @@ internal sealed class QueryAggregator
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor)
     {
-        List<AnalyzedProjection> projections = AnalyzeProjections(ticket.Projection!);
+        List<AnalyzedProjection> projections = AnalyzeProjections(ticket);
         HashSet<string> outputNames = new(StringComparer.Ordinal);
 
         foreach (AnalyzedProjection projection in projections)
@@ -675,11 +688,6 @@ internal sealed class QueryAggregator
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Sort column '{columnName}' has no grouped expression");
-    }
-
-    private static string GetProjectionOutputName(NodeAst expression, int index)
-    {
-        return QueryProjectionResolver.GetOutputNameFromProjectionExpression(expression, index);
     }
 
     internal static NodeAst GetAggregateFuncCall(NodeAst expression)

@@ -201,9 +201,11 @@ public sealed class QueryPlanner
     /// <summary>
     /// Builds the partial split for an aggregate directly above a gather, or null when the
     /// shape disqualifies it — see <see cref="PartialAggregatePlan"/> for what qualifies and
-    /// why. Global shapes are limited to a single aggregate (the engine's global aggregation
-    /// path is single-projection by construction, and the binder rejects multi-aggregate
-    /// globals) and exclude AVG (its expansion needs the multi-projection grouped machinery).
+    /// why. Global shapes are limited to a single non-AVG aggregate. That limit is a coverage
+    /// choice, not a correctness one: the aggregator computes several global aggregates in one
+    /// pass, but the multi-aggregate global split (and the global AVG sum/count pair) has no
+    /// cluster-level parity test yet. A global shape that does not qualify still returns the right
+    /// answer, because its aggregate then runs above the gather over the gathered rows.
     /// Grouped shapes take full projection lists including AVG, which decomposes into
     /// internal SUM/COUNT pair columns finalized after the merge.
     /// </summary>
@@ -278,8 +280,8 @@ public sealed class QueryPlanner
 
             if (funcName.Equals("avg", StringComparison.OrdinalIgnoreCase))
             {
-                // AVG only decomposes on the grouped path (the global aggregator is
-                // single-projection) and needs a real column argument.
+                // AVG only decomposes on the grouped path (see the method summary for why the
+                // global split is not taken) and needs a real column argument.
                 if (!grouped || funcCall.rightAst is null || funcCall.rightAst.nodeType == NodeType.ExprAllFields)
                     return null;
 

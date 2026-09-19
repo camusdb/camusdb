@@ -523,14 +523,9 @@ internal sealed class QueryBinder
             }
         }
 
+        // Several aggregates are fine: without GROUP BY they all reduce the same single group. A bare
+        // column or other non-aggregate projection is not, because there is no group key to bind it to.
         if (hasNonAggregateProjection)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Aggregations cannot be accompanied by other projections or expressions.");
-        }
-
-        if (query.Projections.Count > 1)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,

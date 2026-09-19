@@ -367,6 +367,9 @@ public static class PlanRenderer
             NodeType.ExprSub => $"{RenderExpr(expr.leftAst!)} - {RenderExpr(expr.rightAst!)}",
             NodeType.ExprMult => $"{RenderExpr(expr.leftAst!)} * {RenderExpr(expr.rightAst!)}",
             NodeType.ExprDiv  => $"{RenderExpr(expr.leftAst!)} / {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprNegate => expr.leftAst!.nodeType == NodeType.Identifier
+                ? $"-{RenderExpr(expr.leftAst)}"
+                : $"-({RenderExpr(expr.leftAst)})",
 
             // Function names are case-insensitive; render them in a canonical lower-case form so the
             // EXPLAIN output is stable regardless of the case the function was written in.

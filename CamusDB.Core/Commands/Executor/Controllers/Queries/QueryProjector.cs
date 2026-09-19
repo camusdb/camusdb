@@ -22,11 +22,12 @@ internal sealed class QueryProjector
 
         if (ticket.GroupBy is { Count: > 0 })
         {
-            List<string> visibleColumns = GetVisibleProjectionColumns(ticket);
+            // The aggregator keyed each projected cell by its row key, so the same keys read it back.
+            string[] visibleColumns = ticket.ProjectionRowKeys;
 
             await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
             {
-                Dictionary<string, ColumnValue> projected = new(visibleColumns.Count, StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, ColumnValue> projected = new(visibleColumns.Length, StringComparer.OrdinalIgnoreCase);
 
                 foreach (string columnName in visibleColumns)
                     projected[columnName] = resultRow.Row[columnName];
@@ -62,40 +63,38 @@ internal sealed class QueryProjector
             yield break;
         }
 
-        // Fallback path: SELECT * or any other case where the projection layout is not fixed.
+        // Fallback path: a select list that mixes * with other items, so the output set depends on
+        // the input row's columns. The explicit items' row keys depend on those columns too (an item
+        // named like an expanded column must not share its cell), so they are resolved against the
+        // first row and again only if a later row arrives under a different layout.
+        string[]? starRowKeys = null;
+        RowLayout? starKeysLayout = null;
+
         await foreach (QueryResultRow resultRow in dataCursor)
         {
+            RowLayout? inputLayout = (resultRow.Row as QueryRow)?.Layout;
+
+            if (starRowKeys is null || !ReferenceEquals(inputLayout, starKeysLayout))
+            {
+                starRowKeys = QueryProjectionResolver.GetRowKeys(ticket.Projection, resultRow.Row.Keys);
+                starKeysLayout = inputLayout;
+            }
+
             Dictionary<string, ColumnValue> projected = new(ticket.Projection.Count, StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < ticket.Projection.Count; i++)
             {
                 NodeAst ast = ticket.Projection[i];
 
-                switch (ast.nodeType)
+                if (ast.nodeType == NodeType.ExprAllFields)
                 {
-                    case NodeType.ExprAllFields:
-                    {
-                        foreach (KeyValuePair<string, ColumnValue> keyValue in resultRow.Row)
-                            projected[keyValue.Key] = keyValue.Value;
+                    foreach (KeyValuePair<string, ColumnValue> keyValue in resultRow.Row)
+                        projected[keyValue.Key] = keyValue.Value;
 
-                        continue;
-                    }
-
-                    case NodeType.Identifier:
-                        projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
-                            EvalOrProjectExpr(ticket, ast, resultRow.Row, i);
-                        continue;
-
-                    case NodeType.ExprAlias:
-                        projected[ast.rightAst!.yytext ?? ""] =
-                            EvalOrProjectExpr(ticket, ast, resultRow.Row, i);
-                        break;
-
-                    default:
-                        projected[QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i)] =
-                            EvalOrProjectExpr(ticket, ast, resultRow.Row, i);
-                        break;
+                    continue;
                 }
+
+                projected[starRowKeys[i]] = EvalOrProjectExpr(ticket, ast, resultRow.Row, starRowKeys[i]);
             }
 
             yield return new(resultRow.RowId, projected);
@@ -103,47 +102,21 @@ internal sealed class QueryProjector
     }
 
     /// <summary>
-    /// Attempts to build a fixed <see cref="RowLayout"/> for the projection output columns.
-    /// Returns null and falls back to the dictionary path when:
-    /// <list type="bullet">
-    ///   <item>Any item is <see cref="NodeType.ExprAllFields"/> (SELECT *) — output column set
-    ///     is determined per-row and cannot be fixed ahead of the loop.</item>
-    ///   <item>Two items share an output name (e.g. <c>SELECT a AS x, b AS x</c>) — the dictionary
-    ///     path uses last-wins semantics; the fast path would produce two slots with the same name,
-    ///     which disagrees on both shape and which value <see cref="RowLayout.IndexOf"/> returns.</item>
-    /// </list>
+    /// Builds the fixed <see cref="RowLayout"/> of the projection output, one slot per select-list
+    /// item, named by the item's row key (<see cref="QueryTicket.ProjectionRowKeys"/>). Row keys are
+    /// unique, so two items that share an output name (<c>SELECT a.id, b.id</c>) still get one slot
+    /// each. Returns null when any item is <see cref="NodeType.ExprAllFields"/> (SELECT *): the
+    /// output column set then depends on the input row and cannot be fixed ahead of the loop.
     /// </summary>
     private static RowLayout? TryBuildProjectionLayout(QueryTicket ticket)
     {
-        List<string> names = new(ticket.Projection!.Count);
-        HashSet<string> seen = new(ticket.Projection.Count, StringComparer.Ordinal);
-
-        for (int i = 0; i < ticket.Projection.Count; i++)
+        for (int i = 0; i < ticket.Projection!.Count; i++)
         {
-            NodeAst ast = ticket.Projection[i];
-            if (ast.nodeType == NodeType.ExprAllFields)
+            if (ticket.Projection[i].nodeType == NodeType.ExprAllFields)
                 return null;
-            string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, i);
-            if (!seen.Add(name))
-                return null;
-            names.Add(name);
         }
 
-        return RowLayout.ForColumns(names);
-    }
-
-    private static List<string> GetVisibleProjectionColumns(QueryTicket ticket)
-    {
-        List<string> columns = new(ticket.Projection!.Count);
-
-        for (int i = 0; i < ticket.Projection.Count; i++)
-        {
-            columns.Add(QueryProjectionResolver.GetOutputNameFromProjectionExpression(
-                ticket.Projection[i],
-                i));
-        }
-
-        return columns;
+        return RowLayout.ForColumns(ticket.ProjectionRowKeys);
     }
 
     /// <summary>
@@ -159,11 +132,11 @@ internal sealed class QueryProjector
         QueryRow? inputQr,
         int projectionIndex)
     {
+        // The aggregator already computed this cell and stored it under the item's row key.
         if (QueryExpressionClassifier.IsAggregateProjection(ast)
             || QueryExpressionClassifier.IsCompoundAggregateProjection(ast))
         {
-            string key = QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, projectionIndex);
-            return row[key];
+            return row[ticket.ProjectionRowKeys[projectionIndex]];
         }
 
         NodeAst unwrapped = QueryExpressionClassifier.UnwrapAlias(ast);
@@ -178,13 +151,12 @@ internal sealed class QueryProjector
         QueryTicket ticket,
         NodeAst ast,
         IReadOnlyDictionary<string, ColumnValue> row,
-        int projectionIndex)
+        string rowKey)
     {
         if (QueryExpressionClassifier.IsAggregateProjection(ast)
             || QueryExpressionClassifier.IsCompoundAggregateProjection(ast))
         {
-            string key = QueryProjectionResolver.GetOutputNameFromProjectionExpression(ast, projectionIndex);
-            return row[key];
+            return row[rowKey];
         }
 
         return SqlExecutor.EvalExpr(

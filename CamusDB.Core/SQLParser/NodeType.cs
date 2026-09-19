@@ -709,4 +709,18 @@ public enum NodeType
     /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
     /// </summary>
     ExprSubscript,
+
+    /// <summary>
+    /// Unary minus over an expression, <c>-x</c>. <c>leftAst</c> is the operand; <c>rightAst</c> is
+    /// always null. A minus sign written directly before a numeric literal never builds this node: the
+    /// lexer reads <c>-5</c> as one literal token, and the grammar folds <c>- 5</c> into the same
+    /// literal, so a negative constant stays a constant that the planner can use as an index bound.
+    /// A NULL operand gives NULL; a non-numeric operand is a type error.
+    ///
+    /// <para>Visitors treat it like <see cref="ExprNot"/>: a unary node whose only child is an
+    /// expression that can reference columns or aggregates.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
+    /// </summary>
+    ExprNegate,
 }

@@ -138,7 +138,10 @@ the elements of `a`:
 - Numbers compare by value, so `array_contains(ARRAY[1, 2], 2.0)` is `true`. A value of another type is
   a non-match, not an error.
 
-PostgreSQL writes the same test as `v = ANY (a)`. CamusDB does not support `ANY`, `ALL`, `@>` or `<@` yet.
+PostgreSQL writes the same test as `v = ANY (a)`, and CamusDB accepts that form too: `v = ANY (a)`,
+`v = SOME (a)` and `v <> ALL (a)` work, with the same rules. See
+[`= ANY`, `= SOME` and `<> ALL`](sql-expression-syntax.md#-any--some-and--all). CamusDB does not
+support `@>` or `<@` yet.
 
 ---
 

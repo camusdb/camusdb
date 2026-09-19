@@ -1198,6 +1198,7 @@ internal sealed class SelectStatementExecutor
 
         Dictionary<string, ColumnValue> emptyRow = new();
         Dictionary<string, ColumnValue> projected = new(projections.Count, StringComparer.OrdinalIgnoreCase);
+        string[] rowKeys = QueryProjectionResolver.GetRowKeys(projections);
 
         for (int i = 0; i < projections.Count; i++)
         {
@@ -1219,8 +1220,7 @@ internal sealed class SelectStatementExecutor
                 .RewriteProjectionExpressionAsync(database, valueExpr, ticket)
                 .ConfigureAwait(false);
 
-            string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
-            projected[name] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
+            projected[rowKeys[i]] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }
 
         if (schemaOut is not null)

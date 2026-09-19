@@ -1473,7 +1473,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         foreach (DerivedColumnSchema col in schema)
         {
-            ColumnValue? cv = row.TryGetValue(col.Name, out ColumnValue? v) ? v : null;
+            ColumnValue? cv = row.TryGetValue(col.RowKey, out ColumnValue? v) ? v : null;
             rr.Values.Add(GrpcValueCodec.ToProto(cv));
         }
         return rr;
@@ -1772,7 +1772,7 @@ internal sealed class ResultRowBinder
         if (Ordinals is null || Ordinals.Length != schema.Count)
             Ordinals = new int[schema.Count];
         for (int i = 0; i < schema.Count; i++)
-            Ordinals[i] = rowLayout.IndexOf(schema[i].Name);
+            Ordinals[i] = rowLayout.IndexOf(schema[i].RowKey);
     }
 }
 

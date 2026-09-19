@@ -222,8 +222,26 @@ internal static class RequiredColumnAnalyzer
         return output;
     }
 
-    private static bool RequiresAllColumns(List<NodeAst>? projection) =>
-        projection is null || projection is [{ nodeType: NodeType.ExprAllFields }];
+    /// <summary>
+    /// True when the scan must decode every column: there is no select list, or a <c>*</c> stands
+    /// anywhere in it. A <c>*</c> beside other items (<c>SELECT name AS label, *</c>) expands to all
+    /// columns just as a lone <c>*</c> does; pruning to the columns the other items name would hand
+    /// the expansion undecoded cells, which surface as NULL. Only a top-level item counts — the
+    /// <c>*</c> inside <c>COUNT(*)</c> is a function argument and reads no column.
+    /// </summary>
+    private static bool RequiresAllColumns(List<NodeAst>? projection)
+    {
+        if (projection is null)
+            return true;
+
+        foreach (NodeAst item in projection)
+        {
+            if (item.nodeType == NodeType.ExprAllFields)
+                return true;
+        }
+
+        return false;
+    }
 
     private static void CollectFromProjections(
         List<NodeAst>? projection,
@@ -717,6 +735,8 @@ internal static class RequiredColumnAnalyzer
                 return;
 
             case NodeType.ExprNot:
+
+            case NodeType.ExprNegate:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
             case NodeType.ExprIsTrue:
@@ -971,6 +991,8 @@ internal static class RequiredColumnAnalyzer
                 return;
 
             case NodeType.ExprNot:
+
+            case NodeType.ExprNegate:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
             case NodeType.ExprIsTrue:

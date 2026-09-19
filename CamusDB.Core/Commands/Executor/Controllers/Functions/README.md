@@ -10,12 +10,14 @@ Built-in function groups:
 |------|-----------|
 | `MathScalarFunctions` | `ABS`, `CEIL`, `FLOOR`, `ROUND`, `SQRT`, `POW`, `MOD`, … |
 | `StringScalarFunctions` | `LENGTH`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`, `CONCAT`, `REPLACE`, … |
+| `HashScalarFunctions` | `MD5`, `SHA1`, `SHA256`, `SHA512` — lowercase hex digest of a string (UTF-8) or bytes value; not for security |
 | `DateTimeScalarFunctions` | `NOW`, `DATE`, `YEAR`, `MONTH`, `DAY`, `DATEDIFF`, `DATEADD`, … |
 | `CastScalarFunctions` | `CAST(x AS type)` — converts between column value types |
 | `IdScalarFunctions` | `GEN_ID()` — generates a new ObjectId |
 | `JsonScalarFunctions` | `JSON_EXTRACT`, `JSON_SET`, `JSON_REMOVE` — JSON field access and mutation |
 | `SessionScalarFunctions` | `CURRENT_DATABASE()`, `CURRENT_USER()`, `CURRENT_ROLE()`, `IS_SUPERUSER()` — the session the statement runs in |
 | `ArrayScalarFunctions` | `CARDINALITY(array)`, `ARRAY_LENGTH(array, dim)`, `ARRAY_CONTAINS(array, value)` — an array read as a whole, for length and membership checks |
+| `QuantifierScalarFunctions` | `ANY`, `SOME`, `ALL` — stubs that reject a call; the parser rewrites `x = ANY (a)` and `x <> ALL (a)` before evaluation |
 
 `ScalarFunctionDescriptor` carries the function name(s), arity constraints, and the delegate that implements the function.
 `ScalarFunctionArguments` is the helper that evaluates argument expressions before passing them to the function delegate.

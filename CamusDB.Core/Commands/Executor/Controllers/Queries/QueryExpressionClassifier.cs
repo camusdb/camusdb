@@ -119,6 +119,8 @@ internal static class QueryExpressionClassifier
                         || (node.rightAst is not null && Walk(node.rightAst));
 
                 case NodeType.ExprNot:
+
+                case NodeType.ExprNegate:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
                 case NodeType.ExprIsTrue:
@@ -243,6 +245,8 @@ internal static class QueryExpressionClassifier
                     return;
 
                 case NodeType.ExprNot:
+
+                case NodeType.ExprNegate:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
                 case NodeType.ExprIsTrue:
@@ -344,6 +348,8 @@ internal static class QueryExpressionClassifier
                     return;
 
                 case NodeType.ExprNot:
+
+                case NodeType.ExprNegate:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
                 case NodeType.ExprIsTrue:

@@ -100,6 +100,43 @@ public sealed class NodeAst
             new NodeAst(NodeType.ExprArgumentList, dividend, divisor, null, null, null, null, null, null),
             null, null, null, null, null, null);
 
+    /// <summary>
+    /// Builds the tree for a unary minus. Over a numeric literal it folds the sign into the literal's
+    /// text instead of building <see cref="NodeType.ExprNegate"/>, so <c>- 5</c> gives the same
+    /// constant node as the one-token <c>-5</c>, and <c>- -5</c> gives <c>5</c>. Keeping negative
+    /// constants as literals matters because the planner reads only literals as index bounds and
+    /// folded constants. Over anything else it builds <see cref="NodeType.ExprNegate"/>.
+    /// </summary>
+    public static NodeAst Negate(NodeAst operand)
+    {
+        if (operand.nodeType is NodeType.Integer or NodeType.Float && operand.yytext is { Length: > 0 } text)
+        {
+            string negated = text[0] == '-' ? text[1..] : string.Concat("-", text);
+            return new(operand.nodeType, null, null, null, null, null, null, null, negated);
+        }
+
+        return new(NodeType.ExprNegate, operand, null, null, null, null, null, null, null);
+    }
+
+    /// <summary>
+    /// Builds the tree for the negated predicate spellings <c>x NOT BETWEEN a AND b</c>,
+    /// <c>x NOT LIKE p</c> and <c>x NOT ILIKE p</c>: a <see cref="NodeType.ExprNot"/> over the positive
+    /// node. They need no node types of their own, because <c>NOT</c> over the positive form already
+    /// has the SQL meaning, UNKNOWN included. Every evaluator, walker and renderer then handles them
+    /// with no change; a rendered view body or EXPLAIN shows <c>NOT (x BETWEEN a AND b)</c>.
+    /// </summary>
+    public static NodeAst Not(NodeAst positive) =>
+        new(NodeType.ExprNot, positive, null, null, null, null, null, null, null);
+
+    /// <summary>
+    /// Builds a comparison node (<c>=</c>, <c>&lt;&gt;</c>, <c>&lt;</c>, <c>&gt;</c>, <c>&lt;=</c>,
+    /// <c>&gt;=</c>). When the right operand is <c>ANY (…)</c>, <c>SOME (…)</c> or <c>ALL (…)</c> it
+    /// builds the equivalent membership test instead, or rejects an unsupported operator; see
+    /// <see cref="QuantifiedComparison"/>.
+    /// </summary>
+    public static NodeAst Comparison(NodeType op, NodeAst left, NodeAst right) =>
+        QuantifiedComparison.Build(op, left, right);
+
     // ── Literal sentinels ────────────────────────────────────────────────────
 
     public static readonly NodeAst Null = Leaf(NodeType.Null, "null");

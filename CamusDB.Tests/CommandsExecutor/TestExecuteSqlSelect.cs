@@ -3762,15 +3762,14 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
     #region duplicate projection output names
 
     /// <summary>
-    /// Guards the TryBuildProjectionLayout fallback: when two projection items share an output
-    /// name (SELECT a AS x, b AS x), the fast QueryRow path must not engage — it would produce
-    /// two array slots for the same name while IndexOf always returns the first, silently
-    /// returning the wrong value. The expected last-wins behavior (x = b's value) must hold
-    /// regardless of which internal path the projector takes.
+    /// Two select-list items that share an output name (SELECT a AS x, b AS x) each keep their own
+    /// cell. A row is addressed by key, so the second item gets a generated row key; the name itself
+    /// resolves to the first item. Both values must be present — collapsing them onto one key gives a
+    /// positional reader the same value at both ordinals.
     /// </summary>
     [Test]
     [NonParallelizable]
-    public async Task TestExecuteSelectDuplicateAliasLastWins()
+    public async Task TestExecuteSelectDuplicateAliasKeepsBothValues()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
 
@@ -3782,25 +3781,28 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             sql: "SELECT name AS x, year AS x FROM robots LIMIT 1",
             parameters: null);
 
-        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        QuerySchemaHolder schemaHolder = new();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder);
         List<QueryResultRow> result = await cursor.ToListAsync();
 
         Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2, result[0].Row.Count, "each select-list item owns one cell");
 
-        // Last-wins: "year AS x" overwrites "name AS x" → x holds the year value (Integer64).
-        Assert.IsTrue(result[0].Row.ContainsKey("x"), "output must contain key 'x'");
-        Assert.AreEqual(ColumnType.Integer64, result[0].Row["x"].Type,
-            "last-wins: x must hold the year (Integer64), not the name (String)");
+        Assert.AreEqual(new[] { "x", "x" }, schemaHolder.Schema.Select(c => c.Name).ToArray());
+        Assert.AreEqual("x", schemaHolder.Schema[0].RowKey, "the first item keeps the name as its row key");
+        Assert.AreNotEqual("x", schemaHolder.Schema[1].RowKey, "the second item cannot share the first item's cell");
+
+        Assert.AreEqual(ColumnType.String, result[0].Row[schemaHolder.Schema[0].RowKey].Type, "ordinal 0 is the name");
+        Assert.AreEqual(ColumnType.Integer64, result[0].Row[schemaHolder.Schema[1].RowKey].Type, "ordinal 1 is the year");
     }
 
     /// <summary>
-    /// Same column selected twice under the same bare name (SELECT name, name).
-    /// Both items resolve to output name "name"; the fast path must not engage and the
-    /// result row must contain exactly one "name" key with the correct value.
+    /// Same column selected twice under the same bare name (SELECT name, name): the result has two
+    /// columns, as the select list asked for, and both hold the column's value.
     /// </summary>
     [Test]
     [NonParallelizable]
-    public async Task TestExecuteSelectSameColumnTwiceHasOneOutputKey()
+    public async Task TestExecuteSelectSameColumnTwiceHasTwoOutputColumns()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor, _) = await SetupBasicTable();
 
@@ -3812,19 +3814,20 @@ public class TestExecuteSqlSelect : SharedNodeBaseTest
             sql: "SELECT name, name FROM robots LIMIT 1",
             parameters: null);
 
-        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        QuerySchemaHolder schemaHolder = new();
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder);
         List<QueryResultRow> result = await cursor.ToListAsync();
 
         Assert.AreEqual(1, result.Count);
+        Assert.AreEqual(2, schemaHolder.Schema.Count);
+        Assert.AreEqual(2, result[0].Row.Count, "a select list of two items yields two cells");
 
-        // Both items produce output key "name"; the dict path collapses them to one entry.
-        // Assert the arity, not just the value: without the duplicate-name guard the fast
-        // QueryRow path would emit two "name" slots (Count == 2) instead of one, so this is
-        // what actually catches a regression in the collapse behavior.
-        Assert.AreEqual(1, result[0].Row.Count, "duplicate bare names must collapse to a single output column");
-        Assert.IsTrue(result[0].Row.ContainsKey("name"), "output must contain key 'name'");
-        Assert.AreEqual(ColumnType.String, result[0].Row["name"].Type);
-        Assert.IsNotNull(result[0].Row["name"].StrValue);
+        ColumnValue first = result[0].Row[schemaHolder.Schema[0].RowKey];
+        ColumnValue second = result[0].Row[schemaHolder.Schema[1].RowKey];
+
+        Assert.AreEqual(ColumnType.String, first.Type);
+        Assert.IsNotNull(first.StrValue);
+        Assert.AreEqual(first.StrValue, second.StrValue);
     }
 
     [Test]

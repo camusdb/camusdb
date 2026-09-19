@@ -122,26 +122,33 @@ internal static class QueryPostScanPipeline
     internal static bool IsFullProjection(List<NodeAst> projection) =>
         projection is [{ nodeType: NodeType.ExprAllFields }];
 
+    /// <summary>
+    /// True when the projection aggregates. Without <c>GROUP BY</c> every projection must then be an
+    /// aggregate or a compound over aggregates — any number of them, all computed over the same
+    /// single group — because a bare column has no group key to bind to. The binder rejects that
+    /// shape first; this check is the guard for tickets that do not come through the binder.
+    /// </summary>
     internal static bool HasAggregation(List<NodeAst> projection, QueryTicket ticket)
     {
+        bool hasAggregation = false;
+        bool hasNonAggregate = false;
+
         foreach (NodeAst nodeAst in projection)
         {
-            bool isAggregate = QueryExpressionClassifier.IsAggregateProjection(nodeAst);
-            bool isCompound = !isAggregate && QueryExpressionClassifier.IsCompoundAggregateProjection(nodeAst);
-
-            if (!isAggregate && !isCompound)
-                continue;
-
-            if (projection.Count > 1 && ticket.GroupBy is not { Count: > 0 })
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Aggregations cannot be accompanied by other projections or expressions.");
-            }
-
-            return true;
+            if (QueryExpressionClassifier.IsAggregateProjection(nodeAst)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(nodeAst))
+                hasAggregation = true;
+            else
+                hasNonAggregate = true;
         }
 
-        return false;
+        if (hasAggregation && hasNonAggregate && ticket.GroupBy is not { Count: > 0 })
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Aggregations cannot be accompanied by other projections or expressions.");
+        }
+
+        return hasAggregation;
     }
 }

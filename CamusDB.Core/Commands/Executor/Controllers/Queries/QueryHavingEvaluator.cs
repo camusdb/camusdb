@@ -135,7 +135,9 @@ internal static class QueryHavingEvaluator
                     continue;
                 }
 
-                return QueryProjectionResolver.GetOutputNameFromProjectionExpression(ticket.Projection[i], i);
+                // The workspace row holds this item's cell under its row key, which differs from the
+                // display name when an earlier item already took that name.
+                return ticket.ProjectionRowKeys[i];
             }
         }
 

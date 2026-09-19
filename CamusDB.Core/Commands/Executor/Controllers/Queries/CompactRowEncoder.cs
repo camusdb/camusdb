@@ -30,10 +30,11 @@ public static class CompactRowEncoder
     /// <summary>
     /// Encodes a <see cref="QueryResultRow"/>'s cells into a positional array aligned to
     /// <paramref name="schema"/>: <c>result[c]</c> is the value for <c>schema[c]</c>. Each column
-    /// is resolved from the row by its schema name, so the schema names MUST match the keys the
-    /// row cursor produced (bare for single-source, <c>alias.column</c> for joins) — a name absent
+    /// is resolved from the row by its <see cref="DerivedColumnSchema.RowKey"/>, so the schema row keys
+    /// MUST match the keys the row cursor produced (bare for single-source, <c>alias.column</c> for
+    /// joins, a generated key for a select-list item whose name an earlier item took) — a key absent
     /// from the row encodes as null. See <see cref="DerivedTableSchemaBuilder"/> for how the schema
-    /// names are kept aligned with the cursor keys.
+    /// keys are kept aligned with the cursor keys.
     /// </summary>
     public static object?[] EncodeRow(IReadOnlyDictionary<string, ColumnValue> row, IReadOnlyList<DerivedColumnSchema> schema)
     {
@@ -41,7 +42,7 @@ public static class CompactRowEncoder
 
         for (int i = 0; i < schema.Count; i++)
         {
-            row.TryGetValue(schema[i].Name, out ColumnValue? value);
+            row.TryGetValue(schema[i].RowKey, out ColumnValue? value);
             result[i] = EncodeValue(value);
         }
 

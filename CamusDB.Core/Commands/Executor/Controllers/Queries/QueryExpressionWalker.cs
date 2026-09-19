@@ -58,6 +58,8 @@ internal static class QueryExpressionWalker
                 return;
 
             case NodeType.ExprNot:
+
+            case NodeType.ExprNegate:
             case NodeType.ExprIsNull:
             case NodeType.ExprIsNotNull:
             case NodeType.ExprIsTrue:
