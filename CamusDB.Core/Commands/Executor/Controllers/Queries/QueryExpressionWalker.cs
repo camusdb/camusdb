@@ -49,6 +49,9 @@ internal static class QueryExpressionWalker
             case NodeType.ExprRegexMatchCi:
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
+            // Both operands of an ordered quantified comparison can reference columns: the tested
+            // value and the array. Its operator marker holds no identifier, so it is not walked.
+            case NodeType.ExprQuantifiedComparison:
                 if (expr.leftAst is not null)
                     CollectColumnReferences(expr.leftAst, identifiers);
 

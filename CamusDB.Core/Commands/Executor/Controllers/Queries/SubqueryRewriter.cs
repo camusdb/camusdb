@@ -115,6 +115,9 @@ internal sealed class SubqueryRewriter
 
             case NodeType.ExprNotInSubquery:
                 return await RewriteInSubqueryAsync(database, expr, ticket, negated: true).ConfigureAwait(false);
+
+            case NodeType.ExprQuantifiedComparison when expr.rightAst?.nodeType == NodeType.ExprScalarSubquery:
+                return await RewriteQuantifiedSubqueryAsync(database, expr, ticket).ConfigureAwait(false);
         }
 
         NodeAst? left = expr.leftAst is not null
@@ -207,6 +210,12 @@ internal sealed class SubqueryRewriter
             return await RewriteInSubqueryAsync(database, expr, ticket, negated: true).ConfigureAwait(false);
         }
 
+        if (expr.nodeType == NodeType.ExprQuantifiedComparison
+            && expr.rightAst?.nodeType == NodeType.ExprScalarSubquery)
+        {
+            return await RewriteQuantifiedSubqueryAsync(database, expr, ticket).ConfigureAwait(false);
+        }
+
         NodeAst? left = expr.leftAst is not null
             ? await RewriteExpressionAsync(database, expr.leftAst, ticket).ConfigureAwait(false)
             : null;
@@ -257,5 +266,56 @@ internal sealed class SubqueryRewriter
         return negated
             ? await SubqueryValueListAst.BuildNotInMembershipAsync(lhs, materialization).ConfigureAwait(false)
             : await SubqueryValueListAst.BuildInMembershipAsync(lhs, materialization).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Replaces the subquery of an ordered quantified comparison (<c>x &lt; ANY (SELECT …)</c>,
+    /// <c>x = ALL (SELECT …)</c>, …) with the <c>ARRAY[…]</c> of the rows it returned, so the
+    /// synchronous per-row evaluator can fold over it. The operator marker and the quantifier word
+    /// are carried over unchanged; only the right operand changes.
+    ///
+    /// <para>The subquery must be uncorrelated, for the reason <c>IN</c> requires it: it is executed
+    /// once, before the outer scan starts, so a reference to an outer column has no value to read.
+    /// The same analyzer reports it, so both forms reject the same statements.</para>
+    /// </summary>
+    private async Task<NodeAst> RewriteQuantifiedSubqueryAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        ExecuteSQLTicket ticket)
+    {
+        NodeAst? select = expr.rightAst?.leftAst;
+
+        if (expr.leftAst is null || select is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Invalid quantified comparison subquery expression");
+        }
+
+        InSubqueryAnalyzer.EnsureUncorrelated(select, selectQueryCreator);
+
+        NodeAst lhs = await RewriteExpressionAsync(database, expr.leftAst, ticket).ConfigureAwait(false);
+
+        await using InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
+            database,
+            select,
+            ticket.TxnState,
+            ticket.Parameters,
+            ticket.CancellationToken).ConfigureAwait(false);
+
+        NodeAst elements = await SubqueryValueListAst.BuildArrayLiteralAsync(
+            materialization,
+            ticket.CancellationToken).ConfigureAwait(false);
+
+        return new NodeAst(
+            expr.nodeType,
+            lhs,
+            elements,
+            expr.extendedOne,
+            expr.extendedTwo,
+            expr.extendedThree,
+            expr.extendedFour,
+            expr.extendedFive,
+            expr.yytext);
     }
 }

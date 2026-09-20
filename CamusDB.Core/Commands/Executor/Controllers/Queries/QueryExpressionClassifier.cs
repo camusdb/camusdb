@@ -114,6 +114,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprRegexMatchCi:
                 case NodeType.ExprRegexNotMatch:
                 case NodeType.ExprRegexNotMatchCi:
+                case NodeType.ExprQuantifiedComparison:
                 case NodeType.ExprList:
                     return (node.leftAst is not null && Walk(node.leftAst))
                         || (node.rightAst is not null && Walk(node.rightAst));
@@ -239,6 +240,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprRegexMatchCi:
                 case NodeType.ExprRegexNotMatch:
                 case NodeType.ExprRegexNotMatchCi:
+                case NodeType.ExprQuantifiedComparison:
                 case NodeType.ExprList:
                     if (node.leftAst is not null) Walk(node.leftAst);
                     if (node.rightAst is not null) Walk(node.rightAst);
@@ -342,6 +344,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprRegexMatchCi:
                 case NodeType.ExprRegexNotMatch:
                 case NodeType.ExprRegexNotMatchCi:
+                case NodeType.ExprQuantifiedComparison:
                 case NodeType.ExprList:
                     if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
                     if (node.rightAst is not null) ValidateNode(node.rightAst, insideAggregate);

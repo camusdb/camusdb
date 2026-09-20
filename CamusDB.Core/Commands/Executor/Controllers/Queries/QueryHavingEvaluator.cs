@@ -67,6 +67,16 @@ internal static class QueryHavingEvaluator
             case NodeType.ExprBetween:
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);
 
+            case NodeType.ExprQuantifiedComparison:
+            {
+                // Each operand is evaluated here rather than inside EvalExpr, so an aggregate on
+                // either side reads its value from the workspace row. EvalExpr has no workspace and
+                // would treat count(*) as an unknown scalar function.
+                ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
+                ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
+                return QuantifiedComparisonEvaluator.Evaluate(expression, leftValue, rightValue);
+            }
+
             case NodeType.ExprOr:
             {
                 ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);

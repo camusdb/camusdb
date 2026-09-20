@@ -10,6 +10,7 @@ often:
 | `::` | `x::text` | The same as `CAST(x AS text)` |
 | Subscript | `tags[1]` | The first element of an array |
 | Quantified comparison | `'news' = ANY (tags)` | `true` when `tags` holds `'news'` |
+| Quantified comparison | `score > ALL (limits)` | `true` when `score` is above every element of `limits` |
 | Unary minus | `-total` | The negative of `total` |
 | Negated predicates | `year NOT BETWEEN 2020 AND 2021` | The same as `NOT (year BETWEEN 2020 AND 2021)` |
 
@@ -191,18 +192,19 @@ Two rules differ from PostgreSQL:
 
 See also [Data types → Arrays](data-types.md#arrays).
 
-## `= ANY`, `= SOME` and `<> ALL`
+## Quantified comparisons: `ANY`, `SOME` and `ALL`
 
-A quantified comparison compares a value with each element of an array or each row of a subquery.
-CamusDB accepts the three forms that are membership tests:
+A quantified comparison compares a value with each element of an array, or with each row of a
+subquery. CamusDB accepts every comparison operator with every quantifier:
 
-| Form | Meaning | The same as |
-|------|---------|-------------|
-| `x = ANY (a)` | `x` is equal to one element of `a` | `x IN (...)` over the elements of `a` |
-| `x = SOME (a)` | A synonym of `= ANY` | `x IN (...)` |
-| `x <> ALL (a)` | `x` is not equal to any element of `a` | `x NOT IN (...)` |
+| Form | Meaning |
+|------|---------|
+| `x op ANY (a)` | `true` when `x op element` holds for one element of `a` |
+| `x op SOME (a)` | A synonym of `ANY` |
+| `x op ALL (a)` | `true` when `x op element` holds for every element of `a` |
 
-`!=` is the same as `<>`. `ANY`, `SOME` and `ALL` are not case-sensitive.
+`op` is `=`, `<>`, `<`, `<=`, `>` or `>=`. `!=` is the same as `<>`. `ANY`, `SOME` and `ALL` are not
+case-sensitive.
 
 The right operand can be an array literal, an array column, an array parameter, any other expression
 that gives an array, or a subquery:
@@ -213,20 +215,37 @@ SELECT * FROM users WHERE id = ANY (ARRAY[1, 2, 3]);
 SELECT * FROM users WHERE id = ANY (@ids);                 -- an array parameter
 SELECT * FROM t WHERE x = ANY (SELECT y FROM u);
 SELECT * FROM t WHERE x <> ALL (SELECT y FROM u);
+SELECT * FROM runs WHERE duration > ALL (ARRAY[10, 20]);
+SELECT * FROM runs WHERE duration <= ANY (SELECT budget FROM limits);
 CREATE TABLE posts (id int64 PRIMARY KEY, tags array(string) CHECK ('banned' <> ALL (tags)));
+CREATE TABLE runs (id int64 PRIMARY KEY, scores array(int64) CHECK (0 < ALL (scores)));
 ```
+
+A subquery on the right must not reference a column of the outer query. CamusDB runs the subquery
+once, before the outer scan starts, so an outer column has no value to read. This is the rule that
+`IN (SELECT ...)` already follows.
 
 ### NULL rules
 
-The rules are the rules of `IN` and `NOT IN`:
+The result is the result of the expansion the form stands for, with three-valued `OR` and `AND`:
 
-- A match makes `= ANY` `true` and `<> ALL` `false`, even when the array also holds a `NULL`.
-- A `NULL` `x` gives `NULL`, when the array is not empty.
-- No match gives `NULL` when the array holds a `NULL` element, and otherwise `false` for `= ANY` and
-  `true` for `<> ALL`.
-- An empty array, or a subquery with no rows, gives `false` for `= ANY` and `true` for `<> ALL`. This
-  is also true for a `NULL` `x`.
-- A `NULL` array gives `NULL`.
+- `x op ANY (a1, a2)` is `(x op a1) OR (x op a2)`.
+- `x op ALL (a1, a2)` is `(x op a1) AND (x op a2)`.
+
+Every rule below follows from that expansion:
+
+- `ANY` is `true` when one comparison is `true`. `ALL` is `false` when one comparison is `false`.
+  A decided answer wins, even when another element is `NULL`.
+- With no decided answer, a `NULL` element makes the result `NULL`.
+- A `NULL` `x` gives `NULL`, when the set is not empty.
+- An empty array, or a subquery with no rows, gives `false` for `ANY` and `true` for `ALL`. This is
+  also true for a `NULL` `x`, because no comparison runs.
+- A `NULL` array gives `NULL`. A `NULL` array is not an empty array.
+
+One element comparison means exactly what the same operator means outside a quantifier. A mixed
+numeric pair, such as an `int64` value against a `float64` element, compares by value. A pair that
+the operator cannot compare, such as a number against a string, is the same error it is outside a
+quantifier.
 
 A `WHERE` clause keeps a row only when the result is `true`. A CHECK constraint rejects a row only
 when the result is `false`. So `CHECK ('banned' <> ALL (tags))` accepts a `NULL` array, and it also
@@ -234,8 +253,9 @@ accepts an array that holds a `NULL` element and no `'banned'`.
 
 ### How CamusDB stores each form
 
-The parser changes each form into an equivalent expression. `SHOW CREATE VIEW`, `SHOW CREATE TABLE`
-(for a CHECK constraint) and `EXPLAIN` show the changed form, not the text that you wrote:
+Three forms are membership tests, and the parser changes each one into the equivalent `IN`,
+`NOT IN` or `array_contains` expression. `SHOW CREATE VIEW`, `SHOW CREATE TABLE` (for a CHECK
+constraint) and `EXPLAIN` then show the changed form, not the text that you wrote:
 
 | You write | CamusDB shows |
 |-----------|---------------|
@@ -246,20 +266,34 @@ The parser changes each form into an equivalent expression. `SHOW CREATE VIEW`, 
 | `x = ANY (SELECT y FROM u)` | `x IN (SELECT y FROM u)` |
 | `x <> ALL (SELECT y FROM u)` | `x NOT IN (SELECT y FROM u)` |
 
-An `ARRAY[...]` literal becomes an `IN` list only when each element is a constant or a parameter.
-Then the planner can use an index on `x`, as it does for `x IN (1, 2)`. Every other array becomes an
-`array_contains` call, which the query evaluates for each row. This includes an empty `ARRAY[]` and an
-`ARRAY[...]` with an element such as a column or a calculation.
+`= SOME` is shown as `= ANY` is shown, because the two are one form.
 
-`x = ANY (@ids)` and `x = ANY (tags)` do not use an index.
+Every other operator and quantifier pair keeps its own form, and is shown as you wrote it. Only the
+subquery gains a pair of parentheses:
+
+| You write | CamusDB shows |
+|-----------|---------------|
+| `x < ALL (ARRAY[1, 2])` | `x < ALL (ARRAY[1, 2])` |
+| `x >= ANY (tags)` | `x >= ANY (tags)` |
+| `x <> ANY (SELECT y FROM u)` | `x <> ANY ((SELECT y FROM u))` |
+
+### Index use
+
+An `ARRAY[...]` literal becomes an `IN` list only for a membership form, and only when each element
+is a constant or a parameter. Then the planner can use an index on `x`, as it does for
+`x IN (1, 2)`. Every other array becomes an `array_contains` call, which the query evaluates for
+each row. This includes an empty `ARRAY[]` and an `ARRAY[...]` with an element such as a column or a
+calculation.
+
+`x = ANY (@ids)` and `x = ANY (tags)` do not use an index. No form with an ordered operator uses an
+index; each one is evaluated for each row.
 
 ### Not supported
 
-- The other operators with a quantifier: `< ANY`, `<= ALL`, `> SOME`, `>= ANY`, `= ALL` and `<> ANY`.
-  They give the error `CADB0533` "only = ANY, = SOME and <> ALL are supported".
 - `ANY`, `SOME` or `ALL` with no argument or with more than one argument. The error is `CADB0406`.
-- The quantifier on the left side, as in `ANY (tags) = x`, or a quantifier in any other position, as in
-  `SELECT any(tags)`. The error is "ANY/SOME/ALL is valid only as the right operand of = or <>".
+- The quantifier on the left side, as in `ANY (tags) = x`, or a quantifier in any other position, as
+  in `SELECT any(tags)`. The error is "ANY/SOME/ALL is valid only as the right operand of a
+  comparison".
 - An array text literal on the right, such as `x = ANY ('{a,b}')`. CamusDB has no array text literal.
 
 PostgreSQL rejects `x = (ANY (tags))`. CamusDB accepts it and reads it as `x = ANY (tags)`.

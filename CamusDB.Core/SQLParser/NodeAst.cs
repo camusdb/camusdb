@@ -131,8 +131,9 @@ public sealed class NodeAst
     /// <summary>
     /// Builds a comparison node (<c>=</c>, <c>&lt;&gt;</c>, <c>&lt;</c>, <c>&gt;</c>, <c>&lt;=</c>,
     /// <c>&gt;=</c>). When the right operand is <c>ANY (…)</c>, <c>SOME (…)</c> or <c>ALL (…)</c> it
-    /// builds the equivalent membership test instead, or rejects an unsupported operator; see
-    /// <see cref="QuantifiedComparison"/>.
+    /// builds the equivalent membership test instead, or an
+    /// <see cref="NodeType.ExprQuantifiedComparison"/> for an operator that needs an ordered fold;
+    /// see <see cref="QuantifiedComparison"/>.
     /// </summary>
     public static NodeAst Comparison(NodeType op, NodeAst left, NodeAst right) =>
         QuantifiedComparison.Build(op, left, right);

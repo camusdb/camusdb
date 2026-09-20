@@ -58,6 +58,30 @@ public sealed class TestNodeAstWireCodec
         Assert.AreEqual(json, NodeAstWireCodec.Serialize(restored));
     }
 
+    /// <summary>
+    /// An ordered quantified comparison keeps its operator in <c>extendedOne</c> and its quantifier
+    /// word in <c>yytext</c>. Neither is a child the structural walk would notice if it were
+    /// dropped silently, and a peer that lost either would fold with the wrong operator or the
+    /// wrong quantifier and keep the wrong rows — so both are asserted by value here.
+    /// </summary>
+    [Test]
+    public void RoundTrip_QuantifiedComparison_KeepsOperatorAndQuantifier()
+    {
+        NodeAst select = SQLParserProcessor.Parse(
+            "SELECT id FROM readings WHERE num >= ALL (ARRAY[1, 2])");
+
+        NodeAst where = select.extendedOne!;
+
+        Assert.AreEqual(NodeType.ExprQuantifiedComparison, where.nodeType);
+
+        NodeAst restored = NodeAstWireCodec.Deserialize(NodeAstWireCodec.Serialize(where));
+
+        AssertStructurallyEqual(where, restored, "where");
+        Assert.AreEqual(NodeType.ExprGreaterEqualsThan, QuantifiedComparison.OperatorOf(restored));
+        Assert.AreEqual("ALL", QuantifiedComparison.QuantifierOf(restored));
+        Assert.IsTrue(QuantifiedComparison.IsAll(restored));
+    }
+
     [Test]
     public void RoundTrip_LeafAndUnicodeText_Survive()
     {

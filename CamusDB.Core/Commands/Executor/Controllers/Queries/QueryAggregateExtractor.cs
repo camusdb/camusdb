@@ -145,6 +145,12 @@ internal static class QueryAggregateExtractor
                 node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
                 null, null, null, null, null, null),
 
+            // Not in the group above: rebuilding it with the plain constructor would drop the
+            // operator marker in extendedOne and the quantifier word in yytext. With() keeps both.
+            NodeType.ExprQuantifiedComparison => With(node,
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates)),
+
             NodeType.ExprNot or NodeType.ExprNegate or NodeType.ExprIsNull or NodeType.ExprIsNotNull
                 or NodeType.ExprIsTrue or NodeType.ExprIsNotTrue
                 or NodeType.ExprIsFalse or NodeType.ExprIsNotFalse => With(node,

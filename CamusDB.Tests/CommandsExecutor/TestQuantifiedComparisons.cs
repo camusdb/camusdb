@@ -407,25 +407,7 @@ public sealed class TestQuantifiedComparisons : SharedNodeBaseTest
             await Ids(database, executor, dbname, "SELECT id FROM vals WHERE x = ANY (ARRAY[1, 3]) ORDER BY id"));
     }
 
-    // ── rejected forms ──────────────────────────────────────────────────────
-
-    [TestCase("SELECT 1 = ALL (ARRAY[1])", "= ALL")]
-    [TestCase("SELECT 1 <> ANY (ARRAY[1])", "<> ANY")]
-    [TestCase("SELECT 1 != SOME (ARRAY[1])", "<> SOME")]
-    [TestCase("SELECT 1 < ANY (ARRAY[1])", "< ANY")]
-    [TestCase("SELECT 1 > ALL (ARRAY[1])", "> ALL")]
-    [TestCase("SELECT 1 <= SOME (ARRAY[1])", "<= SOME")]
-    [TestCase("SELECT 1 >= ANY (SELECT 1)", ">= ANY")]
-    public async Task UnsupportedOperator_IsRejectedByName(string sql, string form)
-    {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await ExecQuery(database, executor, dbname, sql), sql)!;
-        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, ex.Code, sql);
-        StringAssert.Contains(form, ex.Message, sql);
-        StringAssert.Contains("only = ANY, = SOME and <> ALL are supported", ex.Message, sql);
-    }
+    // ── argument-count errors ───────────────────────────────────────────────
 
     [TestCase("SELECT 1 = ANY (ARRAY[1], ARRAY[2])")]
     [TestCase("SELECT 1 = ANY ()")]
@@ -454,7 +436,7 @@ public sealed class TestQuantifiedComparisons : SharedNodeBaseTest
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await ExecQuery(database, executor, dbname, sql), sql)!;
-        StringAssert.Contains("valid only as the right operand of = or <>", ex.Message, sql);
+        StringAssert.Contains("valid only as the right operand of a comparison", ex.Message, sql);
     }
 
     // ── the words stay usable as names ──────────────────────────────────────

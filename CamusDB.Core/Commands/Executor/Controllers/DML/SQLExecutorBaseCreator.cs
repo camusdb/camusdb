@@ -570,6 +570,9 @@ internal abstract class SQLExecutorBaseCreator
             case NodeType.ExprNotInMembership:
                 return EvalMembershipNode(expr, row, parameters, rowNameResolver, queryRow);
 
+            case NodeType.ExprQuantifiedComparison:
+                return EvalQuantifiedComparisonNode(expr, row, parameters, rowNameResolver, queryRow);
+
             default:
                 throw UnevaluableExpression(expr.nodeType);
         }
@@ -943,6 +946,26 @@ internal abstract class SQLExecutorBaseCreator
 
         // UNKNOWN comes back as a NULL value, never as FALSE: NOT (x IN (…)) and a CHECK must see it.
         return SubqueryValueListAst.EvaluateMembership(leftValue, expr, parameters);
+    }
+
+    /// <summary>
+    /// Evaluates an ordered quantified comparison (<c>x &lt; ANY (…)</c>, <c>x = ALL (…)</c>, …).
+    /// The right operand is an ordinary expression that must give an array: an <c>ARRAY[…]</c>
+    /// literal, an array column, an array parameter, or the <c>ARRAY[…]</c> the subquery rewrite
+    /// built from a <c>(SELECT …)</c>. Reaching this method with an unresolved subquery is
+    /// impossible — the rewrite runs first and the node would fail the array type check here.
+    /// </summary>
+    private static ColumnValue EvalQuantifiedComparisonNode(
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
+    {
+        ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+        ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
+
+        return QuantifiedComparisonEvaluator.Evaluate(expr, leftValue, rightValue);
     }
 
     /// <summary>

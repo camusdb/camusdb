@@ -195,6 +195,21 @@ internal class SqlAstRenderer
                 RenderInList(sb, expr, negated: true);
                 return;
 
+            // ── ordered quantified comparison (x < ANY (…), x = ALL (…), …) ─────
+            // The right operand is always wrapped in the quantifier's own parentheses, so it needs
+            // no operand parentheses of its own: `ANY (a + b)` and `ANY ((SELECT …))` both re-parse
+            // as one argument of the quantifier call.
+            case NodeType.ExprQuantifiedComparison:
+                RenderOperand(sb, expr.leftAst!);
+                sb.Append(' ')
+                  .Append(QuantifiedComparison.OperatorText(QuantifiedComparison.OperatorOf(expr)))
+                  .Append(' ')
+                  .Append(QuantifiedComparison.QuantifierOf(expr))
+                  .Append(" (");
+                RenderNode(sb, expr.rightAst ?? throw Unsupported(expr));
+                sb.Append(')');
+                return;
+
             // ── function call ───────────────────────────────────────────────────
             case NodeType.ExprFuncCall:
                 sb.Append(expr.leftAst?.yytext ?? throw Unsupported(expr)).Append('(');

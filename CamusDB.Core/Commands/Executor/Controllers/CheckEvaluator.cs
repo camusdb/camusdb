@@ -193,6 +193,20 @@ internal static class CheckEvaluator
                 return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
             }
 
+            // ── ordered quantified comparison: x < ANY (a), x = ALL (a), … ──────────
+            // Both operands go through EvalLeaf, so a column the INSERT left out reads as NULL
+            // instead of raising "unknown column" — the same allowance the membership cases make
+            // for the tested value, extended to the array because a CHECK usually names a column
+            // there (CHECK (0 < ALL (scores))).
+            case NodeType.ExprQuantifiedComparison:
+            {
+                ColumnValue subject = EvalLeaf(condition.leftAst!, row);
+                ColumnValue elements = EvalLeaf(condition.rightAst!, row);
+
+                ColumnValue result = QuantifiedComparisonEvaluator.Evaluate(condition, subject, elements);
+                return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
+            }
+
             // ── fallback: delegate to EvalExpr for non-boolean leaves ────────────────
             default:
             {

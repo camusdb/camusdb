@@ -392,6 +392,10 @@ public static class PlanRenderer
             NodeType.ExprNotInSubquery => $"{RenderExpr(expr.leftAst!)} NOT IN (SELECT ...)",
             NodeType.ExprInMembership => $"{RenderExpr(expr.leftAst!)} IN (...)",
             NodeType.ExprNotInMembership => $"{RenderExpr(expr.leftAst!)} NOT IN (...)",
+            NodeType.ExprQuantifiedComparison =>
+                $"{RenderExpr(expr.leftAst!)} {QuantifiedComparison.OperatorText(QuantifiedComparison.OperatorOf(expr))} "
+                + $"{QuantifiedComparison.QuantifierOf(expr)} ({RenderExpr(expr.rightAst!)})",
+
             NodeType.ExprScalarSubquery => "(SELECT ...)",
             NodeType.ExprExistsSubquery or NodeType.ExprExistsCorrelated => "EXISTS (SELECT ...)",
 

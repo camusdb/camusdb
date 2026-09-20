@@ -64,6 +64,43 @@ internal static class SubqueryValueListAst
             yytext: null);
 
     /// <summary>
+    /// Builds an <c>ARRAY[…]</c> literal node holding everything the subquery returned, for the
+    /// ordered quantified comparisons (<c>x &lt; ANY (SELECT …)</c> and the rest). Those fold over an
+    /// array value, not over an <c>IN</c> list, so the materialized rows become an array the ordinary
+    /// expression evaluator can build.
+    ///
+    /// <para>The materialization drops the NULL rows and records them in
+    /// <c>ContainsNull</c>, so one NULL element is appended when it saw any. One is enough: the fold
+    /// only asks whether a comparison was UNKNOWN, never how many were. An empty subquery gives an
+    /// empty <c>ARRAY[]</c>, which the fold reads as FALSE for <c>ANY</c> and TRUE for
+    /// <c>ALL</c>.</para>
+    ///
+    /// <para>The caller disposes the materialization after this method returns.</para>
+    /// </summary>
+    public static async Task<NodeAst> BuildArrayLiteralAsync(
+        InSubqueryMaterialization materialization,
+        CancellationToken ct = default)
+    {
+        List<NodeAst> items = [];
+
+        await foreach (ColumnValue value in materialization.Values.EnumerateAsync(ct).ConfigureAwait(false))
+        {
+            if (value.Type == ColumnType.Null)
+                continue;
+
+            items.Add(ColumnValueAstBuilder.FromColumnValue(value));
+        }
+
+        if (materialization.ContainsNull)
+            items.Add(NodeAst.Null);
+
+        return new NodeAst(
+            NodeType.ArrayLiteral,
+            ExpressionChains.Combine(NodeType.ExprList, items),
+            null, null, null, null, null, null, null);
+    }
+
+    /// <summary>
     /// Builds an <c>ExprList</c> tree from a literal <c>IReadOnlyList&lt;ColumnValue&gt;</c>.
     /// Used for grammar-parsed literal IN lists (e.g. <c>WHERE x IN (1, 2, 3)</c>).
     /// A long list is built balanced (see <see cref="ExpressionChains"/>): a left-deep list is one

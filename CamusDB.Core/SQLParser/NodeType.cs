@@ -723,4 +723,26 @@ public enum NodeType
     /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
     /// </summary>
     ExprNegate,
+
+    /// <summary>
+    /// A quantified comparison whose operator is not a membership test: <c>x &lt; ANY (…)</c>,
+    /// <c>x &gt;= ALL (…)</c>, <c>x = ALL (…)</c>, <c>x &lt;&gt; ANY (…)</c> and the rest.
+    /// <c>leftAst</c> is the left operand. <c>rightAst</c> is the right operand: an expression that
+    /// gives an array, or an <see cref="ExprScalarSubquery"/> that a rewrite step replaces with an
+    /// <see cref="ArrayLiteral"/> before evaluation. <c>extendedOne</c> is a childless node whose own
+    /// type is the comparison operator, and <c>yytext</c> is the quantifier word, <c>ANY</c>,
+    /// <c>SOME</c> or <c>ALL</c>.
+    ///
+    /// <para>The three membership forms (<c>= ANY</c>, <c>= SOME</c>, <c>&lt;&gt; ALL</c>) never build
+    /// this node. The parser turns each one into the <c>IN</c>, <c>NOT IN</c> or
+    /// <c>array_contains</c> node it is equal to, so their NULL rules cannot drift; see
+    /// <c>QuantifiedComparison</c>.</para>
+    ///
+    /// <para>Visitors treat it as a binary node: both operands are expressions that can reference
+    /// columns. <c>extendedOne</c> carries no column reference, so a visitor may skip it.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    ExprQuantifiedComparison,
 }

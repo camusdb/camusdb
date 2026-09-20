@@ -656,6 +656,7 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprRegexMatchCi:
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
+            case NodeType.ExprQuantifiedComparison:
                 if (expression.leftAst is not null)
                 {
                     CollectFromPostAggregateExpression(
@@ -907,6 +908,7 @@ internal static class RequiredColumnAnalyzer
             case NodeType.ExprRegexMatchCi:
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
+            case NodeType.ExprQuantifiedComparison:
                 if (expression.leftAst is not null)
                 {
                     CollectFromPostAggregateExpressionForAlias(
