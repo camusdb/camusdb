@@ -5,8 +5,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
+
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.SQLParser;
 
@@ -42,6 +45,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 ///     and otherwise FALSE for <c>ANY</c> and TRUE for <c>ALL</c>.</item>
 /// </list>
 ///
+/// <para>The right operand takes one of two forms. A written array gives an array value, and a
+/// subquery gives an <see cref="NodeType.ExprValueSet"/> node that a rewrite step built from the
+/// rows. Both fold through the same private method, so the two forms cannot drift apart. The set
+/// may hold values of more than one type, which an array cannot: a subquery can return an Integer64
+/// in one row and a Float64 in the next, and each pair is compared on its own.</para>
+///
 /// <para>One element pair is compared by <see cref="SQLExecutorBaseCreator.EvalComparison"/>, the
 /// same method the scalar operator uses. So a mixed numeric pair widens rather than failing, and an
 /// incomparable pair raises the type error the scalar form raises — the quantifier changes how many
@@ -50,25 +59,79 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal static class QuantifiedComparisonEvaluator
 {
     /// <summary>
+    /// The evaluated values of one <see cref="NodeType.ExprValueSet"/> node. The node holds literals
+    /// only, so its values are the same for every row, and the fold would otherwise re-evaluate every
+    /// element for every row it is asked about. The table is keyed on the identity of the node and
+    /// holds it weakly, so the values go away with the rewritten tree that owns them.
+    /// </summary>
+    private static readonly ConditionalWeakTable<NodeAst, ColumnValue[]> ValueSetCache = new();
+
+    /// <summary>
+    /// True when the right operand of <paramref name="expr"/> is a set of values a rewrite step
+    /// already read from a subquery. A caller must ask this before it evaluates the right operand:
+    /// the set is not an expression and has no value of its own, so
+    /// <see cref="EvaluateOverValueSet"/> takes its place.
+    /// </summary>
+    public static bool HasValueSet(NodeAst expr) => expr.rightAst?.nodeType == NodeType.ExprValueSet;
+
+    /// <summary>
+    /// Folds the values of the set against <paramref name="left"/>, by the rules
+    /// <see cref="Evaluate"/> applies to an array. The set replaces the array for a subquery, and the
+    /// two differ in one way only: a set may hold values of more than one type, because a subquery
+    /// can return them and each pair is compared on its own.
+    /// </summary>
+    public static ColumnValue EvaluateOverValueSet(NodeAst expr, ColumnValue left) =>
+        Fold(expr, left, ValuesOf(expr.rightAst!));
+
+    /// <summary>
+    /// Returns the evaluated values of a value-set node, and keeps them for the next row. A node
+    /// that crossed the wire to a peer arrives with no values kept, so the first fold there builds
+    /// them from the literals in the node.
+    /// </summary>
+    private static ColumnValue[] ValuesOf(NodeAst valueSet)
+    {
+        if (ValueSetCache.TryGetValue(valueSet, out ColumnValue[]? cached))
+            return cached;
+
+        List<ColumnValue> values = [];
+
+        foreach (ColumnValue value in SubqueryValueListAst.Enumerate(valueSet.leftAst))
+            values.Add(value);
+
+        ColumnValue[] evaluated = values.ToArray();
+
+        // A benign race stores whichever equal array wins last.
+        ValueSetCache.AddOrUpdate(valueSet, evaluated);
+        return evaluated;
+    }
+
+    /// <summary>
     /// Folds <paramref name="right"/> against <paramref name="left"/> with the operator and
     /// quantifier that <paramref name="expr"/> carries. The caller evaluates both operands, so the
     /// WHERE path and the CHECK path can each use their own rule for reading a column.
     /// </summary>
     public static ColumnValue Evaluate(NodeAst expr, ColumnValue left, ColumnValue right)
     {
-        NodeType op = QuantifiedComparison.OperatorOf(expr);
-        bool isAll = QuantifiedComparison.IsAll(expr);
-
         if (right.Type == ColumnType.Null)
             return ColumnValue.Null;
 
         if (right.Type != ColumnType.Array)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"The right operand of {QuantifiedComparison.OperatorText(op)} " +
+                $"The right operand of {QuantifiedComparison.OperatorText(QuantifiedComparison.OperatorOf(expr))} " +
                 $"{QuantifiedComparison.QuantifierOf(expr)} must be an array or a subquery but is {right.Type}");
 
-        IReadOnlyList<ColumnValue> elements = right.ArrayValues!;
+        return Fold(expr, left, right.ArrayValues!);
+    }
+
+    /// <summary>
+    /// The fold itself, over elements that come either from an array value or from a value set. Both
+    /// forms apply the same rules, so one method serves them and they cannot drift apart.
+    /// </summary>
+    private static ColumnValue Fold(NodeAst expr, ColumnValue left, IReadOnlyList<ColumnValue> elements)
+    {
+        NodeType op = QuantifiedComparison.OperatorOf(expr);
+        bool isAll = QuantifiedComparison.IsAll(expr);
 
         if (elements.Count == 0)
             return ColumnValue.FromBool(isAll);

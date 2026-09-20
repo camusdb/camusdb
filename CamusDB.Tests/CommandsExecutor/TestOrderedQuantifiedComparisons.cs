@@ -16,7 +16,10 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Controllers;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -504,11 +507,17 @@ public sealed class TestOrderedQuantifiedComparisons : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// A view body is stored as text too. The array form and the subquery form must both render and
-    /// re-parse, and the view must return the rows the direct query returns.
+    /// A view body is stored as text, so every form must render and re-parse. The array form and the
+    /// array-column form are also queried, and must return the rows the direct query returns.
+    ///
+    /// <para>The subquery form is rendered only. A view body that holds any subquery cannot be
+    /// queried yet — the binder reads a view source without the rewrite step that replaces a
+    /// subquery, so the membership form <c>x = ANY (SELECT …)</c> fails in the same way. That gap is
+    /// not a property of this form, and the view is created and rendered here to show that the
+    /// stored text survives.</para>
     /// </summary>
     [Test]
-    public async Task ViewBody_RendersAndQueries()
+    public async Task ViewBody_RendersEveryFormAndQueriesTheArrayForms()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await Seed(database, executor, dbname);
@@ -528,6 +537,7 @@ public sealed class TestOrderedQuantifiedComparisons : SharedNodeBaseTest
         async Task<string> Shown(string view) =>
             (await ExecQuery(database, executor, dbname, "SHOW CREATE VIEW " + view))[0].Row["create view"].StrValue!;
 
+        // v_sub is not queried here; see the summary.
         StringAssert.Contains("x >= ALL (ARRAY[1, 2])", await Shown("v_lit"));
         StringAssert.Contains("3 < ANY (scores)", await Shown("v_col"));
         StringAssert.Contains("x < ANY ((SELECT", await Shown("v_sub"));
@@ -588,5 +598,151 @@ public sealed class TestOrderedQuantifiedComparisons : SharedNodeBaseTest
             await ExecQuery(database, executor, dbname, "SELECT 1 < ALL (2)"))!;
 
         StringAssert.Contains("must be an array or a subquery", ex.Message);
+    }
+
+    // ── the rows a subquery returns are a set of values, not an array ───────
+
+    /// <summary>
+    /// A subquery can return values of more than one type, and the fold must compare each pair by
+    /// the rule the operator uses outside a quantifier. A mixed numeric pair widens, so
+    /// <c>0 &lt; ANY</c> and <c>0 &lt; ALL</c> over the rows 1 and 2.5 are both TRUE.
+    ///
+    /// <para>The same two values written as <c>ARRAY[1, 2.5]</c> are still rejected, because an
+    /// array literal carries one element type. The rows of a subquery are not an array, so that
+    /// rule must not reach them.</para>
+    /// </summary>
+    [Test]
+    public async Task Subquery_WithMixedNumericRows_ComparesEachPair()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await Seed(database, executor, dbname);
+
+        const string rows = "SELECT CASE WHEN y = 1 THEN 1 ELSE 2.5 END FROM allowed";
+
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT 0 < ANY ({rows})"), "0 < ANY");
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT 0 < ALL ({rows})"), "0 < ALL");
+
+        // 2 < 2.5 is TRUE and 2 < 1 is FALSE, so the two quantifiers must disagree here. Both
+        // answers need the Float64 row and the Integer64 row to be compared on their own.
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT 2 < ANY ({rows})"), "2 < ANY");
+        AssertBool(false, await ExecScalar(database, executor, dbname, $"SELECT 2 < ALL ({rows})"), "2 < ALL");
+
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT 3 > ALL ({rows})"), "3 > ALL");
+
+        // A NULL left operand still gives UNKNOWN over a mixed set.
+        AssertUnknown(await ExecScalar(database, executor, dbname, $"SELECT NULL < ANY ({rows})"), "NULL < ANY");
+
+        // The written array literal keeps the one-element-type rule.
+        Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecQuery(database, executor, dbname, "SELECT 0 < ANY (ARRAY[1, 2.5])"));
+    }
+
+    /// <summary>
+    /// Two bytes values compare byte by byte, so a subquery that returns a bytes column must reach
+    /// the fold. The rows are read from a column: a bytes literal in the select list of a subquery
+    /// fails earlier, in binding, for a reason that has nothing to do with this form.
+    /// </summary>
+    [Test]
+    public async Task Subquery_WithBytesRows_ComparesByteByByte()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(database, executor, dbname, "CREATE TABLE blobs (id int64 PRIMARY KEY, b bytes)");
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO blobs (id, b) VALUES (1, X'00'), (2, X'02')");
+
+        const string rows = "SELECT b FROM blobs";
+
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT X'01' > ANY ({rows})"), "> ANY");
+        AssertBool(false, await ExecScalar(database, executor, dbname, $"SELECT X'01' > ALL ({rows})"), "> ALL");
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT X'03' > ALL ({rows})"), "X'03' > ALL");
+        AssertBool(true, await ExecScalar(database, executor, dbname, $"SELECT X'00' <= ALL ({rows})"), "<= ALL");
+    }
+
+    /// <summary>
+    /// A subquery that returns UUID rows reaches the fold, and gives the answer the scalar operator
+    /// gives for the same pair.
+    /// </summary>
+    [Test]
+    public async Task Subquery_WithUuidRows_Compares()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(database, executor, dbname, "CREATE TABLE tokens (id int64 PRIMARY KEY, u uuid)");
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO tokens (id, u) VALUES " +
+            "(1, CAST('00000000-0000-0000-0000-000000000001' AS uuid)), " +
+            "(2, CAST('00000000-0000-0000-0000-000000000003' AS uuid))");
+
+        const string rows = "SELECT u FROM tokens";
+
+        AssertBool(true, await ExecScalar(database, executor, dbname,
+            $"SELECT CAST('00000000-0000-0000-0000-000000000002' AS uuid) > ANY ({rows})"), "> ANY");
+
+        AssertBool(false, await ExecScalar(database, executor, dbname,
+            $"SELECT CAST('00000000-0000-0000-0000-000000000002' AS uuid) > ALL ({rows})"), "> ALL");
+
+        AssertBool(true, await ExecScalar(database, executor, dbname,
+            $"SELECT CAST('00000000-0000-0000-0000-000000000004' AS uuid) > ALL ({rows})"), "greater than both");
+    }
+
+    /// <summary>
+    /// The values a subquery returned are evaluated once, not once for each row the comparison is
+    /// applied to. Every element is a literal, so the set cannot change between rows.
+    ///
+    /// <para>A UUID element is the case that shows the cost. It has no literal token, so it is held
+    /// as <c>CAST('…' AS uuid)</c>, and a per-row rebuild would parse and allocate a UUID for each
+    /// element for each row. The bound below is far above a reused set and far below one rebuild of
+    /// a 1,000-element set, so it fails on a return to per-row rebuilding without being a
+    /// measurement of the machine.</para>
+    /// </summary>
+    [Test]
+    public void ValueSet_IsEvaluatedOnceForEveryRow()
+    {
+        const int elements = 1_000;
+        const int rows = 100;
+
+        NodeAst parsed = SQLParserProcessor.Parse("SELECT id FROM t WHERE x > ALL (ARRAY[1])").extendedOne!;
+        Assert.AreEqual(NodeType.ExprQuantifiedComparison, parsed.nodeType);
+
+        List<NodeAst> items = new(elements);
+
+        for (int i = 0; i < elements; i++)
+            items.Add(ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromUuid(Guid.NewGuid())));
+
+        NodeAst valueSet = new(
+            NodeType.ExprValueSet,
+            ExpressionChains.Combine(NodeType.ExprList, items),
+            null, null, null, null, null, null, null);
+
+        NodeAst expr = new(
+            parsed.nodeType, parsed.leftAst, valueSet, parsed.extendedOne,
+            parsed.extendedTwo, parsed.extendedThree, parsed.extendedFour, parsed.extendedFive,
+            parsed.yytext);
+
+        // A UUID above every element, so the fold walks the whole set and never short-circuits.
+        ColumnValue probe = ColumnValue.FromUuid(new Guid("ffffffff-ffff-ffff-ffff-ffffffffffff"));
+
+        AssertBool(true, QuantifiedComparisonEvaluator.EvaluateOverValueSet(expr, probe), "first fold");
+
+        // The loop holds the folds alone. An assertion inside it would measure NUnit, not the fold.
+        int trueResults = 0;
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        for (int i = 0; i < rows; i++)
+        {
+            ColumnValue result = QuantifiedComparisonEvaluator.EvaluateOverValueSet(expr, probe);
+
+            if (result.Type == ColumnType.Bool && result.BoolValue)
+                trueResults++;
+        }
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.AreEqual(rows, trueResults, "every fold gives TRUE");
+
+        Assert.Less(allocated, 10_000,
+            $"{rows} folds over {elements} values allocated {allocated} bytes; the set is rebuilt for each row");
     }
 }

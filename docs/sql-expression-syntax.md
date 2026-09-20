@@ -225,6 +225,13 @@ A subquery on the right must not reference a column of the outer query. CamusDB 
 once, before the outer scan starts, so an outer column has no value to read. This is the rule that
 `IN (SELECT ...)` already follows.
 
+A subquery on the right is not an array, and the rule that an array holds one element type does not
+apply to it. The rows it returns can hold more than one type. Each row is compared to the left
+operand on its own, by the same rule the operator uses outside a quantifier. So
+`SELECT 0 < ANY (SELECT CASE WHEN id = 1 THEN 1 ELSE 2.5 END FROM t)` compares `0` to an `int64`
+value and then to a `float64` value, and gives `true`. The same values written as
+`ARRAY[1, 2.5]` are still rejected, because an array literal does have one element type.
+
 ### NULL rules
 
 The result is the result of the expansion the form stands for, with three-valued `OR` and `AND`:

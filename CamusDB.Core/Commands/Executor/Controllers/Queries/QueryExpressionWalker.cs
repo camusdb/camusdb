@@ -43,6 +43,7 @@ internal static class QueryExpressionWalker
             case NodeType.ExprDiv:
             case NodeType.ExprSubscript:
             case NodeType.ArrayLiteral:
+            case NodeType.ExprValueSet:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
             case NodeType.ExprRegexMatch:

@@ -131,7 +131,7 @@ internal static class QueryAggregateExtractor
                 node.rightAst),
 
             NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
-            or NodeType.ExprSubscript or NodeType.ArrayLiteral
+            or NodeType.ExprSubscript or NodeType.ArrayLiteral or NodeType.ExprValueSet
             or NodeType.ExprEquals or NodeType.ExprNotEquals
             or NodeType.ExprLessThan or NodeType.ExprGreaterThan
             or NodeType.ExprLessEqualsThan or NodeType.ExprGreaterEqualsThan

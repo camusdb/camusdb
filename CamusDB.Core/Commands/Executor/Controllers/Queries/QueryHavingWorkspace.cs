@@ -117,6 +117,7 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprDiv:
             case NodeType.ExprSubscript:
             case NodeType.ArrayLiteral:
+            case NodeType.ExprValueSet:
             case NodeType.ExprList:
             case NodeType.ExprLike:
             case NodeType.ExprILike:
@@ -286,6 +287,7 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprDiv:
             case NodeType.ExprSubscript:
             case NodeType.ArrayLiteral:
+            case NodeType.ExprValueSet:
             case NodeType.ExprList:
             case NodeType.ExprLike:
             case NodeType.ExprILike:

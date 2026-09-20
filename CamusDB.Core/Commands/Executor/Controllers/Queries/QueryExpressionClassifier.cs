@@ -100,6 +100,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprDiv:
                 case NodeType.ExprSubscript:
                 case NodeType.ArrayLiteral:
+                case NodeType.ExprValueSet:
                 case NodeType.ExprEquals:
                 case NodeType.ExprNotEquals:
                 case NodeType.ExprLessThan:
@@ -226,6 +227,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprDiv:
                 case NodeType.ExprSubscript:
                 case NodeType.ArrayLiteral:
+                case NodeType.ExprValueSet:
                 case NodeType.ExprEquals:
                 case NodeType.ExprNotEquals:
                 case NodeType.ExprLessThan:
@@ -330,6 +332,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprDiv:
                 case NodeType.ExprSubscript:
                 case NodeType.ArrayLiteral:
+                case NodeType.ExprValueSet:
                 case NodeType.ExprEquals:
                 case NodeType.ExprNotEquals:
                 case NodeType.ExprLessThan:

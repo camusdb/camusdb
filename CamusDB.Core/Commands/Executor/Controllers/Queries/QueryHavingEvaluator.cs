@@ -73,6 +73,10 @@ internal static class QueryHavingEvaluator
                 // either side reads its value from the workspace row. EvalExpr has no workspace and
                 // would treat count(*) as an unknown scalar function.
                 ColumnValue leftValue = Evaluate(expression.leftAst!, row, ticket, parameters);
+
+                if (QuantifiedComparisonEvaluator.HasValueSet(expression))
+                    return QuantifiedComparisonEvaluator.EvaluateOverValueSet(expression, leftValue);
+
                 ColumnValue rightValue = Evaluate(expression.rightAst!, row, ticket, parameters);
                 return QuantifiedComparisonEvaluator.Evaluate(expression, leftValue, rightValue);
             }

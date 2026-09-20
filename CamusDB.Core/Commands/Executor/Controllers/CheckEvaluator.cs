@@ -201,9 +201,12 @@ internal static class CheckEvaluator
             case NodeType.ExprQuantifiedComparison:
             {
                 ColumnValue subject = EvalLeaf(condition.leftAst!, row);
-                ColumnValue elements = EvalLeaf(condition.rightAst!, row);
 
-                ColumnValue result = QuantifiedComparisonEvaluator.Evaluate(condition, subject, elements);
+                // A CHECK condition holds no subquery, so no value set can reach here. The test
+                // costs nothing and keeps the three evaluation paths alike.
+                ColumnValue result = QuantifiedComparisonEvaluator.HasValueSet(condition)
+                    ? QuantifiedComparisonEvaluator.EvaluateOverValueSet(condition, subject)
+                    : QuantifiedComparisonEvaluator.Evaluate(condition, subject, EvalLeaf(condition.rightAst!, row));
                 return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
             }
 

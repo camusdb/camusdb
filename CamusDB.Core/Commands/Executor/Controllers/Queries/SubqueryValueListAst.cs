@@ -17,6 +17,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal static class SubqueryValueListAst
 {
     /// <summary>
+    /// The row every list item is evaluated against. A list item is a literal, so it reads no
+    /// column; one shared instance avoids an allocation for each item of each row.
+    /// </summary>
+    private static readonly Dictionary<string, ColumnValue> EmptyRow = new();
+
+    /// <summary>
     /// Builds an <c>ExprInMembership</c> node by asynchronously enumerating the
     /// <see cref="SpillableValueList"/> in the materialization. The enumeration reads from disk
     /// when the value list has spilled, keeping peak in-memory usage bounded during collection.
@@ -64,20 +70,21 @@ internal static class SubqueryValueListAst
             yytext: null);
 
     /// <summary>
-    /// Builds an <c>ARRAY[…]</c> literal node holding everything the subquery returned, for the
-    /// ordered quantified comparisons (<c>x &lt; ANY (SELECT …)</c> and the rest). Those fold over an
-    /// array value, not over an <c>IN</c> list, so the materialized rows become an array the ordinary
-    /// expression evaluator can build.
+    /// Builds the <c>ExprValueSet</c> node that holds everything the subquery returned, for the
+    /// ordered quantified comparisons (<c>x &lt; ANY (SELECT …)</c> and the rest).
     ///
-    /// <para>The materialization drops the NULL rows and records them in
-    /// <c>ContainsNull</c>, so one NULL element is appended when it saw any. One is enough: the fold
-    /// only asks whether a comparison was UNKNOWN, never how many were. An empty subquery gives an
-    /// empty <c>ARRAY[]</c>, which the fold reads as FALSE for <c>ANY</c> and TRUE for
-    /// <c>ALL</c>.</para>
+    /// <para>The node holds a set of candidate values, not an array. An array carries one element
+    /// type, so a subquery that returned both an Integer64 and a Float64 could not become one;
+    /// the fold compares one pair at a time and widens a mixed numeric pair by itself.</para>
+    ///
+    /// <para>The materialization drops the NULL rows and records them in <c>ContainsNull</c>, so one
+    /// NULL element is appended when it saw any. One is enough: the fold only asks whether a
+    /// comparison was UNKNOWN, never how many were. A subquery that returned no row gives a node
+    /// with no list, which the fold reads as FALSE for <c>ANY</c> and TRUE for <c>ALL</c>.</para>
     ///
     /// <para>The caller disposes the materialization after this method returns.</para>
     /// </summary>
-    public static async Task<NodeAst> BuildArrayLiteralAsync(
+    public static async Task<NodeAst> BuildValueSetAsync(
         InSubqueryMaterialization materialization,
         CancellationToken ct = default)
     {
@@ -95,7 +102,7 @@ internal static class SubqueryValueListAst
             items.Add(NodeAst.Null);
 
         return new NodeAst(
-            NodeType.ArrayLiteral,
+            NodeType.ExprValueSet,
             ExpressionChains.Combine(NodeType.ExprList, items),
             null, null, null, null, null, null, null);
     }
@@ -227,7 +234,7 @@ internal static class SubqueryValueListAst
     /// of a list nor its shape can overflow the stack; the previous nested-iterator form also cost
     /// time proportional to depth for every value it yielded.
     /// </summary>
-    private static IEnumerable<ColumnValue> Enumerate(NodeAst? ast, Dictionary<string, ColumnValue>? parameters = null)
+    internal static IEnumerable<ColumnValue> Enumerate(NodeAst? ast, Dictionary<string, ColumnValue>? parameters = null)
     {
         if (ast is null)
             yield break;
@@ -251,7 +258,7 @@ internal static class SubqueryValueListAst
                 continue;
             }
 
-            yield return SQLExecutorBaseCreator.EvalExpr(node, new Dictionary<string, ColumnValue>(), parameters);
+            yield return SQLExecutorBaseCreator.EvalExpr(node, EmptyRow, parameters);
         }
     }
 }

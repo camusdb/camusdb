@@ -84,6 +84,19 @@ internal static class ColumnValueAstBuilder
                 extendedFour: null,
                 extendedFive: null,
                 yytext: null),
+            // A bytes value has a literal form, X'<hex>', and the comparison of two bytes values
+            // orders them byte by byte. Without this arm a subquery that returns a bytes column
+            // fails here, although the same comparison of two bytes literals succeeds.
+            ColumnType.Bytes => new NodeAst(
+                NodeType.BytesLiteral,
+                leftAst: null,
+                rightAst: null,
+                extendedOne: null,
+                extendedTwo: null,
+                extendedThree: null,
+                extendedFour: null,
+                extendedFive: null,
+                yytext: SqlStringLiteral.QuoteBytes(value.BytesValue ?? [])),
             ColumnType.Null => NodeAst.Null,
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

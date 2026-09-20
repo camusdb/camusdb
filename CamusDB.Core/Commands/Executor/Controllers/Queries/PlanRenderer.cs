@@ -384,6 +384,10 @@ public static class PlanRenderer
 
             NodeType.ArrayLiteral => $"ARRAY[{(expr.leftAst is null ? "" : RenderExpr(expr.leftAst))}]",
 
+            // The values a subquery returned. The plan names the form, not the rows: a subquery can
+            // return thousands of them, and the plan is read by a person.
+            NodeType.ExprValueSet => "(...)",
+
             NodeType.ExprSubscript => $"{RenderExpr(expr.leftAst!)}[{RenderExpr(expr.rightAst!)}]",
 
             NodeType.ExprCase => RenderCase(expr),

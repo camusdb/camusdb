@@ -729,7 +729,7 @@ public enum NodeType
     /// <c>x &gt;= ALL (…)</c>, <c>x = ALL (…)</c>, <c>x &lt;&gt; ANY (…)</c> and the rest.
     /// <c>leftAst</c> is the left operand. <c>rightAst</c> is the right operand: an expression that
     /// gives an array, or an <see cref="ExprScalarSubquery"/> that a rewrite step replaces with an
-    /// <see cref="ArrayLiteral"/> before evaluation. <c>extendedOne</c> is a childless node whose own
+    /// <see cref="ExprValueSet"/> before evaluation. <c>extendedOne</c> is a childless node whose own
     /// type is the comparison operator, and <c>yytext</c> is the quantifier word, <c>ANY</c>,
     /// <c>SOME</c> or <c>ALL</c>.
     ///
@@ -745,4 +745,30 @@ public enum NodeType
     /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
     /// </summary>
     ExprQuantifiedComparison,
+
+    /// <summary>
+    /// The values a subquery returned, held for an ordered quantified comparison. A rewrite step
+    /// builds this node and puts it in the <c>rightAst</c> of an
+    /// <see cref="ExprQuantifiedComparison"/>, in place of the <see cref="ExprScalarSubquery"/> the
+    /// parser put there. <c>leftAst</c> is the <see cref="ExprList"/> chain of the values, or null
+    /// when the subquery returned no row.
+    ///
+    /// <para>This is a set of candidate values, not an array. An array has one element type, and a
+    /// subquery can return values of more than one type — a column that is Integer64 in one row and
+    /// Float64 in another, for example. The comparison of one pair applies its own rule to a mixed
+    /// numeric pair, so the set must not force the values into one type first.</para>
+    ///
+    /// <para>Every element is a literal. A rewrite step builds the node from values it already read,
+    /// so no element reads a row column or a bind placeholder. The value of the set is therefore the
+    /// same for every row, and <c>QuantifiedComparisonEvaluator</c> evaluates the elements once and
+    /// keeps them.</para>
+    ///
+    /// <para>The node is never the operand of another expression, so no evaluator gives it a value of
+    /// its own. Visitors treat it as a list holder: walk <c>leftAst</c>, exactly as for
+    /// <see cref="ArrayLiteral"/>.</para>
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>: member
+    /// ordinals cross the wire, so no member may be inserted mid-enum.</para>
+    /// </summary>
+    ExprValueSet,
 }

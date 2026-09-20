@@ -950,10 +950,12 @@ internal abstract class SQLExecutorBaseCreator
 
     /// <summary>
     /// Evaluates an ordered quantified comparison (<c>x &lt; ANY (…)</c>, <c>x = ALL (…)</c>, …).
-    /// The right operand is an ordinary expression that must give an array: an <c>ARRAY[…]</c>
-    /// literal, an array column, an array parameter, or the <c>ARRAY[…]</c> the subquery rewrite
-    /// built from a <c>(SELECT …)</c>. Reaching this method with an unresolved subquery is
-    /// impossible — the rewrite runs first and the node would fail the array type check here.
+    /// The right operand takes one of two forms. For an <c>ARRAY[…]</c> literal, an array column or
+    /// an array parameter it is an ordinary expression that must give an array. For a
+    /// <c>(SELECT …)</c> the subquery rewrite already replaced it with a
+    /// <see cref="NodeType.ExprValueSet"/>, which holds the values the subquery returned and is not
+    /// evaluated as an expression. Reaching this method with an unresolved subquery is impossible —
+    /// the rewrite runs first and the node would fail the array type check here.
     /// </summary>
     private static ColumnValue EvalQuantifiedComparisonNode(
         NodeAst expr,
@@ -963,6 +965,12 @@ internal abstract class SQLExecutorBaseCreator
         QueryRow? queryRow)
     {
         ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
+
+        // A set of values a rewrite step read from a subquery is not an expression and has no value
+        // of its own, so it must not go through EvalExpr.
+        if (QuantifiedComparisonEvaluator.HasValueSet(expr))
+            return QuantifiedComparisonEvaluator.EvaluateOverValueSet(expr, leftValue);
+
         ColumnValue rightValue = EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow);
 
         return QuantifiedComparisonEvaluator.Evaluate(expr, leftValue, rightValue);

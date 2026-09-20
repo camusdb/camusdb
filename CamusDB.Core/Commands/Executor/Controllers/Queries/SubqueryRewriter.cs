@@ -303,7 +303,7 @@ internal sealed class SubqueryRewriter
             ticket.Parameters,
             ticket.CancellationToken).ConfigureAwait(false);
 
-        NodeAst elements = await SubqueryValueListAst.BuildArrayLiteralAsync(
+        NodeAst elements = await SubqueryValueListAst.BuildValueSetAsync(
             materialization,
             ticket.CancellationToken).ConfigureAwait(false);
 
