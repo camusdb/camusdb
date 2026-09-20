@@ -7,7 +7,7 @@ CamusDB is a SQL distributed database written in C# on .NET. It provides a SQL i
 
 [![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
 
-[Documentation](https://camusdb.github.io/docs/intro)
+[Documentation](https://camusdb.github.io/docs/intro) | [Live playground](https://camusdb.github.io/playground/)
 
 <img width="809" height="503" alt="cli" src="https://github.com/user-attachments/assets/77b73c6f-a985-4fca-8f75-10de0b0c4358" />
 
@@ -70,7 +70,7 @@ CamusDB's engine is written in modern C# on .NET: the SQL parser, the query plan
 
 ### Browser playground
 
-The same engine also compiles to WebAssembly and runs in a browser tab, with nothing to install: a single in-memory node with a SQL editor and a sample data set. See [docs/browser-playground.md](docs/browser-playground.md) to build it and serve it from any static host.
+The same engine also compiles to WebAssembly and runs in a browser tab, with nothing to install: an in-memory node with a SQL editor and a sample data set. One button turns it into a three-node cluster inside that one tab, over an in-memory transport — stop the leader, watch another node take over, start the old one and watch it catch up. Try it at [camusdb.github.io/playground](https://camusdb.github.io/playground/). See [docs/browser-playground.md](docs/browser-playground.md) to build it and serve it from any static host.
 
 Features
 --------

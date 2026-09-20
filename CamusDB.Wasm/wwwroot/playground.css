@@ -195,3 +195,88 @@ tbody tr:last-child td { border-bottom: none; }
     textarea { min-height: 200px; }
     .top { padding: 12px 16px; }
 }
+
+/* ── Cluster mode ─────────────────────────────────────────────────────────── */
+
+.modes { display: flex; gap: 0; margin-left: auto; }
+
+.mode-button {
+    font-size: 13px;
+    padding: 5px 12px;
+    border-radius: 0;
+    background: var(--surface-2);
+}
+
+.mode-button:first-child { border-radius: 8px 0 0 8px; }
+.mode-button:last-child { border-radius: 0 8px 8px 0; border-left: none; }
+.mode-button.is-on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+
+.cluster {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+}
+
+.cluster-intro { margin: 0; color: var(--muted); font-size: 13px; }
+
+.cluster-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.cluster-bar label { color: var(--muted); }
+
+.cluster-bar select {
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 5px 8px;
+}
+
+.cluster-bar button { font-size: 13px; padding: 4px 11px; margin-left: auto; }
+
+.nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+
+.node {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface-2);
+}
+
+.node.is-stopped { opacity: 0.55; }
+.node.is-leader { border-color: var(--accent); }
+
+.node-head { display: flex; align-items: center; gap: 7px; }
+.node-name { font-weight: 600; font-size: 13px; }
+.node-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.node.is-stopped .node-dot { background: var(--muted); }
+.node.is-cut .node-dot { background: var(--warn); }
+
+.node-badges { display: flex; flex-wrap: wrap; gap: 5px; min-height: 20px; }
+
+.badge {
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+}
+
+.badge.lead { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.badge.cut { border-color: var(--warn); color: var(--warn); }
+
+.node-actions { display: flex; gap: 6px; }
+.node-actions button { font-size: 12px; padding: 3px 9px; flex: 1; }
+
+@media (max-width: 900px) {
+    .top { flex-wrap: wrap; }
+    .modes { margin-left: 0; }
+}

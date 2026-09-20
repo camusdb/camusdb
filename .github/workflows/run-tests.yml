@@ -79,3 +79,7 @@ jobs:
       - name: Run the engine in the browser runtime
         timeout-minutes: 10
         run: node CamusDB.Wasm/smoke/smoke.mjs artifacts/wasm/wwwroot
+
+      - name: Run a three-node cluster in the browser runtime
+        timeout-minutes: 15
+        run: node CamusDB.Wasm/smoke/smoke-cluster.mjs artifacts/wasm/wwwroot

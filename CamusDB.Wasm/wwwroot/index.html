@@ -14,6 +14,11 @@
             <span class="name">CamusDB</span>
             <span class="tag">Playground</span>
         </div>
+        <div class="modes" role="group" aria-label="Engine mode">
+            <button id="mode-single" class="mode-button is-on" disabled>Single node</button>
+            <button id="mode-cluster" class="mode-button" disabled title="Start three CamusDB nodes in this tab">3-node cluster</button>
+        </div>
+
         <div class="status" id="status" role="status" aria-live="polite">
             <span class="dot"></span><span id="status-text">Loading the engine…</span>
         </div>
@@ -26,6 +31,22 @@
                 your browser tab. Nothing is sent to a server. A sample <code>authors</code> and
                 <code>books</code> data set is loaded; a reload starts over.
             </p>
+
+            <section class="cluster" id="cluster" hidden aria-label="Cluster">
+                <p class="cluster-intro">
+                    Three CamusDB nodes run in this one tab. They replicate through Raft over an
+                    in-memory transport. Send a statement to any node, stop a node, or cut its
+                    links, and watch the cluster carry on.
+                </p>
+
+                <div class="cluster-bar">
+                    <label for="node-select">Run statements on</label>
+                    <select id="node-select"></select>
+                    <button id="restore-links" hidden>Restore all links</button>
+                </div>
+
+                <div class="nodes" id="nodes"></div>
+            </section>
 
             <div class="examples" id="examples" aria-label="Example queries"></div>
 
@@ -47,7 +68,7 @@
     </main>
 
     <footer class="foot">
-        Single-node, in-memory engine compiled to WebAssembly.
+        In-memory engine compiled to WebAssembly: one node, or a cluster of three in this tab.
         <a href="https://github.com/camusdb/camusdb">Source</a>
     </footer>
 

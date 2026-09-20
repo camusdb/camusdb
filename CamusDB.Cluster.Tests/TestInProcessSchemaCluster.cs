@@ -1387,7 +1387,7 @@ public sealed class TestInProcessSchemaCluster
 
     // The two-version gate blocks on a behind follower and releases once the
     // relayed ack from that follower arrives. This verifies that SchemaAckTracker is
-    // per-instance (not static) and that InProcessSchemaAckRelay delivers remote acks
+    // per-instance (not static) and that the in-process schema transport delivers remote acks
     // to the leader's tracker — the full production ack-transport path in-process.
     [Test]
     public async Task AckTransport_GateBlocksUntilFollowerRelayArrives()

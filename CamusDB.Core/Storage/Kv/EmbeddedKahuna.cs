@@ -410,13 +410,15 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         WireSettingsRestoreBuffer();
     }
 
-#if !CAMUSDB_BROWSER
-    // Cluster mode needs Kahuna's multi-node constructor and the gRPC transports. The browser build
-    // of Kahuna has neither: a browser tab cannot open sockets, so it runs one node only.
-
     /// <summary>
     /// Constructs the embedded engine with externally supplied communication implementations.
     /// Use for cluster mode where real gRPC transports replace in-process fakes.
+    ///
+    /// <para>The browser build has this constructor too. A tab cannot open a socket, so it cannot
+    /// reach another host, but several nodes inside one tab can share Kahuna's and Kommander's
+    /// in-memory transports and form a real cluster over them — which is what the playground's
+    /// cluster mode does. Only <see cref="CreateCluster"/>, which builds the gRPC transports, is
+    /// left out of that build.</para>
     /// </summary>
     public EmbeddedKahuna(
         EmbeddedKahunaOptions options,
@@ -434,6 +436,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         WireWalRestoreBuffer();
         WireSettingsRestoreBuffer();
     }
+
+#if !CAMUSDB_BROWSER
+    // The gRPC transports are not in the browser build of Kahuna, and a tab could not open their
+    // sockets anyway. A cluster inside one tab is built on the in-memory transports instead, and
+    // passed to the constructor above.
 
     /// <summary>
     /// Creates a cluster-mode engine backed by SQLite, wired with real gRPC communications.

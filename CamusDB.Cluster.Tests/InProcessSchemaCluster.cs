@@ -52,7 +52,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     public Node[] Nodes { get; }
 
     /// <summary>The in-process fragment channel shared by every node; set by StartAsync.</summary>
-    internal InProcessFragmentTransport? FragmentTransport { get; set; }
+    internal RecordingFragmentTransport? FragmentTransport { get; set; }
 
     public static async Task<InProcessSchemaCluster> StartAsync(
         int nodeCount = 3,
@@ -139,25 +139,39 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 continue;
             }
 
-            // Opt-in forwarder that routes a follower's DDL ticket to the current schema
-            // leader node. Shared across nodes (it resolves the leader dynamically); only
-            // followers invoke it (the leader handles DDL locally). Off by default so the rest of
-            // the suite keeps the "follower DDL throws leader-required" behaviour that
-            // RunOnSchemaLeaderAsync relies on.
-            ClusterLeaderForwarder? forwarder = wireLeaderForwarder ? new ClusterLeaderForwarder() : null;
+            // The shipped in-process transports address a peer by its Raft endpoint, so they need
+            // the address book of this cluster. It is filled below, once each node has an executor;
+            // nothing resolves through it before the first statement runs.
+            InProcessClusterNodes registry = new();
 
-            // In-process ack relay — routes each follower's RecordAndPublishSchemaApplied
-            // notification to the current leader's RecordRemoteSchemaAck, replacing the
-            // co-location side-effect of the old static SchemaAckTracker. Every node gets the
-            // relay so the leader's per-instance tracker receives real follower acks.
-            InProcessSchemaAckRelay ackRelay = new(kahunaNodes);
+            // Assigned at the end of this attempt, and read only when a forwarded ticket or an ack
+            // resolves a leader — long after the assignment.
+            InProcessSchemaCluster? created = null;
+
+            // The shipped forwarder trusts the leader endpoint its caller resolved. This harness
+            // waits for a settled schema leader instead: a cluster under test load re-elects often
+            // enough that the caller's endpoint can already be stale, and the tests expect the
+            // ticket to reach whoever leads now.
+            InProcessSchemaDdlForwarder schemaTransport = new(
+                registry,
+                async (_, databaseName, _) => (await created!.WaitForSchemaLeaderNodeAsync(databaseName).ConfigureAwait(false)).Executor
+            );
+
+            // Routes each follower's RecordAndPublishSchemaApplied notification to the current
+            // leader's RecordRemoteSchemaAck, replacing the co-location side-effect of the old
+            // static SchemaAckTracker. Every node gets it so the leader's per-instance tracker
+            // receives real follower acks.
             foreach (EmbeddedKahuna kahuna in kahunaNodes)
-                kahuna.SetSchemaAckSender(ackRelay);
+                kahuna.SetSchemaAckForwarder(schemaTransport);
+
+            // DDL forwarding itself is opt-in: off by default so the rest of the suite keeps the
+            // "follower DDL throws leader-required" behaviour that RunOnSchemaLeaderAsync relies on.
+            InProcessSchemaDdlForwarder? forwarder = wireLeaderForwarder ? schemaTransport : null;
 
             // In-process fragment channel: every node can execute span fragments on its peers.
             // Wired unconditionally — it only engages when a plan actually fragments (the
             // distribution flag is off in most fixtures, so this is inert for them).
-            InProcessFragmentTransport fragmentTransport = new();
+            RecordingFragmentTransport fragmentTransport = new(new InProcessQueryFragmentTransport(registry));
 
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
@@ -174,43 +188,44 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                         fragmentTransport: fragmentTransport
                     );
 
+                    registry.Register(kahuna, executor);
+
                     return new Node(index, kahuna, executor);
                 })
                 .ToArray();
 
             InProcessSchemaCluster cluster = new(nodes, faultComm);
             cluster.FragmentTransport = fragmentTransport;
-            fragmentTransport.Cluster = cluster;
-            if (forwarder is not null)
-                forwarder.Cluster = cluster;
+            created = cluster;
             return cluster;
         }
     }
 
     /// <summary>
-    /// In-process <see cref="IQueryFragmentTransport"/>: resolves the target node by its Raft
-    /// endpoint and executes the fragment on that node's <see cref="CommandExecutor"/>. Every
-    /// request is round-tripped through the UTF-8 JSON encoding and every returned frame
-    /// through <b>both</b> wire codecs of <see cref="QueryFragmentWireCodec"/> (binary, then
-    /// NDJSON), so cluster tests exercise exactly the serialization the HTTP transport and the
-    /// fragment controller use — an in-process shortcut that skipped the codecs would leave
-    /// them untested. Records executed requests and supports injecting failures for fallback
-    /// coverage.
+    /// Wraps the shipped <see cref="InProcessQueryFragmentTransport"/> with the bookkeeping the
+    /// distributed-query tests need: how many fragments ran, how many survivor rows they shipped,
+    /// and an injected failure for the coordinator's local-fallback path.
+    ///
+    /// <para>Only the bookkeeping lives here. The request encoding and the frame round trip
+    /// through both wire codecs are the shipped transport's, so the tests exercise the same
+    /// serialization the browser playground and the HTTP fragment controller use.</para>
     /// </summary>
-    internal sealed class InProcessFragmentTransport : IQueryFragmentTransport
+    internal sealed class RecordingFragmentTransport : IQueryFragmentTransport
     {
-        internal InProcessSchemaCluster? Cluster { get; set; }
+        private readonly IQueryFragmentTransport inner;
 
         private readonly List<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest> executed = new();
 
         private int failRemaining;
 
+        private long rowsReturned;
+
+        internal RecordingFragmentTransport(IQueryFragmentTransport inner) => this.inner = inner;
+
         internal int ExecutedCount { get { lock (executed) return executed.Count; } }
 
         /// <summary>Executed fragments that were broadcast-join probes (request carried a join spec).</summary>
         internal int ExecutedJoinCount { get { lock (executed) return executed.Count(r => r.Join is not null); } }
-
-        private long rowsReturned;
 
         /// <summary>Total survivor rows shipped across all fragment executions since the last reset.</summary>
         internal long RowsReturned => Interlocked.Read(ref rowsReturned);
@@ -229,20 +244,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest request,
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            InProcessSchemaCluster cluster = Cluster
-                ?? throw new InvalidOperationException("Fragment transport used before the cluster was wired");
-
-            Node? target = cluster.Nodes.FirstOrDefault(
-                n => n.Kahuna.Raft.GetLocalEndpoint() == targetRaftEndpoint)
-                ?? throw new InvalidOperationException($"No cluster node has endpoint '{targetRaftEndpoint}'");
-
-            // Wire round-trip on purpose (see class doc).
-            byte[] requestJson = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request);
-            CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest decoded =
-                System.Text.Json.JsonSerializer.Deserialize<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest>(requestJson)!;
-
             lock (executed)
-                executed.Add(decoded);
+                executed.Add(request);
 
             if (failRemaining > 0)
             {
@@ -251,110 +254,17 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             }
 
             await foreach (CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row in
-                target.Executor.ExecuteQueryFragment(decoded, cancellationToken).ConfigureAwait(false))
+                inner.ExecuteFragmentAsync(targetRaftEndpoint, request, cancellationToken).ConfigureAwait(false))
             {
                 // Terminal stats frames are protocol bookkeeping, not shipped survivors.
                 if (row.Stats is null)
                     Interlocked.Increment(ref rowsReturned);
 
-                yield return RoundTripThroughWire(row, targetRaftEndpoint);
+                yield return row;
             }
         }
-
-        /// <summary>
-        /// Encodes and decodes one frame through the binary codec and then through the NDJSON
-        /// codec, returning the twice-decoded row. Either codec dropping or mangling a member
-        /// (row id, bytes, cells, match indices, stats) surfaces as a wrong query result.
-        /// </summary>
-        private static CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow RoundTripThroughWire(
-            CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row, string peer)
-        {
-            System.Buffers.ArrayBufferWriter<byte> binary = new();
-            QueryFragmentWireCodec.WriteBinaryFrame(binary, row);
-            System.Buffers.ReadOnlySequence<byte> binaryBytes = new(binary.WrittenMemory);
-
-            if (!QueryFragmentWireCodec.TryReadBinaryFrame(ref binaryBytes, peer, out QueryFragmentWireFrame fromBinary)
-                || !binaryBytes.IsEmpty || fromBinary.Row is null)
-                throw new InvalidOperationException("Binary fragment frame did not round-trip");
-
-            System.Buffers.ArrayBufferWriter<byte> ndjson = new();
-            using (System.Text.Json.Utf8JsonWriter writer = new(ndjson))
-            {
-                QueryFragmentWireCodec.WriteNdjsonFrame(writer, fromBinary.Row);
-                writer.Flush();
-            }
-
-            QueryFragmentWireFrame fromNdjson = QueryFragmentWireCodec.ReadNdjsonFrame(
-                new System.Buffers.ReadOnlySequence<byte>(ndjson.WrittenMemory), peer);
-
-            return fromNdjson.Row ?? throw new InvalidOperationException("NDJSON fragment frame did not round-trip");
-        }
     }
 
-    // In-process equivalent of the HTTP schema-ack transport. Delivers a follower's applied
-    // version directly to the target leader node's RecordRemoteSchemaAck, replacing the
-    // co-location side effect of the old static SchemaAckTracker. Synchronous delivery ensures
-    // the leader's tracker is updated before the next WaitForSchemaAcksAsync poll fires.
-    internal sealed class InProcessSchemaAckRelay : ISchemaAckSender
-    {
-        private readonly Dictionary<string, EmbeddedKahuna> nodeMap;
-
-        public InProcessSchemaAckRelay(EmbeddedKahuna[] nodes)
-        {
-            nodeMap = nodes.ToDictionary(n => n.Raft.GetLocalEndpoint(), StringComparer.Ordinal);
-        }
-
-        public Task SendSchemaAckAsync(
-            string leaderEndpoint,
-            string database,
-            string nodeEndpoint,
-            long schemaVersion,
-            CancellationToken cancellationToken)
-        {
-            if (nodeMap.TryGetValue(leaderEndpoint, out EmbeddedKahuna? leader))
-                leader.RecordRemoteSchemaAck(database, nodeEndpoint, schemaVersion);
-            return Task.CompletedTask;
-        }
-    }
-
-    // In-process equivalent of HttpSchemaDdlForwarder — re-runs a forwarded DDL ticket on
-    // the current schema-leader node's executor (the normal leader replicated path) and returns
-    // its applied result. No HTTP, no op-id dedup (tests don't retry); the leader executor's own
-    // AmISchemaLeader check prevents any re-forward loop.
-    private sealed class ClusterLeaderForwarder : ISchemaDdlForwarder
-    {
-        public InProcessSchemaCluster? Cluster;
-
-        private async Task<Node> LeaderAsync(string db)
-            => await Cluster!.WaitForSchemaLeaderNodeAsync(db).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken ct)
-            => (await (await LeaderAsync(ticket.DatabaseName)).Executor.CreateTable(ticket).ConfigureAwait(false)).Success;
-
-        public async Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, string operationId, CancellationToken ct)
-            => await (await LeaderAsync(ticket.DatabaseName)).Executor.AlterTable(ticket).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, string operationId, CancellationToken ct)
-            => await (await LeaderAsync(ticket.DatabaseName)).Executor.AlterIndex(ticket).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken ct)
-            => await (await LeaderAsync(ticket.DatabaseName)).Executor.DropTable(ticket).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardTruncateTableAsync(string leader, TruncateTableTicket ticket, string operationId, CancellationToken ct)
-            => await (await LeaderAsync(ticket.DatabaseName)).Executor.TruncateTable(ticket).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken ct)
-            => await (await LeaderAsync(ticket.DatabaseName)).Executor.RelinkTable(ticket).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken ct)
-            => await (await LeaderAsync(ticket.DatabaseName)).Executor.RenameTable(ticket).ConfigureAwait(false);
-
-        public async Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken ct)
-            => (await (await LeaderAsync(ticket.DatabaseName)).Executor.AlterConstraint(ticket).ConfigureAwait(false)).Success;
-
-        public async Task<bool?> ForwardCommentAsync(string leader, CommentTicket ticket, string operationId, CancellationToken ct)
-            => (await (await LeaderAsync(ticket.DatabaseName)).Executor.Comment(ticket).ConfigureAwait(false)).Success;
-    }
 
     public string NextSchemaLogDatabaseName()
     {
