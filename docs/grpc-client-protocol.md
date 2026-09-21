@@ -310,6 +310,8 @@ BatchExecuteResponse { int32 request_id,
                              | start_reply | commit_reply | rollback_reply } }
 ```
 
+(Both messages also have a **frame** form that carries several of them in one stream message — §7.8.)
+
 - `kind` selects the op:
   - `QUERY` → `ExecuteQuery`, streams schema + rows.
   - `NON_QUERY` → `ExecuteNonQuery`, single reply.
@@ -428,12 +430,112 @@ Rules:
 
 Full semantics, limits, and the REST equivalent: [prepared-statements.md](prepared-statements.md).
 
-### 7.7 Server write-serialization note (informational)
+### 7.7 The server's single response writer (informational)
 
-gRPC forbids concurrent writes to one stream, so the server serializes all its `WriteAsync` calls
-onto the batch response stream behind a single lock while still dispatching op *execution*
-concurrently. Clients don't need to do anything special for this — just be prepared for interleaved,
-out-of-order responses (§7.2) and correlate by id.
+gRPC forbids concurrent writes to one stream. The server dispatches op *execution* concurrently, and
+every op hands its response messages to **one writer per stream** through a bounded first-in
+first-out queue (`BatchResponseWriter`). Consequences a client can rely on:
+
+- The messages of one `request_id` arrive in order: `schema`, rows, terminator. Messages of different
+  ids interleave (§7.2).
+- The writer buffers a write while another message already waits and lets the last write of a burst
+  flush, so a burst of answers costs one socket flush. It never holds a message back to wait for
+  company: a lone answer is written and flushed at once.
+- The queue is bounded (256 entries, of which at most 4 may be 64 KiB or larger). A client that
+  reads slowly stalls the cursor of a large result instead of growing server memory.
+- A query hands its messages over in **groups**: the `schema` and the first row wait for the next
+  event of their own op (the second row, the terminator, or a failure), later rows go in groups that
+  double from 2 rows up to 64 rows or 32 KiB, and the terminator joins the last group. A group is one
+  queue entry, so no other op's message comes between its items. This is what lets a small result be
+  one stream message when frames are on; without frames the group is written message by message, in
+  the same order as before. The cost is one cursor step of latency on the first row. A query that
+  fails after it produced rows drops the rows it still holds and answers only its `error`.
+
+### 7.8 Stream frames — many ops, and many answers, in one stream message
+
+A stream message has a fixed cost on both ends (a gRPC message frame, an HTTP/2 DATA frame, the
+protobuf envelope, thread-pool hops) that does not depend on the statement. A **frame** is one stream
+message that carries several complete messages, so that cost is paid once per frame instead of once
+per op or per row. A frame is a transport optimization only: **it gives no atomicity and no ordering
+that the stream does not already give.**
+
+```
+BatchExecuteRequest  { kind = BATCH_STATEMENT_KIND_FRAME, repeated BatchExecuteRequest items = 4 }
+BatchExecuteResponse { oneof { … | BatchResponseFrame frame = 12 } }
+BatchResponseFrame   { repeated BatchExecuteResponse items = 1 }
+```
+
+Each item is a complete single message with its own `request_id`, handled exactly as if it had
+arrived alone, in item order. The `request_id` of the frame itself is unused (0). `kind` decides
+which field the server reads: on a `FRAME` only `items`, on every other kind only `request`.
+
+**Negotiation — announced, never probed.** A server built before frames does not reject an unknown
+`kind`; it runs it as a `NON_QUERY`. A frame sent to such a server would be executed as SQL. So:
+
+- The server writes the response header `camusdb-batch-frames: 1` (the contract version) when the
+  stream opens, before it reads the first request.
+- A client sends a request frame on a stream **only after it saw that header on that same stream**.
+  It must not wait for the header on the operation path; until the header arrives, and for ever
+  against an older server, ops travel one per message.
+- The server sends a response frame **only to a peer that proved it reads them**. Two proofs exist:
+  the request header `camusdb-batch-frames-accept: 1` (the contract version the client reads), sent
+  by the client when it opens the stream — an older server ignores it — or a request frame on that
+  stream. A single caller never sends a request frame, so without the header a lone 100-row read is
+  still 102 stream messages; with it, a lone small result is one message. After the proof, *any*
+  answer may arrive inside a frame, a `start_reply` included.
+- Both decisions are per stream. A rotated or rebuilt stream negotiates again by itself, and a
+  rolling upgrade is safe in either order.
+
+**Limits — the sender's duty.** At most **256 items** and **1 MiB** of serialized items per frame
+(item cost = 1 tag byte + length prefix + message size). Constants and both header names:
+`CamusDB.Grpc.BatchFrames`. The
+byte budget sits far below the gRPC message limit on purpose: the transport rejects an oversized
+message *before it is parsed* and resets the stream every other op shares, so a receiver cannot
+refuse it item by item. A message larger than the byte budget on its own travels as a plain single
+message. Only messages that already wait are packed, and a frame of one is sent as the plain message,
+so a quiet stream is byte-identical to a stream without frames.
+
+**What the server does with a request frame.**
+
+- Items are admitted in item order, and frames in stream order, so the per-handle chain (§7.4) sees
+  the same sequence as it would for separate messages. `START` still has to be answered before its
+  handle can be used, and `PREPARE` before its id can be used (§7.6) — a frame does not change that.
+- Flow control and authorization stay per item: one read-buffer slot and one principal resolution
+  for each item, taken one at a time. A frame larger than the free slots makes progress; it never
+  reserves its slots up front.
+- One item that fails, is refused, or is cancelled gets its own `error` by its own `request_id` and
+  does not affect its neighbours.
+- Items past the 256-item limit are **not run** and each is answered with the retryable `CADB0504`
+  (nothing was written; send it again). Note for client authors: a refused `COMMIT` or `ROLLBACK`
+  leaves its transaction open, as any op that never ran does — a conforming client never exceeds
+  the limit, so it never meets this case.
+- An empty frame starts nothing. A frame inside a frame is never run: each op directly inside it is
+  refused with `CADB0400` by its own `request_id` so no caller waits, and the nested frame itself
+  gets no answer. A client drops a frame it finds inside a response frame.
+- A frame is never resent. A frame whose write failed may or may not have reached the server, which
+  is true of every item in it; each item faults with the transport error and the per-op retry
+  contract (§7.5) decides.
+
+**Invariants a maintainer must keep.**
+
+1. Never send a frame on a stream whose server did not announce support; never block on the header.
+2. Never send a response frame to a peer that gave no proof (accept header or request frame).
+3. Admit items in order, one flow-control slot at a time, one authority check each.
+4. Keep the messages of one `request_id` in order.
+5. Never resend a frame.
+6. Never hold an operation or a response back to fill a frame.
+7. Keep every frame inside both limits on the sending side.
+8. Keep the two copies of `camus_sql.proto` identical: `CamusDB.Grpc.Contracts/Protos/` in this
+   repository and `CamusDB.Client/Protos/` in the `camusdb-dotnet` repository. The frame constants
+   have the same two homes (`BatchFrames` in both).
+
+The in-repo client `CamusDB.Grpc.Client` does not send frames. It therefore never receives one, and
+it keeps working unchanged against a server that supports them.
+
+No CamusDB measurement of frames exists yet. The same change in Kahuna's key/value stream was
+measured on one machine at roughly 2–4× throughput for cheap requests at concurrency 64, with no
+change at concurrency 1; a SQL statement does far more work per request, so expect a smaller share,
+largest on point reads and small multi-row reads.
 
 ---
 

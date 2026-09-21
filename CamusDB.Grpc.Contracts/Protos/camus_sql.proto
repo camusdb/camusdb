@@ -227,6 +227,11 @@ enum BatchStatementKind {
   // parameter names travel again. CLOSE frees one id (SqlRequest.statement_id).
   BATCH_STATEMENT_KIND_PREPARE     = 6;
   BATCH_STATEMENT_KIND_CLOSE       = 7;
+  // A FRAME: this message runs nothing itself and carries several complete ops in
+  // BatchExecuteRequest.items. See "Stream frames" below. NEVER sent unless the server announced
+  // support on this stream's response headers: a server built before frames runs an unknown kind
+  // as a NON_QUERY, so a probe would be executed as SQL.
+  BATCH_STATEMENT_KIND_FRAME       = 8;
 }
 
 // PREPARE terminator. The client MUST await this reply before sending any op that references the
@@ -241,10 +246,41 @@ message PrepareReply {
 // CLOSE terminator. Closing an unknown id succeeds — the requested end state already holds.
 message CloseReply {}
 
+// ─── Stream frames ─────────────────────────────────────────────────────────────
+// A frame is ONE stream message that carries several independent ops (request side) or several
+// independent response messages (response side), so the fixed cost of a stream message is paid once
+// per frame instead of once per op or per row. A frame is a transport optimization only: it gives
+// no atomicity and no ordering that the stream does not already give.
+//
+//  - Each item is a complete single message with its own request_id, handled exactly as if it had
+//    arrived alone, in item order. One item that fails does not affect its neighbours.
+//  - A frame inside a frame is never run (server) and never followed (client).
+//  - Negotiation is per stream and is announced, never probed. The server writes the response
+//    header "camusdb-batch-frames" (value: the contract version, "1") when the stream opens. A
+//    client sends a request frame only after it saw that header on that same stream. The server
+//    sends a response frame only on a stream whose client sent the request header
+//    "camusdb-batch-frames-accept" (value: the contract version it reads) when the stream opened,
+//    or that already carried a request frame.
+//  - Limits (the sender's duty): at most 256 items and 1 MiB of serialized items per frame. A
+//    message that is larger than the byte budget on its own travels as a plain single message. The
+//    byte budget sits far below the gRPC message limit, because the transport rejects an oversized
+//    message before it is parsed and resets the stream that every other op shares.
+//  - Only messages that are already waiting are packed. A lone message travels as the plain single
+//    message, so a quiet stream is byte-identical to a stream without frames.
+
 message BatchExecuteRequest {
-  int32              request_id = 1;   // echoed on every response for this op
+  int32              request_id = 1;   // echoed on every response for this op; unused (0) on a FRAME
   BatchStatementKind kind       = 2;
-  SqlRequest         request    = 3;   // same shape as the unary path
+  SqlRequest         request    = 3;   // same shape as the unary path; MUST be absent on a FRAME
+  // FRAME only: the ops of the frame, in order. `kind` decides which field is read: on a FRAME only
+  // `items` is read, on every other kind only `request` is read. A message that sets `items` with a
+  // kind other than FRAME, or sets `request` on a FRAME, is invalid.
+  repeated BatchExecuteRequest items = 4;
+}
+
+// Response-side frame. A wrapper message because a oneof cannot hold a repeated field.
+message BatchResponseFrame {
+  repeated BatchExecuteResponse items = 1;   // in stream order; an item never holds a frame
 }
 
 // In-band domain error for one batched op (mirrors the error code/message the unary calls put in
@@ -281,6 +317,7 @@ message BatchExecuteResponse {
     RollbackReply rollback_reply = 9;   // ROLLBACK: terminator
     PrepareReply  prepare_reply  = 10;  // PREPARE: terminator — id + parameter names
     CloseReply    close_reply    = 11;  // CLOSE: terminator
+    BatchResponseFrame frame     = 12;  // several response messages; request_id is unused (0)
   }
 }
 

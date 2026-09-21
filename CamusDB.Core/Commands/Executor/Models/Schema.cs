@@ -45,39 +45,79 @@ public sealed class Schema : IDisposable
     /// <summary>
     /// Serializes schema validation and apply so deltas are applied one at a time.
     /// Acquire via <see cref="AcquireLockAsync"/> and release via <see cref="ReleaseLock"/>
-    /// so the depth counter stays in sync for the lock-depth assertions.
+    /// so the hold is recorded for the schema-lock assertions.
     /// </summary>
     public SemaphoreSlim Semaphore { get; } = new(1, 1);
 
-    // Tracks how many callers currently hold Schema.Semaphore.
-    // Zero means nobody holds it; non-zero flags an invariant violation when
-    // a replicated KV write is attempted. Interlocked for thread safety across
-    // the async continuations that may resume on different threads.
+    // Tracks how many callers currently hold Schema.Semaphore, across every flow in the process.
+    // Zero means nobody holds it. Interlocked for thread safety across the async continuations
+    // that may resume on different threads.
     private int _lockDepth;
 
+    // The lock hold of the current async flow, if it has one. The value is a mutable holder rather
+    // than a flag: an AsyncLocal assignment made inside an async method is undone when that method
+    // returns, so the holder is published synchronously by AcquireLockAsync, in the caller's own
+    // context, and only its Held field changes afterwards. Flows forked while the lock is held see
+    // the same holder, and so see the release too.
+    private readonly AsyncLocal<LockHold?> _currentHold = new();
+
+    private sealed class LockHold
+    {
+        public volatile bool Held;
+    }
+
     /// <summary>
-    /// Number of callers currently holding <see cref="Semaphore"/>. Used by the
-    /// lock-depth assertions to detect replicated KV writes while the schema lock is held.
+    /// Number of callers currently holding <see cref="Semaphore"/>, in <b>any</b> flow. Diagnostic
+    /// only: on a node that runs DDL concurrently it is routinely non-zero while another operation
+    /// applies its delta, so it says nothing about the caller. Invariant checks must use
+    /// <see cref="IsHeldByCurrentFlow"/>.
     /// </summary>
     public int LockDepth => Volatile.Read(ref _lockDepth);
 
     /// <summary>
-    /// Acquires <see cref="Semaphore"/> and increments the depth counter.
-    /// Always pair with <see cref="ReleaseLock"/> in a finally block.
+    /// True while the current async flow — the method that acquired the lock, its callees, and
+    /// anything it forked meanwhile — holds <see cref="Semaphore"/>. This is what the
+    /// "no replicated write under the schema lock" assertions check: the deadlock they guard
+    /// against is a holder waiting on a write that needs its own lock. A different operation
+    /// holding the lock for the length of an in-memory apply is normal and harmless.
     /// </summary>
-    public async Task AcquireLockAsync()
+    public bool IsHeldByCurrentFlow => _currentHold.Value is { Held: true };
+
+    /// <summary>
+    /// Acquires <see cref="Semaphore"/> and records the hold for the current flow.
+    /// Always pair with <see cref="ReleaseLock"/> in a finally block of the same method.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not an async method: the flow's holder must be published in the caller's
+    /// execution context, which an async method would restore on return.
+    /// </remarks>
+    public Task AcquireLockAsync()
+    {
+        LockHold hold = new();
+        _currentHold.Value = hold;
+        return AcquireLockCoreAsync(hold);
+    }
+
+    private async Task AcquireLockCoreAsync(LockHold hold)
     {
         await Semaphore.WaitAsync().ConfigureAwait(false);
         Interlocked.Increment(ref _lockDepth);
+        hold.Held = true;
     }
 
     /// <summary>
-    /// Decrements the depth counter then releases <see cref="Semaphore"/>.
-    /// Decrement-before-release so <see cref="LockDepth"/> returns 0 only after
-    /// the lock is fully relinquished from this holder's perspective.
+    /// Clears the flow's hold and the depth counter, then releases <see cref="Semaphore"/>.
+    /// Cleared before release so neither reports a hold after the lock is relinquished from this
+    /// holder's perspective.
     /// </summary>
     public void ReleaseLock()
     {
+        if (_currentHold.Value is { } hold)
+        {
+            hold.Held = false;
+            _currentHold.Value = null;
+        }
+
         Interlocked.Decrement(ref _lockDepth);
         Semaphore.Release();
     }

@@ -65,9 +65,10 @@ internal sealed class SchemaChangePublisher
         // schema partition's serial, inline apply pipeline — which yields on the schema lock. Doing
         // it while the lock is held deadlocks that pipeline (the root cause). DDL proposers must
         // build/validate + apply the delta under the lock, then RELEASE before calling this. A
-        // non-zero depth here is a bug.
+        // hold by this flow here is a bug. (Another DDL holding it meanwhile is not: see
+        // Schema.IsHeldByCurrentFlow.)
         System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
+            !database.Schema.IsHeldByCurrentFlow,
             $"ReplicateAndWaitLocalApplyAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 

@@ -28,7 +28,7 @@ namespace CamusDB.Core.Catalogs.Meta;
 ///
 /// <para><b>No method here may run while the schema lock is held.</b> These writes are replicated,
 /// and a replicated write issued under the schema lock deadlocks the schema-log partition behind
-/// the lock holder. Each entry point asserts <c>Schema.LockDepth == 0</c> for that reason. A caller
+/// the lock holder. Each entry point asserts <c>!Schema.IsHeldByCurrentFlow</c> for that reason. A caller
 /// that needs the lock must release it first and then persist.</para>
 ///
 /// <para>Every method takes the <see cref="DatabaseDescriptor"/> and reads the store from it. The
@@ -66,7 +66,7 @@ internal static class SchemaMetaStore
         // Same invariant as PersistSchemaTableAsync: a replicated KV write must never be issued while
         // the schema lock is held, or the schema-log partition can deadlock behind it.
         System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
+            !database.Schema.IsHeldByCurrentFlow,
             $"PersistSchemaViewAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
@@ -90,7 +90,7 @@ internal static class SchemaMetaStore
     internal static async Task DeleteSchemaViewAsync(DatabaseDescriptor database, string viewId, KvTransaction tx)
     {
         System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
+            !database.Schema.IsHeldByCurrentFlow,
             $"DeleteSchemaViewAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
@@ -110,7 +110,7 @@ internal static class SchemaMetaStore
         // Replicated KV writes must never be issued while the schema lock is held.
         // A non-zero depth here means a caller violated the invariant (lock-order deadlock risk).
         System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
+            !database.Schema.IsHeldByCurrentFlow,
             $"PersistSchemaTableAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
@@ -161,7 +161,7 @@ internal static class SchemaMetaStore
     {
         // See PersistSchemaTableAsync above.
         System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
+            !database.Schema.IsHeldByCurrentFlow,
             $"PersistDroppedTableAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
         IKahuna kahuna = database.Kahuna.Kahuna;

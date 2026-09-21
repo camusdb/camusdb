@@ -103,7 +103,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>
     /// Resolves and converts the response's routing metadata. Best-effort by contract — the
     /// statement already committed, so a metadata failure returns null rather than surfacing,
-    /// following the same terminal discipline as <see cref="TryWriteBatchAsync"/>.
+    /// following the same terminal discipline as <see cref="BatchResponseWriter.TryWriteAsync"/>.
     /// </summary>
     private RoutingAdvice? BuildRoutingAdvice(DatabaseDescriptor? database, Core.Routing.StatementRoutingCollector? collector)
     {
@@ -609,6 +609,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <c>START</c> opened on this stream and never finalized is rolled back on teardown so a dropped or
     /// half-closed stream cannot orphan it; in-flight autocommit work rolls back via each op's own
     /// handler.</para>
+    ///
+    /// <para><b>Frames.</b> One stream message may carry several ops (<see cref="BatchStatementKind.Frame"/>),
+    /// and one response message may carry several answers. A frame only packs messages: each item is
+    /// admitted, authorized, flow-controlled and answered exactly as a lone message is, in item order
+    /// (<see cref="AdmitBatchFrameAsync"/>), and responses leave through the stream's one
+    /// <see cref="BatchResponseWriter"/>. Support is announced on the response headers, and a response
+    /// frame goes only to a peer that proved it reads them (an accept request header, or a request
+    /// frame) — see <see cref="BatchFrames"/> for why support can never be probed.</para>
     /// </summary>
     public override Task BatchExecute(
         IAsyncStreamReader<BatchExecuteRequest> requestStream,
@@ -645,9 +653,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             authority?.AuthorityEnded ?? CancellationToken.None);
         CancellationToken ct = shutdownLinked.Token;
 
-        SemaphoreSlim writeLock = new(1, 1);
+        // Announce that this server reads request frames, before the first request is read. A client
+        // sends a frame only on a stream where it saw this header: a server built before frames runs
+        // an unknown op kind as a NON_QUERY, so support can be announced but never probed. Written
+        // after authentication, so a refused stream still ends with its status and nothing else.
+        await context.WriteResponseHeadersAsync(new Metadata
+        {
+            { BatchFrames.HeaderName, BatchFrames.Version.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+        }).ConfigureAwait(false);
+
         int maxInFlight = Math.Max(1, options.GrpcBatchMaxInFlight);
-        SemaphoreSlim inFlight = new(maxInFlight, maxInFlight);
 
         // Bounds how many requests may be read-and-buffered (queued in a per-handle chain or executing)
         // before the read loop pauses — a memory guard only. Deliberately much wider than the execution
@@ -657,95 +672,44 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // (other transactions' statements and commits) waited seconds — measured as a 7x throughput
         // collapse with execute p99 at 2s. Queued chain ops cost only memory; only running ops cost CPU.
         int maxBuffered = maxInFlight * 8;
-        SemaphoreSlim readBuffer = new(maxBuffered, maxBuffered);
 
-        // Per-txn-handle serial chains so same-handle ops run strictly in arrival order, plus the
-        // outstanding-op count that teardown waits on. The chain is per stream (this call): it orders
-        // only same-handle ops that arrive here, which is why the client must pin all of a
-        // transaction's ops to one stream — see the client routing contract. Keyed by the raw
-        // (pt, counter) pair rather than a formatted string so no per-op key string is allocated on
-        // the multiplexed hot path. The tracker deliberately keeps no history of finished ops: a
-        // stream lives for a whole client session, so a per-op Task kept here would retain one async
-        // state machine per op for that session — see the BatchStreamTracker summary.
-        BatchStreamTracker tracker = new(maxBuffered);
+        BatchStreamState state = new(
+            authority,
+            // The one writer of the response stream: op handlers and row sinks queue their messages
+            // here instead of taking turns on the transport — see BatchResponseWriter.
+            new BatchResponseWriter(responseStream, ct),
+            inFlight: new SemaphoreSlim(maxInFlight, maxInFlight),
+            readBuffer: new SemaphoreSlim(maxBuffered, maxBuffered),
+            // Per-txn-handle serial chains so same-handle ops run strictly in arrival order, plus the
+            // outstanding-op count that teardown waits on. The chain is per stream (this call): it orders
+            // only same-handle ops that arrive here, which is why the client must pin all of a
+            // transaction's ops to one stream — see the client routing contract. Keyed by the raw
+            // (pt, counter) pair rather than a formatted string so no per-op key string is allocated on
+            // the multiplexed hot path. The tracker deliberately keeps no history of finished ops: a
+            // stream lives for a whole client session, so a per-op Task kept here would retain one async
+            // state machine per op for that session — see the BatchStreamTracker summary.
+            new BatchStreamTracker(maxBuffered),
+            // Statements prepared by ops on this stream. Owned by the call, so it is freed with the
+            // call — a stream that ends for any reason takes its handles with it.
+            new StreamPreparedStatements(options),
+            ct);
 
-        // One delegate for the whole stream instead of a closure per op: releasing the read-buffer
-        // slot and reporting completion are the same two steps for every op.
-        Action<Task> onOpCompleted = completed =>
-        {
-            readBuffer.Release();
-            tracker.Complete(completed);
-        };
+        BatchStreamTracker tracker = state.Tracker;
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles = state.StartedHandles;
 
-        // Transactions begun by a batched START on this stream but not yet finalized. A stream that
-        // ends (normally or by cancellation) without a matching COMMIT/ROLLBACK must not leak an open
-        // transaction, so any survivor here is rolled back on teardown. Written from concurrent op
-        // handlers, hence concurrent. The key IS the handle pair; the bool value carries nothing.
-        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles = new();
-
-        // Statements prepared by ops on this stream. A local of the call, so it is freed with the
-        // call — a stream that ends for any reason takes its handles with it.
-        StreamPreparedStatements prepared = new(options);
+        // A client that reads response frames may say so when it opens the stream, so that a single
+        // caller, who never sends a request frame, still gets its results as frames.
+        if (int.TryParse(context.RequestHeaders.GetValue(BatchFrames.AcceptHeaderName), out int accepts) && accepts >= 1)
+            state.Writer.MarkPeerReadsFrames();
 
         try
         {
             await foreach (BatchExecuteRequest req in requestStream.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                // Re-resolve before the op is admitted, so an authorization change reaches this stream
-                // instead of waiting for the client to open a new one. Resolved here, ahead of the two
-                // reservations below, because a token that has become invalid must fail without first
-                // taking a slot it will never release.
-                Principal? opPrincipal;
-                try
-                {
-                    opPrincipal = authority is null
-                        ? null
-                        : await executor.ResolveStreamPrincipalAsync(authority).ConfigureAwait(false);
-                }
-                catch (CamusDBException ex) when (ex.Code != CamusDBErrorCodes.AuthenticationFailed)
-                {
-                    // The catalog could not be read. That says nothing about the authority, so it costs
-                    // this one op and not the stream — and every transaction pinned to it.
-                    CommandFailureLog.LogFailure(logger, ex);
-                    await TryWriteBatchAsync(responseStream, writeLock, new BatchExecuteResponse
-                    {
-                        RequestId = req.RequestId,
-                        Error = new BatchError { Code = ex.Code, Message = ex.Message },
-                    }, ct).ConfigureAwait(false);
-                    continue;
-                }
-
-                // Memory-bound only. The execution limit (inFlight) is acquired inside the op, AFTER its
-                // chain predecessor completes, so an op queued behind its transaction's chain never pins
-                // an execution slot it cannot use yet — see maxBuffered above for the failure this avoids.
-                await readBuffer.WaitAsync(ct).ConfigureAwait(false);
-
-                (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
-
-                // Reserve the outstanding-op reference before the op exists: an op can finish before
-                // this line returns, and its completion callback must not decrement a count that was
-                // never incremented.
-                tracker.Enter();
-
-                Task op;
-                (long Pt, uint Counter)? tail = null;
-                if (handleKey is { } hk)
-                {
-                    Task prev = tracker.PredecessorFor(hk);
-                    op = RunBatchOpAfterAsync(prev, inFlight, req, responseStream, writeLock, startedHandles, prepared, opPrincipal, ct);
-                    tail = hk;
-                }
+                if (req.Kind == BatchStatementKind.Frame)
+                    await AdmitBatchFrameAsync(state, req).ConfigureAwait(false);
                 else
-                {
-                    op = RunBatchOpGatedAsync(inFlight, req, responseStream, writeLock, startedHandles, prepared, opPrincipal, ct);
-                }
-
-                // Attach the completion callback before anything else can fail: without it the
-                // reserved reference above would never come back and teardown would wait forever.
-                _ = op.ContinueWith(onOpCompleted, TaskScheduler.Default);
-
-                if (tail is { } recorded)
-                    tracker.RecordTail(recorded, op);
+                    await AdmitBatchOpAsync(state, req).ConfigureAwait(false);
             }
 
             await tracker.DrainAsync().ConfigureAwait(false);
@@ -775,8 +739,212 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // back. Draining twice is safe; the second call waits for the same signal.
             try { await tracker.DrainAsync().ConfigureAwait(false); } catch { /* handled per-op */ }
 
+            // Every op has completed, so nothing more can be queued. On a normal end this writes what
+            // the ops queued; on a dead call the writer already stopped and what is left is dropped.
+            // Either way no write to the response stream can run after this line, so none can race
+            // the end of the call.
+            await state.Writer.CompleteAsync().ConfigureAwait(false);
+
             await RollbackStartedSurvivorsAsync(startedHandles).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// What one <see cref="BatchExecute"/> stream shares between its read loop and its ops. It exists
+    /// so that admission is one method (<see cref="AdmitBatchOpAsync"/>) that the read loop calls for
+    /// a lone request and for every item of a request frame: a second admission path would be a
+    /// second place to keep the ordering, flow-control and authority rules.
+    /// </summary>
+    private sealed class BatchStreamState
+    {
+        public BatchStreamState(
+            StreamAuthority? authority,
+            BatchResponseWriter writer,
+            SemaphoreSlim inFlight,
+            SemaphoreSlim readBuffer,
+            BatchStreamTracker tracker,
+            StreamPreparedStatements prepared,
+            CancellationToken ct)
+        {
+            Authority = authority;
+            Writer = writer;
+            InFlight = inFlight;
+            ReadBuffer = readBuffer;
+            Tracker = tracker;
+            Prepared = prepared;
+            Ct = ct;
+
+            // One delegate for the whole stream instead of a closure per op: releasing the read-buffer
+            // slot and reporting completion are the same two steps for every op.
+            OnOpCompleted = completed =>
+            {
+                ReadBuffer.Release();
+                Tracker.Complete(completed);
+            };
+        }
+
+        /// <summary>Null when authentication is off.</summary>
+        public StreamAuthority? Authority { get; }
+
+        public BatchResponseWriter Writer { get; }
+
+        /// <summary>Bounds the ops that execute at the same time.</summary>
+        public SemaphoreSlim InFlight { get; }
+
+        /// <summary>Bounds the ops that were read and did not complete yet — a memory guard.</summary>
+        public SemaphoreSlim ReadBuffer { get; }
+
+        public BatchStreamTracker Tracker { get; }
+
+        public StreamPreparedStatements Prepared { get; }
+
+        public CancellationToken Ct { get; }
+
+        public Action<Task> OnOpCompleted { get; }
+
+        /// <summary>
+        /// Transactions begun by a batched START on this stream but not yet finalized. A stream that
+        /// ends (normally or by cancellation) without a matching COMMIT/ROLLBACK must not leak an open
+        /// transaction, so any survivor here is rolled back on teardown. Written from concurrent op
+        /// handlers, hence concurrent. The key IS the handle pair; the bool value carries nothing.
+        /// </summary>
+        public ConcurrentDictionary<(long Pt, uint Counter), bool> StartedHandles { get; } = new();
+
+        /// <summary>Set by the read loop only. Keeps the nested-frame warning to one per stream.</summary>
+        public bool NestedFrameLogged { get; set; }
+    }
+
+    /// <summary>
+    /// Admits the items of one request frame, <b>in item order</b>, each through
+    /// <see cref="AdmitBatchOpAsync"/> exactly as if it had arrived as its own stream message. A frame
+    /// is a transport packing only: it gives its items no atomicity and no ordering beyond arrival
+    /// order, which is the order the per-handle chain already keeps.
+    ///
+    /// <para><b>Flow control stays per item.</b> Each item awaits its own read-buffer slot before the
+    /// next item is looked at. Never reserve the slots of a frame up front: a frame larger than the
+    /// free slots would block the read loop against ops that cannot complete until it reads on.</para>
+    ///
+    /// <para>The byte size of a frame cannot be checked here. The transport rejects a message over
+    /// its limit before it is parsed and resets the stream, so the byte budget is the sender's duty.
+    /// The item limit can be checked: items past <see cref="BatchFrames.MaxItems"/> are not run and
+    /// each is answered with the retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/> by
+    /// its own <c>request_id</c> ("nothing was written; send it again"). A refused COMMIT or ROLLBACK
+    /// leaves its transaction open, as any op that never ran does.</para>
+    ///
+    /// <para>A frame inside a frame is never run. Each op directly inside it is refused with
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> by its own <c>request_id</c> so that no caller
+    /// waits for an answer; the nested frame itself has no <c>request_id</c> and gets no answer.</para>
+    /// </summary>
+    private async Task AdmitBatchFrameAsync(BatchStreamState state, BatchExecuteRequest frame)
+    {
+        // A request frame proves that this peer reads response frames. An empty frame proves it as well.
+        state.Writer.MarkPeerReadsFrames();
+
+        Google.Protobuf.Collections.RepeatedField<BatchExecuteRequest> items = frame.Items;
+
+        for (int i = 0; i < items.Count; i++)
+        {
+            BatchExecuteRequest item = items[i];
+
+            if (item.Kind == BatchStatementKind.Frame)
+            {
+                if (!state.NestedFrameLogged)
+                {
+                    state.NestedFrameLogged = true;
+                    logger.LogWarning("BatchExecute: a request frame held a frame; the ops inside it were refused");
+                }
+
+                for (int j = 0; j < item.Items.Count; j++)
+                {
+                    if (item.Items[j].Kind != BatchStatementKind.Frame)
+                        await RefuseBatchOpAsync(state, item.Items[j], CamusDBErrorCodes.InvalidInput,
+                            "A frame inside a frame is not run").ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
+            if (i >= BatchFrames.MaxItems)
+            {
+                await RefuseBatchOpAsync(state, item, CamusDBErrorCodes.TransactionMustRetry,
+                    $"The request frame holds more than {BatchFrames.MaxItems} ops; this op was not run").ConfigureAwait(false);
+                continue;
+            }
+
+            await AdmitBatchOpAsync(state, item).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Answers an op that is not run with a <c>BatchError</c> by its own <c>request_id</c>. Takes no slot.</summary>
+    private static ValueTask RefuseBatchOpAsync(BatchStreamState state, BatchExecuteRequest req, string code, string message)
+        => state.Writer.TryWriteAsync(new BatchExecuteResponse
+        {
+            RequestId = req.RequestId,
+            Error = new BatchError { Code = code, Message = message },
+        }, state.Ct);
+
+    /// <summary>
+    /// Admits one op: resolves its principal, takes one read-buffer slot, and starts it — chained after
+    /// the previous op of the same transaction handle, or gated by the execution limit alone. Called
+    /// only from the read loop, one op at a time, which is what makes "arrival order" well defined for
+    /// the per-handle chain. It returns when the op is started, not when it completes.
+    /// </summary>
+    private async Task AdmitBatchOpAsync(BatchStreamState state, BatchExecuteRequest req)
+    {
+        CancellationToken ct = state.Ct;
+
+        // Re-resolve before the op is admitted, so an authorization change reaches this stream
+        // instead of waiting for the client to open a new one. Resolved here, ahead of the two
+        // reservations below, because a token that has become invalid must fail without first
+        // taking a slot it will never release. One resolution covers one op, never a whole frame.
+        Principal? opPrincipal;
+        try
+        {
+            opPrincipal = state.Authority is null
+                ? null
+                : await executor.ResolveStreamPrincipalAsync(state.Authority).ConfigureAwait(false);
+        }
+        catch (CamusDBException ex) when (ex.Code != CamusDBErrorCodes.AuthenticationFailed)
+        {
+            // The catalog could not be read. That says nothing about the authority, so it costs
+            // this one op and not the stream — and every transaction pinned to it.
+            CommandFailureLog.LogFailure(logger, ex);
+            await RefuseBatchOpAsync(state, req, ex.Code, ex.Message).ConfigureAwait(false);
+            return;
+        }
+
+        // Memory-bound only. The execution limit (InFlight) is acquired inside the op, AFTER its
+        // chain predecessor completes, so an op queued behind its transaction's chain never pins
+        // an execution slot it cannot use yet — see maxBuffered in the caller for the failure this avoids.
+        await state.ReadBuffer.WaitAsync(ct).ConfigureAwait(false);
+
+        BatchStreamTracker tracker = state.Tracker;
+        (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
+
+        // Reserve the outstanding-op reference before the op exists: an op can finish before
+        // this line returns, and its completion callback must not decrement a count that was
+        // never incremented.
+        tracker.Enter();
+
+        Task op;
+        (long Pt, uint Counter)? tail = null;
+        if (handleKey is { } hk)
+        {
+            Task prev = tracker.PredecessorFor(hk);
+            op = RunBatchOpAfterAsync(prev, state.InFlight, req, state.Writer, state.StartedHandles, state.Prepared, opPrincipal, ct);
+            tail = hk;
+        }
+        else
+        {
+            op = RunBatchOpGatedAsync(state.InFlight, req, state.Writer, state.StartedHandles, state.Prepared, opPrincipal, ct);
+        }
+
+        // Attach the completion callback before anything else can fail: without it the
+        // reserved reference above would never come back and teardown would wait forever.
+        _ = op.ContinueWith(state.OnOpCompleted, TaskScheduler.Default);
+
+        if (tail is { } recorded)
+            tracker.RecordTail(recorded, op);
     }
 
     /// <summary>
@@ -838,8 +1006,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         Task prev,
         SemaphoreSlim inFlight,
         BatchExecuteRequest req,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         StreamPreparedStatements prepared,
         Principal? principal,
@@ -850,7 +1017,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // The execution slot is acquired only AFTER the predecessor: while queued in the chain this op
         // consumes no execution capacity, so a pipelining transaction cannot starve the stream.
         try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
-        await RunBatchOpGatedAsync(inFlight, req, stream, writeLock, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+        await RunBatchOpGatedAsync(inFlight, req, writer, startedHandles, prepared, principal, ct).ConfigureAwait(false);
     }
 
     /// <summary>Acquires an execution slot, runs the op, releases the slot. The slot bounds concurrently
@@ -858,8 +1025,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchOpGatedAsync(
         SemaphoreSlim inFlight,
         BatchExecuteRequest req,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         StreamPreparedStatements prepared,
         Principal? principal,
@@ -877,7 +1043,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         try
         {
-            await RunBatchOpAsync(req, stream, writeLock, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+            await RunBatchOpAsync(req, writer, startedHandles, prepared, principal, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -891,8 +1057,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// </summary>
     private async Task RunBatchOpAsync(
         BatchExecuteRequest req,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         StreamPreparedStatements prepared,
         Principal? principal,
@@ -922,27 +1087,27 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             switch (req.Kind)
             {
                 case BatchStatementKind.Query:
-                    await RunBatchQueryAsync(req.RequestId, request, stream, writeLock, prepared, principal, ct).ConfigureAwait(false);
+                    await RunBatchQueryAsync(req.RequestId, request, writer, prepared, principal, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Prepare:
-                    await RunBatchPrepareAsync(req.RequestId, request, stream, writeLock, prepared, ct).ConfigureAwait(false);
+                    await RunBatchPrepareAsync(req.RequestId, request, writer, prepared, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Close:
-                    await RunBatchCloseAsync(req.RequestId, request, stream, writeLock, prepared, ct).ConfigureAwait(false);
+                    await RunBatchCloseAsync(req.RequestId, request, writer, prepared, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Start:
-                    await RunBatchStartAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+                    await RunBatchStartAsync(req.RequestId, request, writer, startedHandles, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Commit:
-                    await RunBatchCommitAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+                    await RunBatchCommitAsync(req.RequestId, request, writer, startedHandles, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Rollback:
-                    await RunBatchRollbackAsync(req.RequestId, request, stream, writeLock, startedHandles, ct).ConfigureAwait(false);
+                    await RunBatchRollbackAsync(req.RequestId, request, writer, startedHandles, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.NonQuery:
                 case BatchStatementKind.Unspecified:
                 default:
-                    await RunBatchNonQueryAsync(req.RequestId, request, stream, writeLock, prepared, principal, ct).ConfigureAwait(false);
+                    await RunBatchNonQueryAsync(req.RequestId, request, writer, prepared, principal, ct).ConfigureAwait(false);
                     break;
             }
         }
@@ -955,7 +1120,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             outcome = ClassifyOutcome(ex.Code);
             CommandFailureLog.LogFailure(logger, ex);
-            await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+            await writer.TryWriteAsync(new BatchExecuteResponse
             {
                 RequestId = req.RequestId,
                 Error = new BatchError { Code = ex.Code, Message = ex.Message },
@@ -970,7 +1135,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             CamusDBException mapped = KahunaRetryPolicy.ToMustRetry(ex, "statement");
             outcome = ClassifyOutcome(mapped.Code);
             CommandFailureLog.LogFailure(logger, mapped);
-            await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+            await writer.TryWriteAsync(new BatchExecuteResponse
             {
                 RequestId = req.RequestId,
                 Error = new BatchError { Code = mapped.Code, Message = mapped.Message },
@@ -980,7 +1145,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             outcome = ServerDiagnostics.Tags.Outcome.InternalError;
             logger.LogError("{Name}: {Message}", ex.GetType().Name, ex.Message);
-            await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+            await writer.TryWriteAsync(new BatchExecuteResponse
             {
                 RequestId = req.RequestId,
                 Error = new BatchError { Code = "CADB0000", Message = "Internal server error" },
@@ -1021,15 +1186,14 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchQueryAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         StreamPreparedStatements prepared,
         Principal? principal,
         CancellationToken ct)
     {
         ResolvedStatement resolved = ResolveStatement(request, prepared);
         string sql = resolved.Sql;
-        BatchQuerySink sink = new(stream, writeLock, requestId);
+        BatchQuerySink sink = new(writer, requestId);
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
         Core.Routing.StatementRoutingCollector? routingCollector = null;
@@ -1103,7 +1267,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         RoutingAdvice? queryAdvice = BuildRoutingAdvice(routingDb, routingCollector);
         if (queryAdvice is not null)
             complete.Routing = queryAdvice;
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await sink.CompleteAsync(new BatchExecuteResponse
         {
             RequestId = requestId,
             QueryComplete = complete,
@@ -1113,8 +1277,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchNonQueryAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         StreamPreparedStatements prepared,
         Principal? principal,
         CancellationToken ct)
@@ -1199,7 +1362,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         // Best-effort terminal: the mutation already committed, so a failed write must not be
         // reported as a BatchError (that would invite a double-applying retry).
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await writer.TryWriteAsync(new BatchExecuteResponse
         {
             RequestId = requestId,
             NonQuery = reply,
@@ -1215,8 +1378,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchStartAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
@@ -1234,7 +1396,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         };
         startedHandles[(handle.TxnIdPt, handle.TxnIdCounter)] = true;
 
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await writer.TryWriteAsync(new BatchExecuteResponse
         {
             RequestId  = requestId,
             StartReply = handle,
@@ -1250,8 +1412,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchCommitAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
@@ -1266,7 +1427,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         if (!token.IsNull())
             ApplyCausalToken(reply, token);
 
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await writer.TryWriteAsync(new BatchExecuteResponse
         {
             RequestId   = requestId,
             CommitReply = reply,
@@ -1281,8 +1442,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchRollbackAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
         CancellationToken ct)
     {
@@ -1295,34 +1455,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, ct).ConfigureAwait(false);
         startedHandles.TryRemove((handle.TxnIdPt, handle.TxnIdCounter), out _);
 
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await writer.TryWriteAsync(new BatchExecuteResponse
         {
             RequestId     = requestId,
             RollbackReply = new RollbackReply(),
         }, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Writes one batch response under <paramref name="writeLock"/> (gRPC forbids concurrent writes),
-    /// swallowing failures. Used for terminal messages (QueryComplete / NonQueryReply / BatchError):
-    /// a delivery failure must not cascade — the op's real outcome already happened.
-    /// </summary>
-    private static async Task TryWriteBatchAsync(
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
-        BatchExecuteResponse msg,
-        CancellationToken ct)
-    {
-        try
-        {
-            await writeLock.WaitAsync(ct).ConfigureAwait(false);
-            try { await stream.WriteAsync(msg, ct).ConfigureAwait(false); }
-            finally { writeLock.Release(); }
-        }
-        catch
-        {
-            // Stream gone or cancelled — best effort.
-        }
     }
 
     // ─── Transaction lifecycle ────────────────────────────────────────────────
@@ -1684,8 +1821,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchPrepareAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         StreamPreparedStatements prepared,
         CancellationToken ct)
     {
@@ -1699,7 +1835,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         PrepareReply reply = new() { StatementId = id };
         reply.ParameterNames.AddRange(statement.ParameterNames);
 
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await writer.TryWriteAsync(new BatchExecuteResponse
         {
             RequestId    = requestId,
             PrepareReply = reply,
@@ -1714,14 +1850,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private async Task RunBatchCloseAsync(
         int requestId,
         SqlRequest request,
-        IServerStreamWriter<BatchExecuteResponse> stream,
-        SemaphoreSlim writeLock,
+        BatchResponseWriter writer,
         StreamPreparedStatements prepared,
         CancellationToken ct)
     {
         prepared.Remove(request.StatementId);
 
-        await TryWriteBatchAsync(stream, writeLock, new BatchExecuteResponse
+        await writer.TryWriteAsync(new BatchExecuteResponse
         {
             RequestId  = requestId,
             CloseReply = new CloseReply(),
@@ -1818,35 +1953,61 @@ internal sealed class QueryStreamSink : IQueryRowSink
 
 /// <summary>
 /// <see cref="IQueryRowSink"/> that writes a query's schema/rows as <c>BatchExecuteResponse</c>
-/// messages tagged with the op's <c>request_id</c>, serialized against a shared write lock (many
-/// ops share one duplex stream and gRPC forbids concurrent writes). Schema/row writes propagate
-/// failures so a broken stream aborts the query and rolls back; the terminal QueryComplete is
-/// written best-effort by the caller.
+/// messages tagged with the op's <c>request_id</c>, handed to the stream's one
+/// <see cref="BatchResponseWriter"/> (many ops share one duplex stream and gRPC forbids concurrent
+/// writes). A write awaits space in the writer's bounded queue, which is what makes a slow client
+/// stall the cursor, and it propagates a dead stream as a cancellation so the query aborts and rolls
+/// back.
+///
+/// <para><b>Messages are handed over in groups, not one by one.</b> The writer packs only what waits
+/// when it wakes, and it wakes on the first message; handed over singly, the <c>schema</c>, the row
+/// and the terminator of a point read mostly travel in three stream messages. So the sink holds the
+/// <c>schema</c> and the first row until the <i>next event of its own op</i> — the second row, the
+/// terminator (<see cref="CompleteAsync"/>), or a failure — and then hands a
+/// <see cref="BatchResponseGroup"/> over. Later rows go in groups whose size doubles from two rows
+/// up to <see cref="MaxGroupRows"/> or <see cref="MaxGroupBytes"/>, so a row waits at most for as
+/// many rows as were already delivered, and the terminator always joins the last group: a small
+/// result is one queue entry, and with frames one stream message. A cell too large for a group
+/// travels alone, so a group never takes the writer's large-message slot.</para>
+///
+/// <para>The cost is one cursor step of latency on the first row, which the present clients cannot
+/// observe: they buffer a whole result before they return it. A query that fails after it produced
+/// rows drops the rows it still holds and answers only its <c>BatchError</c>; a client discards the
+/// rows of a failed query in any case.</para>
 /// </summary>
 internal sealed class BatchQuerySink : IQueryRowSink
 {
-    private readonly IServerStreamWriter<BatchExecuteResponse> stream;
-    private readonly SemaphoreSlim writeLock;
+    /// <summary>Most rows in one group after the size stopped doubling.</summary>
+    internal const int MaxGroupRows = 64;
+
+    /// <summary>A group is handed over once its messages reach this many bytes.</summary>
+    internal const int MaxGroupBytes = 32 * 1024;
+
+    private readonly BatchResponseWriter writer;
     private readonly int requestId;
     private readonly ResultRowBinder binder = new();
 
+    private BatchResponseGroup group = new();
+    private int rowsInGroup;
+    private int flushAtRows = 2;
+
     public bool HasWritten { get; private set; }
 
-    public BatchQuerySink(IServerStreamWriter<BatchExecuteResponse> stream, SemaphoreSlim writeLock, int requestId)
+    public BatchQuerySink(BatchResponseWriter writer, int requestId)
     {
-        this.stream    = stream;
-        this.writeLock = writeLock;
+        this.writer    = writer;
         this.requestId = requestId;
     }
 
-    public async ValueTask WriteSchemaAsync(IReadOnlyList<DerivedColumnSchema> schema, CancellationToken ct)
+    public ValueTask WriteSchemaAsync(IReadOnlyList<DerivedColumnSchema> schema, CancellationToken ct)
     {
         HasWritten = true;
-        await WriteLockedAsync(new BatchExecuteResponse
+        group.Add(new BatchExecuteResponse
         {
             RequestId = requestId,
             Schema    = CamusSqlService.BuildResultSchema(schema),
-        }, ct).ConfigureAwait(false);
+        });
+        return ValueTask.CompletedTask;
     }
 
     public async ValueTask WriteRowAsync(
@@ -1855,19 +2016,59 @@ internal sealed class BatchQuerySink : IQueryRowSink
         CancellationToken ct)
     {
         HasWritten = true;
-        await WriteLockedAsync(new BatchExecuteResponse
+        BatchExecuteResponse message = new()
         {
             RequestId = requestId,
             // One binder per sink is safe: a sink belongs to one op, and an op's rows are written
-            // sequentially (the shared write lock guards the stream, not this sink's state).
+            // sequentially (the response writer orders the stream, not this sink's state).
             Row       = CamusSqlService.BuildResultRow(row, schema, binder),
-        }, ct).ConfigureAwait(false);
+        };
+
+        int cost = BatchFrames.ItemCost(message.CalculateSize());
+        if (cost >= BatchResponseWriter.LargeMessageBytes)
+        {
+            // A large cell travels alone, behind what the sink holds, so the writer's large-message
+            // bound sees it as the single large message it is.
+            await FlushAsync(ct).ConfigureAwait(false);
+            await writer.WriteAsync(message, ct).ConfigureAwait(false);
+            return;
+        }
+
+        group.Add(message);
+        rowsInGroup++;
+
+        if (rowsInGroup >= flushAtRows || group.Bytes >= MaxGroupBytes)
+        {
+            await FlushAsync(ct).ConfigureAwait(false);
+            flushAtRows = Math.Min(flushAtRows * 2, MaxGroupRows);
+        }
     }
 
-    private async ValueTask WriteLockedAsync(BatchExecuteResponse msg, CancellationToken ct)
+    /// <summary>
+    /// Hands the terminator over together with whatever the sink still holds, best-effort: the read
+    /// completed, so a delivery failure must not become a <c>BatchError</c>.
+    /// </summary>
+    public async ValueTask CompleteAsync(BatchExecuteResponse terminator, CancellationToken ct)
     {
-        await writeLock.WaitAsync(ct).ConfigureAwait(false);
-        try { await stream.WriteAsync(msg, ct).ConfigureAwait(false); }
-        finally { writeLock.Release(); }
+        group.Add(terminator);
+        try
+        {
+            await FlushAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Stream gone or cancelled — best effort.
+        }
+    }
+
+    private ValueTask FlushAsync(CancellationToken ct)
+    {
+        if (group.Count == 0)
+            return ValueTask.CompletedTask;
+
+        BatchResponseGroup handed = group;
+        group = new BatchResponseGroup();
+        rowsInGroup = 0;
+        return writer.WriteGroupAsync(handed, ct);
     }
 }

@@ -65,8 +65,14 @@ internal sealed class TestServerCallContext : ServerCallContext
     protected override IDictionary<object, object> UserStateCore { get; } =
         new Dictionary<object, object>();
 
+    /// <summary>The response headers the handler wrote, or null when it wrote none.</summary>
+    public Metadata? ResponseHeaders { get; private set; }
+
     protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders)
-        => Task.CompletedTask;
+    {
+        ResponseHeaders = responseHeaders;
+        return Task.CompletedTask;
+    }
 
     protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options)
         => throw new NotImplementedException("Propagation tokens not needed in tests");
@@ -154,6 +160,10 @@ internal sealed class ChannelAsyncStreamReader<T> : IAsyncStreamReader<T>
 /// <see cref="IServerStreamWriter{T}"/> stub that accumulates messages and lets a test asynchronously
 /// wait for the first message matching a predicate (e.g. "the COMMIT reply for request 4"). Thread-safe:
 /// the <c>BatchExecute</c> handler writes from concurrent op tasks.
+///
+/// <para>It keeps the written <b>reference</b>. That is correct only on a stream that carries no
+/// request frame: the server reuses one envelope for its response frames and empties it after each
+/// write. A test that sends a frame uses <see cref="GatedStreamWriter{T}"/>, which keeps a copy.</para>
 /// </summary>
 internal sealed class ObservingStreamWriter<T> : IServerStreamWriter<T>
 {
@@ -201,6 +211,96 @@ internal sealed class ObservingStreamWriter<T> : IServerStreamWriter<T>
             waiters.Add((predicate, tcs));
             return tcs.Task;
         }
+    }
+}
+
+/// <summary>
+/// <see cref="IServerStreamWriter{T}"/> stub whose writes a test can park, to stand for a client that
+/// reads slowly: while a write is parked, everything the handler produces collects behind it, which is
+/// the only state in which "what is already waiting" is deterministic. It records a <b>copy</b> of each
+/// message together with the write options of that write — the batch response writer reuses one frame
+/// envelope, so a stored reference would be emptied after the write returns.
+/// </summary>
+internal sealed class GatedStreamWriter<T> : IServerStreamWriter<T> where T : Google.Protobuf.IDeepCloneable<T>
+{
+    private readonly object gate = new();
+    private readonly List<(T Message, bool Buffered)> written = new();
+    private TaskCompletionSource? parked;
+    private TaskCompletionSource parkedReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private bool armed;
+    private Exception? failure;
+
+    public WriteOptions? WriteOptions { get; set; }
+
+    /// <summary>Every write so far, with whether it carried the buffer hint.</summary>
+    public IReadOnlyList<(T Message, bool Buffered)> Writes
+    {
+        get { lock (gate) return written.ToArray(); }
+    }
+
+    public IReadOnlyList<T> Written
+    {
+        get { lock (gate) return written.Select(w => w.Message).ToArray(); }
+    }
+
+    /// <summary>Makes the next write wait, before it records anything, until <see cref="Release"/>.</summary>
+    public void ParkNextWrite()
+    {
+        lock (gate) armed = true;
+    }
+
+    /// <summary>Completes when a write is parked.</summary>
+    public Task WriteIsParked
+    {
+        get { lock (gate) return parkedReached.Task; }
+    }
+
+    public void Release()
+    {
+        lock (gate)
+        {
+            parked?.TrySetResult();
+            parked = null;
+        }
+    }
+
+    /// <summary>Makes the parked write, and every later write, fail as a broken transport does.</summary>
+    public void Break(Exception exception)
+    {
+        lock (gate)
+        {
+            failure = exception;
+            parked?.TrySetException(exception);
+            parked = null;
+        }
+    }
+
+    public Task WriteAsync(T message) => WriteAsync(message, CancellationToken.None);
+
+    public async Task WriteAsync(T message, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        Task? wait = null;
+        lock (gate)
+        {
+            if (failure is not null)
+                throw failure;
+
+            if (armed)
+            {
+                armed = false;
+                parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                wait = parked.Task;
+                parkedReached.TrySetResult();
+            }
+        }
+
+        if (wait is not null)
+            await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        lock (gate)
+            written.Add((message.Clone(), WriteOptions is { } o && (o.Flags & WriteFlags.BufferHint) != 0));
     }
 }
 

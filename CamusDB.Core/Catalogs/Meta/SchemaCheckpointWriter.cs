@@ -29,7 +29,7 @@ namespace CamusDB.Core.Catalogs.Meta;
 /// <para><b>Nothing here may run from the apply callback.</b> These writes re-enter the schema
 /// partition, and apply runs inside that partition's commit pipeline. The proposer calls this after
 /// the replication round-trip returns, never before. Every entry point asserts
-/// <c>Schema.LockDepth == 0</c> for the same reason.</para>
+/// <c>!Schema.IsHeldByCurrentFlow</c> for the same reason.</para>
 ///
 /// <para><b>A rename must persist the dependent views in the same transaction as the relation.</b>
 /// Renaming a table rewrites the stored bodies of the views that read it. A checkpoint that saved
@@ -296,7 +296,7 @@ internal sealed class SchemaCheckpointWriter
 
         // Must not be called while Schema lock is held (deadlock risk — see class doc).
         System.Diagnostics.Debug.Assert(
-            database.Schema.LockDepth == 0,
+            !database.Schema.IsHeldByCurrentFlow,
             $"PersistFullSchemaCheckpointAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
         );
 
