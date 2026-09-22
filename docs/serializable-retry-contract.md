@@ -227,5 +227,5 @@ The `TransactionLifetimeExceeded` error (CADB0505) means the transaction was ope
 
 | Setting                             | Default | Description                                              |
 |-------------------------------------|---------|----------------------------------------------------------|
-| `CamusDBConfig.DefaultIsolationLevel` | `Serializable` | Server default; opt down per-transaction via `BEGIN` or `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`. |
-| `CamusDBConfig.MaxSerializableTransactionLifetimeMs` | 3 600 000 ms (1 h) | Maximum lifetime for a Serializable+RW transaction; aborts with CADB0505 if exceeded. |
+| `CamusDBOptions.DefaultIsolationLevel` | `Serializable` | Server default; opt down per-transaction via `BEGIN` or `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`. |
+| `CamusDBOptions.MaxSerializableTransactionLifetimeMs` | 3 600 000 ms (1 h) | Maximum lifetime for a Serializable+RW transaction; aborts with CADB0505 if exceeded. |

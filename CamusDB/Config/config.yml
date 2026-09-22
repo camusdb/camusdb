@@ -1,8 +1,8 @@
 # CamusDB configuration reference
 #
-# This file is the annotated reference used by a source checkout and by the container image, and it
-# is tracked in git — a pull or a checkout can replace whatever you edit here. It is NOT where an
-# installed node should keep its settings: run `camusdb init` to write a short, user-owned file to
+# This file is the annotated reference used by a source checkout and by the container image. It is
+# tracked in git, so a pull or a checkout can replace whatever you edit here. An installed node keeps
+# its settings elsewhere: run `camusdb init` to write a short, user-owned file to
 # ~/.camusdb/config.yml, which no checkout can touch. The reference is also published at
 # https://camusdb.github.io/docs/configuration/
 #
@@ -12,282 +12,338 @@
 #   3. ./camusdb.yml or ./Config/config.yml   (this file, when started from the repository root)
 #   4. ~/.camusdb/config.yml                  (%APPDATA%\camusdb\config.yml on Windows)
 #   5. built-in defaults, when no file exists anywhere
-# A path named explicitly by 1 or 2 must exist; startup fails rather than falling through to another
-# file. Setting CAMUS_HOME relocates both the user configuration and the default data directory.
+# A path named by 1 or 2 must exist; startup fails rather than falling through to another file.
+# Setting CAMUS_HOME relocates both the user configuration and the default data directory.
 #
 # Precedence (highest wins): CLI flag > environment variable > config.yml > built-in default.
-# Only explicitly provided CLI flags override YAML — omitting a flag keeps the YAML value.
+# Only CLI flags you actually pass override YAML; omitting a flag keeps the YAML value.
 #
 # Environment overrides:
 #   CAMUS_KEY_RANGE_SHARDING — when set to 1 or true, enables key_range_sharding regardless of YAML.
+#   CAMUSDB_AUTH_ENABLED     — switches authentication on (see the authentication section).
+#
+# Unknown keys are rejected at startup, so a typo fails loudly instead of being ignored.
+# SHOW VARIABLES reports every resolved value, where it came from, and whether it can be changed live
+# with SET CLUSTER SETTING (see docs/runtime-cluster-settings.md). A commented-out value is the
+# built-in default, except for paths, hosts and names, which are examples.
 
-data_dir: /tmp/camusdb/
+data_dir: /tmp/camusdb/    # unset = ~/.camusdb/data ($CAMUS_HOME/data when CAMUS_HOME is set)
 
-# ── Server mode ───────────────────────────────────────────────────────────────
+# ── Node identity ─────────────────────────────────────────────────────────────
 # mode: standalone         # standalone | cluster
-# node_name: camus-node-1  # cluster: unique node name (defaults to machine name)
+# node_name: camus-node-1  # cluster: unique node name (defaults to the machine name)
 # raft_node_id: 1          # cluster: numeric Raft node id (> 0)
 # raft_host: localhost     # cluster: Raft bind/advertise host
 # raft_port: 7070          # cluster: Raft gRPC port (1..65535)
-initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 1: a single node has one
-                           # disk / one fsync target, so partition fan-out buys nothing — and a single
-                           # partition makes every transaction single-participant, enabling the one-phase
-                           # commit fast path (one durable barrier per commit instead of two). Measured on
-                           # TPC-C (1000 warehouses, 8 clients): 28.8 tx/s with 1 partition + one-phase vs
-                           # 7.0 tx/s with 4 partitions (commit p50 7.6 ms vs ~107 ms). Raise only for
-                           # cluster deployments, where partitions map to distinct leaders.
+initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in standalone mode and 3 in
+                           # cluster mode. A single node has one disk, so extra partitions buy nothing,
+                           # and one partition keeps every transaction on the one-phase commit path.
+                           # Raise it only for a cluster, where partitions map to distinct leaders.
+
 # ── Memory profile ────────────────────────────────────────────────────────────
-# memory_profile (default prod): how the node sizes the cache budgets you leave unset — the RocksDB
-#   shared block cache, its memtable sub-budget, and the key/value actor caches.
-#     prod — sized from the machine's available memory, container limits respected (~16% of RAM
-#            across both cache layers; ~1.5 GiB on an 8 GiB / 8-core box). See the kahuna: section.
-#     dev  — small fixed budgets: 64 MiB block cache (16 MiB of it memtables) and 32 MiB of actor
-#            caches, ~96 MiB in total, regardless of how large the machine is. For a node sharing a
-#            laptop with the app being developed against it. Nothing about correctness or durability
-#            changes; a working set larger than the cache is read from disk, so a real dataset is
-#            materially slower — do not run a server on it.
-#   Any explicit kahuna.* budget still wins over the profile, so the two can be combined.
-#   Also settable as --memory-profile prod|dev, which overrides this value.
+# memory_profile: how the node sizes the cache budgets you leave unset — the RocksDB shared block
+#   cache, its memtable sub-budget, and the key/value actor caches.
+#     prod — sized from the machine's memory, container limits respected (~16% of RAM across both
+#            cache layers; ~1.5 GiB on an 8 GiB / 8-core box). See the kahuna: section.
+#     dev  — small fixed budgets (~96 MiB in total) regardless of the machine. For a node sharing a
+#            laptop with the app developed against it. Correctness and durability do not change, but
+#            a working set larger than the cache is read from disk — do not run a server on it.
+#   An explicit kahuna.* budget still wins over the profile. Also settable as --memory-profile.
 # memory_profile: prod
 
+# ── Network ───────────────────────────────────────────────────────────────────
 # http_port: 5095          # HTTP API port (1..65535)
-# https_port: 7141         # HTTPS API port when https_certificate is set (1..65535)
-# https_certificate:       # path to PFX for HTTPS; omit to disable HTTPS
-# raft_certificate:        # path to PFX for Raft gRPC TLS in cluster mode
-# grpc_certificate:        # path to PFX for the client-facing gRPC port; falls back to
-#                          # raft_certificate, and the port is plaintext h2c when both are unset.
-#                          # Separate from raft_certificate because the two ports face different
-#                          # networks: the Raft port is peer-only, while this one faces clients
-#                          # whose trust store has to accept whatever it presents.
+# https_port: 7141         # HTTPS API port, used only when https_certificate is set (1..65535)
+# https_certificate:       # path to a PFX for HTTPS; omit to disable HTTPS
+# raft_certificate:        # path to a PFX for Raft gRPC TLS in cluster mode
+#
+# grpc_enabled: true       # client-facing gRPC endpoint (CamusSql, CamusRows, reflection)
+# grpc_port: 5096          # gRPC port, HTTP/2 only (1..65535)
+# grpc_certificate:        # path to a PFX for the gRPC port. Falls back to raft_certificate; the port
+#                          # is plaintext h2c when both are unset. Kept separate because the Raft port
+#                          # faces peers only, while this one faces clients whose trust store must
+#                          # accept the certificate it presents.
+# grpc_batch_max_in_flight: 64   # operations one BatchExecute stream runs at once before the server
+#                                # stops reading new requests from it (backpressure); must be > 0
+#
+# SQL routing advice: advisory routing metadata attached to SQL responses for clients that ask for
+# it. It never changes execution; false is the kill switch. See docs/sql-routing-advice.md.
+# sql_routing_advice_enabled: true
+# sql_routing_advice_ttl_ms: 5000    # maximum advertised age of the advice (1..600000)
 
 # ── Operator dashboard ────────────────────────────────────────────────────────
-# A read-only page served on the HTTP port: node health, load, engine metrics,
-# databases, backups and configuration. It never writes. With authentication off
-# there is no principal to gate its panels on, so it serves loopback only; with
-# authentication on it uses a session cookie scoped to its own routes.
-# false removes the surface entirely — its pages and endpoints answer 404.
+# A read-only page on the HTTP port: node health, load, engine metrics, databases, backups and
+# configuration. With authentication off it serves loopback only; with authentication on it uses a
+# session cookie scoped to its own routes. false removes it entirely (its routes answer 404).
 # See docs/operator-dashboard.md.
 # dashboard_enabled: true
 # dashboard_refresh_seconds: 2   # load-panel refresh in the browser (1..300)
 
-# ── Authentication transport security ─────────────────────────────────────────
-# Authentication itself is switched on with the CAMUSDB_AUTH_ENABLED environment variable, and its
-# secrets (token key, bootstrap credentials, node secret) are read only from the environment so they
-# never sit in this file. This flag carries no secret — it is deployment topology — so it lives here.
+# ── Authentication ────────────────────────────────────────────────────────────
+# Authentication is switched on with the CAMUSDB_AUTH_ENABLED environment variable. Its secrets
+# (token key, bootstrap credentials, node secret) are read only from the environment, so they never
+# sit in this file. The keys below carry no secret. See docs/sql-authentication.md.
 #
-# require_tls_when_auth_enabled (default true): with authentication on, reject credential-bearing
-#   requests that arrive over plaintext HTTP/h2c, since a bearer token on the wire is trivially
-#   stolen. Loopback peers are always exempt, so local development needs no certificate. Set false
-#   ONLY when TLS terminates in front of the node (ingress, sidecar, service mesh): that hop is
-#   invisible to the server, so it would otherwise reject every forwarded request. Also settable as
-#   --require-tls-when-auth-enabled true|false, which overrides this value.
+# require_tls_when_auth_enabled: with authentication on, reject credential-bearing requests that
+#   arrive over plaintext HTTP/h2c. Loopback peers are always exempt. Set false ONLY when TLS
+#   terminates in front of the node (ingress, sidecar, service mesh), because that hop is invisible
+#   to the server. Also settable as --require-tls-when-auth-enabled true|false.
 # require_tls_when_auth_enabled: true
 #
-# login_max_attempts_per_source_per_minute (default 200): login attempts allowed from one source
-#   address per rolling minute, across every account it names. This is the ceiling that bounds a
-#   flood, because an account name is chosen by the request and a caller varying it never reaches
-#   the per-account ceiling. Keep it well above login_max_attempts_per_minute: several legitimate
-#   users can share one address behind a proxy or a NAT gateway.
+# password_hash_iterations: PBKDF2-HMAC-SHA256 iterations for new password hashes (>= 1). The count
+#   is stored with each credential, so raising it later does not invalidate existing passwords.
+# login_kdf_max_concurrency: password verifications allowed at once across all logins (>= 1).
+# login_max_attempts_per_minute: login attempts per account per rolling minute (>= 1).
+# login_max_attempts_per_source_per_minute: login attempts from one source address per rolling
+#   minute, across every account it names (>= 1). This is the ceiling that stops a flood, because a
+#   caller can vary the account name. Keep it well above the per-account value: several users can
+#   share one address behind a proxy or a NAT gateway.
+# login_rate_limit_max_entries: keys the login rate limiter tracks, per counter family (>= 1).
+# authentication_cache_ttl: maximum age (ms) of a per-node authorization cache hit; 0 = look up
+#   authoritatively on every request.
+# authentication_cache_max_entries: principals the per-node authentication cache holds (>= 1).
+# access_token_ttl: absolute access-token lifetime (ms, > 0). Default 15 min.
+# password_hash_iterations: 600000
+# login_kdf_max_concurrency: 8
+# login_max_attempts_per_minute: 20
 # login_max_attempts_per_source_per_minute: 200
+# login_rate_limit_max_entries: 100000
+# authentication_cache_ttl: 1000
+# authentication_cache_max_entries: 10000
+# access_token_ttl: 900000
+#
+# Session cleanup. A session record is removed only by an explicit logout or by dropping its user, so
+# a client that logs in again on a timer leaves one expired record per login. The sweep deletes them.
+# session_reaper_interval_ms: 300000     # sweep interval; <= 0 switches the sweep off
+#
+# How long an expired session record is kept before the sweep deletes it (>= 0). A long-lived gRPC
+# stream can outlive its token, but a logout or a revocation must still end it: at expiry the stream
+# looks its session record up, and this window is how long that lookup has. Keep it well above the
+# clock skew between nodes. A stream that misses the window is ended and the client logs in again.
+# expired_session_retention_ms: 300000
 
-# Cluster mode example (uncomment and fill in)
+# ── Cluster ───────────────────────────────────────────────────────────────────
+# Cluster mode example (uncomment and fill in):
 # mode: cluster
 # node_name: camus-node-1
+# raft_node_id: 1
 # raft_host: 192.168.1.10
 # raft_port: 7070
 # initial_partitions: 3
 #
-# peers: Raft endpoint list.  Each entry MUST be "host:raftPort" exactly as Raft
-# reports it — the endpoint-map lookup is a byte-exact string match against the
-# leader endpoint string returned by Raft.WaitForLeader().  A mismatch causes a
-# silent fallback to the uniform-port heuristic (logged at Warning level).
+# peers: Raft endpoint list. Each entry MUST be "host:raftPort" exactly as Raft reports it: the
+# endpoint map is a byte-exact match against the leader endpoint Raft returns. A mismatch falls back
+# to the uniform-port assumption below and logs a warning.
 # peers:
 #   - 192.168.1.10:7070
 #   - 192.168.1.11:7070
 #   - 192.168.1.12:7070
 #
-# Per-peer HTTP addresses (parallel to peers, same index order).
-# Required for heterogeneous HTTP ports or multiple nodes per host.
-# If omitted, the leader's host is reused with this node's http_port (uniform-port assumption).
-# An entry may carry its own scheme (https://10.0.0.1:5095), which overrides peer_tls_enabled for
-# that peer alone.
+# http_peers: per-peer HTTP addresses, parallel to peers (same count, same order). Required for
+# different HTTP ports or several nodes on one host. If omitted, the leader's host is reused with this
+# node's http_port. An entry may carry its own scheme (https://10.0.0.1:5095), which overrides
+# peer_tls_enabled for that peer alone.
 # http_peers:
 #   - 192.168.1.10:5095
 #   - 192.168.1.11:5095
 #   - 192.168.1.12:5095
 #
-# peer_tls_enabled (default false): reach peers over HTTPS on their HTTP port. Two of the three
-#   node-to-node channels — schema-DDL forwarding and cluster-settings forwarding — send the shared
-#   node secret as a header, so while this is off anyone who can observe peer traffic reads it. Turn
-#   it on only once the peers actually serve HTTPS there. An exposed cluster running without it is
-#   reported at startup.
+# peer_tls_enabled: reach peers over HTTPS on their HTTP port. Schema-DDL forwarding and
+#   cluster-settings forwarding send the shared node secret as a header, so while this is off anyone
+#   who can observe peer traffic can read it. Turn it on only once the peers serve HTTPS there. An
+#   exposed cluster running without it is reported at startup.
 # peer_tls_enabled: false
 #
-# join_existing: join a RUNNING cluster as a new node instead of bootstrapping one, with 'peers'
-# acting as the SEED list (one or more members of the running cluster). The node enters the
-# committed roster as a learner and is promoted to voter once caught up. Never guessed from
-# state: a would-be joiner booted without this flag forms a separate cluster (split brain), and a
-# founding node booted with it finds no cluster to join. Requires cluster mode and >= 1 peer.
-# Graceful scale-down is the reverse path: POST /v1/cluster/leave drains the node's replicas onto
-# survivors and commits its removal. Also settable as --join-existing true|false.
+# join_existing: join a RUNNING cluster as a new node instead of bootstrapping one, with peers acting
+#   as the seed list. The node enters as a learner and is promoted to voter once caught up. It is never
+#   guessed: a joiner started without it forms a separate cluster (split brain), and a founding node
+#   started with it finds no cluster to join. Requires cluster mode and >= 1 peer. Graceful scale-down
+#   is POST /v1/cluster/leave. Also settable as --join-existing true|false.
 # join_existing: false
 #
-# Schema two-version gate tunables (cluster mode). A DDL proposer waits for every
-# live node to ack the previous schema version before proposing the next.
+# Schema two-version gate. A DDL proposer waits for every live node to ack the previous schema
+# version before it proposes the next one.
 # schema_ack_wait_timeout_ms: how long to wait for all acks before giving up (> 0).
-# schema_ack_live_node_lease_ms: how long since a member's last ack before the gate
-#   presumes it down and stops blocking on it. -1 = infinite (conservative default:
-#   wait on every member); a positive value enables apply-derived liveness expiry.
+# schema_ack_live_node_lease_ms: how long since a member was last heard from before the gate presumes
+#   it down and stops waiting on it (> 0). -1 = infinite: wait on every member, so one dead node
+#   blocks all DDL.
 # schema_ack_wait_timeout_ms: 30000
-# schema_ack_live_node_lease_ms: -1
+# schema_ack_live_node_lease_ms: 30000
+#
+# schema_freshness_check_interval_ms: how often each node compares every open database's in-memory
+#   schema version with its durable checkpoint, and reloads a schema that fell behind. Ignored in
+#   standalone mode; <= 0 disables the sweep.
+# schema_freshness_check_interval_ms: 10000
 
 # ── Isolation and locking ─────────────────────────────────────────────────────
 # default_isolation_level: serializable       # serializable | read_committed
 # default_transaction_locking: pessimistic    # pessimistic | optimistic
-# default_transaction_priority: normal        # background | low | normal | high | critical; consulted only when kahuna.max_concurrent_sessions sets a ceiling
+# default_read_validation: none               # none | track_and_validate
+# default_decision_durability: best_effort    # best_effort | durable
+# default_transaction_priority: normal        # background | low | normal | high | critical; used only when kahuna.max_concurrent_sessions sets a ceiling
 # transaction_admission_wait_ms: 0            # how long a transaction queues at the admission gate before a retryable refusal; 0 = use kahuna.default_admission_wait_ms. NOT the transaction lifetime
-# range_lock_expires_ms: 150000           # initial range-lock TTL; must be >= 2x the effective kahuna.collection_interval_ms (60s default) or startup is rejected; <= 0 = no expiry
-# max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables absolute cap; also the Kahuna session timeout (the node's kahuna.max_transaction_timeout_ms is derived from this unless pinned larger)
-# lock_escalation_threshold: 50           # shared-point locks before bucket escalation (> 0)
-# lock_wait_deadline_ms: 500              # per-operation Serializable conflict cap (> 0)
-# key_range_sharding: false               # opt tables into Kahuna key-range routing
-#                                         # (see docs/key-range-sharding.md; needs initial_partitions >= 2
-#                                         #  to distribute anything)
+# range_lock_expires_ms: 150000               # initial range-lock TTL; must be >= 2x the effective kahuna.collection_interval_ms (60 s default); <= 0 = no expiry
+# max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables the cap; also the Kahuna session timeout (kahuna.max_transaction_timeout_ms is derived from it unless set larger)
+# lock_escalation_threshold: 50               # shared point locks in one bucket before whole-bucket escalation (> 0)
+# lock_wait_deadline_ms: 500                  # per-operation cap on waiting for a Serializable conflict (> 0)
+# key_range_sharding: false                   # opt tables into Kahuna key-range routing; needs initial_partitions >= 2 to distribute anything (docs/key-range-sharding.md)
 
-# Unresolved-finalize budget. A COMMIT/ROLLBACK can come back "outcome not known yet" (a leadership
-# flip mid-finalize, an in-progress drain, a participant write shed under load). That is not a
-# failure and the write may already have landed, so the same finalize is retried on the same handle
-# for this long before CADB0509 tells the client to retry it themselves. Raise it on saturated nodes,
-# where each of those conditions takes longer in wall-clock without taking more attempts.
-# transaction_finalize_retry_budget_ms: 15000  # total retry budget per finalize; <= 0 = attempt once
+# ── Retry budgets ─────────────────────────────────────────────────────────────
+# Finalize budget. A COMMIT/ROLLBACK can come back "outcome not known yet" (a leadership change
+# mid-finalize, a drain, a write shed under load). That is not a failure and the write may already
+# have landed, so the same finalize is retried for this long before CADB0509 tells the client to
+# retry. Raise it on saturated nodes. <= 0 = attempt once; a positive value must be >= 2000.
+# transaction_finalize_retry_budget_ms: 15000
+#
+# Id-counter budget. Database ids, table ids and the registry generation come from persistent
+# counters, which refuse a call while their Raft partition has no confirmed leader (a node still
+# joining, an election in flight). Every CREATE TABLE / VIEW / CTAS allocates an id first, so this
+# budget decides whether an election is invisible or fails the statement with CADB0535.
+# <= 0 = attempt once.
+# sequence_retry_budget_ms: 10000
+#
+# Snapshot-hold budget: how long acquiring a snapshot-floor hold (a branch fork, an AS OF read) is
+# retried while the storage layer answers "retry" before the statement fails with CADB0504.
+# <= 0 = attempt once.
+# snapshot_hold_retry_budget_ms: 10000
 
-# Id-counter retry budget. Database ids, table ids, and the registry's cross-node generation stamp all
-# come from persistent monotonic counters, and a call against one is refused while its Raft partition
-# has no confirmed leader — a node still joining, or an election in flight. Every CREATE TABLE / VIEW /
-# CTAS allocates an id first, so this budget is what decides whether an election is invisible or fails
-# the statement with CADB0535. Sized against the election, which runs in seconds.
-# sequence_retry_budget_ms: 10000  # total retry budget per counter call; <= 0 = attempt once
-
-# Abandoned explicit-transaction reaper. A client that opens a transaction (/start-transaction)
-# and never commits/rolls back would otherwise hold its locks indefinitely (a Serializable+RW
-# transaction's heartbeat renews them forever). The reaper rolls back any explicit transaction
-# idle — no statement issued — for longer than transaction_idle_timeout_ms.
+# ── Abandoned transactions ────────────────────────────────────────────────────
+# A client that opens a transaction and never commits or rolls back would hold its locks forever
+# (the heartbeat of a Serializable read-write transaction renews them). The reaper rolls back any
+# explicit transaction that issues no statement for longer than transaction_idle_timeout_ms.
 # transaction_idle_timeout_ms: 300000     # idle cutoff before rollback; <= 0 disables the reaper
 # transaction_reaper_interval_ms: 30000   # sweep interval; must be > 0
-
-# ── Session cleanup ───────────────────────────────────────────────────────────
-# Sessions have no storage TTL and are removed only by an explicit logout or by dropping the owning
-# user. Since a token is short-lived and re-login is the only refresh, a client that reconnects on a
-# timer leaves one dead record per reconnection. The cost is not only storage: dropping a user scans
-# that whole key family, so the growth slows an unrelated statement.
-# Set to 0 or less to switch the sweep off.
-# session_reaper_interval_ms: 300000
-
-# How long an expired session record is kept before the sweep deletes it. A long-lived gRPC stream may
-# outlive its token when the token merely ran out, but a logout or a revocation must still end it. At
-# the moment of expiry the stream looks its session record up: present and unrevoked means an ordinary
-# expiry. This window is how long that lookup has to happen, so keep it well above clock skew between
-# nodes. A stream that misses the window is ended and the client logs in again.
-# expired_session_retention_ms: 300000
-
-# Release of an abandoned transaction's holdings. A rollback the storage node answers with "unknown
-# transaction" — no session, no retained outcome, no durable record — releases nothing, because the
-# working set it finalizes from died with the session. The staged writes and point locks that
-# transaction planted then stay on their keys and block every scan of that key space. The keys the
-# client still remembers are replayed as per-key releases once the transaction reaches this age; each
-# release removes only state that transaction still owns, so one that in fact committed or aborted
-# loses nothing. The age exists because an unknown answer during a leader change is not proof of a
-# dead session. A transaction reaped before reaching it keeps its key list parked until it does, and
-# the reaper sweep releases it then — the reap itself is never retried.
-# 0 derives it from the session-timeout ceiling plus the node's reclaim grace; an explicit value must
+#
+# A rollback that the storage node answers with "unknown transaction" releases nothing, so the staged
+# writes and point locks that transaction planted stay on their keys and block scans of that key
+# space. Once the transaction reaches this age, the keys the client still remembers are released one
+# by one. Each release removes only state that transaction still owns, so a transaction that in fact
+# committed or aborted loses nothing. The age exists because an "unknown" answer during a leader
+# change is not proof of a dead session.
+# 0 = derive it from the session-timeout ceiling plus the node's reclaim grace; an explicit value must
 # be >= max_serializable_transaction_lifetime_ms; a negative value disables the release.
-# abandoned_transaction_release_after_ms: 0  # 0 = derive, > 0 = explicit age, < 0 = disabled
+# abandoned_transaction_release_after_ms: 0
 
-# Prepared statements. A gRPC handle dies with the BatchExecute stream that minted it, so it needs
-# no timeout — only a per-stream cap. A REST handle has no such event to end it (HTTP connections are
-# pooled, multiplexed and load-balanced), so it is scoped to this node and to the principal that
-# prepared it, with an idle timeout as the backstop for clients that never close what they prepared.
-# Exceeding a cap refuses the new PREPARE (CADB0521) rather than evicting a handle a client still
-# holds. See docs/prepared-statements.md.
-# Counting statements does not bound memory on its own — a cap of 512 permits 512 times whatever the
-# largest request happens to be — so a per-statement size limit and retained-byte budgets bound the
-# per-entry term as well. All of these are validated at startup: a negative value is a startup error,
-# not a silently-unbounded limit.
+# ── Prepared statements ───────────────────────────────────────────────────────
+# A gRPC handle dies with the BatchExecute stream that created it, so it needs only a per-stream cap.
+# A REST handle has no such event (HTTP connections are pooled and load-balanced), so it is scoped to
+# this node and to the principal that prepared it, with an idle timeout as the backstop. Exceeding a
+# cap refuses the new PREPARE (CADB0521) rather than evicting a handle a client still holds. The byte
+# limits bound memory, because a count cap alone permits N times the largest request. A negative
+# value is a startup error. See docs/prepared-statements.md.
 # prepared_statement_idle_timeout_ms: 600000        # REST idle cutoff; <= 0 disables reaping
 # prepared_statement_sweep_interval_ms: 60000       # reaper sweep interval; must be > 0
 # grpc_max_prepared_statements_per_stream: 512      # per BatchExecute stream; 0 = unbounded
 # rest_max_prepared_statements_per_principal: 512   # per principal on this node; 0 = unbounded
 # rest_max_prepared_statements: 8192                # node-wide across principals; 0 = unbounded
-# max_prepared_statement_bytes: 65536               # largest single statement, either transport
+# max_prepared_statement_bytes: 65536               # largest single statement, either transport; 0 = unlimited
 # grpc_max_prepared_statement_bytes_per_stream: 8388608       # 8 MiB retained per stream
 # rest_max_prepared_statement_bytes_per_principal: 8388608    # 8 MiB retained per principal
 # rest_max_prepared_statement_bytes: 67108864                 # 64 MiB retained per node
 
 # ── Schema and transaction limits ─────────────────────────────────────────────
-# max_index_columns: max key + INCLUDE columns in one index; <= 0 disables. Default 32.
-# max_index_include_tuple_bytes: max encoded bytes of one index entry's key + INCLUDE tuple, checked
-#   at write time; <= 0 disables. Default 4096 (4 KiB).
-# max_mutations_per_transaction: max rows one user transaction may mutate; <= 0 disables (unlimited);
-#   DDL/backfill always run unlimited. Default 20000.
-# large_value_threshold_bytes: stored size at or above which a string/bytes/array value moves out of its
-#   row into its own key (columns with STORAGE EXTENDED or EXTERNAL); <= 0 keeps new values inline.
-#   A size decision only — results never change. Default 2048.
-# large_value_compression_enabled: LZ4-compress values of 256+ bytes (STORAGE EXTENDED or MAIN) when the
-#   saving pays back; reads ignore it. Default true.
+# For every limit below, <= 0 disables it. See docs/transaction-limits.md.
+# max_identifier_length: 64             # UTF-16 length of any identifier (database, table, column, index)
+# max_columns_per_table: 512            # user-declared columns per table
+# max_indexes_per_table: 64             # secondary indexes per table (the primary key is exempt)
+# max_tables_per_database: 10000
+# max_index_columns: 32                 # key + INCLUDE columns in one index
+# max_index_include_tuple_bytes: 4096   # encoded bytes of one index entry's key + INCLUDE tuple, checked at write time
+# max_mutations_per_transaction: 20000  # rows one user transaction may mutate; DDL and backfill always run unlimited
+# max_view_expansion_depth: 32          # view-over-view nesting depth; a backstop behind the cycle check at DDL time
+#
+# min_free_disk_bytes: free space on the data directory's volume below which new user DML is refused
+#   with CADB0536. Reads, DDL and internal transactions are still admitted. Default 64 MiB.
+# min_free_disk_bytes: 67108864
+
+# ── Large values ──────────────────────────────────────────────────────────────
+# See docs/storage-layout.md.
+# large_value_threshold_bytes: stored size at or above which a string/bytes/array value moves out of
+#   its row into its own key (columns with STORAGE EXTENDED or EXTERNAL); <= 0 keeps new values inline.
+#   A storage decision only — results never change.
+# large_value_compression_enabled: LZ4-compress values of 256+ bytes (STORAGE EXTENDED or MAIN) when
+#   the saving pays back; reads ignore it.
 # large_value_compression_min_saving_percent: minimum saving a compressed value must reach to be kept
-#   compressed; incompressible data is stored raw. Default 12.
-# large_value_rewrite_batch_rows: rows per transaction for ALTER TABLE ... REWRITE STORAGE; at most half
-#   of max_mutations_per_transaction. Default 200.
-# large_value_resolve_batch_bytes: decoded bytes of compressed and out-of-line values one read or rewrite
-#   batch resolves at a time, so large compressible values cannot make one read hold gigabytes; <= 0
-#   removes the bound. Node-local; never changes a result. Default 67108864 (64 MiB).
-# branch_snapshot_hold_lease_ms: lease window for a branch's snapshot-floor hold on its parent's MVCC
-#   history (the leader-owned renewer renews well inside it); must be > 0. Default 300000 (5 min).
-# max_index_columns: 32
-# max_index_include_tuple_bytes: 4096
-# max_mutations_per_transaction: 20000
+#   compressed; incompressible data is stored raw.
+# large_value_rewrite_batch_rows: rows per transaction for ALTER TABLE ... REWRITE STORAGE; > 0 and at
+#   most half of max_mutations_per_transaction.
+# large_value_resolve_batch_bytes: decoded bytes of compressed and out-of-line values that one read or
+#   rewrite batch resolves at a time, so large values cannot make one read hold gigabytes; <= 0
+#   removes the bound.
 # large_value_threshold_bytes: 2048
 # large_value_compression_enabled: true
 # large_value_compression_min_saving_percent: 12
 # large_value_rewrite_batch_rows: 200
 # large_value_resolve_batch_bytes: 67108864
+
+# ── Materialized views and branches ───────────────────────────────────────────
+# materialized_view_refresh_enabled: whether this node runs materialized-view refresh work.
+# materialized_view_refresh_chunk_rows: rows written per transaction during a refresh; at most half
+#   of max_mutations_per_transaction, because each row also costs one mutation per index.
+# materialized_view_refresh_takeover_attempts: restarts of an interrupted refresh before the sweep
+#   gives up; 0 only reclaims the abandoned staging storage.
+# branch_snapshot_hold_lease_ms: lease on a branch's snapshot-floor hold on its parent's MVCC history;
+#   the leader renews it well inside the lease. Must be >= 5000.
+# materialized_view_refresh_enabled: true
+# materialized_view_refresh_chunk_rows: 10000
+# materialized_view_refresh_takeover_attempts: 3
 # branch_snapshot_hold_lease_ms: 300000
 
-# ── Advisory table statistics ─────────────────────────────────────────────────
-# Row-count estimates are updated in memory on every DML and flushed to durable storage
-# at most once per this interval (milliseconds), per table.
-#   0  = flush after every change (highest durability, highest write amplification)
-#   -1 = never auto-flush; persist only on explicit flush / database close
-#   >0 = cap flush frequency to roughly once per interval per table (default 5000)
+# ── Database lifecycle ────────────────────────────────────────────────────────
+# database_idle_eviction_ms: how long a database may sit unused before this node releases its
+#   in-memory descriptor (it reopens on the next use). This bounds the memory a node spends on
+#   databases it is not serving. <= 0 disables eviction. Default 15 min.
+# database_idle_eviction_ms: 900000
+#
+# A non-FORCE DROP DATABASE/TABLE (root only) keeps the object's data as a recoverable orphan
+# (SHOW ORPHAN DATABASES / SHOW ORPHAN TABLES, then CREATE ... RELINK TO '<id>') until the background
+# garbage collector reclaims it. See docs/recover-dropped-objects.md.
+# orphan_retention_ms: how long an orphan stays recoverable; <= 0 keeps orphans until an explicit
+#   DROP ... FORCE. Default 7 days.
+# orphan_reclaim_interval_ms: garbage-collector sweep interval; <= 0 disables the loop.
+# orphan_retention_ms: 604800000
+# orphan_reclaim_interval_ms: 300000
+#
+# Drop-intent fence: the lease a drop holds while it purges, so a concurrent RELINK or garbage
+# collection cannot act on a key space that is being destroyed. The renew interval must be < the lease.
+# fence_lease_ms: 30000
+# fence_lease_renew_interval_ms: 10000
+# keyspace_purge_batch_size: 512        # keys the DROP DATABASE purge scans and deletes per batch (>= 1)
+
+# ── Table statistics ──────────────────────────────────────────────────────────
+# Row-count estimates are updated in memory on every DML and flushed to storage at most once per
+# interval, per table:
+#   0  = flush after every change (highest write amplification)
+#   -1 = never auto-flush; persist only on an explicit flush or when the database closes
+#   >0 = flush at most about once per interval
 # stats_flush_interval_ms: 5000
 #
-# Manual ANALYZE tuning:
-# stats_analyze_sample_rows: full-scan below this row count; sample the first N rows above it.
-#   0 = always full scan. Default 100000.
-# stats_histogram_buckets: equi-depth histogram buckets built per column (>= 1). Default 100.
+# Manual ANALYZE:
+# stats_analyze_sample_rows: full scan below this row count; sample the first N rows above it.
+#   0 = always full scan.
+# stats_histogram_buckets: equi-depth histogram buckets per column (>= 1).
 # stats_analyze_sample_rows: 100000
 # stats_histogram_buckets: 100
 
 # ── Automatic (background) ANALYZE ────────────────────────────────────────────
-# Keeps optimizer statistics fresh without a user running ANALYZE. Stays low-priority: it reads a
-# lock-free snapshot (never blocks/aborts foreground work), bounds memory with sampling, throttles
-# its scan rate, and backs off under load. On by default. See docs/automatic-analyze.md.
+# Keeps optimizer statistics fresh without a user running ANALYZE. It reads a lock-free snapshot
+# (never blocks or aborts foreground work), bounds memory by sampling, throttles its scan rate, and
+# backs off under load. See docs/automatic-analyze.md.
 #
-# auto_analyze_enabled: master switch. Default true; set false for manual-only ANALYZE.
+# auto_analyze_enabled: master switch; false = manual ANALYZE only.
 # auto_analyze_check_interval_ms: sweep interval; only the registry leader sweeps (once per cluster).
-#   <= 0 also disables the loop. Default 60000.
-# auto_analyze_fraction_stale_rows: proportional trigger — stale once mutations reach
-#   fraction*row_count + min_stale_rows (>= 0). Default 0.20.
-# auto_analyze_min_stale_rows: absolute mutation floor before a table is ever stale (>= 0). Default 500.
-# auto_analyze_max_concurrent: max background analyses at once on a node (>= 1). Default 1.
-# auto_analyze_max_rows_per_second: scan-rate throttle (CPU/IO cap); <= 0 disables. Default 50000.
+#   <= 0 also disables the loop.
+# auto_analyze_fraction_stale_rows: a table is stale once mutations reach
+#   fraction * row_count + min_stale_rows (>= 0).
+# auto_analyze_min_stale_rows: mutation floor before a table is ever stale (>= 0).
+# auto_analyze_max_concurrent: background analyses at once on a node (>= 1).
+# auto_analyze_max_rows_per_second: scan-rate throttle; <= 0 disables it.
 # auto_analyze_histogram_sample_rows: reservoir sample size per column — the memory bound (>= 1).
-#   Default 10000.
-# auto_analyze_hll_precision: HyperLogLog index bits for NDV sketches; register count 2^p (4..16).
-#   Default 11 (~2 KB/column, ~2.3% error).
+# auto_analyze_hll_precision: HyperLogLog index bits for NDV sketches (4..16); 11 is ~2 KB per
+#   column at ~2.3% error.
 # auto_analyze_load_pause_threshold: in-flight foreground work above which the sweep backs off;
-#   <= 0 disables load backoff. Default 16.
-# auto_analyze_ownership_check_rows: rows between mid-scan ownership/load re-checks (>= 1). Default 1000.
+#   <= 0 disables the backoff.
+# auto_analyze_ownership_check_rows: rows between mid-scan ownership and load re-checks (>= 1).
 # auto_analyze_enabled: true
 # auto_analyze_check_interval_ms: 60000
 # auto_analyze_fraction_stale_rows: 0.20
@@ -300,24 +356,22 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # auto_analyze_ownership_check_rows: 1000
 
 # ── Row-level TTL ─────────────────────────────────────────────────────────────
-# Background sweep that deletes rows whose expiry column has passed. On by default, but a table only
-# enters the sweep once it sets the ttl_expiration_expression storage parameter — a database with no
-# TTL-configured table costs an idle poll and nothing else. Per-table tuning (cadence, batch sizes,
-# rate limits, pause) lives on the table; the values below are only the fallback a table that sets
-# nothing resolves to. See docs/row-level-ttl.md.
+# Background sweep that deletes rows whose expiry has passed. A table enters the sweep only once it
+# sets the ttl_expiration_expression storage parameter, so a database without TTL tables pays only an
+# idle poll. Per-table settings live on the table; the ttl_default_* values are the fallback for a
+# table that sets nothing. See docs/row-level-ttl.md.
 #
-# ttl_enabled: master switch. Default true; set false to stop collecting expired rows node-wide.
-# ttl_default_job_cron: fallback ttl_job_cron; @macro forms only. Default "@daily".
-# ttl_default_select_batch_size: rows read per scan batch (> 0). Default 500.
-# ttl_default_delete_batch_size: rows deleted per transaction (> 0). Default 100.
-# ttl_default_select_rate_limit: scan rows/second; 0 = unlimited. Default 0.
-# ttl_default_delete_rate_limit: delete rows/second; 0 = unlimited. Default 100.
-# ttl_spans_per_table: spans a table's keyspace is split into per run (> 0). Default 64.
-# ttl_max_concurrent_spans_per_node: spans one node processes at once (>= 1). Default 1.
+# ttl_enabled: master switch; false stops collecting expired rows on this node.
+# ttl_default_job_cron: fallback ttl_job_cron; @macro forms only.
+# ttl_default_select_batch_size: rows read per scan batch (>= 1).
+# ttl_default_delete_batch_size: rows deleted per transaction (>= 1).
+# ttl_default_select_rate_limit: scan rows/second; 0 = unlimited.
+# ttl_default_delete_rate_limit: deleted rows/second; 0 = unlimited.
+# ttl_spans_per_table: spans a table's key space is split into per run (>= 1).
+# ttl_max_concurrent_spans_per_node: spans one node processes at once (>= 1).
 # ttl_load_pause_threshold: in-flight foreground work above which the sweep pauses; <= 0 disables.
-#   Default 16.
-# ttl_span_lease_ms: lease on a claimed span (> 0). Default 30000.
-# ttl_span_lease_renew_interval_ms: lease re-stamp cadence; must be well under the lease. Default 10000.
+# ttl_span_lease_ms: lease on a claimed span (>= 1).
+# ttl_span_lease_renew_interval_ms: lease renewal interval; must be < ttl_span_lease_ms.
 # ttl_enabled: true
 # ttl_default_job_cron: "@daily"
 # ttl_default_select_batch_size: 500
@@ -330,134 +384,131 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 # ttl_span_lease_ms: 30000
 # ttl_span_lease_renew_interval_ms: 10000
 
-# ── SQL parser AST cache ──────────────────────────────────────────────────────
-# Identical SQL texts skip lexing+parsing on the second and later executions.
-# sql_parser_cache_ttl_seconds: sliding TTL in seconds; 0 disables the cache. Default: 300.
-# sql_parser_cache_max_entries: cap on distinct SQL texts; 0 = unbounded. Default: 2048.
-# sql_parser_cache_sweep_seconds: background sweep interval; must be > 0. Default: 60.
-# sql_parser_cache_ttl_seconds: 300
-# sql_parser_cache_max_entries: 2048
-# sql_parser_cache_sweep_seconds: 60
-
-# ── Recoverable drops (deferred DROP + orphan reclamation) ────────────────────
-# A non-FORCE DROP DATABASE/TABLE (root only) retains the object's data as a recoverable orphan,
-# recoverable via CREATE ... RELINK TO '<id>' (see SHOW ORPHAN DATABASES / SHOW ORPHAN TABLES),
-# until the background garbage collector reclaims it.
-# orphan_retention_ms: how long an orphan stays recoverable before the GC may physically delete it;
-#   <= 0 keeps orphans until an explicit DROP ... FORCE / manual purge. Default: 604800000 (7 days).
-# orphan_reclaim_interval_ms: GC sweep interval; <= 0 disables the loop. Default: 300000 (5 min).
-# orphan_retention_ms: 604800000
-# orphan_reclaim_interval_ms: 300000
+# ── Query execution ───────────────────────────────────────────────────────────
+# index_scan_fetch_batch_size: 64        # row ids buffered from a non-covering index scan before one batched row fetch (>= 1)
+# max_query_parallelism: 1               # span workers per full table scan; 1 = sequential. Results and row order never change
+# hash_join_max_build_rows: 1000000      # rows a hash-join build side may hold before it falls back to nested loop; applies only while spill is off (>= 1)
+# broadcast_join_max_build_rows: 10000   # largest hash-join build side shipped to remote probe fragments; 0 disables broadcast joins
+# net_weight: 0.01                       # planner cost per byte sent over the network; 0 disables network costing
+#
+# distributed_query_execution: split eligible read-only full scans of a key-range-sharded table into
+#   per-span fragments that run where the data lives. Everything else plans and runs as with the flag
+#   off. Give every node the same value.
+# distributed_query_execution: false
+#
+# Row decoding. Both keys exist as kill switches and A/B baselines; leave them at the default.
+# slot_backed_decode: true               # lazy per-cell decode; false = eager decode
+# borrowed_decode: adaptive              # adaptive | force_eager | force_borrowed
 
 # ── Spill-to-disk ─────────────────────────────────────────────────────────────
-# When spill_enabled is false (default), all blocking operators (sort, GROUP BY, DISTINCT,
-# hash join, derived-table materialization, DELETE/UPDATE row buffers) keep their existing
-# in-memory behavior. When true, each operator writes sorted runs or partitioned rows to
-# temp files under {data_dir}/tmp/spill/ once its buffer exceeds spill_threshold_rows.
-# Spill files are always deleted on operator completion, cancellation, or exception;
-# orphaned files from a prior crash are swept on the next startup.
-#
-# spill_enabled: false            # gate all spill behavior; default false
-# spill_threshold_rows: 500000    # per-operator row cap before spilling; must be > 0
-# spill_merge_fan_in: 16          # max simultaneous run readers in a k-way merge; must be > 0
+# With spill_enabled false, every blocking operator (sort, GROUP BY, DISTINCT, hash join,
+# derived-table materialization, DELETE/UPDATE row buffers) stays in memory. With it true, an operator
+# writes sorted runs or partitioned rows to temp files under {data_dir}/tmp/spill/ once its buffer
+# exceeds spill_threshold_rows. Spill files are deleted when the operator finishes, is cancelled or
+# fails; files left by a crash are removed at the next startup. See docs/spill-to-disk.md.
+# spill_enabled: false
+# spill_threshold_rows: 500000     # per-operator row cap before spilling; must be > 0
+# spill_merge_fan_in: 16           # run readers open at once in a k-way merge; must be > 0
+# spill_max_frame_bytes: 268435456 # largest spill record a reader accepts before it allocates (256 MiB); must be > 0
 
-# ── Cost-based optimizer ──────────────────────────────────────────────────────
-# Both cost-based switches are still opt-in. They engage on a DML-maintained row count alone, so a
-# table that has never been ANALYZEd is costed without histograms or NDV and can be planned worse
-# than the heuristic; auto_analyze_enabled fills those in only once a table passes
-# auto_analyze_min_stale_rows.
-# cost_based_access_path_enabled: false   # cost all index access paths, pick cheapest
-# cost_based_join_order_enabled: false    # System-R DP join-order enumeration
-# plan_cache_enabled: false               # SQL plan cache (reuse parsed+planned queries)
-# plan_cache_max_entries: 512             # max LRU entries in the plan cache
+# ── Planner and caches ────────────────────────────────────────────────────────
+# The cost-based switches are on by default. A table that was never ANALYZEd is costed from its
+# DML-maintained row count alone, without histograms or NDV; auto_analyze fills those in once the
+# table passes auto_analyze_min_stale_rows.
+# cost_based_access_path_enabled: true    # cost every index access path and pick the cheapest
+# cost_based_join_order_enabled: true     # System-R style join-order enumeration
+# plan_cache_enabled: false               # reuse planned queries across executions
+# plan_cache_max_entries: 512             # LRU entries in the plan cache
+# bound_query_cache_enabled: true         # reuse a SELECT's binding across executions of the same SQL text
+#
+# SQL parser cache: identical SQL texts skip lexing and parsing after the first execution.
+# sql_parser_cache_ttl_seconds: 300       # sliding TTL; 0 disables the cache
+# sql_parser_cache_max_entries: 2048      # distinct SQL texts; 0 = unbounded
+# sql_parser_cache_max_bytes: 67108864    # approximate bytes retained (64 MiB); 0 = unbounded
+# sql_parser_cache_sweep_seconds: 60      # background sweep interval; must be > 0
 
 # ── Regex match operators (~, ~*, !~, !~*) ────────────────────────────────────
-# regex_match_timeout_ms: per-match timeout guarding against ReDoS on pathological patterns;
-#   a match that exceeds it is rejected rather than allowed to run unbounded. Must be > 0.
-# regex_cache_max_entries: max compiled patterns cached (keyed by pattern + case-sensitivity);
-#   0 disables caching (patterns still compile+evaluate, just aren't retained).
-# regex_match_timeout_ms: 250
-# regex_cache_max_entries: 1024
+# regex_match_timeout_ms: 250     # per-match timeout that guards against ReDoS; must be > 0
+# regex_cache_max_entries: 1024   # compiled patterns kept; 0 = compile every time
 
 # ── Query result cache ────────────────────────────────────────────────────────
-# On by default; opt-in per query via a {cache=name} hint. Nothing without a hint is cached.
-# See docs/query-result-cache.md for the full reference.
-# query_result_cache_enabled: true              # master switch; set false to disable entirely
+# On by default, but a query is cached only when it carries a {cache=name} hint.
+# See docs/query-result-cache.md.
+# query_result_cache_enabled: true              # master switch
 # query_result_cache_default_ttl_ms: 5000       # TTL for entries without a per-hint ttl=
-# query_result_cache_max_entries: 1024          # entry-count cap (LRU beyond it)
-# query_result_cache_max_bytes: 67108864        # total byte budget across entries (64 MiB)
-# query_result_cache_max_entry_bytes: 1048576   # per-entry byte cap; larger results not stored
-# query_result_cache_max_entry_rows: 10000      # per-entry row cap; larger results not stored
+# query_result_cache_max_entries: 1024          # entry cap (LRU beyond it)
+# query_result_cache_max_bytes: 67108864        # byte budget across entries (64 MiB)
+# query_result_cache_max_entry_bytes: 1048576   # per-entry byte cap; larger results are not stored
+# query_result_cache_max_entry_rows: 10000      # per-entry row cap; larger results are not stored
+# query_result_cache_max_deps: 4096             # dependency facts per entry before it is not stored
+# query_result_cache_max_point_deps: 2048       # point-key dependencies per entry before promotion or bypass
+# query_result_cache_max_ranges: 256            # range dependencies per entry before promotion or bypass
+# query_result_cache_singleflight_wait_ms: 250  # how long a concurrent miss waits for the first execution
 # query_result_cache_strict_validation_max_keys: 10000  # probe budget for strict validation
-# query_result_cache_sweep_interval_ms: 10000   # background TTL-sweep interval
+# query_result_cache_sweep_interval_ms: 10000   # background TTL sweep interval
 
-# ── Kahuna engine (cluster and standalone) ────────────────────────────────────
-# Allow-listed passthrough to EmbeddedKahunaOptions. Omit the section or any key to
-# keep the mode-specific CamusDB baseline. Both modes default to rocksdb for KV and WAL:
-#   standalone — rocksdb for both KV and WAL.
-#   cluster    — rocksdb for both KV and WAL, plus election 2000/4000 ms.
-# Any key you set below overrides that baseline. Unknown keys are rejected at startup.
+# ── Observability ─────────────────────────────────────────────────────────────
+# Slow query log: statements at or above the threshold are kept in a bounded in-memory ring, read
+# with SHOW SLOW QUERIES. See docs/slow-query-log.md.
+# slow_query_log_enabled: false
+# slow_query_log_threshold_ms: 1000       # 0 = record every statement
+# slow_query_log_max_entries: 200         # ring size; the oldest entry is overwritten (>= 1)
+# slow_query_log_max_sql_length: 4096     # SQL characters kept per entry (>= 1)
+#
+# engine_metrics_enabled: true            # observe the Kahuna/Kommander meters for SHOW ENGINE STATS
+# query_tracing_enabled: false            # one log line per executed plan step
+# lock_tracing_enabled: false             # one debug log line per acquired lock
+
+# ── Kahuna engine ─────────────────────────────────────────────────────────────
+# Allow-listed passthrough to the embedded Kahuna node, in both modes. Omit the section or any key to
+# keep the CamusDB baseline for the mode:
+#   standalone — rocksdb for KV and WAL.
+#   cluster    — rocksdb for KV and WAL, plus election timeouts 2000/4000 ms.
+# Unknown keys are rejected at startup. The whole section is restart-class. See docs/configuration.md.
 #
 # Storage backends:
 #   memory   — no persistence; data is lost on restart. Dev/test only.
-#   sqlite   — per-partition files {storage_path}/kahuna{N}_{revision}.db (opt-in override).
-#   rocksdb  — higher write throughput; directory tree under {storage_path}/{revision}/
-#              (default for both modes; recommended for write-heavy workloads).
+#   sqlite   — per-partition files under {data_dir}/kv.
+#   rocksdb  — the default; the highest write throughput.
 #
-# wal_sync_writes (default true) fsyncs the WAL on every write for crash durability. On macOS/APFS
-# an fsync is ~10 ms, so a write-heavy load (many autocommits, or a large batch whose commit is not
-# group-fsynced) can be dominated by fsync latency. Set it false for dev/bulk loads to trade that
-# durability for a large speedup; keep it true in production.
+# wal_sync_writes fsyncs the WAL on every write. On macOS/APFS an fsync is ~10 ms, so a write-heavy
+# load can be dominated by it. Set it false only for dev or bulk loads; keep it true in production.
 #
-# The two knobs below raise write throughput WITHOUT giving up durability — the right lever when a
-# concurrent write load is fsync-bound (each commit paying its own disk barrier):
+# Two keys raise write throughput WITHOUT giving up durability, for a write load bound by fsync:
+#   wal_group_commit_linger_ms: a WAL worker waits up to this long to gather more ready commits into
+#     ONE group fsync. Adds a small, bounded latency per commit; try 1-2 for write-heavy loads.
+#   wal_single_fsync_commit: an auto-commit proposal acks once the propose quorum is durable, and its
+#     commit marker rides the next durable flush. On in the CamusDB baseline (Kahuna's own default is
+#     off); false restores the two-fsync commit path.
 #
-# wal_group_commit_linger_ms (default 0 = off): a WAL worker briefly waits up to this many ms to gather
-#   more ready commits into ONE group fsync, so many concurrent commits amortize a single disk barrier
-#   instead of each fsyncing alone. Raises WAL batch density and throughput for a small, bounded latency
-#   floor per commit; data is still fsync'd before a commit is acked. Try 1-2 for write-heavy loads.
-# wal_single_fsync_commit (Kahuna embedded default false; CamusDB baseline true in BOTH modes): removes
-#   one serial fsync from the commit path — an auto-commit proposal acks once the propose quorum is
-#   durable and its commit marker rides the next durable flush, without weakening durability. The
-#   standalone and cluster baselines both enable it; set false to restore the two-fsync commit path.
+# The eight wal_shard_* keys size the RocksDB column families that hold the Raft log. They override
+# Kommander's defaults, which are tuned and measured there: each one is unset here, and unset keeps
+# Kommander's value. Change one only with a measurement of your own. They apply only when
+# wal_storage is rocksdb. Cautions:
+#   Memory  — worst case per written shard is write_buffer_size_mb x max_write_buffer_number (256 MB
+#             at the defaults), which competes with rocksdb_shared_memory_budget_mb. Over budget, the
+#             shared write-buffer manager flushes early, so raising the memtable keys without raising
+#             the budget can buy nothing.
+#   Restart — a wider flush unit is a wider WAL-replay unit, so a restart re-reads more.
+#   Universal compaction makes wal_shard_max_bytes_for_level_base_mb inert (accepted, not an error).
 #
-# The eight wal_shard_* keys size the RocksDB column families that hold the Raft log. They are
-# OVERRIDES OF KOMMANDER'S DEFAULTS, not CamusDB settings: every one is unset here, and unset leaves
-# Kommander's own value for that field in force, field for field. The default is tuned and measured in
-# Kommander, so change one only with a measurement of your own. They apply only when wal_storage is
-# rocksdb.
-#
-# Why they exist: a Raft log row dies when a compaction pass covers it with a range tombstone. A row
-# that meets its tombstone inside one flush unit is dropped at flush and never reaches L0; a row
-# flushed earlier has to be rewritten down the levels first, and that rewrite is the write
-# amplification these knobs cut.
-#
-# Three cautions apply to all eight:
-#   Memory  — worst case per actively-written shard is write_buffer_size_mb x max_write_buffer_number
-#             (256 MB at the defaults), competing with rocksdb_shared_memory_budget_mb on a small
-#             node. Over budget, the shared WriteBufferManager flushes early, which returns the flush
-#             unit to its old size instead of growing memory — so raising the memtable knobs without
-#             raising the budget can buy nothing.
-#   Restart — a wider flush unit is a wider WAL-replay unit, so a restart re-reads more before the
-#             node reports ready. Measure restart time, not only bytes written.
-#   Universal compaction makes wal_shard_max_bytes_for_level_base_mb inert. Setting both is accepted
-#             and is not an error; RocksDB simply does not consult level sizing under universal.
-#
-# See docs/configuration.md for the full table and the validation rules.
-#
-# To opt out of the rocksdb default and use sqlite for both KV and WAL:
+# To use sqlite instead of the rocksdb default:
 # kahuna:
 #   storage: sqlite
 #   wal_storage: sqlite
 #
 # kahuna:
-#   storage: rocksdb             # memory | sqlite | rocksdb (default rocksdb)
-#   storage_revision: v1
-#   wal_storage: rocksdb          # memory | sqlite | rocksdb (default rocksdb)
-#   wal_revision: v1
+#   storage: rocksdb              # memory | sqlite | rocksdb
+#   wal_storage: rocksdb          # memory | sqlite | rocksdb
+#   # storage_revision / wal_revision name the on-disk layout directory. The baseline pins both to the
+#   # current layout (v2). Do not set an older revision to reach older data: that layout is not
+#   # readable, and every table would look empty. Move old data with a logical dump and reimport
+#   # (docs/logical-dump-and-reimport.md).
+#   storage_revision: v2
+#   wal_revision: v2
 #   wal_sync_writes: true
 #   wal_group_commit_linger_ms: 0
-#   wal_single_fsync_commit: true   # CamusDB baseline (both modes); false restores the two-fsync commit path
+#   wal_single_fsync_commit: true   # CamusDB baseline (both modes)
 #   # Raft WAL shard column families — all unset; each line shows Kommander's default.
 #   wal_shard_write_buffer_size_mb: 64                    # one shard memtable
 #   wal_shard_min_write_buffer_number_to_merge: 2         # immutable memtables merged into one flush
@@ -465,238 +516,181 @@ initial_partitions: 1      # Raft partition count (>= 1). Standalone default is 
 #   wal_shard_level0_file_num_compaction_trigger: 8       # L0 files that trigger compaction
 #   wal_shard_level0_slowdown_writes_trigger: 28          # L0 files at which writers are slowed
 #   wal_shard_level0_stop_writes_trigger: 44              # L0 files at which writers are stopped
-#   wal_shard_max_bytes_for_level_base_mb: 256            # unset leaves RocksDB's own 256 MiB; size it above the retained log to keep the live log in the base level
+#   wal_shard_max_bytes_for_level_base_mb: 256            # RocksDB's own default; size it above the retained log to keep the live log in the base level
 #   wal_shard_universal_compaction: false                 # true = universal instead of leveled; makes the line above inert
+#
+#   # Transactions and admission control (docs/transaction-priority.md).
 #   default_transaction_timeout_ms: 5000
-#   max_transaction_timeout_ms: 3600000  # hard cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset => derived from that lifetime so a long serializable txn is not clamped/reaped early
-#   max_concurrent_sessions: 0           # 0 = no admission gate. For CamusDB this is a ceiling on concurrent WORK (a session per transaction), not on connections — see docs/transaction-priority.md
-#   transaction_priority_reserved_slots: 0   # slots only High/Critical may occupy; effectively mandatory (>= 1) whenever a ceiling is set, or engine-internal work queues behind user traffic
-#   transaction_priority_aging_threshold: 1000  # ms a waiter takes to gain one effective level; 0 disables aging and permits indefinite starvation
-#   transaction_priority_max_queued: 4096    # queue DEPTH bound; beyond it, transactions are refused outright (retryable)
-#   default_admission_wait_ms: 5000      # queue DURATION bound: how long a caller that asked for nothing waits at the door. Keep it short — this is not the session lifetime
-#   max_admission_wait_ms: 30000         # hard clamp on any caller-supplied admission budget
-#   locks_workers: 8
-#   key_value_workers: 8
+#   max_transaction_timeout_ms: 3600000  # cap on any session timeout; must be >= max_serializable_transaction_lifetime_ms. Unset = derived from that lifetime
+#   max_concurrent_sessions: 0           # 0 = no admission gate. A ceiling on concurrent WORK (one session per transaction), not on connections
+#   transaction_priority_reserved_slots: 0   # slots only High/Critical may occupy; set >= 1 whenever a ceiling is set, or engine-internal work queues behind user traffic
+#   transaction_priority_aging_threshold: 1000  # ms a waiter takes to gain one priority level; 0 disables aging and permits starvation
+#   transaction_priority_max_queued: 4096    # queue DEPTH bound; beyond it, transactions are refused (retryable)
+#   default_admission_wait_ms: 5000      # queue DURATION bound for a caller that asked for nothing. Not the session lifetime
+#   max_admission_wait_ms: 30000         # clamp on any caller-supplied admission wait
+#   transaction_outcome_retention_ttl_ms: 300000  # age after which a committed/aborted transaction record is reclaimed. Raising it also widens the age range over which recovery presumes abort
+#   transaction_outcome_retention_max: 10000      # records kept per node regardless of age; raise it together with the TTL
+#   scan_page_retry_budget_ms: 5000      # how long one range-scan page may answer "transient" before the scan fails with the range named. Keep it below the client command deadline (10 s by default)
+#
+#   # Workers and threads.
+#   locks_workers:                     # lock actors (shards of the lock space); > 0. Unset = max(32, 4 x CPU cores)
+#   key_value_workers:                 # key/value actors (shards of the key space); > 0. Unset = max(32, 4 x CPU cores)
 #   background_writer_workers: 1
-#   read_io_threads: 8
+#   read_io_threads: 4
 #   write_io_threads: 8
-#   start_election_timeout_ms: 2000    # must be < end_election_timeout_ms
-#   end_election_timeout_ms: 4000
+#
+#   # Raft timing.
+#   start_election_timeout_ms: 500     # 2000 in the cluster baseline; must be < end_election_timeout_ms
+#   end_election_timeout_ms: 1500      # 4000 in the cluster baseline
 #   start_election_timeout_increment_ms: 100
 #   end_election_timeout_increment_ms: 200
-#   heartbeat_interval_ms: 500
-#   recent_heartbeat_ms: 25            # de-dup window: a peer contacted within it is skipped for the
-#                                      # next heartbeat. MUST be < heartbeat_interval_ms, or every
-#                                      # timer-driven heartbeat is suppressed and the node refuses to
-#                                      # start. Unset, it tracks a quarter of the cadence, so lowering
-#                                      # heartbeat_interval_ms alone stays valid; set it only to
-#                                      # override that relation
+#   heartbeat_interval_ms: 100
+#   recent_heartbeat_ms: 25            # a peer contacted within this window is skipped for the next
+#                                      # heartbeat. MUST be < heartbeat_interval_ms. Unset, it is a
+#                                      # quarter of heartbeat_interval_ms; set it only to override that
 #   voting_timeout_ms: 1500
-#   max_entries_per_actor: 50000        # size-based eviction: cap on in-memory entries per actor.
-#                                       # Unset => sized from RAM (see "memory-proportional defaults" below)
-#   max_bytes_per_actor: 268435456      # size-based eviction: cap on in-memory bytes per actor (256 MiB).
-#                                       # Unset => sized from RAM (see "memory-proportional defaults" below)
-#   cache_entry_ttl_ms: 300000          # idle TTL before an aged cache entry may be evicted (5 min)
-#   cache_entries_to_remove: 1000       # max aged entries evicted per collection sweep
-#   collection_interval_ms: 60000       # background eviction-sweep + range-lock renewal cadence (60 s); range_lock_expires_ms must be >= 2x this
-#   compact_every_operations: 1000      # Raft-log compaction pass every N persisted WAL *batches* (not entries; a
-#                                       # batch carries ~100 entries under load). Kommander >= 1.6.1 advances the
-#                                       # reclaim floor to the true floor on every pass, so this cadence only sets
-#                                       # how often the pass runs, not how much it may reclaim.
-#   compact_number_entries: 50          # trailing log entries retained at each compaction point
-#   max_entries_per_compaction: 5000    # cap on entries a single pass tombstones (the whole-file reclaim below the
-#                                       # floor is not bounded by it since Kommander 1.6.1)
 #
-#   # RocksDB memory sharing (default: on whenever storage AND wal_storage are rocksdb;
-#   # a no-op otherwise). One block cache + one write-buffer manager serve both databases,
-#   # bounding total RocksDB memory with a single budget instead of two.
-#   rocksdb_shared_memory: true                 # set false to give each database its own budget
-#   rocksdb_shared_memory_budget_mb: 2048       # total shared block-cache budget (MiB); unset => 10% of machine memory
-#   rocksdb_shared_memtable_budget_mb: 512      # memtable sub-budget (MiB), charged INSIDE the total budget
-#                                               # (not added to it); must be <= the total. Unset => a quarter of it,
-#                                               # raised to the Raft-log flush unit (192 MiB at the wal_shard_* defaults)
-#                                               # but never past half of the total
+#   # Caches and eviction.
+#   max_entries_per_actor:              # size-based eviction: entries per actor. Unset = sized from memory (see below)
+#   max_bytes_per_actor:                # size-based eviction: bytes per actor. Unset = sized from memory (see below)
+#   cache_entry_ttl_ms: 300000          # idle age before a cache entry may be evicted
+#   cache_entries_to_remove: 1000       # aged entries evicted per collection sweep
+#   collection_interval_ms: 60000       # eviction sweep and range-lock renewal cadence; range_lock_expires_ms must be >= 2x this
 #
-#   # SST read path. Kahuna's own default is direct I/O (block cache is the only read cache; misses go
-#   # to the device). CamusDB defaults it OFF: on a node whose disk is already busy with the Raft WAL's
-#   # fsyncs, a device-bound miss stalls the key/value actor that issued it, and under sustained write
-#   # load that turned 1 ms leader reads into 40-50 ms. Buffered reads serve misses from the page cache
-#   # (charged to the container but reclaimable). Set true for a footprint bounded by the block cache alone.
+#   # Raft-log compaction.
+#   compact_every_operations: 1000      # compaction pass every N persisted WAL batches (not entries)
+#   compact_number_entries: 50          # trailing log entries kept at each compaction point
+#   max_entries_per_compaction: 5000    # entries one pass may tombstone
+#
+#   # RocksDB memory sharing: one block cache and one write-buffer manager serve both the KV store and
+#   # the Raft WAL. On whenever storage and wal_storage are both rocksdb; a no-op otherwise.
+#   rocksdb_shared_memory: true
+#   rocksdb_shared_memory_budget_mb:            # total block-cache budget (MiB). Unset = sized from memory
+#   rocksdb_shared_memtable_budget_mb:          # memtable sub-budget (MiB), charged INSIDE the total; must be <= it. Unset = sized from memory
+#
+#   # SST reads. false (the CamusDB baseline; Kahuna's own default is true) serves cache misses from
+#   # the OS page cache. Direct I/O made each miss a device read queued behind the WAL's fsyncs, which
+#   # stalled the key/value actor that issued it. true bounds the read footprint to the block cache.
 #   rocksdb_direct_reads: false
 #
-#   # Write-aggregator batches a partition may have waiting on Raft at once (Kahuna 1.7.1). 1 = one batch
-#   # in flight, the next dispatched on completion, so batches/s <= 1 / Raft round. Raise only after an A/B.
-#   key_value_write_max_in_flight_batches_per_partition: 1
+#   # Write aggregator.
+#   key_value_write_max_in_flight_batches_per_partition: 1  # batches a partition may have waiting on Raft; raise only after an A/B
+#   key_value_write_linger_ms: 1                  # how long the oldest queued write waits before a batch is sent while nothing is in flight
+#   key_value_write_post_completion_hold_ms: 2    # hold after a batch completes, so the next batch is denser; CamusDB baseline (Kahuna's own is 0)
+#   key_value_write_max_batch_items: 512          # items per batch
 #
-#   # Write-aggregator batch shaping: how long the oldest queued item may wait (ms) before a batch is
-#   # dispatched with nothing in flight, and the cap on items per batch. Denser batches raise throughput at
-#   # one partition (the round costs ~1.4 ms fixed + ~18 us/item); the linger adds that much write latency.
-#   key_value_write_linger_ms: 1
-#   # Hold after a batch completes before dispatching the next (ms); adds batch density at full occupancy
-#   # where the linger cannot, at the cost of that much write latency. CamusDB ships 2 (Kahuna's own
-#   # default is 0): +6% at 128 workers with a lower write p50, free at low load. 0 = dispatch at once.
-#   key_value_write_post_completion_hold_ms: 2
-#   key_value_write_max_batch_items: 512
-#
-#   # Memory-proportional defaults. Any of the four cache knobs above that you leave UNSET is sized
-#   # at startup, not left at a fixed value. Two sizes feed it:
-#   #   machine memory      = the container's cgroup limit, else physical RAM. Sizes the RocksDB pair,
-#   #                         which is native memory.
-#   #   managed heap budget = what the .NET GC reports: the heap hard limit when one is set
-#   #                         (DOTNET_GCHeapHardLimitPercent, or the runtime's 75% default in a
-#   #                         memory-limited container), else machine memory. Sizes the actor caches.
-#   # The RocksDB budgets therefore sit OUTSIDE a heap limit and count against the container beside it:
-#   # a 4096 MiB container with DOTNET_GCHeapHardLimitPercent=3C (60%, hexadecimal) gets a 2457 MiB heap
-#   # AND a 409 MiB block cache sized from the full 4096 MiB. Leave room for both.
-#   # Block cache = 10% of machine memory, at most 2 GiB (the 320 MiB floor yields on a small node);
-#   # memtable sub-budget = a quarter of the block cache, at most 1 GiB (the 128 MiB floor yields),
-#   # raised to the Raft-log flush unit plus headroom (wal_shard_write_buffer_size_mb x
-#   # (wal_shard_min_write_buffer_number_to_merge + 1) = 192 MiB) when storage and wal_storage are both
-#   # rocksdb, but never past half of the block cache -- below ~3.75 GiB of machine memory the unit does
-#   # not fit and Kommander logs "shared memtable budget ... is below the shard flush unit" at startup;
-#   # the key/value actor caches together take 6.25% of the managed heap budget (at least 64 MiB for
-#   # the layer), split across kahuna.key_value_workers actors (default: one per CPU), at most 2 GiB
-#   # each -- adding cores splits that budget further rather than growing it -- with
-#   # max_entries_per_actor derived at ~512 B/entry, clamped to [2k, 4M]. The node logs the values it
-#   # chose once at startup ("RocksDB shared memory: block cache ... MiB, memtable budget ... MiB").
-#   # That is roughly 16% of RAM across both cache layers, and never more than 4 GiB in total however
-#   # large the machine is -- the defaults assume a shared developer workstation or CI container, not a
-#   # dedicated server. Setting a key explicitly always wins over the computed value.
-#   #
-#   # Worked example, 8 GiB / 8-core machine, no heap limit, nothing set: block cache 819 MiB, memtable 204 MiB, actor
-#   # caches 64 MiB x 8 = 512 MiB => ~1.5 GiB. The same 8 GiB box with 32 cores still spends 512 MiB on
-#   # actor caches, at 16 MiB each. A dedicated database server should raise all four. To hand most of an
-#   # 8 GiB machine to CamusDB, set them together and keep ~2.5 GiB for the CLR heap, RocksDB overhead
-#   # outside the cache, and the OS:
+#   # Memory-proportional defaults. Under memory_profile: prod, each of the four cache keys above that
+#   # you leave UNSET is sized at startup:
+#   #   block cache      = 10% of machine memory, at most 2 GiB
+#   #   memtable budget  = a quarter of the block cache, at most 1 GiB, raised to the Raft-log flush
+#   #                      unit (192 MiB at the wal_shard_* defaults) but never past half the block cache
+#   #   actor caches     = 6.25% of the managed heap budget (at least 64 MiB for the layer), divided
+#   #                      across the key/value actors, at most 2 GiB each; entries at ~512 B each
+#   # Machine memory is the container's cgroup limit, else physical RAM. The managed heap budget is
+#   # the .NET heap hard limit when one is set, else machine memory. The RocksDB budgets sit OUTSIDE a
+#   # heap limit and count against the container beside it — leave room for both.
+#   # Example, 8 GiB / 8 cores, no heap limit: 819 MiB block cache, 204 MiB memtables, and 512 MiB of
+#   # actor caches (16 MiB x 32 actors) => ~1.5 GiB. Adding cores splits the same actor budget further. The node logs the values it chose once at startup ("RocksDB shared memory:
+#   # ..."). A dedicated server should set all four, for example on an 8 GiB machine:
 #   #   rocksdb_shared_memory_budget_mb: 3584
 #   #   rocksdb_shared_memtable_budget_mb: 896
-#   #   max_bytes_per_actor: 134217728          # 128 MiB PER ACTOR -- multiply by key_value_workers
+#   #   max_bytes_per_actor: 134217728          # 128 MiB PER ACTOR — multiply by the actor count
 #   #   max_entries_per_actor: 262144
-#   #
-#   # Trap: rocksdb_shared_memtable_budget_mb must be <= rocksdb_shared_memory_budget_mb, and the two
-#   # are validated AFTER merging with the computed defaults. Overriding only one of the pair can make
-#   # the effective pair inconsistent (e.g. a 100 MiB total against an explicit 512 MiB memtable) and
-#   # fails startup with InvalidConfig. Always set both together.
+#   #   key_value_workers: 8                    # pin the actor count so the per-actor budget is predictable
+#   # Always set the two rocksdb_shared_* budgets together: they are validated after merging with the
+#   # computed defaults, and a memtable budget above the total fails startup.
 #
-#   # Backups & point-in-time recovery (opt-in; off unless backup_dir is set).
-#   # When backup_dir is set, the server-admin backup/PITR API (/v1/backups/*, /v1/restore) is
-#   # enabled and node-wide backups are written under this directory. It backs up ALL databases at
-#   # once (they share one Kahuna node). Superuser-only when authentication is enabled.
-#   backup_dir: /opt/camusdb/backups            # omit to DISABLE backups (default). Must not be blank when set
-#   pitr_window_seconds: 3600                   # how far back live WAL is retained for recovery; > 0 and <= 21600 (6h). Default 3600 (1h)
-#   base_snapshot_interval_seconds: 1800        # base-image cadence; > 0 and <= pitr_window_seconds. Default 1800 (30m)
-#   # Restore is disabled unless a server-owned restore root is set (destinations are confined to it).
-#   # /v1/restore refuses with RemoteRestoreDisabled until this is configured.
-#   restore_root: /opt/camusdb/restores         # omit to keep restore disabled. Must not be blank when set
-#   allow_unconfined_remote_restore: false      # true = allow restore to any absolute path (insecure). Default false
-#   # Backup disk retention (garbage collection deletes only whole chains; also runs after each backup):
-#   backup_retention_max_chains: 0              # keep at most N chains (0 = unlimited)
-#   backup_retention_max_age_seconds: 0         # delete chains older than this (0 = unlimited)
-#   backup_retention_max_bytes: 0               # cap total backup bytes (0 = unlimited)
-#   backup_gc_interval_seconds: 3600            # background GC reaper cadence (0 = disabled). Default 3600 (1h)
-#   backup_restore_throttle_bytes_per_sec: 0    # throttle a restore's checkpoint copy (0 = unlimited)
-#   # Cluster + authenticity. Set the SAME value on every node. The backup root must be owner-only
-#   # (0700) or backups fail with BackupInsecureRoot. Encryption-at-rest is not offered — keep backups
-#   # on an access-controlled (ideally encrypted) volume.
-#   backup_cluster_id: prod-cluster-a           # stamped into manifests; a restore refuses a foreign cluster's chain. Empty on standalone is fine
-#   backup_mac_key_file: /etc/camusdb/backup.key # HMAC-SHA-256 key file signing manifests (authenticity). Same file on all nodes, kept outside backup_dir. Omit = unsigned
+#   # Backups and point-in-time recovery (off unless backup_dir is set).
+#   # backup_dir enables the server-admin backup/PITR API (/v1/backups/*, /v1/restore). It backs up
+#   # ALL databases at once. Superuser-only when authentication is on.
+#   # See docs/backups-and-point-in-time-recovery.md.
+#   backup_dir: /opt/camusdb/backups            # omit to disable backups; must not be blank when set
+#   pitr_window_seconds: 3600                   # how far back WAL is kept for recovery; > 0 and <= 21600 (6 h)
+#   base_snapshot_interval_seconds: 1800        # base-image cadence; > 0 and <= pitr_window_seconds
+#   # Restore stays disabled until a restore root is set; destinations are confined to it.
+#   restore_root: /opt/camusdb/restores         # omit to keep restore disabled; must not be blank when set
+#   allow_unconfined_remote_restore: false      # true = allow restore to any absolute path (insecure)
+#   # Retention (garbage collection deletes whole chains only; it also runs after each backup):
+#   backup_retention_max_chains: 0              # keep at most N chains; 0 = unlimited
+#   backup_retention_max_age_seconds: 0         # delete chains older than this; 0 = unlimited
+#   backup_retention_max_bytes: 0               # cap on total backup bytes; 0 = unlimited
+#   backup_gc_interval_seconds: 3600            # background GC cadence; 0 = disabled
+#   backup_restore_throttle_bytes_per_sec: 0    # throttle a restore's checkpoint copy; 0 = unlimited
+#   # Set the SAME values on every node. The backup root must be owner-only (0700) or backups fail with
+#   # BackupInsecureRoot. Backups are not encrypted — keep them on an access-controlled volume.
+#   backup_cluster_id: prod-cluster-a           # stamped into manifests; a restore refuses another cluster's chain
+#   backup_mac_key_file: /etc/camusdb/backup.key # HMAC-SHA-256 key that signs manifests; same file on all nodes, outside backup_dir. Omit = unsigned
 #
-#   # Partition placement (replication factor). Cluster mode. Applies at cluster BOOTSTRAP only:
-#   # there is no in-place migration from full replication — restarting an existing cluster with a
-#   # factor set changes the configured target while already-committed ranges keep their empty
-#   # (full-replication) replica sets. Set the same values on every node. The placement table is
-#   # observable at GET /v1/cluster/placement; graceful decommission at POST /v1/cluster/leave.
-#   replication_factor: 0                # 0 = full replication (default): every voter hosts every range.
-#                                        # N > 0: each range gets N replicas and a per-range quorum.
-#                                        # Prefer odd values (3 is the standard choice); even warns at startup
-#   zone: rack-a                         # failure-domain label; replicas spread across distinct zones. Omit = zone-unaware
-#   enable_placement_rebalancer: false   # master switch for ONGOING moves (repair under-replication on node
-#                                        # loss, trim over-replication, smooth skew on join/leave). Initial
-#                                        # placement at the factor is applied at bootstrap regardless
-#   placement_pass_interval_ms: 5000     # placement-controller cadence; a relocation costs ~3 passes, so this floors convergence speed
+#   # Partition placement (replication factor). Cluster mode, applied at cluster BOOTSTRAP only: an
+#   # existing cluster keeps its fully replicated ranges. Set the same values on every node.
+#   # Placement: GET /v1/cluster/placement; graceful decommission: POST /v1/cluster/leave.
+#   replication_factor: 0                # 0 = every voter hosts every range. N > 0 = N replicas per range; prefer odd values (3)
+#   zone: rack-a                         # failure-domain label; replicas spread across zones. Omit = zone-unaware
+#   enable_placement_rebalancer: false   # ongoing moves: repair under-replication, trim over-replication, smooth skew
+#   placement_pass_interval_ms: 5000     # placement-controller cadence; a relocation costs ~3 passes
 #   max_replica_moves_per_pass: 4        # new moves per pass across all priorities; keep >= repairs + transfers
-#   max_concurrent_replica_transfers: 1  # in-flight BALANCE backfills (skew smoothing); never starves client traffic
-#   max_concurrent_replica_repairs: 3    # in-flight REPAIR moves (restore durability); budgeted separately from balance
+#   max_concurrent_replica_transfers: 1  # in-flight balance backfills
+#   max_concurrent_replica_repairs: 3    # in-flight repair moves, budgeted apart from balance
 #   replica_count_deadband: 1            # per-node imbalance tolerated before balance moves are planned
-#   decommission_drain_timeout_ms: 120000 # how long a graceful leave waits for replica evacuation; one drain at a time
+#   decommission_drain_timeout_ms: 120000 # how long a graceful leave waits for replicas to move; one drain at a time
 #
-#   # Raft leader balancing (which replica LEADS, vs which nodes HOLD a range — that is placement above).
-#   # Off by default; set the same values on every node.
-#   enable_leader_balancer: false        # master switch for the load-report-driven leader balancer
+#   # Raft leader balancing (which replica LEADS a range). Off by default; same values on every node.
+#   enable_leader_balancer: false
 #   leader_balancer_interval_ms: 30000   # balancing-pass cadence
-#   leader_balancer_report_interval_ms: 5000  # per-node load-report publish cadence
-#   leader_balancer_report_ttl_ms: 20000 # reports older than this are ignored; must be > the report interval
-#   min_leader_stability_ms: 5000        # minimum leader tenure before the balancer may move leadership again
+#   leader_balancer_report_interval_ms: 5000  # per-node load-report cadence
+#   leader_balancer_report_ttl_ms: 20000 # older reports are ignored; must be > the report interval
+#   min_leader_stability_ms: 5000        # minimum leader tenure before leadership may move again
+#   enable_load_reports: false           # publish load reports WITHOUT enabling the leader balancer
 #
-#   # Range auto-split. Both branches are OFF unless a threshold is set: a routing flag must not also
-#   # switch on a rebalancing policy. The count branch splits a range that holds many keys; the load
-#   # branch splits a partition that is saturated, which is the case the count branch cannot see.
-#   # Needs key_range_sharding: true, initial_partitions >= 2, cluster mode, AND a load-report source.
-#   # enable_leader_balancer above is what actually moves the child leader off the hot node — without
-#   # it a split costs an extra Raft group and relieves nothing. The node warns at startup for each
-#   # precondition it does not meet, and still starts. See docs/key-range-sharding.md.
-#   range_split_threshold: 0             # count branch: sampled keys before a range is split; 0 disables. Must be 0 or >= 2 x range_split_min_range_size
-#   range_split_min_range_size: 10       # smallest a child range may be
-#   range_split_load_threshold: 500      # load branch: sustained log ops/sec before a partition counts as hot; 0 disables
-#   range_split_load_min_queue_depth: 8  # WAL backlog required alongside the rate; AND-combined with it
-#   range_split_load_min_commit_wait_ms: 0  # optional third gate (commit-wait ms); 0 disables. Never fires on its own
-#   range_split_load_window_ms: 15000    # the three gates must all hold for this long before a split fires
+#   # Range auto-split and merge. Both split branches are OFF unless a threshold is set. The count
+#   # branch splits a range with many keys; the load branch splits a saturated partition. Needs
+#   # key_range_sharding: true, initial_partitions >= 2, cluster mode and a load-report source, and
+#   # enable_leader_balancer to move the new leader off the hot node. The node warns at startup about
+#   # each missing precondition. See docs/key-range-sharding.md.
+#   range_split_threshold: 0             # count branch: sampled keys before a split; 0 disables. 0 or >= 2 x range_split_min_range_size
+#   range_split_min_range_size: 10       # smallest child range
+#   range_split_load_threshold: 500      # load branch: sustained log ops/sec before a partition is hot; 0 disables
+#   range_split_load_min_queue_depth: 8  # WAL backlog required together with the rate
+#   range_split_load_min_commit_wait_ms: 0  # optional third gate (commit wait); 0 disables
+#   range_split_load_window_ms: 15000    # how long all gates must hold before a split
 #   range_split_load_poll_interval_ms: 5000  # sampling cadence; must be < range_split_load_window_ms
-#   range_split_load_imbalance_max: 0.8  # refuse a split this lopsided (a single hot key); range (0.5, 1.0]
-#   range_split_settle_window_ms: 10000  # leave a fresh child alone for this long; must be >= min_leader_stability_ms
+#   range_split_load_imbalance_max: 0.8  # refuse a split this lopsided (one hot key); range (0.5, 1.0]
+#   range_split_settle_window_ms: 10000  # leave a new child alone this long; must be >= min_leader_stability_ms
 #   range_split_indivisible_cooldown_ms: 300000  # stop re-sampling a range the imbalance guard refused
-#   range_move_settle_timeout_ms: 10000  # how long one split/merge attempt holds its quiesce draining
-#                                        # the moving range's intents. This is what an attempt costs the
-#                                        # workload: writes to the moving half are refused (retryably)
-#                                        # for up to this long. 0 = no wait, and under sustained writes
-#                                        # that means every attempt is refused. Clamped to 15000
-#   range_merge_min_size: 10             # key count below which two neighbours merge back; 0 disables auto-merge
-#   enable_load_reports: false           # gossip load signals WITHOUT enabling the leader balancer
+#   range_move_settle_timeout_ms: 10000  # how long a split/merge waits for the moving range to drain.
+#                                        # Writes to the moving half are refused (retryably) for up to
+#                                        # this long. 0 = no wait, which under sustained writes refuses
+#                                        # every attempt. Clamped to 15000
+#   range_merge_min_size: 10             # key count below which two neighbours merge; 0 disables auto-merge
 #
-#   # One-phase durable commit for read-modify-write transactions. Off by default. When on, an eligible
-#   # transaction (one participant partition, anchor on it, an on-partition read set) commits in one
-#   # Raft round instead of two, and every replica judges its read dependencies at apply time against
-#   # the partition's committed-head ledger. DEFAULT TRUE — worth ~+24% throughput on a multi-partition
-#   # row-update workload. Set it to false when either of Kahuna's rules says you must: during a ROLLING
-#   # UPGRADE across Kahuna versions (an old node skips the check and commits where a new node refuses,
-#   # forking the state machine), and for the first start of a data directory written before the
-#   # committed-head ledger existed (such a node fails to start with the gate on — run once with false,
-#   # let a checkpoint rewrite the snapshots, then remove the override). Whatever the value, give every
-#   # node of the group the same one, for this key and the one below. See docs/configuration.md.
+#   # One-phase commit for read-modify-write transactions. On by default: an eligible transaction (one
+#   # participant partition, anchor on it, reads on that partition) commits in one Raft round instead
+#   # of two, and each replica checks its reads at apply time. Set it false during a ROLLING UPGRADE
+#   # across Kahuna versions, and for the first start of a data directory written before the
+#   # committed-head ledger existed (start once with false, let a checkpoint run, then remove the
+#   # override). Give every node the same value for this key and the next one. See docs/configuration.md.
 #   one_phase_apply_time_validation: true
-#   staged_base_fence_retention_ms: 600000  # horizon the staged-base fence (and the ledger the gate
-#                                        # judges against) remembers a key's last committed head for.
-#                                        # Must comfortably exceed the longest transaction lifetime:
-#                                        # a transaction that began before it is refused. Must be
-#                                        # identical on every node while the gate is on
+#   staged_base_fence_retention_ms: 600000  # how long a key's last committed head is remembered. Must
+#                                           # comfortably exceed the longest transaction lifetime: a
+#                                           # transaction that began before it is refused
 #
-#   # Persistent MVCC revision retention. Every version of every row is a physical row in the KV
-#   # store; without pruning a hot table's history and the disk behind it grow without bound.
-#   # Default (both keys unset): age-based pruning aligned with the effective PITR window, so an
-#   # as-of restore inside the window always finds the revisions it needs. Snapshot reads older
-#   # than the retention age are not guaranteed; branch forks pin their own snapshot floors,
-#   # which pruning honors. An explicit age below the PITR window is rejected. 0 disables a bound.
+#   # MVCC revision retention. Every version of every row is a physical row; without pruning, history
+#   # grows without bound. Unset: prune by age, aligned with the effective PITR window, so a restore
+#   # inside the window always finds its revisions. Snapshot reads older than the retention age are
+#   # not guaranteed; branch forks pin their own snapshot floors. An age below the PITR window is
+#   # rejected; 0 disables a bound.
 #   persistent_revision_retention_age_seconds: 3600
 #   persistent_revision_retention_count: 0  # hard per-key cap; can cut below the PITR window — prefer the age bound
 
 # ── Diagnostics (opt-in) ──────────────────────────────────────────────────────
-# Low-overhead OpenTelemetry metrics + sampled traces for performance diagnosis. Off by default:
-# with enabled=false the server registers no exporter, endpoint, or collector and emits nothing.
-# Works in both standalone and cluster mode; in cluster mode the Kahuna/Kommander meters include
-# the kahuna.placement.* counters used to watch replica moves. The Prometheus endpoint
-# exposes operational metadata — protect it or bind it to a trusted interface.
-#
-# enabled: master switch. Default false.
-# prometheus_enabled: bind the Prometheus scrape endpoint on the HTTP listener. Default false.
-# prometheus_path: path for the scrape endpoint; must start with '/'. Default /metrics.
-# otlp_endpoint: optional OTLP collector URL; its presence enables the OTLP push exporter.
-# trace_sample_ratio: head sampling ratio in [0, 1]. Default 0.01 (1%).
-# include_runtime_metrics: also export .NET runtime metrics (GC, thread-pool). Default true.
+# OpenTelemetry metrics and sampled traces, in both modes. With enabled: false the server registers
+# no exporter and no endpoint. The Prometheus endpoint exposes operational metadata — protect it or
+# bind it to a trusted interface. See docs/standalone-performance-diagnostics.md.
 #
 # diagnostics:
-#   enabled: false
-#   prometheus_enabled: false
-#   prometheus_path: /metrics
-#   otlp_endpoint:
-#   trace_sample_ratio: 0.01
-#   include_runtime_metrics: true
+#   enabled: false                 # master switch
+#   prometheus_enabled: false      # scrape endpoint on the HTTP listener
+#   prometheus_path: /metrics      # must start with '/'
+#   otlp_endpoint:                 # OTLP collector URL; setting it enables the OTLP push exporter
+#   trace_sample_ratio: 0.01       # head sampling ratio in [0, 1]
+#   include_runtime_metrics: true  # also export .NET runtime metrics (GC, thread pool)

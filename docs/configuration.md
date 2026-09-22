@@ -1,7 +1,19 @@
 # Configuration
 
-CamusDB reads `CamusDB/Config/config.yml` at startup and merges CLI flags and environment
-variables into a single resolved configuration object.
+CamusDB reads one YAML configuration file at startup and merges CLI flags and environment variables
+into a single resolved configuration object. It uses the first file it finds:
+
+1. `--config <path>`
+2. the `CAMUS_CONFIG_PATH` environment variable
+3. `./camusdb.yml` or `./Config/config.yml` in the working directory
+4. `~/.camusdb/config.yml` (`%APPDATA%\camusdb\config.yml` on Windows; `$CAMUS_HOME/config.yml` when
+   `CAMUS_HOME` is set)
+5. built-in defaults, when no file exists
+
+A path named by 1 or 2 must exist; startup fails rather than falling through to another file.
+`camusdb init` writes a short starter file to location 4 and creates the default data directory.
+`CamusDB/Config/config.yml` in the repository is the annotated reference for every key; it is tracked
+in git, so do not keep a node's settings there.
 
 To see what a running node actually resolved — including which layer supplied each value — run
 [`SHOW VARIABLES`](show-variables.md) against it rather than reconstructing the merge by hand.
@@ -11,10 +23,11 @@ To see what a running node actually resolved — including which layer supplied 
 Highest wins:
 
 1. **CLI flags** — only flags you explicitly pass override YAML (nullable options; no sentinel defaults).
-2. **Environment variables** — currently `CAMUS_KEY_RANGE_SHARDING` overrides `key_range_sharding`
-   (what that setting does: [key-range-sharding.md](key-range-sharding.md)).
+2. **Environment variables** — `CAMUS_KEY_RANGE_SHARDING` overrides `key_range_sharding`
+   (what that setting does: [key-range-sharding.md](key-range-sharding.md)). Authentication is
+   switched on with `CAMUSDB_AUTH_ENABLED`, and its secrets are read only from the environment.
 3. **`config.yml`**
-4. **Built-in defaults** in `ConfigDefinition` / `CamusDBConfig`.
+4. **Built-in defaults** in `ConfigDefinition` / `CamusDBOptions`.
 
 Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode. YAML
 `mode: cluster` with no `--mode` flag stays in cluster mode.
@@ -23,29 +36,32 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 
 | YAML field | CLI flag | Default |
 |------------|----------|---------|
-| `data_dir` | `--data-dir` | `Data` (process cwd) |
+| `data_dir` | `--data-dir` | `~/.camusdb/data` (`$CAMUS_HOME/data` when set) |
 | `mode` | `--mode` | `standalone` |
 | `memory_profile` | `--memory-profile` | `prod` |
 | `node_name` | `--raft-nodename` | `""` (cluster: machine name) |
 | `raft_node_id` | `--raft-nodeid` | `1` |
 | `raft_host` | `--raft-host` | `localhost` |
 | `raft_port` | `--raft-port` | `7070` |
-| `initial_partitions` | `--initial-cluster-partitions` | `1` |
+| `initial_partitions` | `--initial-cluster-partitions` | `1` standalone, `3` cluster |
 | `peers` | `--initial-cluster` | `[]` |
 | `http_peers` | `--http-peers` | `[]` |
+| `join_existing` | `--join-existing` | `false` |
 | `schema_ack_wait_timeout_ms` | `--schema-ack-wait-timeout-ms` | `30000` |
 | `schema_ack_live_node_lease_ms` | `--schema-ack-live-node-lease-ms` | `30000` |
 | `http_port` | `--http-port` | `5095` |
 | `https_port` | `--https-port` | `7141` |
 | `https_certificate` | `--https-certificate` | `""` |
 | `raft_certificate` | `--raft-certificate` | `""` |
+| `grpc_enabled` | — | `true` |
+| `grpc_port` | — | `5096` |
+| `grpc_certificate` | — | `""` (falls back to `raft_certificate`) |
 | `require_tls_when_auth_enabled` | `--require-tls-when-auth-enabled` | `true` |
 | `default_isolation_level` | — | `serializable` |
 | `default_transaction_locking` | — | `pessimistic` |
 | `default_transaction_priority` | — | `normal` |
 | `transaction_admission_wait_ms` | — | `0` (node default) |
-| `range_lock_expires_ms` | — | `30000` |
-| `range_lock_heartbeat_interval_ms` | — | `10000` |
+| `range_lock_expires_ms` | — | `150000` |
 | `max_serializable_transaction_lifetime_ms` | — | `3600000` |
 | `lock_escalation_threshold` | — | `50` |
 | `lock_wait_deadline_ms` | — | `500` |
@@ -76,6 +92,9 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `slow_query_log_max_sql_length` | — | `4096` |
 | `kahuna.*` | — | mode-specific baseline |
 
+The table covers every key with a CLI flag plus a selection of YAML-only keys. `config.yml` documents
+every accepted key with its default, and `SHOW VARIABLES` reports the resolved value of each.
+
 Parser-cache, lock/isolation, spill, and query-result-cache knobs are YAML-only (operational tuning,
 not per-node startup flags). The result cache is **on by default** (opt-in per query via a
 `{cache=…}` hint); set `query_result_cache_enabled: false` to turn it off entirely. See
@@ -87,8 +106,8 @@ without a restart.
 
 ## Kahuna engine section
 
-The nested `kahuna:` map is an allow-listed passthrough to `EmbeddedKahunaOptions`, used for
-both the cluster node (`Program.cs`) and standalone per-database nodes (`DatabaseOpener`).
+The nested `kahuna:` map is an allow-listed passthrough to `EmbeddedKahunaOptions`, used for the one
+embedded Kahuna node a process runs, in both standalone and cluster mode (`Program.cs`).
 Unset keys keep the CamusDB baseline for that mode. Unknown keys fail validation at startup.
 
 The authoritative allow-list is `KahunaOptionsConfig.AllowedYamlKeys`; the commented `kahuna:` block
@@ -111,15 +130,10 @@ older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed toget
 `compact_every_operations` (how often), `compact_number_entries` (trailing entries kept), and
 `max_entries_per_compaction` (per-pass removal cap).
 
-`compact_every_operations` counts persisted WAL **batches**, not log entries: Kommander's
-`RaftWriteAhead.NotifyCommitted` decrements once per batch, and under load a batch carries on the order of
-a hundred entries. With a RocksDB Raft log the log is reclaimed by dropping whole SST files below a persisted
-compaction floor. On Kommander 1.6.0 that floor advanced at most `max_entries_per_compaction` rows per pass,
-which at Kahuna's defaults (1,000 batches, 5,000 rows) reclaimed a few hundred entries per second against
-~9,000 written on the 2026-09-10 write probe and let the live log grow ~100 MB per minute per node; CamusDB
-shipped a temporary 100 / 100,000 default for that version. Kommander 1.6.1 (Kahuna 1.7.6) advances the floor
-to the true floor on every pass, so the Kahuna defaults are in force again and the cadence only decides how
-often a pass runs.
+`compact_every_operations` counts persisted WAL **batches**, not log entries: under load a batch carries
+on the order of a hundred entries. With a RocksDB Raft log, the log is reclaimed by dropping whole SST
+files below a persisted compaction floor, and every pass advances that floor to the true floor. The
+cadence therefore decides only how often a pass runs, not how much it may reclaim.
 
 Storage backends: `memory`, `sqlite`, `rocksdb`.
 
@@ -235,7 +249,7 @@ heap percentage.
 |-----|---------------------|-------|
 | `rocksdb_shared_memory_budget_mb` | 10% of machine memory | 64 MiB – 2 GiB (320 MiB floor only when 10% reaches it) |
 | `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache, raised to the Raft-log flush unit (never past half the cache) | 16 MiB – 1 GiB (128 MiB floor only when a quarter reaches it) |
-| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ `key_value_workers` | 1 MiB – 2 GiB per actor (8 MiB floor only when the share reaches it) |
+| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ the key/value actor count | 1 MiB – 2 GiB per actor (8 MiB floor only when the share reaches it) |
 | `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 2k – 4M (10k floor only when the share reaches it) |
 
 The floors in parentheses yield on a small node: below them the percentage governs, down to the lower
@@ -282,13 +296,15 @@ large the machine is. The fractions and the ceilings are deliberately modest: an
 is far more often a developer workstation or a CI container sharing the box with a compiler and an
 IDE than a dedicated database server. An explicit value always wins over the computed one. On an
 8 GiB, 8-core machine with no heap limit and none of them set: 819 MiB block cache, 204 MiB memtable
-sub-budget (above the 192 MiB flush unit without any floor), and 64 MiB × 8 = 512 MiB of actor caches — about 1.5 GiB.
+sub-budget (above the 192 MiB flush unit without any floor), and 512 MiB of actor caches split across
+32 actors (16 MiB each) — about 1.5 GiB.
 
 A dedicated server should raise all four explicitly; the sizing above is a floor to build from, not
 a recommendation for a machine whose only job is CamusDB.
 
 Note that the 6.25% share and its 64 MiB floor bound the actor-cache layer *as a whole*, and are
-then divided by `key_value_workers`; only the 8 MiB per-actor minimum is per actor. Adding cores
+then divided by the key/value actor count (`kahuna.key_value_workers`, or max(32, 4 × CPU cores)
+when unset); only the 8 MiB per-actor minimum is per actor. Adding cores
 therefore splits the same budget more ways rather than growing it — a machine with many cores
 relative to its RAM does not end up with a multiple of the intended share.
 
@@ -298,8 +314,8 @@ KV store and the Raft WAL. The memtable sub-budget is charged **inside** the tot
 budget, not added to it, and must be ≤ it. That comparison is made against the *effective*
 post-merge pair, so overriding only one of the two can produce an inconsistent pair — a 100 MiB
 total against an explicit 512 MiB memtable — and fails startup with `InvalidConfig`. The computed
-memtable default never exceeds the total, with or without the flush-unit floor. Set both together. Likewise `max_bytes_per_actor` is **per actor**: multiply by `key_value_workers` (default:
-one per CPU) to get the total.
+memtable default never exceeds the total, with or without the flush-unit floor. Set both together. Likewise `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
+default max(32, 4 × CPU cores)) to get the total.
 
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
 write-aggregator batches a partition may have waiting on Raft at once. At 1 the next batch is dispatched
@@ -389,7 +405,9 @@ combination silently.
 | Port outside 1..65535 | `InvalidConfig` |
 | `http_peers` count ≠ `peers` count | `InvalidConfig` |
 | Invalid `default_isolation_level` | `InvalidConfig` |
-| `range_lock_heartbeat_interval_ms` ≥ `range_lock_expires_ms` (when expiry > 0) | `InvalidConfig` |
+| `range_lock_expires_ms` > 0 and < 2 × effective `kahuna.collection_interval_ms` (60 s by default) | `InvalidConfig` |
+| `kahuna.max_transaction_timeout_ms` < `max_serializable_transaction_lifetime_ms` | `InvalidConfig` |
+| `kahuna.locks_workers` or `kahuna.key_value_workers` set to ≤ 0 | `InvalidConfig` |
 | `spill_threshold_rows` ≤ 0 | `InvalidConfig` |
 | `spill_merge_fan_in` ≤ 0 | `InvalidConfig` |
 | `large_value_rewrite_batch_rows` ≤ 0, or above half of `max_mutations_per_transaction` (when the limit > 0) | `InvalidConfig` |

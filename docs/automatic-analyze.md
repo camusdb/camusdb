@@ -142,7 +142,7 @@ the same table on one node.
 
 ## Configuration
 
-All knobs live in `CamusDBConfig` (see [`docs/configuration.md`](./configuration.md) for how config is
+All knobs live in `CamusDBOptions` (see [`docs/configuration.md`](./configuration.md) for how config is
 loaded). The feature is on by default; the tuning defaults around it are deliberately conservative.
 
 | Setting | Default | Meaning |

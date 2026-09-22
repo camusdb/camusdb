@@ -138,8 +138,8 @@ Key points:
   `CREATE` / `ALTER` time, not deferred to the first `INSERT`. A malformed or timed-out pattern
   encountered *during* a CHECK evaluation surfaces as a check-constraint violation (HTTP 400).
 - **ReDoS guard.** Every match runs under a bounded timeout
-  (`CamusDBConfig.RegexMatchTimeoutMs`, default 250 ms); a pathological pattern fails rather than
-  hanging. Compiled patterns are cached (`CamusDBConfig.RegexCacheMaxEntries`).
+  (`CamusDBOptions.RegexMatchTimeoutMs`, default 250 ms); a pathological pattern fails rather than
+  hanging. Compiled patterns are cached (`CamusDBOptions.RegexCacheMaxEntries`).
 
 ### Array columns
 

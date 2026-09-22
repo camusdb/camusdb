@@ -381,7 +381,7 @@ If you touch a write, read, lock, or transaction-lifecycle path, keep these true
 ## 11. Configuration touchpoints
 
 - **Locking / read-validation / decision-durability** are selected per transaction as arguments
-  to `BeginAsync`, each with a process-wide default in `CamusDBConfig`
+  to `BeginAsync`, each with a process-wide default in `CamusDBOptions`
   (`DefaultTransactionLocking`, `DefaultReadValidation`, `DefaultDecisionDurability`). The
   shipped defaults preserve the historical behavior: pessimistic, no extra read validation,
   best-effort decisions. The locking default is also wired to `config.yml`'s

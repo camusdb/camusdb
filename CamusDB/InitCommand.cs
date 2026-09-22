@@ -15,7 +15,7 @@ namespace CamusDB;
 /// directory and creates the default data directory.
 /// <para>
 /// This is what makes an operator's settings safe from a repository checkout. The configuration
-/// shipped in the repository is a 26 KB commented reference, not a starting point — it is a tracked
+/// shipped in the repository is a long commented reference, not a starting point — it is a tracked
 /// file, so editing it in place means a <c>git pull</c> can replace it, and its size makes it a poor
 /// thing to diff. What <c>init</c> writes instead is a short file of active keys under the user's
 /// home directory, which no checkout can reach.
@@ -84,13 +84,26 @@ internal static class InitCommand
         # standalone (single node) or cluster (Raft; requires node_name, raft_* and peers).
         mode: standalone
 
-        # HTTP API port. The gRPC endpoint is on grpc_port (default 5096).
+        # Client ports: the HTTP API and the gRPC endpoint.
         http_port: 5095
+        grpc_port: 5096
 
         # Raft partitions. A standalone node wants 1: with one disk there is a single fsync target,
         # so a single partition makes every transaction single-participant and enables the one-phase
         # commit fast path. Raise this only for a cluster, where partitions map to distinct leaders.
         initial_partitions: 1
+
+        # Cache sizing: prod sizes the caches from the machine's memory; dev pins them to ~96 MiB
+        # for a node that shares a laptop with the application developed against it.
+        # memory_profile: prod
+
+        # Record statements slower than the threshold; read them with SHOW SLOW QUERIES.
+        # slow_query_log_enabled: true
+        # slow_query_log_threshold_ms: 1000
+
+        # Serve the client ports over TLS (paths to PFX files).
+        # https_certificate:
+        # grpc_certificate:
 
         """;
 }

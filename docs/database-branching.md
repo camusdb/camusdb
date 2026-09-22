@@ -363,11 +363,19 @@ several layered fences:
   `SchemaDdlSemaphore` across the descendant re-check and `UnregisterAsync`; branch-create holds
   the *source's* semaphore across its own publish — the same id-keyed descriptor, so they mutually
   exclude on one node.
-- **Cross-node fence (drop-intent key).** Before its descendant scan, `DropDatabase` writes a
+- **Cross-node fence (drop-intent lease).** Before its descendant scan, `DropDatabase` takes a
   Raft-replicated `drop-intent:{dbId}` (`SetIfNotExists`) and holds it through the keyspace purge;
   branch-create checks it *after* `RegisterAsync`. Raft linearizability guarantees exactly one
   wins — either branch-create sees the intent and retracts, or drop's descendant scan sees the
   new child and aborts. The intent is released on every exit path.
+
+  The intent is a **lease**, not a plain marker (`KeyLeaseFence`). Its key carries a native expiry of
+  `CamusDBOptions.FenceLeaseMs` (default 30 s), and the holder re-stamps it every
+  `FenceLeaseRenewIntervalMs` for as long as it holds the fence. So a long purge is never interrupted,
+  and a holder that dies stops blocking the id once the lease lapses. Every acquisition carries a
+  fencing token, and release is a compare-and-set of that token onto a near-immediate expiry rather
+  than a delete — a stalled predecessor can therefore never free a fence that now belongs to someone
+  else.
 - **Source liveness re-read (completed-drop fence).** The intent key only covers a drop still in
   flight: a create that stalls between its metadata copy and `RegisterAsync` can resume after the
   drop has fully finished and released the intent. So directly after the intent check,
@@ -377,9 +385,12 @@ several layered fences:
   from before the child's `RegisterAsync` until after its own unregister, so the create either
   sees the intent, or its later liveness read sees the unregistered id. Ids are never reused, so
   a recreate of the name under a new id still aborts, while a rename (same id) does not.
-- **Meta-last, resumable, paged purge.** The keyspace purge reads the catalog first, deletes
-  row/index/stats, and deletes **meta (catalog included) last** — so a crashed purge can be
-  resumed from the still-present catalog. A `dropping:{dbId}` marker is written before
+- **Meta-last, resumable, paged purge.** This is the immediate-purge path, which is the one every
+  branch drop takes: a root dropped without `FORCE` is instead retained as a recoverable orphan for
+  `RELINK`, and its keyspace is purged later by the orphan GC. Branch recovery would have to hold the
+  parent's snapshot floor for the whole retention window, so deferred drop is out of scope for
+  branches. The purge reads the catalog first, deletes row/index/stats, and deletes **meta (catalog
+  included) last** — so a crashed purge can be resumed from the still-present catalog. A `dropping:{dbId}` marker is written before
   `UnregisterAsync` and cleared only after the purge completes; startup resumes any interrupted
   purge. Deletes are **paged** in bounded batches (`CamusDBOptions.KeyspacePurgeBatchSize`) so a
   large database drops in bounded memory.
@@ -422,7 +433,7 @@ destroys data.
 | Marker | Written when | Cleared when | On crash, startup does |
 |--------|-------------|--------------|------------------------|
 | `pending:{branchId}` | before copying branch metadata | after publish, or after a *verified* purge on abort | for own prior-run markers and unstamped legacy markers only: re-check registration against the *persistent* registry, take the id's fence, re-check again, then scrub `{branchId}/meta` with verified, paged deletes; the marker is cleared only once a confirming scan finds the namespace empty, otherwise it stays for the next startup; a registered id only loses its obsolete marker |
-| `drop-intent:{dbId}` | before a drop's descendant scan | after purge / on abort | clear own stale intents (a drop never spans a restart) |
+| `drop-intent:{dbId}` | before a drop's descendant scan | after purge / on abort | clear own stale intents (a drop never spans a restart). The lease also frees a dead owner's intent by itself, so the sweep removes the wait, not a deadlock |
 | `dropping:{dbId}` | before a drop's `UnregisterAsync` | after the purge completes | under the id's fence, and only for an own, prior-run marker: re-check registration against the *persistent* registry, then resume the keyspace purge; the marker is cleared only after the purge verifiably completes |
 
 Two ordering choices make this robust: the pending marker is written *before* the metadata copy
@@ -448,7 +459,9 @@ gauges (under the `Kahuna` meter scope) that operators should dashboard:
 **Lease / renewal.** `CamusDBOptions.BranchSnapshotHoldLeaseMs` (default `300_000` = 5 min) sets
 the hold lease; the leader-owned renewer refreshes every `lease/3`. Choose it coarse enough that
 renewals are not a hot Raft path. If the renewer's node is unhealthy, failover moves the sweep to
-the new registry-partition leader; a branch only loses its hold if renewal stops for a full lease.
+the new registry-partition leader. A branch does not lose its hold the moment a lease lapses: a
+registered hold keeps constraining reclamation, and the next renew revives it. The loss is Kahuna's
+reaper purging the lapsed hold, so the lease sets how long a stalled renewer has to recover (§6).
 
 **Drop order matters.** You cannot drop a database that still has live descendant branches
 (`CADB0508`) — drop descendants first, leaf to root. A dropped id is never reused.
@@ -456,8 +469,9 @@ the new registry-partition leader; a branch only loses its hold if renewal stops
 **Deep chains cost reads, and are observable.** Read cost is proportional to lineage depth (one
 ancestor probe per level on a point-read miss, one extra scan iterator per level). There is no
 depth cap, but the read path is instrumented via always-on process-wide counters in
-`BranchMetrics` — read them directly (there is no metrics exporter yet; this is the hook point for
-one):
+`BranchMetrics`. These counters are **not** published through the `ServerDiagnostics` meter, so the
+Prometheus endpoint does not scrape them; read them in process (attaching them to that meter is the
+hook point):
 
 - `AncestorProbesTotal` — ancestor-level probes fired by `GetRow`/`LookupUnique` misses. A high
   rate relative to query volume means deep chains are amplifying point reads.

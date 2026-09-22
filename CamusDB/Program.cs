@@ -188,12 +188,10 @@ CamusDBConfig.SetAmbient(camusOptions);
 // controllers and keeps the ambient value in sync.
 CamusDB.Core.Config.CamusDBOptionsHolder optionsHolder = new(camusOptions with { BootstrapSuperuserPassword = "" });
 
-// Diagnostics are opt-in for both modes: enable the Core Meter/ActivitySource gate whenever the
+// Diagnostics are opt-in in both modes: enable the Core Meter/ActivitySource gate whenever the
 // operator turned diagnostics on. When false, every ServerDiagnostics record helper
-// short-circuits, so an unconfigured node emits nothing and pays no cost. Cluster nodes were
-// excluded in the first diagnostics phase; chaos/reliability harnesses need Prometheus /metrics
-// (including the kahuna.placement.* counters) on every node of a cluster, so the gate is now
-// purely the operator's diagnostics switch.
+// short-circuits, so an unconfigured node emits nothing and pays no cost. A cluster node exports
+// the same signals, including the kahuna.placement.* counters used to watch replica moves.
 bool diagnosticsActive = config.Diagnostics.Enabled;
 CamusDB.Core.Diagnostics.ServerDiagnostics.Enabled = diagnosticsActive;
 

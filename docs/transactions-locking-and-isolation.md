@@ -404,7 +404,7 @@ field on the begin-request, or as the first statement of an explicit transaction
 SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
 ```
 
-There is also a server-wide knob (`DefaultIsolationLevel` in `CamusDBConfig`) to revert the default
+There is also a server-wide knob (`default_isolation_level` in `config.yml`, `CamusDBOptions.DefaultIsolationLevel`) to revert the default
 globally, if you need to roll back an environment to the old behaviour.
 
 ### 9.2 Read Committed (explicit opt-out)

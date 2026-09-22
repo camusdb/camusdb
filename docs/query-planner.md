@@ -643,8 +643,8 @@ optimization passes.
 ```
 
 Everything in the bottom row consumes the cost. The two flagged choices (`cost_based_access_path_enabled`,
-`cost_based_join_order_enabled`) are off by default and fall back to the heuristic when off or when stats
-are missing, so the optimizer is strictly additive.
+`cost_based_join_order_enabled`) are on by default. Each falls back to the heuristic when it is off or
+when stats are missing, so the optimizer is strictly additive.
 
 ## Optimization passes
 
@@ -838,21 +838,22 @@ declared-first `events` outermost (paying a full `events` scan), while the DP dr
 
 ## Config flags summary
 
-| Flag (`config.yml`) | `CamusDBConfig` field | Default | Effect when on |
+| Flag (`config.yml`) | `CamusDBOptions` field | Default | Effect when on |
 |---|---|---|---|
-| `cost_based_access_path_enabled` | `CostBasedAccessPathEnabled` | `false` | Cost-based per-table access-path selection |
-| `cost_based_join_order_enabled` | `CostBasedJoinOrderEnabled` | `false` | System-R join-order DP |
+| `cost_based_access_path_enabled` | `CostBasedAccessPathEnabled` | `true` | Cost-based per-table access-path selection |
+| `cost_based_join_order_enabled` | `CostBasedJoinOrderEnabled` | `true` | System-R join-order DP |
 | `plan_cache_enabled` | `PlanCacheEnabled` | `false` | Per-process LRU plan cache (see below) |
 | `plan_cache_max_entries` | `PlanCacheMaxEntries` | `512` | LRU capacity; 0 = effectively disabled |
 | `key_range_sharding` | `KeyRangeShardingEnabled` | `false` | Enables `Partitioned` distributions + non-zero `NetworkFactor` |
-| `initial_partitions` | `ClusterPartitionCount` | `1` | `N` in the `(N−1)/N` remote-fraction estimate |
+| `initial_partitions` | `ClusterPartitionCount` | `1` standalone, `3` cluster | `N` in the `(N−1)/N` remote-fraction estimate |
 
-All cost flags are **off by default and additive**. Note that access-path costing engages on a
-DML-maintained row count alone: a table that has never been `ANALYZE`d is costed with default
-selectivities rather than histograms/NDV, so turning the flag on before statistics exist can pick
-worse plans than the heuristic. With the flags off (or with no stats) → the planner is byte-identical
-to the heuristic. This is a hard invariant — a bad histogram or stale row count cannot silently regress a
-production plan until an operator opts in.
+The two cost-based switches are **on by default**; the plan cache is off. The flags are additive.
+Access-path costing engages on a DML-maintained row count alone: a table that has never been
+`ANALYZE`d is costed with default selectivities rather than histograms/NDV, and can get a worse plan
+than the heuristic would pick. Automatic `ANALYZE` ([automatic-analyze.md](automatic-analyze.md))
+fills in the statistics once the table passes `auto_analyze_min_stale_rows`. With both switches off,
+the planner is byte-identical to the heuristic — that is the fallback if a bad histogram or a stale
+row count regresses a production plan.
 
 ### Plan cache (`plan_cache_enabled`)
 
@@ -912,12 +913,12 @@ and full plan inspection via `EXPLAIN` / `EXPLAIN ANALYZE`.
 foundation (`ANALYZE`-built equi-depth histograms and distinct-value counts, plus DML-maintained row
 counts / index counts / min/max, all persisted), a cardinality estimator (histogram/NDV selectivity,
 FK-aware join cardinality, composite-key correlation), a cost model with a real network/distribution
-dimension (`DataDistribution` + `NetworkFactor`), two opt-in cost-based search passes —
+dimension (`DataDistribution` + `NetworkFactor`), two cost-based search passes, on by default —
 per-table **access-path selection** (`cost_based_access_path_enabled`) and **join-order enumeration**
 via a System-R dynamic program (`cost_based_join_order_enabled`) — and an opt-in **plan cache**
 (`plan_cache_enabled`) that memoizes the access-path and join-order decision by query shape,
-skipping re-enumeration on repeated queries. All three flags default off and degrade to the
-heuristic planner with byte-identical plans.
+skipping re-enumeration on repeated queries. The two cost-based passes default on and the plan cache
+defaults off. With all three off, the planner falls back to the heuristic with byte-identical plans.
 
 ## Gaps and where to contribute
 
@@ -930,8 +931,8 @@ These are the meaningful missing pieces and where new work fits.
 | **Histograms, NDV & `ANALYZE`** | **Done** | `ANALYZE [TABLE] <name>` (`TableAnalyzer`) one-pass-builds equi-depth `ColumnHistogram`s and distinct-value counts (`ColumnNdv`/`KeyNdv`, including every composite prefix), persisted. Sampling above `stats_analyze_sample_rows`. |
 | **Cardinality estimator** | **Done** | `CardinalityEstimator`: histogram/NDV filter selectivity, IN-list, composite-key correlation, and FK-aware join cardinality (`|A||B|/max(NDV)`). |
 | **Cost model + network** | **Done** | `PlanCost`/`CostEstimator` populate `EstimatedCardinality`/`Cost` incl. a real `NetworkFactor` (`DataDistribution` + `PlacementReader` + `RowWidthEstimator`); always-on vetoes (range-vs-scan, join algorithm) plus the two flagged passes below. |
-| **Cost-based access-path selection** | **Done (opt-in)** | `cost_based_access_path_enabled`: enumerate + cost all index candidates per table, pick cheapest. Off by default → heuristic. |
-| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over table subsets (`JoinEnumerator`), capped at 12 tables, inner-joins-only, falls back to heuristic. Off by default → heuristic. |
+| **Cost-based access-path selection** | **Done** | `cost_based_access_path_enabled`: enumerate + cost all index candidates per table, pick cheapest. On by default; off → heuristic. |
+| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over table subsets (`JoinEnumerator`), capped at 12 tables, inner-joins-only, falls back to heuristic. On by default; off → heuristic. |
 | **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. The next phase — caching optimized plans keyed by query shape — is unbuilt. |
 | **Interesting orders in the join DP** | **Missing** | The DP costs by scan/join cost only; it does not keep a costlier sub-plan that supplies an ordering/distribution a parent needs (would avoid a later sort/exchange). |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
@@ -986,7 +987,7 @@ cost are modeled; remote operator execution is not).
 | Scan / filter / sort / aggregate / project / distinct / having / limit | `QueryScanner.cs`, `QueryFilterer.cs`, `QuerySorter.cs`, `QueryAggregator.cs`, `QueryProjector.cs`, `QueryDistincter.cs`, `QueryHavingEvaluator.cs`, `QueryLimiter.cs` |
 | Row merge for joins | `Commands/Executor/Controllers/Queries/QueryRowMerger.cs` |
 | Expression evaluator | `Commands/Executor/Controllers/SqlExecutor.cs` |
-| Table statistics (row counts, index counts, min/max, histograms, NDV) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`, `ColumnMinMax.cs`, `ScalarBound.cs`, `ColumnHistogram.cs`, `ColumnHistogramBucket.cs`; flush cadence `CamusDBConfig.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
+| Table statistics (row counts, index counts, min/max, histograms, NDV) | `Statistics/StatisticsManager.cs`, `Statistics/Models/TableStatistics.cs`, `ColumnMinMax.cs`, `ScalarBound.cs`, `ColumnHistogram.cs`, `ColumnHistogramBucket.cs`; flush cadence `CamusDBOptions.StatsFlushIntervalMs` / `stats_flush_interval_ms` |
 | `ANALYZE` (stats builder) | `Commands/Executor/Controllers/TableAnalyzer.cs` |
 | KV table access | `Storage/Kv/KvTableStore.cs` |
 | Row encoding / decoding | `CommandsExecutor/Models/RowEncoder.cs` |
